@@ -1,0 +1,36 @@
+# Rust formatting configuration for Agentic Database
+
+# Basic options
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+
+# Import formatting
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+reorder_imports = true
+
+# Function formatting  
+fn_single_line = false
+fn_args_layout = "Tall"
+
+# Control flow formatting
+match_block_trailing_comma = true
+trailing_comma = "Vertical"
+use_small_heuristics = "Default"
+
+# Comment formatting
+format_code_in_doc_comments = true
+normalize_doc_attributes = true
+wrap_comments = true
+comment_width = 80
+
+# String formatting
+format_strings = true
+
+# Misc formatting
+newline_style = "Unix"
+remove_nested_parens = true
+spaces_around_ranges = false
+type_punctuation_density = "Wide"
+unstable_features = false

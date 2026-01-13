@@ -1,0 +1,37 @@
+[package]
+name = "agent-db-examples"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "basic_pipeline"
+path = "basic_pipeline.rs"
+
+[[bin]]
+name = "storage_pipeline"
+path = "storage_pipeline.rs"
+
+[[bin]]
+name = "graph_integration"
+path = "graph_integration.rs"
+
+[[bin]]
+name = "concurrent_events"
+path = "concurrent_events.rs"
+
+[[bin]]
+name = "scoped_inference"
+path = "scoped_inference.rs"
+
+[[bin]]
+name = "end_to_end_demo"
+path = "end_to_end_demo.rs"
+
+[dependencies]
+agent-db-core = { path = "../crates/agent-db-core" }
+agent-db-events = { path = "../crates/agent-db-events" }
+agent-db-storage = { path = "../crates/agent-db-storage" }
+agent-db-graph = { path = "../crates/agent-db-graph" }
+serde_json = "1.0"
+bincode = "1.3"
+tokio = { version = "1.28", features = ["full"] }

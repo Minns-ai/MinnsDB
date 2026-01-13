@@ -1,0 +1,31 @@
+# Clippy configuration for Agentic Database
+
+# Performance lints
+avoid-breaking-exported-api = true
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 7
+too-many-lines-threshold = 100
+type-complexity-threshold = 250
+
+# Style preferences
+enum-variant-name-threshold = 3
+literal-suffix-style = "short"
+single-char-binding-names-threshold = 4
+trivial-copy-size-limit = 128
+
+# Allow certain patterns common in database code
+allow = [
+    "clippy::module_name_repetitions",  # Common in modular design
+    "clippy::similar_names",            # Event vs events, etc.
+    "clippy::cast_precision_loss",      # Necessary for performance calculations
+    "clippy::cast_possible_truncation", # Controlled truncation in storage
+]
+
+# Deny dangerous patterns
+deny = [
+    "clippy::indexing_slicing",         # Use checked access
+    "clippy::unwrap_used",              # Use proper error handling
+    "clippy::expect_used",              # Use proper error handling
+    "clippy::panic",                    # No panics in library code
+    "clippy::mem_forget",               # Memory management critical
+]

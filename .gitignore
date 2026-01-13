@@ -1,0 +1,57 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+agent_db_data/
+test_data/
+*.db
+*.wal
+*.log
+
+# Benchmarks
+criterion/
+flamegraph.svg
+perf.data*
+
+# Documentation
+/doc/
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+
+# Configuration overrides
+config.local.json
+.env.local
+
+# Performance profiling
+*.prof
+*.trace
+
+# Coverage reports
+coverage/
+tarpaulin-report.html
+
+# Backup files
+*.backup
+*.bak
+test_data_backup_*.tar.gz
+
+# Local development
+scratch/
+experiments/
+dev_notes.md
