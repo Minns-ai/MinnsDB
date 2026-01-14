@@ -1,7 +1,6 @@
 //! Core event structures and types
 
 use agent_db_core::types::*;
-use agent_db_core::error::{DatabaseError, DatabaseResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;

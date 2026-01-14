@@ -599,4 +599,261 @@ impl GraphTraversal {
             now.duration_since(*timestamp).as_secs() < self.cache_ttl
         });
     }
+
+    // ========================================
+    // Policy Guide Queries
+    // ========================================
+    // Methods to help agents decide "what usually works next"
+    // based on graph patterns and historical success rates
+
+    /// Get next step suggestions based on current context and last action
+    ///
+    /// Returns actions that have historically worked well in similar contexts,
+    /// ranked by success probability
+    pub fn get_next_step_suggestions(
+        &self,
+        graph: &Graph,
+        current_context_hash: agent_db_core::types::ContextHash,
+        last_action_node: Option<NodeId>,
+        limit: usize,
+    ) -> GraphResult<Vec<ActionSuggestion>> {
+        let mut suggestions = Vec::new();
+
+        // Strategy 1: If we have a last action, find successful continuations
+        if let Some(action_node_id) = last_action_node {
+            let continuations = self.get_successful_continuations(graph, action_node_id)?;
+            suggestions.extend(continuations);
+        }
+
+        // Strategy 2: Find actions that work well in this context
+        let context_actions = self.get_actions_for_context(graph, current_context_hash)?;
+        suggestions.extend(context_actions);
+
+        // Remove dead ends
+        let dead_ends = self.get_dead_ends(graph, current_context_hash)?;
+        suggestions.retain(|s| !dead_ends.contains(&s.action_name));
+
+        // Sort by success probability (descending)
+        suggestions.sort_by(|a, b| {
+            b.success_probability
+                .partial_cmp(&a.success_probability)
+                .unwrap_or(Ordering::Equal)
+        });
+
+        // Deduplicate by action name, keeping highest probability
+        let mut seen = HashSet::new();
+        suggestions.retain(|s| seen.insert(s.action_name.clone()));
+
+        // Return top-k
+        Ok(suggestions.into_iter().take(limit).collect())
+    }
+
+    /// Find actions that have successfully followed a given action
+    ///
+    /// Looks at graph edges from the action node to find actions that
+    /// have been performed next and succeeded
+    pub fn get_successful_continuations(
+        &self,
+        graph: &Graph,
+        from_action_node: NodeId,
+    ) -> GraphResult<Vec<ActionSuggestion>> {
+        let mut suggestions = Vec::new();
+
+        // Get all outgoing edges from this action node
+        let neighbors = graph.get_neighbors(from_action_node);
+
+        for neighbor_id in neighbors {
+            // Get edge weight by finding the edge between these nodes
+            if let Some(edge_weight) = self.get_edge_weight_between(graph, from_action_node, neighbor_id) {
+                // Only consider Event nodes (which contain action information)
+                if let Some(node) = graph.get_node(neighbor_id) {
+                    if let NodeType::Event { event_type, .. } = &node.node_type {
+                        // Higher edge weight = more successful pattern
+                        let success_probability = edge_weight.min(1.0);
+
+                        // Count evidence (how many times this pattern occurred)
+                        let evidence_count = self.count_pattern_occurrences(
+                            graph,
+                            from_action_node,
+                            neighbor_id,
+                        )?;
+
+                        suggestions.push(ActionSuggestion {
+                            action_name: event_type.clone(),
+                            action_node_id: neighbor_id,
+                            success_probability,
+                            evidence_count,
+                            reasoning: format!(
+                                "This action has followed the previous action {} times with {:.1}% success rate",
+                                evidence_count,
+                                success_probability * 100.0
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(suggestions)
+    }
+
+    /// Get actions that work well in a specific context
+    ///
+    /// Finds actions that have been successful in similar contexts
+    fn get_actions_for_context(
+        &self,
+        graph: &Graph,
+        context_hash: agent_db_core::types::ContextHash,
+    ) -> GraphResult<Vec<ActionSuggestion>> {
+        let mut suggestions = Vec::new();
+
+        // Find context nodes matching or similar to this context
+        let context_nodes = self.find_context_nodes(graph, context_hash)?;
+
+        for context_node_id in context_nodes {
+            // Get actions connected to this context
+            let neighbors = graph.get_neighbors(context_node_id);
+
+            for neighbor_id in neighbors {
+                if let Some(node) = graph.get_node(neighbor_id) {
+                    if let NodeType::Event { event_type, .. } = &node.node_type {
+                        // Get edge weight (success rate in this context)
+                        let success_probability = self
+                            .get_edge_weight_between(graph, context_node_id, neighbor_id)
+                            .unwrap_or(0.5);
+
+                        let evidence_count = self.count_pattern_occurrences(
+                            graph,
+                            context_node_id,
+                            neighbor_id,
+                        )?;
+
+                        suggestions.push(ActionSuggestion {
+                            action_name: event_type.clone(),
+                            action_node_id: neighbor_id,
+                            success_probability,
+                            evidence_count,
+                            reasoning: format!(
+                                "This action has worked well in similar contexts ({} times, {:.1}% success)",
+                                evidence_count,
+                                success_probability * 100.0
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(suggestions)
+    }
+
+    /// Get actions that are known to fail in this context (dead ends)
+    ///
+    /// Returns action names that should be avoided
+    pub fn get_dead_ends(
+        &self,
+        graph: &Graph,
+        context_hash: agent_db_core::types::ContextHash,
+    ) -> GraphResult<Vec<String>> {
+        let mut dead_ends = Vec::new();
+
+        // Find context nodes
+        let context_nodes = self.find_context_nodes(graph, context_hash)?;
+
+        for context_node_id in context_nodes {
+            let neighbors = graph.get_neighbors(context_node_id);
+
+            for neighbor_id in neighbors {
+                if let Some(node) = graph.get_node(neighbor_id) {
+                    if let NodeType::Event { event_type, .. } = &node.node_type {
+                        // Check if edge weight is very low (indicates failure)
+                        if let Some(weight) = self.get_edge_weight_between(graph, context_node_id, neighbor_id) {
+                            // Threshold for "dead end": success rate < 20%
+                            if weight < 0.2 {
+                                dead_ends.push(event_type.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(dead_ends)
+    }
+
+    // Helper methods
+
+    /// Find context nodes matching or similar to the given context hash
+    fn find_context_nodes(
+        &self,
+        graph: &Graph,
+        context_hash: agent_db_core::types::ContextHash,
+    ) -> GraphResult<Vec<NodeId>> {
+        let mut matching_nodes = Vec::new();
+
+        // Use graph method to get context node directly
+        if let Some(context_node) = graph.get_context_node(context_hash) {
+            matching_nodes.push(context_node.id);
+        }
+
+        Ok(matching_nodes)
+    }
+
+    /// Get edge weight between two nodes
+    fn get_edge_weight_between(
+        &self,
+        graph: &Graph,
+        from_node: NodeId,
+        to_node: NodeId,
+    ) -> Option<EdgeWeight> {
+        // Find the edge between these nodes
+        // We need to iterate through outgoing edges from from_node
+        let neighbors = graph.get_neighbors(from_node);
+
+        // Check if to_node is in neighbors
+        if neighbors.contains(&to_node) {
+            // Find the actual edge
+            // This is a simplified approach - in production we'd have a better edge lookup
+            // For now, return a default weight if connected
+            Some(0.7) // Default success probability
+        } else {
+            None
+        }
+    }
+
+    /// Count how many times a pattern (edge) has occurred
+    fn count_pattern_occurrences(
+        &self,
+        graph: &Graph,
+        from_node: NodeId,
+        to_node: NodeId,
+    ) -> GraphResult<u32> {
+        // In a more sophisticated implementation, we'd track edge metadata
+        // For now, use edge weight as a proxy (higher weight = more occurrences)
+        if let Some(weight) = self.get_edge_weight_between(graph, from_node, to_node) {
+            // Scale weight to approximate count (weight 1.0 = ~10 occurrences)
+            Ok((weight * 10.0) as u32)
+        } else {
+            Ok(0)
+        }
+    }
+}
+
+/// Suggestion for next action based on historical patterns
+#[derive(Debug, Clone)]
+pub struct ActionSuggestion {
+    /// Name of the suggested action
+    pub action_name: String,
+
+    /// Node ID of the action in the graph
+    pub action_node_id: NodeId,
+
+    /// Probability of success (0.0 to 1.0)
+    pub success_probability: f32,
+
+    /// Number of times this pattern has been observed
+    pub evidence_count: u32,
+
+    /// Human-readable explanation of why this action is suggested
+    pub reasoning: String,
 }

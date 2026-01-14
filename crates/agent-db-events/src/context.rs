@@ -1,6 +1,6 @@
 //! Context processing and similarity matching
 
-use crate::core::{EventContext, EnvironmentState, Goal, ResourceState};
+use crate::core::EventContext;
 use agent_db_core::types::ContextHash;
 use agent_db_core::utils::cosine_similarity;
 use std::collections::HashMap;

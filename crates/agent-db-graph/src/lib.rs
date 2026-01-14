@@ -34,6 +34,9 @@ pub mod traversal;
 pub mod integration;
 pub mod event_ordering;
 pub mod scoped_inference;
+pub mod episodes;
+pub mod memory;
+pub mod strategies;
 
 // Re-export commonly used items
 pub use error::{GraphError, GraphResult};
@@ -44,11 +47,22 @@ pub use structures::{
 pub use inference::{
     GraphInference, InferenceConfig, InferenceStats, InferenceResults,
     TemporalPattern, ContextualAssociation, EntityReference,
+    EpisodeMetrics, ReinforcementResult, ReinforcementStats,
 };
 pub use traversal::{
     GraphTraversal, GraphQuery, QueryResult, QueryStats,
-    PathConstraint, CommunityAlgorithm,
+    PathConstraint, CommunityAlgorithm, ActionSuggestion,
 };
 pub use integration::{
     GraphEngine, GraphEngineConfig, GraphOperationResult,
+};
+pub use episodes::{
+    Episode, EpisodeId, EpisodeOutcome, EpisodeDetector, EpisodeDetectorConfig,
+};
+pub use memory::{
+    Memory, MemoryId, MemoryType, MemoryFormation, MemoryFormationConfig, MemoryStats,
+};
+pub use strategies::{
+    Strategy, StrategyId, ReasoningStep, ContextPattern,
+    StrategyExtractor, StrategyExtractionConfig, StrategyStats,
 };

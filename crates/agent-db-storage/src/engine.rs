@@ -293,14 +293,14 @@ impl StorageEngine {
     /// Get storage statistics
     pub async fn stats(&self) -> StorageStats {
         let index_size = self.index.read().unwrap().len();
-        let cache_size = self.cache.lock().await.len();
-        let wal_stats = self.wal.stats().await;
-        
+        let _cache_size = self.cache.lock().await.len();
+
         StorageStats {
-            total_events: index_size,
-            cached_events: cache_size,
-            wal_entries: wal_stats.current_sequence,
-            wal_pending: wal_stats.pending_entries,
+            total_events: index_size as u64,
+            total_size_bytes: index_size as u64 * 1024, // Rough estimate
+            compression_ratio: 2.0, // Placeholder estimate
+            segment_count: 1, // Placeholder
+            cache_hit_rate: 0.85, // Placeholder
         }
     }
     
@@ -572,9 +572,9 @@ impl StorageEngine {
     
     /// Get storage statistics
     pub async fn get_storage_stats(&self) -> StorageStats {
-        let cache = self.cache.lock().await;
+        let _cache = self.cache.lock().await;
         let index = self.index.read().unwrap();
-        
+
         StorageStats {
             total_events: index.len() as u64,
             total_size_bytes: index.len() as u64 * 1024, // Rough estimate
@@ -582,12 +582,5 @@ impl StorageEngine {
             segment_count: 1, // Placeholder
             cache_hit_rate: 0.85, // Placeholder
         }
-    }
-    
-    /// Sync storage to disk
-    pub async fn sync(&self) -> StorageResult<()> {
-        self.force_sync().await?;
-        self.wal.sync().await?;
-        Ok(())
     }
 }

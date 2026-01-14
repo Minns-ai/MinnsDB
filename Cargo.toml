@@ -1,10 +1,12 @@
 [workspace]
+resolver = "2"
 members = [
     "crates/agent-db-core",
-    "crates/agent-db-events", 
+    "crates/agent-db-events",
     "crates/agent-db-storage",
     "crates/agent-db-graph",
     "examples",
+    "server",
 ]
 
 [workspace.dependencies]

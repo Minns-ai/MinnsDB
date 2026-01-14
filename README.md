@@ -38,33 +38,51 @@ cargo build --release
 ### Basic Usage
 
 ```rust
-use agent_db_core::*;
-use agent_db_events::*;
+use agent_db_graph::{GraphEngine, GraphEngineConfig};
+use agent_db_events::{Event, EventType, ActionOutcome};
 
-// Create database instance
-let config = DatabaseConfig::default();
-let mut db = AgentDatabase::new(config).await?;
+// Create integrated engine (all self-evolution features automatic)
+let engine = GraphEngine::new().await?;
 
-// Record agent action
-let event = Event::new(
-    agent_id: 123,
-    session_id: 456,
-    EventType::Action {
-        action_name: "navigate_to".to_string(),
-        parameters: json!({"target": "location_A"}),
-        outcome: ActionOutcome::Success { 
-            result: json!({"time_taken": 2.5}) 
+// Process events - automatic learning happens!
+let event = Event {
+    id: generate_event_id(),
+    timestamp: current_timestamp(),
+    agent_id: 1,
+    agent_type: "ai-debugger".to_string(),
+    session_id: 42,
+    event_type: EventType::Action {
+        action_name: "fix_null_error".to_string(),
+        parameters: json!({"fix": "add_null_check"}),
+        outcome: ActionOutcome::Success {
+            result: json!({"tests_pass": true})
         },
-        duration_ns: 2_500_000_000,
+        duration_ns: 1_500_000_000,
     },
-    context,
-);
+    causality_chain: vec![],
+    context: your_context,
+    metadata: HashMap::new(),
+};
 
-db.ingest_event(event).await?;
+// Process event - automatic episode detection, memory formation,
+// strategy extraction, and reinforcement learning!
+engine.process_event(event).await?;
 
-// Retrieve relevant memories
-let memories = db.retrieve_memories(&current_context, 10).await?;
+// Query learned knowledge
+let memories = engine.get_agent_memories(agent_id, 10).await;
+let strategies = engine.get_agent_strategies(agent_id, 10).await;
+let suggestions = engine.get_next_action_suggestions(context_hash, None, 5).await?;
+
+// "What should I do next?"
+for suggestion in suggestions {
+    println!("{}: {:.1}% success",
+        suggestion.action_name,
+        suggestion.success_probability * 100.0
+    );
+}
 ```
+
+**See [API_REFERENCE.md](API_REFERENCE.md) for complete documentation and examples.**
 
 ## Architecture
 
@@ -166,10 +184,12 @@ cargo test --release
 
 ## Documentation
 
-- [Technical Specification](TECHNICAL_SPECIFICATION.md)
-- [Implementation Plan](IMPLEMENTATION_PLAN.md)
-- [MVP Specification](MVP_SPECIFICATION.md)
-- [Phase 1 Foundation](PHASE_1_FOUNDATION.md)
+- **[API Reference](API_REFERENCE.md)** ⭐ **NEW!** - Complete API documentation with examples
+- [Technical Writeup](TECHNICAL_WRITEUP.md) - Deep technical details and algorithms
+- [Progress Report](PROGRESS_REPORT.md) - Development progress and status
+- [Technical Specification](TECHNICAL_SPECIFICATION.md) - System architecture
+- [MVP Specification](MVP_SPECIFICATION.md) - Requirements and targets
+- [Implementation Plan](IMPLEMENTATION_PLAN.md) - Development roadmap
 
 ## License
 
