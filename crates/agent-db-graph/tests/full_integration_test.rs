@@ -7,7 +7,7 @@
 //! - Reinforcement learning
 //! - Policy guide queries
 
-use agent_db_core::types::{AgentId, SessionId, AgentType, generate_event_id, current_timestamp};
+use agent_db_core::types::{AgentId, generate_event_id, current_timestamp};
 use agent_db_events::{
     Event, EventContext, EventType, ActionOutcome, CognitiveType,
     EnvironmentState, TemporalContext, ResourceState, ComputationalResources,
@@ -313,7 +313,6 @@ async fn test_policy_guide_with_real_patterns() -> Result<(), Box<dyn std::error
     let suggestions = engine.get_next_action_suggestions(12345, None, 5).await?;
     println!("  Generated {} action suggestions", suggestions.len());
 
-    assert!(suggestions.len() >= 0, "Should generate suggestions or return empty");
 
     Ok(())
 }

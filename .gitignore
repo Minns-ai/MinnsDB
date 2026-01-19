@@ -55,3 +55,17 @@ test_data_backup_*.tar.gz
 scratch/
 experiments/
 dev_notes.md
+
+# Client build artifacts
+client/node_modules/
+client/dist/
+
+# Temporary Claude files
+tmpclaude-*
+**/tmpclaude-*
+
+# Batch scripts (local dev)
+*.bat
+
+# Null device file
+nul

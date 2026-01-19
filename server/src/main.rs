@@ -11,7 +11,9 @@ use axum::{
 };
 use agent_db_graph::{GraphEngine, GraphEngineConfig};
 use agent_db_events::Event;
-use agent_db_core::types::{AgentId, ContextHash};
+use agent_db_events::core::EventType;
+use agent_db_core::types::{AgentId, AgentType, ContextHash, SessionId};
+use agent_db_events::core::EventContext;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -66,11 +68,16 @@ struct ActionSuggestionsQuery {
 struct MemoryResponse {
     id: u64,
     agent_id: AgentId,
+    session_id: SessionId,
     strength: f32,
     relevance_score: f32,
     access_count: u32,
     formed_at: u64,
     last_accessed: u64,
+    context_hash: ContextHash,
+    context: EventContext,
+    outcome: String,
+    memory_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +89,38 @@ struct StrategyResponse {
     success_count: u32,
     failure_count: u32,
     reasoning_steps: Vec<ReasoningStepResponse>,
+    strategy_type: String,
+    support_count: u32,
+    expected_success: f32,
+    expected_cost: f32,
+    expected_value: f32,
+    confidence: f32,
+    goal_bucket_id: u64,
+    behavior_signature: String,
+    precondition: String,
+    action_hint: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SimilarStrategyResponse {
+    score: f32,
+    id: u64,
+    name: String,
+    agent_id: AgentId,
+    quality_score: f32,
+    success_count: u32,
+    failure_count: u32,
+    reasoning_steps: Vec<ReasoningStepResponse>,
+    strategy_type: String,
+    support_count: u32,
+    expected_success: f32,
+    expected_cost: f32,
+    expected_value: f32,
+    confidence: f32,
+    goal_bucket_id: u64,
+    behavior_signature: String,
+    precondition: String,
+    action_hint: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +158,83 @@ struct StatsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct GraphResponse {
+    nodes: Vec<GraphNodeResponse>,
+    edges: Vec<GraphEdgeResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQuery {
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    session_id: Option<SessionId>,
+    #[serde(default)]
+    agent_type: Option<AgentType>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphContextQuery {
+    context_hash: ContextHash,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    session_id: Option<SessionId>,
+    #[serde(default)]
+    agent_type: Option<AgentType>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContextMemoriesRequest {
+    context: EventContext,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    min_similarity: Option<f32>,
+    #[serde(default)]
+    agent_id: Option<AgentId>,
+    #[serde(default)]
+    session_id: Option<SessionId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StrategySimilarityRequest {
+    #[serde(default)]
+    goal_ids: Vec<u64>,
+    #[serde(default)]
+    tool_names: Vec<String>,
+    #[serde(default)]
+    result_types: Vec<String>,
+    #[serde(default)]
+    context_hash: Option<ContextHash>,
+    #[serde(default)]
+    agent_id: Option<AgentId>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    min_score: Option<f32>,
+}
+
+#[derive(Debug, Serialize)]
+struct GraphNodeResponse {
+    id: u64,
+    label: String,
+    node_type: String,
+    created_at: u64,
+    properties: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct GraphEdgeResponse {
+    id: u64,
+    from: u64,
+    to: u64,
+    edge_type: String,
+    weight: f32,
+    confidence: f32,
+}
+
+#[derive(Debug, Serialize)]
 struct HealthResponse {
     status: String,
     version: String,
@@ -135,10 +251,74 @@ struct ErrorResponse {
     details: Option<String>,
 }
 
+// NEW: Advanced Graph Features Response Types
+
+#[derive(Debug, Serialize)]
+struct AnalyticsResponse {
+    node_count: usize,
+    edge_count: usize,
+    connected_components: usize,
+    largest_component_size: usize,
+    average_path_length: f32,
+    diameter: u32,
+    clustering_coefficient: f32,
+    average_clustering: f32,
+    modularity: f32,
+    community_count: usize,
+    learning_metrics: LearningMetricsResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct LearningMetricsResponse {
+    total_events: usize,
+    unique_contexts: usize,
+    learned_patterns: usize,
+    strong_memories: usize,
+    overall_success_rate: f32,
+    average_edge_weight: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct IndexStatsResponse {
+    insert_count: u64,
+    query_count: u64,
+    range_query_count: u64,
+    hit_count: u64,
+    miss_count: u64,
+    last_accessed: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CommunityResponse {
+    community_id: u64,
+    node_ids: Vec<u64>,
+    size: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CommunitiesResponse {
+    communities: Vec<CommunityResponse>,
+    modularity: f32,
+    iterations: usize,
+    community_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CentralityScoresResponse {
+    node_id: u64,
+    degree: f32,
+    betweenness: f32,
+    closeness: f32,
+    eigenvector: f32,
+    pagerank: f32,
+    combined: f32,
+}
+
 // ============================================================================
 // Error Handling
 // ============================================================================
 
+#[allow(dead_code)]
 enum ApiError {
     Internal(String),
     BadRequest(String),
@@ -168,6 +348,25 @@ impl From<Box<dyn std::error::Error>> for ApiError {
     }
 }
 
+fn event_type_name(event_type: &EventType) -> &'static str {
+    match event_type {
+        EventType::Action { .. } => "Action",
+        EventType::Observation { .. } => "Observation",
+        EventType::Cognitive { .. } => "Cognitive",
+        EventType::Communication { .. } => "Communication",
+        EventType::Learning { .. } => "Learning",
+    }
+}
+
+fn memory_type_label(memory_type: &agent_db_graph::memory::MemoryType) -> String {
+    match memory_type {
+        agent_db_graph::memory::MemoryType::Episodic { .. } => "Episodic".to_string(),
+        agent_db_graph::memory::MemoryType::Working => "Working".to_string(),
+        agent_db_graph::memory::MemoryType::Semantic => "Semantic".to_string(),
+        agent_db_graph::memory::MemoryType::Negative { .. } => "Negative".to_string(),
+    }
+}
+
 // ============================================================================
 // API Endpoints
 // ============================================================================
@@ -177,10 +376,37 @@ async fn process_event(
     State(state): State<AppState>,
     Json(payload): Json<ProcessEventRequest>,
 ) -> Result<Json<ProcessEventResponse>, ApiError> {
-    info!("Processing event: id={}", payload.event.id);
+    let start = std::time::Instant::now();
+    let event_id = payload.event.id;
+    info!(
+        "Processing event: id={} agent_id={} session_id={} type={}",
+        event_id,
+        payload.event.agent_id,
+        payload.event.session_id,
+        event_type_name(&payload.event.event_type)
+    );
 
-    let result = state.engine.process_event(payload.event).await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // Auto-compute fingerprint if not provided (fingerprint == 0)
+    let mut event = payload.event;
+    if event.context.fingerprint == 0 {
+        info!("Event {} missing fingerprint, computing.", event.id);
+        event.context.fingerprint = event.context.compute_fingerprint();
+    }
+
+    let result = state.engine.process_event(event).await
+        .map_err(|e| {
+            info!("Error processing event: {:?}", e);
+            ApiError::Internal(e.to_string())
+        })?;
+
+    info!(
+        "Processed event {}: nodes_created={} patterns_detected={} processing_time_ms={} total_handler_ms={}",
+        event_id,
+        result.nodes_created.len(),
+        result.patterns_detected.len(),
+        result.processing_time_ms,
+        start.elapsed().as_millis()
+    );
 
     Ok(Json(ProcessEventResponse {
         success: true,
@@ -203,11 +429,53 @@ async fn get_agent_memories(
     let response: Vec<MemoryResponse> = memories.into_iter().map(|m| MemoryResponse {
         id: m.id,
         agent_id: m.agent_id,
+        session_id: m.session_id,
         strength: m.strength,
         relevance_score: m.relevance_score,
         access_count: m.access_count,
         formed_at: m.formed_at,
         last_accessed: m.last_accessed,
+        context_hash: m.context.fingerprint,
+        context: m.context.clone(),
+        outcome: format!("{:?}", m.outcome),
+        memory_type: memory_type_label(&m.memory_type),
+    }).collect();
+
+    Ok(Json(response))
+}
+
+// POST /api/memories/context - Get memories for a similar context
+async fn get_memories_by_context(
+    State(state): State<AppState>,
+    Json(payload): Json<ContextMemoriesRequest>,
+) -> Result<Json<Vec<MemoryResponse>>, ApiError> {
+    info!("Getting memories for context hash: {}", payload.context.fingerprint);
+
+    let min_similarity = payload.min_similarity.unwrap_or(0.6);
+    let memories = state
+        .engine
+        .retrieve_memories_by_context_similar(
+            &payload.context,
+            payload.limit,
+            min_similarity,
+            payload.agent_id,
+            payload.session_id,
+        )
+        .await;
+
+    let response: Vec<MemoryResponse> = memories.into_iter().map(|m| MemoryResponse {
+        id: m.id,
+        agent_id: m.agent_id,
+        session_id: m.session_id,
+        strength: m.strength,
+        relevance_score: m.relevance_score,
+        access_count: m.access_count,
+        formed_at: m.formed_at,
+        last_accessed: m.last_accessed,
+        context_hash: m.context.fingerprint,
+        context: m.context.clone(),
+        outcome: format!("{:?}", m.outcome),
+        memory_type: memory_type_label(&m.memory_type),
     }).collect();
 
     Ok(Json(response))
@@ -234,6 +502,63 @@ async fn get_agent_strategies(
             description: step.description.clone(),
             sequence_order: step.sequence_order,
         }).collect(),
+        strategy_type: format!("{:?}", s.strategy_type),
+        support_count: s.support_count,
+        expected_success: s.expected_success,
+        expected_cost: s.expected_cost,
+        expected_value: s.expected_value,
+        confidence: s.confidence,
+        goal_bucket_id: s.goal_bucket_id,
+        behavior_signature: s.behavior_signature.clone(),
+        precondition: s.precondition.clone(),
+        action_hint: s.action_hint.clone(),
+    }).collect();
+
+    Ok(Json(response))
+}
+
+// POST /api/strategies/similar - Find similar strategies
+async fn get_similar_strategies(
+    State(state): State<AppState>,
+    Json(payload): Json<StrategySimilarityRequest>,
+) -> Result<Json<Vec<SimilarStrategyResponse>>, ApiError> {
+    let min_score = payload.min_score.unwrap_or(0.2);
+    let query = agent_db_graph::strategies::StrategySimilarityQuery {
+        goal_ids: payload.goal_ids,
+        tool_names: payload.tool_names,
+        result_types: payload.result_types,
+        context_hash: payload.context_hash,
+        agent_id: payload.agent_id,
+        min_score,
+        limit: payload.limit,
+    };
+
+    let strategies = state.engine.get_similar_strategies(query).await;
+
+    let response: Vec<SimilarStrategyResponse> = strategies.into_iter().map(|(s, score)| {
+        SimilarStrategyResponse {
+            score,
+            id: s.id,
+            name: s.name.clone(),
+            agent_id: s.agent_id,
+            quality_score: s.quality_score,
+            success_count: s.success_count,
+            failure_count: s.failure_count,
+            reasoning_steps: s.reasoning_steps.iter().map(|step| ReasoningStepResponse {
+                description: step.description.clone(),
+                sequence_order: step.sequence_order,
+            }).collect(),
+            strategy_type: format!("{:?}", s.strategy_type),
+            support_count: s.support_count,
+            expected_success: s.expected_success,
+            expected_cost: s.expected_cost,
+            expected_value: s.expected_value,
+            confidence: s.confidence,
+            goal_bucket_id: s.goal_bucket_id,
+            behavior_signature: s.behavior_signature.clone(),
+            precondition: s.precondition.clone(),
+            action_hint: s.action_hint.clone(),
+        }
     }).collect();
 
     Ok(Json(response))
@@ -284,6 +609,16 @@ async fn get_episodes(
     Ok(Json(response))
 }
 
+// GET /api/events - Get recent events
+async fn get_events(
+    State(state): State<AppState>,
+    Query(pagination): Query<PaginationQuery>,
+) -> Result<Json<Vec<Event>>, ApiError> {
+    info!("Getting recent events");
+    let events = state.engine.get_recent_events(pagination.limit).await;
+    Ok(Json(events))
+}
+
 // GET /api/stats - Get system statistics
 async fn get_stats(
     State(state): State<AppState>,
@@ -301,6 +636,75 @@ async fn get_stats(
         total_reinforcements_applied: stats.total_reinforcements_applied,
         average_processing_time_ms: stats.average_processing_time_ms,
     }))
+}
+
+// GET /api/graph - Get graph structure
+async fn get_graph(
+    State(state): State<AppState>,
+    Query(query): Query<GraphQuery>,
+) -> Result<Json<GraphResponse>, ApiError> {
+    info!("Getting graph structure");
+
+    let graph_data = state
+        .engine
+        .get_graph_structure(query.limit, query.session_id, query.agent_type)
+        .await;
+
+    let nodes: Vec<GraphNodeResponse> = graph_data.nodes.into_iter().map(|n| GraphNodeResponse {
+        id: n.id,
+        label: n.label.unwrap_or_else(|| format!("Node {}", n.id)),
+        node_type: n.node_type,
+        created_at: n.created_at,
+        properties: n.properties,
+    }).collect();
+
+    let edges: Vec<GraphEdgeResponse> = graph_data.edges.into_iter().map(|e| GraphEdgeResponse {
+        id: e.id,
+        from: e.from,
+        to: e.to,
+        edge_type: e.edge_type,
+        weight: e.weight,
+        confidence: e.confidence,
+    }).collect();
+
+    Ok(Json(GraphResponse { nodes, edges }))
+}
+
+// GET /api/graph/context - Get context-centered graph structure
+async fn get_graph_for_context(
+    State(state): State<AppState>,
+    Query(query): Query<GraphContextQuery>,
+) -> Result<Json<GraphResponse>, ApiError> {
+    info!("Getting graph structure for context: {}", query.context_hash);
+
+    let graph_data = state
+        .engine
+        .get_graph_structure_for_context(
+            query.context_hash,
+            query.limit,
+            query.session_id,
+            query.agent_type,
+        )
+        .await;
+
+    let nodes: Vec<GraphNodeResponse> = graph_data.nodes.into_iter().map(|n| GraphNodeResponse {
+        id: n.id,
+        label: n.label.unwrap_or_else(|| format!("Node {}", n.id)),
+        node_type: n.node_type,
+        created_at: n.created_at,
+        properties: n.properties,
+    }).collect();
+
+    let edges: Vec<GraphEdgeResponse> = graph_data.edges.into_iter().map(|e| GraphEdgeResponse {
+        id: e.id,
+        from: e.from,
+        to: e.to,
+        edge_type: e.edge_type,
+        weight: e.weight,
+        confidence: e.confidence,
+    }).collect();
+
+    Ok(Json(GraphResponse { nodes, edges }))
 }
 
 // GET /api/health - Health check endpoint
@@ -322,14 +726,24 @@ async fn health_check(
 
 // GET / - Root endpoint
 async fn root() -> &'static str {
-    "EventGraphDB REST API Server v0.1.0\n\nEndpoints:\n\
+    "EventGraphDB REST API Server v0.2.0\n\n\
+     Core Endpoints:\n\
      POST /api/events - Process event\n\
      GET /api/memories/agent/:id - Get agent memories\n\
+     POST /api/memories/context - Get memories by context\n\
      GET /api/strategies/agent/:id - Get agent strategies\n\
+     POST /api/strategies/similar - Find similar strategies\n\
      GET /api/suggestions - Get action suggestions\n\
      GET /api/episodes - Get episodes\n\
      GET /api/stats - Get statistics\n\
-     GET /api/health - Health check\n\
+     GET /api/graph - Get graph visualization data\n\
+     GET /api/graph/context - Get context graph visualization data\n\
+     GET /api/health - Health check\n\n\
+     NEW - Advanced Graph Features:\n\
+     GET /api/analytics - Graph analytics with learning metrics\n\
+     GET /api/indexes - Property index statistics\n\
+     GET /api/communities - Community detection (Louvain)\n\
+     GET /api/centrality - Node centrality scores\n\n\
      GET /docs - API documentation"
 }
 
@@ -337,6 +751,112 @@ async fn root() -> &'static str {
 async fn docs() -> &'static str {
     "EventGraphDB API Documentation\n\n\
      See API_REFERENCE.md for complete documentation."
+}
+
+// ============================================================================
+// NEW: Advanced Graph Features Endpoints
+// ============================================================================
+
+// GET /api/analytics - Get comprehensive graph analytics
+async fn get_analytics(
+    State(state): State<AppState>,
+) -> Result<Json<AnalyticsResponse>, ApiError> {
+    let metrics = state.engine.get_analytics().await
+        .map_err(|e| ApiError::Internal(format!("Failed to get analytics: {}", e)))?;
+
+    Ok(Json(AnalyticsResponse {
+        node_count: metrics.node_count,
+        edge_count: metrics.edge_count,
+        connected_components: metrics.connected_components,
+        largest_component_size: metrics.largest_component_size,
+        average_path_length: metrics.average_path_length,
+        diameter: metrics.diameter,
+        clustering_coefficient: metrics.clustering_coefficient,
+        average_clustering: metrics.average_clustering,
+        modularity: metrics.modularity,
+        community_count: metrics.community_count,
+        learning_metrics: LearningMetricsResponse {
+            total_events: metrics.learning_metrics.total_events,
+            unique_contexts: metrics.learning_metrics.unique_contexts,
+            learned_patterns: metrics.learning_metrics.learned_patterns,
+            strong_memories: metrics.learning_metrics.strong_memories,
+            overall_success_rate: metrics.learning_metrics.overall_success_rate,
+            average_edge_weight: metrics.learning_metrics.average_edge_weight,
+        },
+    }))
+}
+
+// GET /api/indexes - Get property index statistics
+async fn get_indexes(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<IndexStatsResponse>>, ApiError> {
+    let index_stats = state.engine.get_index_stats().await;
+
+    let response: Vec<IndexStatsResponse> = index_stats.into_iter().map(|stats| {
+        IndexStatsResponse {
+            insert_count: stats.insert_count,
+            query_count: stats.query_count,
+            range_query_count: stats.range_query_count,
+            hit_count: stats.hit_count,
+            miss_count: stats.miss_count,
+            last_accessed: stats.last_accessed,
+        }
+    }).collect();
+
+    Ok(Json(response))
+}
+
+// GET /api/communities - Detect and return graph communities
+async fn get_communities(
+    State(state): State<AppState>,
+) -> Result<Json<CommunitiesResponse>, ApiError> {
+    let result = state.engine.detect_communities().await
+        .map_err(|e| ApiError::Internal(format!("Failed to detect communities: {}", e)))?;
+
+    let communities: Vec<CommunityResponse> = result.communities.into_iter().map(|(id, nodes)| {
+        CommunityResponse {
+            community_id: id,
+            size: nodes.len(),
+            node_ids: nodes,
+        }
+    }).collect();
+
+    Ok(Json(CommunitiesResponse {
+        communities,
+        modularity: result.modularity,
+        iterations: result.iterations,
+        community_count: result.community_count,
+    }))
+}
+
+// GET /api/centrality - Get centrality scores for all nodes
+async fn get_centrality(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<CentralityScoresResponse>>, ApiError> {
+    let all_centralities = state.engine.get_all_centrality_scores().await
+        .map_err(|e| ApiError::Internal(format!("Failed to calculate centrality: {}", e)))?;
+
+    // Get all node IDs from one of the centrality maps
+    let node_ids: Vec<u64> = all_centralities.degree.keys().copied().collect();
+
+    let mut scores: Vec<CentralityScoresResponse> = node_ids.into_iter().map(|node_id| {
+        let combined = all_centralities.combined_score(node_id);
+
+        CentralityScoresResponse {
+            node_id,
+            degree: all_centralities.degree.get(&node_id).copied().unwrap_or(0.0),
+            betweenness: all_centralities.betweenness.get(&node_id).copied().unwrap_or(0.0),
+            closeness: all_centralities.closeness.get(&node_id).copied().unwrap_or(0.0),
+            eigenvector: all_centralities.eigenvector.get(&node_id).copied().unwrap_or(0.0),
+            pagerank: all_centralities.pagerank.get(&node_id).copied().unwrap_or(0.0),
+            combined,
+        }
+    }).collect();
+
+    // Sort by combined score descending
+    scores.sort_by(|a, b| b.combined.partial_cmp(&a.combined).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(Json(scores))
 }
 
 // ============================================================================
@@ -369,12 +889,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(root))
         .route("/docs", get(docs))
         .route("/api/health", get(health_check))
-        .route("/api/events", post(process_event))
+        .route("/api/events", post(process_event).get(get_events))
         .route("/api/memories/agent/:agent_id", get(get_agent_memories))
+        .route("/api/memories/context", post(get_memories_by_context))
         .route("/api/strategies/agent/:agent_id", get(get_agent_strategies))
+        .route("/api/strategies/similar", post(get_similar_strategies))
         .route("/api/suggestions", get(get_action_suggestions))
         .route("/api/episodes", get(get_episodes))
         .route("/api/stats", get(get_stats))
+        .route("/api/graph", get(get_graph))
+        .route("/api/graph/context", get(get_graph_for_context))
+        // NEW: Advanced graph features endpoints
+        .route("/api/analytics", get(get_analytics))
+        .route("/api/indexes", get(get_indexes))
+        .route("/api/communities", get(get_communities))
+        .route("/api/centrality", get(get_centrality))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

@@ -3,11 +3,11 @@
 //! Handles out-of-order event processing to ensure correct relationship inference
 //! even when events arrive from multiple concurrent sources.
 
-use crate::{GraphResult, GraphError};
+use crate::{GraphResult};
 use agent_db_core::types::{AgentId, EventId, Timestamp};
 use agent_db_events::Event;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, BTreeMap, VecDeque};
+
+use std::collections::{HashMap, BTreeMap, VecDeque, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -34,6 +34,9 @@ pub struct OrderingConfig {
     
     /// How often to flush buffers (milliseconds)
     pub flush_interval_ms: u64,
+
+    /// Watermark window for late event acceptance (milliseconds)
+    pub watermark_window_ms: u64,
     
     /// Enable strict causality checking
     pub strict_causality: bool,
@@ -48,6 +51,7 @@ impl Default for OrderingConfig {
             reorder_window_ms: 5000,  // 5 second reorder window
             max_buffer_size: 1000,
             flush_interval_ms: 1000,  // Flush every second
+            watermark_window_ms: 5000, // 5 second watermark window
             strict_causality: true,
             max_clock_skew_ms: 10000, // 10 second clock skew tolerance
         }
@@ -58,6 +62,7 @@ impl Default for OrderingConfig {
 #[derive(Debug)]
 struct AgentEventBuffer {
     /// Agent this buffer belongs to
+    #[allow(dead_code)]
     agent_id: AgentId,
     
     /// Events waiting to be ordered (timestamp -> event)
@@ -81,8 +86,12 @@ struct GlobalEventBuffer {
     
     /// Latest processed timestamp
     last_processed_timestamp: Timestamp,
+
+    /// Set of processed event IDs (idempotency)
+    processed_event_ids: HashSet<EventId>,
     
     /// Pending events that might be out of order
+    #[allow(dead_code)]
     pending_window: VecDeque<TimestampedEvent>,
 }
 
@@ -90,20 +99,22 @@ struct GlobalEventBuffer {
 #[derive(Debug, Clone)]
 struct CausalityState {
     /// Expected next sequence number (for detecting gaps)
+    #[allow(dead_code)]
     expected_sequence: u64,
     
-    /// Missing events we're waiting for
-    missing_events: Vec<EventId>,
-    
     /// Events waiting for their dependencies
+    #[allow(dead_code)]
     waiting_for_deps: HashMap<EventId, Event>,
 }
 
 /// Timestamped event with ordering metadata
 #[derive(Debug, Clone)]
 struct TimestampedEvent {
+    #[allow(dead_code)]
     event: Event,
+    #[allow(dead_code)]
     arrival_time: Timestamp,
+    #[allow(dead_code)]
     processing_priority: f32,
 }
 
@@ -113,6 +124,7 @@ struct BufferStats {
     events_buffered: u64,
     events_reordered: u64,
     events_dropped_late: u64,
+    #[allow(dead_code)]
     max_buffer_size_reached: u64,
 }
 
@@ -160,6 +172,19 @@ pub enum OrderingIssue {
         agent_id: AgentId,
         dropped_count: usize,
     },
+
+    /// Duplicate event (already processed or buffered)
+    DuplicateEvent {
+        event_id: EventId,
+    },
+
+    /// Late event dropped outside watermark window
+    LateEventDropped {
+        event_id: EventId,
+        watermark_time: Timestamp,
+        actual_time: Timestamp,
+        delay_ms: u64,
+    },
 }
 
 impl EventOrderingEngine {
@@ -180,6 +205,28 @@ impl EventOrderingEngine {
             reordering_occurred: false,
             issues: Vec::new(),
         };
+
+        // Idempotency: skip duplicates
+        if self.is_duplicate_event(event.id).await {
+            result.issues.push(OrderingIssue::DuplicateEvent { event_id: event.id });
+            return Ok(result);
+        }
+
+        // Watermark: reject events that are too far in the past
+        if self.is_late_beyond_watermark(&event).await? {
+            let global = self.global_buffer.read().await;
+            let watermark_time = global
+                .last_processed_timestamp
+                .saturating_sub(self.config.watermark_window_ms * 1_000_000);
+            let delay = watermark_time.saturating_sub(event.timestamp);
+            result.issues.push(OrderingIssue::LateEventDropped {
+                event_id: event.id,
+                watermark_time,
+                actual_time: event.timestamp,
+                delay_ms: delay / 1_000_000,
+            });
+            return Ok(result);
+        }
         
         // Step 1: Add event to agent-specific buffer
         {
@@ -214,10 +261,21 @@ impl EventOrderingEngine {
                     agent_buffer.stats.events_reordered += 1;
                 }
             }
-            
-            // Add to buffer
-            agent_buffer.pending_events.insert(event.timestamp, event.clone());
-            agent_buffer.stats.events_buffered += 1;
+
+            // Enforce causality: hold until dependencies are processed
+            if self.config.strict_causality && !self.dependencies_satisfied(&event).await {
+                for &dep_id in &event.causality_chain {
+                    result.issues.push(OrderingIssue::MissingCausalEvent {
+                        waiting_event: event.id,
+                        missing_dependency: dep_id,
+                    });
+                }
+                agent_buffer.causality_state.waiting_for_deps.insert(event.id, event.clone());
+            } else {
+                // Add to buffer
+                agent_buffer.pending_events.insert(event.timestamp, event.clone());
+                agent_buffer.stats.events_buffered += 1;
+            }
         }
         
         // Step 2: Check if we can process any buffered events
@@ -242,6 +300,49 @@ impl EventOrderingEngine {
         
         Ok(result)
     }
+
+    async fn is_duplicate_event(&self, event_id: EventId) -> bool {
+        let global = self.global_buffer.read().await;
+        if global.processed_event_ids.contains(&event_id) {
+            return true;
+        }
+        drop(global);
+
+        let buffers = self.agent_buffers.read().await;
+        for buffer in buffers.values() {
+            if buffer.pending_events.values().any(|e| e.id == event_id) {
+                return true;
+            }
+            if buffer.causality_state.waiting_for_deps.contains_key(&event_id) {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn is_late_beyond_watermark(&self, event: &Event) -> GraphResult<bool> {
+        let global = self.global_buffer.read().await;
+        if global.last_processed_timestamp == 0 {
+            return Ok(false);
+        }
+        let watermark_time = global
+            .last_processed_timestamp
+            .saturating_sub(self.config.watermark_window_ms * 1_000_000);
+        Ok(event.timestamp < watermark_time)
+    }
+
+    async fn dependencies_satisfied(&self, event: &Event) -> bool {
+        if event.causality_chain.is_empty() {
+            return true;
+        }
+        let global = self.global_buffer.read().await;
+        for &dep_id in &event.causality_chain {
+            if !global.processed_event_ids.contains(&dep_id) {
+                return false;
+            }
+        }
+        true
+    }
     
     /// Try to flush events from an agent's buffer
     async fn try_flush_agent_buffer(&self, agent_id: AgentId) -> GraphResult<Vec<Event>> {
@@ -250,6 +351,20 @@ impl EventOrderingEngine {
         
         let mut buffers = self.agent_buffers.write().await;
         if let Some(agent_buffer) = buffers.get_mut(&agent_id) {
+            // Move waiting events whose deps are now satisfied into pending
+            if self.config.strict_causality && !agent_buffer.causality_state.waiting_for_deps.is_empty() {
+                let waiting_ids: Vec<EventId> = agent_buffer.causality_state.waiting_for_deps.keys().copied().collect();
+                for event_id in waiting_ids {
+                    if let Some(waiting_event) = agent_buffer.causality_state.waiting_for_deps.get(&event_id) {
+                        if self.dependencies_satisfied(waiting_event).await {
+                            let event = waiting_event.clone();
+                            agent_buffer.pending_events.insert(event.timestamp, event);
+                            agent_buffer.causality_state.waiting_for_deps.remove(&event_id);
+                        }
+                    }
+                }
+            }
+
             let mut to_remove = Vec::new();
             
             // Find events that are ready to process (past reorder window)
@@ -284,16 +399,6 @@ impl EventOrderingEngine {
     
     /// Check if an event is the next expected in sequence
     fn is_next_in_sequence(&self, buffer: &AgentEventBuffer, event: &Event) -> bool {
-        // Check if this event resolves a causality dependency
-        if !event.causality_chain.is_empty() {
-            // If this event has dependencies, check if they've been processed
-            for &dep_id in &event.causality_chain {
-                if buffer.causality_state.missing_events.contains(&dep_id) {
-                    return false; // Still waiting for dependency
-                }
-            }
-        }
-        
         // Check timestamp ordering
         if let Some(last_ts) = buffer.last_processed_timestamp {
             event.timestamp >= last_ts
@@ -315,6 +420,8 @@ impl EventOrderingEngine {
                 .entry(event.timestamp)
                 .or_insert_with(Vec::new)
                 .push(event.clone());
+
+            global_buffer.processed_event_ids.insert(event.id);
             
             global_buffer.last_processed_timestamp = 
                 global_buffer.last_processed_timestamp.max(event.timestamp);
@@ -434,7 +541,6 @@ impl AgentEventBuffer {
             last_processed_timestamp: None,
             causality_state: CausalityState {
                 expected_sequence: 0,
-                missing_events: Vec::new(),
                 waiting_for_deps: HashMap::new(),
             },
             stats: BufferStats::default(),
@@ -448,6 +554,7 @@ impl GlobalEventBuffer {
             timeline: BTreeMap::new(),
             last_processed_timestamp: 0,
             pending_window: VecDeque::new(),
+            processed_event_ids: HashSet::new(),
         }
     }
 }

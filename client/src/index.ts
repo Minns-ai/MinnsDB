@@ -1,8 +1,12 @@
 import {
   Event,
   ProcessEventResponse,
+  ContextMemoriesRequest,
+  EventContext,
   MemoryResponse,
   StrategyResponse,
+  StrategySimilarityRequest,
+  SimilarStrategyResponse,
   ActionSuggestionResponse,
   EpisodeResponse,
   StatsResponse,
@@ -72,7 +76,7 @@ export class EventGraphDBClient {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        const error: ErrorResponse = await response.json();
+        const error = await response.json() as ErrorResponse;
         throw new EventGraphDBError(
           error.error,
           response.status,
@@ -80,7 +84,7 @@ export class EventGraphDBClient {
         );
       }
 
-      return await response.json();
+      return await response.json() as T;
     } catch (error) {
       clearTimeout(timeoutId);
 
@@ -174,6 +178,32 @@ export class EventGraphDBClient {
     );
   }
 
+  /**
+   * Retrieve memories for a similar context with optional filters.
+   *
+   * @param context - Current context snapshot
+   * @param request - Optional retrieval settings and filters
+   * @returns Array of context-relevant memories
+   */
+  async getContextMemories(
+    context: EventContext,
+    request: Omit<ContextMemoriesRequest, "context"> = {}
+  ): Promise<MemoryResponse[]> {
+    const payload: ContextMemoriesRequest = {
+      context,
+      limit: request.limit ?? 10,
+      min_similarity: request.min_similarity,
+      agent_id: request.agent_id,
+      session_id: request.session_id,
+    };
+
+    return this.request<MemoryResponse[]>(
+      "POST",
+      "/api/memories/context",
+      payload
+    );
+  }
+
   // ==========================================================================
   // Strategy Queries
   // ==========================================================================
@@ -204,6 +234,29 @@ export class EventGraphDBClient {
     return this.request<StrategyResponse[]>(
       "GET",
       `/api/strategies/agent/${agentId}?${query}`
+    );
+  }
+
+  /**
+   * Find strategies similar to a signature (goal/tool/result/context).
+   */
+  async getSimilarStrategies(
+    request: StrategySimilarityRequest
+  ): Promise<SimilarStrategyResponse[]> {
+    const payload: StrategySimilarityRequest = {
+      goal_ids: request.goal_ids,
+      tool_names: request.tool_names,
+      result_types: request.result_types,
+      context_hash: request.context_hash,
+      agent_id: request.agent_id,
+      limit: request.limit ?? 10,
+      min_score: request.min_score,
+    };
+
+    return this.request<SimilarStrategyResponse[]>(
+      "POST",
+      "/api/strategies/similar",
+      payload
     );
   }
 
@@ -240,7 +293,7 @@ export class EventGraphDBClient {
     limit: number = 5
   ): Promise<ActionSuggestionResponse[]> {
     const params: Record<string, string> = {
-      context_hash: contextHash,
+      context_hash: contextHash.toString(),
       limit: limit.toString(),
     };
 

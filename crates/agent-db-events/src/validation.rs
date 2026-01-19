@@ -83,6 +83,9 @@ impl BasicEventValidator {
                     return Err(DatabaseError::validation("Sender and recipient cannot be the same"));
                 }
             }
+            EventType::Learning { .. } => {
+                // Learning telemetry is validated by schema; no extra constraints.
+            }
         }
         
         Ok(())

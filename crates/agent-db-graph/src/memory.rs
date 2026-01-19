@@ -6,13 +6,19 @@
 // strength tracking, and time-based decay.
 
 use crate::episodes::{Episode, EpisodeId, EpisodeOutcome};
-use agent_db_core::types::{AgentId, EventId, Timestamp, ContextHash, current_timestamp};
+use agent_db_core::types::{AgentId, EventId, Timestamp, ContextHash, SessionId, current_timestamp};
+use agent_db_core::utils::cosine_similarity;
 use agent_db_events::core::EventContext;
-use agent_db_events::{EnvironmentState, TemporalContext, ResourceState, ComputationalResources};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Unique identifier for a memory
 pub type MemoryId = u64;
+
+#[derive(Debug, Clone)]
+pub struct MemoryUpsert {
+    pub id: MemoryId,
+    pub is_new: bool,
+}
 
 /// Memory represents a consolidated experience that can be retrieved and applied
 #[derive(Debug, Clone)]
@@ -22,6 +28,9 @@ pub struct Memory {
 
     /// Agent that formed this memory
     pub agent_id: AgentId,
+
+    /// Session that formed this memory
+    pub session_id: SessionId,
 
     /// Episode this memory was formed from
     pub episode_id: EpisodeId,
@@ -71,6 +80,16 @@ pub enum MemoryType {
 
     /// Semantic memory - abstracted knowledge (not yet implemented in MVP)
     Semantic,
+
+    // ========== Phase 1 Upgrade (Feature C) ==========
+    /// Negative memory - failed experience to avoid repeating
+    /// Used to prevent the agent from repeating mistakes
+    Negative {
+        /// Failure significance (0.0 to 1.0) - how badly it failed
+        failure_severity: f32,
+        /// What went wrong - brief description of failure pattern
+        failure_pattern: String,
+    },
 }
 
 /// Configuration for memory formation
@@ -119,6 +138,9 @@ pub struct MemoryFormation {
     /// Memory index by context hash
     context_index: HashMap<ContextHash, Vec<MemoryId>>,
 
+    /// Memory index by episode
+    episode_index: HashMap<EpisodeId, MemoryId>,
+
     /// Configuration
     config: MemoryFormationConfig,
 
@@ -133,6 +155,7 @@ impl MemoryFormation {
             memories: HashMap::new(),
             agent_memories: HashMap::new(),
             context_index: HashMap::new(),
+            episode_index: HashMap::new(),
             config,
             next_memory_id: 1,
         }
@@ -141,14 +164,38 @@ impl MemoryFormation {
     /// Form a memory from an episode
     ///
     /// Returns the memory ID if a memory was formed, None if episode doesn't meet criteria
-    pub fn form_memory(&mut self, episode: &Episode) -> Option<MemoryId> {
+    pub fn form_memory(&mut self, episode: &Episode) -> Option<MemoryUpsert> {
+        if let Some(existing_id) = self.episode_index.get(&episode.id).copied() {
+            let updated = self.update_memory_from_episode(existing_id, episode);
+            if updated {
+                return Some(MemoryUpsert {
+                    id: existing_id,
+                    is_new: false,
+                });
+            }
+            return Some(MemoryUpsert {
+                id: existing_id,
+                is_new: false,
+            });
+        }
+
         // Check if episode meets significance threshold
         if episode.significance < self.config.min_significance {
+            tracing::info!(
+                "Memory formation rejected episode_id={} significance={:.3} min={:.3}",
+                episode.id,
+                episode.significance,
+                self.config.min_significance
+            );
             return None;
         }
 
         // Check if episode has ended
         if episode.end_timestamp.is_none() {
+            tracing::info!(
+                "Memory formation rejected episode_id={} (no end_timestamp)",
+                episode.id
+            );
             return None;
         }
 
@@ -157,44 +204,54 @@ impl MemoryFormation {
 
         let current_time = current_timestamp();
 
+        // Phase 1 Feature C: Determine memory type based on outcome
+        // Failures create Negative memories for avoidance learning
+        let memory_type = match episode.outcome {
+            Some(EpisodeOutcome::Failure) => {
+                // Create negative memory to avoid repeating this failure
+                let failure_pattern = format!(
+                    "Failed episode {} with significance {:.2} - avoid similar context",
+                    episode.id, episode.significance
+                );
+                MemoryType::Negative {
+                    failure_severity: episode.significance,
+                    failure_pattern,
+                }
+            }
+            _ => {
+                // Success, Partial, or Interrupted create episodic memories
+                MemoryType::Episodic {
+                    significance: episode.significance,
+                }
+            }
+        };
+
+        // Phase 1 Feature A: Apply prediction error weighting to memory strength
+        // Surprising outcomes (high prediction error) get stronger initial strength
+        let prediction_weighted_strength = self.config.initial_strength
+            * (1.0 + episode.prediction_error);
+
+        // Use the latest episode context snapshot for retrieval
+        let mut context = episode.context.clone();
+        if context.fingerprint == 0 {
+            context.fingerprint = context.compute_fingerprint();
+        }
+
         // Create memory from episode
         let memory = Memory {
             id: memory_id,
             agent_id: episode.agent_id,
+            session_id: episode.session_id,
             episode_id: episode.id,
-            context: EventContext {
-                environment: EnvironmentState {
-                    variables: HashMap::new(),
-                    spatial: None,
-                    temporal: TemporalContext {
-                        time_of_day: None,
-                        deadlines: vec![],
-                        patterns: vec![],
-                    },
-                },
-                active_goals: vec![],
-                resources: ResourceState {
-                    computational: ComputationalResources {
-                        cpu_percent: 0.0,
-                        memory_bytes: 0,
-                        storage_bytes: 0,
-                        network_bandwidth: 0,
-                    },
-                    external: HashMap::new(),
-                },
-                fingerprint: episode.context_signature,
-                embeddings: None,
-            },
+            context,
             key_events: episode.events.clone(),
-            strength: self.config.initial_strength,
-            relevance_score: episode.significance,
+            strength: prediction_weighted_strength.min(self.config.max_strength),
+            relevance_score: episode.significance * (1.0 + episode.prediction_error * 0.5),
             formed_at: current_time,
             last_accessed: current_time,
             access_count: 0,
             outcome: episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted),
-            memory_type: MemoryType::Episodic {
-                significance: episode.significance,
-            },
+            memory_type,
             metadata: HashMap::new(),
         };
 
@@ -209,11 +266,85 @@ impl MemoryFormation {
 
         // Index by context
         self.context_index
-            .entry(episode.context_signature)
+            .entry(memory.context.fingerprint)
             .or_insert_with(Vec::new)
             .push(memory_id);
 
-        Some(memory_id)
+        // Index by episode
+        self.episode_index.insert(episode.id, memory_id);
+
+        tracing::info!(
+            "Memory stored id={} episode_id={} agent_id={} session_id={} strength={:.3} relevance={:.3} context_hash={}",
+            memory_id,
+            episode.id,
+            episode.agent_id,
+            episode.session_id,
+            memory.strength,
+            memory.relevance_score,
+            memory.context.fingerprint
+        );
+
+        Some(MemoryUpsert {
+            id: memory_id,
+            is_new: true,
+        })
+    }
+
+    fn update_memory_from_episode(&mut self, memory_id: MemoryId, episode: &Episode) -> bool {
+        let Some(memory) = self.memories.get_mut(&memory_id) else {
+            return false;
+        };
+
+        let old_fingerprint = memory.context.fingerprint;
+        let mut context = episode.context.clone();
+        if context.fingerprint == 0 {
+            context.fingerprint = context.compute_fingerprint();
+        }
+
+        memory.context = context;
+        memory.key_events = episode.events.clone();
+        memory.outcome = episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted);
+        memory.memory_type = match episode.outcome {
+            Some(EpisodeOutcome::Failure) => MemoryType::Negative {
+                failure_severity: episode.significance,
+                failure_pattern: format!(
+                    "Failed episode {} with significance {:.2} - avoid similar context",
+                    episode.id, episode.significance
+                ),
+            },
+            _ => MemoryType::Episodic {
+                significance: episode.significance,
+            },
+        };
+
+        let prediction_weighted_strength = self.config.initial_strength
+            * (1.0 + episode.prediction_error);
+        memory.strength = memory
+            .strength
+            .max(prediction_weighted_strength)
+            .min(self.config.max_strength);
+        memory.relevance_score = episode.significance * (1.0 + episode.prediction_error * 0.5);
+
+        if old_fingerprint != memory.context.fingerprint {
+            if let Some(list) = self.context_index.get_mut(&old_fingerprint) {
+                list.retain(|id| *id != memory_id);
+            }
+            self.context_index
+                .entry(memory.context.fingerprint)
+                .or_insert_with(Vec::new)
+                .push(memory_id);
+        }
+
+        tracing::info!(
+            "Memory updated from episode correction id={} episode_id={} outcome={:?} strength={:.3} relevance={:.3}",
+            memory_id,
+            episode.id,
+            memory.outcome,
+            memory.strength,
+            memory.relevance_score
+        );
+
+        true
     }
 
     /// Retrieve memories by context similarity
@@ -225,6 +356,11 @@ impl MemoryFormation {
         limit: usize,
     ) -> Vec<Memory> {
         let context_hash = context.fingerprint;
+        tracing::info!(
+            "Memory retrieve_by_context hash={} limit={}",
+            context_hash,
+            limit
+        );
 
         // Get candidate memory IDs from context index
         let candidate_ids: Vec<MemoryId> = self
@@ -261,7 +397,202 @@ impl MemoryFormation {
         });
 
         // Take top-k
-        candidates.into_iter().take(limit).collect()
+        {
+            let result = candidates.into_iter().take(limit).collect::<Vec<_>>();
+            tracing::info!("Memory retrieve_by_context results={}", result.len());
+            result
+        }
+    }
+
+    /// Retrieve memories by context similarity with optional filtering
+    pub fn retrieve_by_context_similar(
+        &mut self,
+        context: &EventContext,
+        limit: usize,
+        min_similarity: f32,
+        agent_id: Option<AgentId>,
+        session_id: Option<SessionId>,
+    ) -> Vec<Memory> {
+        tracing::info!(
+            "Memory retrieve_by_context_similar limit={} min_similarity={:.3} agent_id={:?} session_id={:?}",
+            limit,
+            min_similarity,
+            agent_id,
+            session_id
+        );
+        let current_time = current_timestamp();
+        let mut candidates: Vec<(f32, Memory)> = self
+            .memories
+            .values_mut()
+            .filter_map(|memory| {
+                if let Some(agent_id) = agent_id {
+                    if memory.agent_id != agent_id {
+                        return None;
+                    }
+                }
+                if let Some(session_id) = session_id {
+                    if memory.session_id != session_id {
+                        return None;
+                    }
+                }
+
+                let similarity = Self::calculate_context_similarity(context, &memory.context);
+                if similarity < min_similarity {
+                    return None;
+                }
+
+                // Update access tracking
+                memory.access_count += 1;
+                memory.last_accessed = current_time;
+
+                // Boost strength on access
+                memory.strength = (memory.strength + self.config.access_strength_boost)
+                    .min(self.config.max_strength);
+
+                let score = similarity * memory.relevance_score;
+                Some((score, memory.clone()))
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        {
+            let result = candidates
+                .into_iter()
+                .take(limit)
+                .map(|(_, memory)| memory)
+                .collect::<Vec<_>>();
+            tracing::info!("Memory retrieve_by_context_similar results={}", result.len());
+            result
+        }
+    }
+
+    /// Apply explicit outcome feedback to a memory (used -> outcome)
+    pub fn apply_outcome(&mut self, memory_id: MemoryId, success: bool) -> bool {
+        let current_time = current_timestamp();
+        let Some(memory) = self.memories.get_mut(&memory_id) else {
+            return false;
+        };
+
+        memory.access_count += 1;
+        memory.last_accessed = current_time;
+
+        if success {
+            memory.strength = (memory.strength + self.config.access_strength_boost)
+                .min(self.config.max_strength);
+            memory.relevance_score = (memory.relevance_score + 0.02).min(1.0);
+        } else {
+            memory.strength = (memory.strength - self.config.decay_rate_per_hour)
+                .max(self.config.forget_threshold);
+            memory.relevance_score = (memory.relevance_score - 0.02).max(0.0);
+        }
+
+        true
+    }
+
+    fn calculate_context_similarity(a: &EventContext, b: &EventContext) -> f32 {
+        if let (Some(embed_a), Some(embed_b)) = (&a.embeddings, &b.embeddings) {
+            return cosine_similarity(embed_a, embed_b);
+        }
+
+        Self::fallback_context_similarity(a, b)
+    }
+
+    fn fallback_context_similarity(a: &EventContext, b: &EventContext) -> f32 {
+        let env_similarity = Self::key_overlap_ratio(
+            a.environment.variables.keys(),
+            b.environment.variables.keys(),
+        );
+        let goals_similarity = Self::id_overlap_ratio(
+            a.active_goals.iter().map(|goal| goal.id),
+            b.active_goals.iter().map(|goal| goal.id),
+        );
+        let resources_similarity = Self::resource_similarity(a, b);
+
+        let mut total = 0.0;
+        let mut weight = 0.0;
+
+        if env_similarity >= 0.0 {
+            total += env_similarity * 0.4;
+            weight += 0.4;
+        }
+
+        if goals_similarity >= 0.0 {
+            total += goals_similarity * 0.3;
+            weight += 0.3;
+        }
+
+        total += resources_similarity * 0.3;
+        weight += 0.3;
+
+        if weight == 0.0 {
+            0.0
+        } else {
+            (total / weight).min(1.0).max(0.0)
+        }
+    }
+
+    fn key_overlap_ratio<'a, I, J>(a: I, b: J) -> f32
+    where
+        I: Iterator<Item = &'a String>,
+        J: Iterator<Item = &'a String>,
+    {
+        let set_a: HashSet<&String> = a.collect();
+        let set_b: HashSet<&String> = b.collect();
+        if set_a.is_empty() && set_b.is_empty() {
+            return -1.0;
+        }
+
+        let intersection = set_a.intersection(&set_b).count() as f32;
+        let union = set_a.union(&set_b).count() as f32;
+
+        if union == 0.0 {
+            -1.0
+        } else {
+            intersection / union
+        }
+    }
+
+    fn id_overlap_ratio<I, J>(a: I, b: J) -> f32
+    where
+        I: Iterator<Item = u64>,
+        J: Iterator<Item = u64>,
+    {
+        let set_a: HashSet<u64> = a.collect();
+        let set_b: HashSet<u64> = b.collect();
+        if set_a.is_empty() && set_b.is_empty() {
+            return -1.0;
+        }
+
+        let intersection = set_a.intersection(&set_b).count() as f32;
+        let union = set_a.union(&set_b).count() as f32;
+
+        if union == 0.0 {
+            -1.0
+        } else {
+            intersection / union
+        }
+    }
+
+    fn resource_similarity(a: &EventContext, b: &EventContext) -> f32 {
+        let cpu_a = a.resources.computational.cpu_percent;
+        let cpu_b = b.resources.computational.cpu_percent;
+        let cpu_max = cpu_a.max(cpu_b).max(1.0);
+        let cpu_sim = 1.0 - ((cpu_a - cpu_b).abs() / cpu_max).min(1.0);
+
+        let mem_a = a.resources.computational.memory_bytes as f32;
+        let mem_b = b.resources.computational.memory_bytes as f32;
+        let mem_max = mem_a.max(mem_b);
+        let mem_sim = if mem_max == 0.0 {
+            1.0
+        } else {
+            1.0 - ((mem_a - mem_b).abs() / mem_max).min(1.0)
+        };
+
+        ((cpu_sim + mem_sim) / 2.0).min(1.0).max(0.0)
     }
 
     /// Retrieve memories for a specific agent
@@ -384,19 +715,53 @@ pub struct MemoryStats {
 mod tests {
     use super::*;
     use crate::episodes::{Episode, EpisodeOutcome};
+    use agent_db_events::{EnvironmentState, TemporalContext, ResourceState, ComputationalResources};
+    use std::collections::HashMap;
+
+    fn test_context() -> EventContext {
+        EventContext::new(
+            EnvironmentState {
+                variables: HashMap::new(),
+                spatial: None,
+                temporal: TemporalContext {
+                    time_of_day: None,
+                    deadlines: vec![],
+                    patterns: vec![],
+                },
+            },
+            vec![],
+            ResourceState {
+                computational: ComputationalResources {
+                    cpu_percent: 0.0,
+                    memory_bytes: 0,
+                    storage_bytes: 0,
+                    network_bandwidth: 0,
+                },
+                external: HashMap::new(),
+            },
+        )
+    }
 
     fn create_test_episode(id: EpisodeId, agent_id: AgentId, significance: f32) -> Episode {
+        let context = test_context();
         Episode {
             id,
+            episode_version: 1,
             agent_id,
             start_event: 1,
             end_event: Some(2),
             events: vec![1, 2],
-            context_signature: 12345,
+            session_id: 1,
+            context_signature: context.fingerprint,
+            context,
             outcome: Some(EpisodeOutcome::Success),
             start_timestamp: current_timestamp(),
             end_timestamp: Some(current_timestamp()),
             significance,
+            // Phase 1 fields
+            prediction_error: 0.0,
+            self_judged_quality: None,
+            salience_score: 0.5,
         }
     }
 
@@ -447,34 +812,12 @@ mod tests {
         let mut memory_formation = MemoryFormation::new(MemoryFormationConfig::default());
 
         let episode = create_test_episode(1, 1, 0.8);
-        let memory_id = memory_formation.form_memory(&episode).unwrap();
+        let memory_id = memory_formation.form_memory(&episode).unwrap().id;
 
         let initial_strength = memory_formation.get_memory(memory_id).unwrap().strength;
 
         // Access memory multiple times
-        let context = EventContext {
-            environment: EnvironmentState {
-                variables: HashMap::new(),
-                spatial: None,
-                temporal: TemporalContext {
-                    time_of_day: None,
-                    deadlines: vec![],
-                    patterns: vec![],
-                },
-            },
-            active_goals: vec![],
-            resources: ResourceState {
-                computational: ComputationalResources {
-                    cpu_percent: 50.0,
-                    memory_bytes: 1024 * 1024 * 1024,
-                    storage_bytes: 10 * 1024 * 1024 * 1024,
-                    network_bandwidth: 1000 * 1000,
-                },
-                external: HashMap::new(),
-            },
-            fingerprint: 12345,
-            embeddings: None,
-        };
+        let context = memory_formation.get_memory(memory_id).unwrap().context.clone();
 
         memory_formation.retrieve_by_context(&context, 10);
         memory_formation.retrieve_by_context(&context, 10);

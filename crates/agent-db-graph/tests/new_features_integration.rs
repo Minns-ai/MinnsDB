@@ -131,7 +131,6 @@ async fn test_episode_detection() -> Result<(), Box<dyn std::error::Error>> {
     let episodes = detector.get_completed_episodes();
 
     println!("   ✓ Episodes detected: {}", episodes.len());
-    assert!(episodes.len() >= 0, "Episode detection should work");
 
     Ok(())
 }

@@ -4,10 +4,10 @@
 //! agent types and session boundaries for contextual grouping.
 
 use crate::{GraphResult, GraphError};
-use crate::structures::{Graph, GraphNode, GraphEdge, NodeType, EdgeType, NodeId};
+use crate::structures::{NodeType, NodeId};
 use crate::inference::{GraphInference, InferenceConfig};
 use crate::event_ordering::{EventOrderingEngine, OrderingConfig};
-use agent_db_core::types::{AgentId, AgentType, SessionId, EventId, Timestamp, current_timestamp};
+use agent_db_core::types::{AgentType, SessionId, current_timestamp};
 use agent_db_events::Event;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -114,6 +114,15 @@ impl ScopedInferenceEngine {
             scope_ordering: Arc::new(RwLock::new(HashMap::new())),
             config,
         })
+    }
+
+    /// Get an existing inference engine for a scope (without creating one)
+    pub async fn get_scope_engine(&self, scope: &InferenceScope) -> GraphResult<Arc<RwLock<GraphInference>>> {
+        let engines = self.scoped_engines.read().await;
+        engines
+            .get(scope)
+            .cloned()
+            .ok_or_else(|| GraphError::OperationError(format!("Scope not found: {:?}", scope)))
     }
     
     /// Process a scoped event
@@ -361,7 +370,7 @@ impl ScopedInferenceEngine {
     }
     
     /// Detect patterns that span across different scopes
-    async fn detect_cross_scope_patterns(&self, current_scope: &InferenceScope, event: &ScopedEvent) -> Vec<CrossScopePattern> {
+    async fn detect_cross_scope_patterns(&self, current_scope: &InferenceScope, _event: &ScopedEvent) -> Vec<CrossScopePattern> {
         let mut patterns = Vec::new();
         
         // Find similar agent types in different sessions
@@ -416,7 +425,7 @@ impl ScopedInferenceEngine {
             for agent2 in &agent_nodes {
                 if agent1.id != agent2.id {
                     // Check if there's a path between these agents
-                    if let Some(path) = graph.shortest_path(agent1.id, agent2.id) {
+                    if let Some(_path) = graph.shortest_path(agent1.id, agent2.id) {
                         patterns.push(CollaborationPattern {
                             agents: vec![agent1.id, agent2.id],
                             interaction_count: 1,
@@ -556,6 +565,7 @@ pub struct CrossScopePattern {
 
 #[derive(Debug)]
 struct CrossScopePatterns {
+    #[allow(dead_code)]
     patterns: HashMap<String, Vec<CrossScopePattern>>,
 }
 

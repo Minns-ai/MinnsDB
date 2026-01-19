@@ -4,7 +4,7 @@
 //! processing for the agentic database graph structure.
 
 use crate::{GraphResult, GraphError};
-use crate::structures::{Graph, GraphNode, GraphEdge, NodeType, EdgeType, NodeId, EdgeId, EdgeWeight};
+use crate::structures::{Graph, GraphNode, GraphEdge, NodeType, NodeId, EdgeId, EdgeWeight};
 use std::collections::{HashMap, HashSet, VecDeque, BinaryHeap};
 use std::cmp::Ordering;
 
@@ -141,6 +141,7 @@ pub struct QueryStats {
 struct PathEntry {
     node_id: NodeId,
     cost: f32,
+    #[allow(dead_code)]
     path: Vec<NodeId>,
 }
 
@@ -193,7 +194,7 @@ impl GraphTraversal {
         
         // Check cache first
         let cache_key = format!("{:?}", query);
-        if let Some((cached_result, timestamp)) = self.query_cache.get(&cache_key) {
+        if let Some((_cached_result, timestamp)) = self.query_cache.get(&cache_key) {
             if start_time.duration_since(*timestamp).as_secs() < self.cache_ttl {
                 // Return cached result (would need to clone properly)
                 return Ok(QueryResult::Nodes(Vec::new())); // Placeholder
@@ -442,11 +443,11 @@ impl GraphTraversal {
     /// Find nodes by property value
     fn find_nodes_by_property(
         &self,
-        graph: &Graph,
-        key: &str,
-        value: &serde_json::Value,
+        _graph: &Graph,
+        _key: &str,
+        _value: &serde_json::Value,
     ) -> GraphResult<QueryResult> {
-        let mut matching_nodes = Vec::new();
+        let matching_nodes = Vec::new();
         
         // This would require iterating over all nodes in the graph
         // For now, return empty result as we need access to all nodes
@@ -472,7 +473,7 @@ impl GraphTraversal {
         graph: &Graph,
         start: NodeId,
         end: NodeId,
-        constraints: &[PathConstraint],
+        _constraints: &[PathConstraint],
     ) -> GraphResult<QueryResult> {
         // Simplified implementation - would need full constraint checking
         self.shortest_path(graph, start, end)
@@ -749,7 +750,7 @@ impl GraphTraversal {
 
     /// Get actions that are known to fail in this context (dead ends)
     ///
-    /// Returns action names that should be avoided
+    /// Returns action names that should be avoided based on actual failure rates
     pub fn get_dead_ends(
         &self,
         graph: &Graph,
@@ -766,11 +767,27 @@ impl GraphTraversal {
             for neighbor_id in neighbors {
                 if let Some(node) = graph.get_node(neighbor_id) {
                     if let NodeType::Event { event_type, .. } = &node.node_type {
-                        // Check if edge weight is very low (indicates failure)
-                        if let Some(weight) = self.get_edge_weight_between(graph, context_node_id, neighbor_id) {
-                            // Threshold for "dead end": success rate < 20%
-                            if weight < 0.2 {
-                                dead_ends.push(event_type.clone());
+                        // Get the actual edge to check failure rate
+                        if let Some(edge) = graph.get_edge_between(context_node_id, neighbor_id) {
+                            let success_count = edge.get_success_count();
+                            let failure_count = edge.get_failure_count();
+                            let total = success_count + failure_count;
+                            
+                            // Dead end if:
+                            // 1. Low success rate (< 20%) AND at least 3 observations
+                            // 2. OR failure rate > 70% (strong negative signal)
+                            if total >= 3 {
+                                let failure_rate = failure_count as f32 / total as f32;
+                                let success_rate = success_count as f32 / total as f32;
+                                
+                                if failure_rate > 0.7 || success_rate < 0.2 {
+                                    dead_ends.push(event_type.clone());
+                                }
+                            } else if let Some(success_rate) = edge.get_success_rate() {
+                                // Use computed success rate if available
+                                if success_rate < 0.2 {
+                                    dead_ends.push(event_type.clone());
+                                }
                             }
                         }
                     }
@@ -799,7 +816,7 @@ impl GraphTraversal {
         Ok(matching_nodes)
     }
 
-    /// Get edge weight between two nodes
+    /// Get edge weight between two nodes, using success rate if available
     fn get_edge_weight_between(
         &self,
         graph: &Graph,
@@ -807,15 +824,29 @@ impl GraphTraversal {
         to_node: NodeId,
     ) -> Option<EdgeWeight> {
         // Find the edge between these nodes
-        // We need to iterate through outgoing edges from from_node
-        let neighbors = graph.get_neighbors(from_node);
-
-        // Check if to_node is in neighbors
-        if neighbors.contains(&to_node) {
-            // Find the actual edge
-            // This is a simplified approach - in production we'd have a better edge lookup
-            // For now, return a default weight if connected
-            Some(0.7) // Default success probability
+        if let Some(edge) = graph.get_edge_between(from_node, to_node) {
+            // Prefer success rate if we have enough evidence
+            if let Some(success_rate) = edge.get_success_rate() {
+                let total_observations = edge.get_success_count() + edge.get_failure_count();
+                
+                // If we have at least 3 observations, use success rate
+                // Otherwise, blend with edge weight (prior)
+                if total_observations >= 3 {
+                    Some(success_rate)
+                } else {
+                    // Bayesian prior: blend success rate with edge weight
+                    let prior_weight = edge.weight;
+                    let evidence_weight = total_observations as f32;
+                    let prior_strength = 2.0; // Equivalent to 2 prior observations
+                    
+                    let blended = (success_rate * evidence_weight + prior_weight * prior_strength) 
+                        / (evidence_weight + prior_strength);
+                    Some(blended.clamp(0.0, 1.0))
+                }
+            } else {
+                // No success/failure data yet, use edge weight
+                Some(edge.weight)
+            }
         } else {
             None
         }
@@ -828,11 +859,9 @@ impl GraphTraversal {
         from_node: NodeId,
         to_node: NodeId,
     ) -> GraphResult<u32> {
-        // In a more sophisticated implementation, we'd track edge metadata
-        // For now, use edge weight as a proxy (higher weight = more occurrences)
-        if let Some(weight) = self.get_edge_weight_between(graph, from_node, to_node) {
-            // Scale weight to approximate count (weight 1.0 = ~10 occurrences)
-            Ok((weight * 10.0) as u32)
+        if let Some(edge) = graph.get_edge_between(from_node, to_node) {
+            // Use observation_count which tracks all occurrences
+            Ok(edge.observation_count)
         } else {
             Ok(0)
         }

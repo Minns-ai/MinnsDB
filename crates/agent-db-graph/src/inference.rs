@@ -7,10 +7,12 @@
 use crate::{GraphResult, GraphError};
 use crate::structures::{
     Graph, GraphNode, GraphEdge, NodeType, EdgeType, NodeId, EdgeWeight,
-    ConceptType, GoalStatus, InteractionType, GoalRelationType,
+    ConceptType, GoalStatus, InteractionType,
 };
 use agent_db_core::types::{AgentId, EventId, Timestamp, ContextHash};
 use agent_db_events::{Event, EventType, ActionOutcome, EventContext};
+use agent_db_events::core::MetadataValue;
+use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -129,35 +131,48 @@ impl GraphInference {
     pub fn process_event(&mut self, event: Event) -> GraphResult<Vec<NodeId>> {
         let start_time = SystemTime::now();
         let mut created_nodes = Vec::new();
+        tracing::info!("Inference start event_id={} agent_id={} session_id={}", event.id, event.agent_id, event.session_id);
         
         // Ensure agent node exists
+        tracing::info!("Inference ensure_agent_node event_id={}", event.id);
         let agent_node_id = self.ensure_agent_node(event.agent_id, &event)?;
         created_nodes.push(agent_node_id);
         
         // Create event node
+        tracing::info!("Inference create_event_node event_id={}", event.id);
         let event_node_id = self.create_event_node(&event)?;
         created_nodes.push(event_node_id);
         
         // Ensure context node exists
+        tracing::info!("Inference ensure_context_node event_id={}", event.id);
         let context_node_id = self.ensure_context_node(&event.context)?;
         if context_node_id != event_node_id {
             created_nodes.push(context_node_id);
         }
         
         // Create basic relationships
+        tracing::info!("Inference create_agent_event_relationship event_id={}", event.id);
         self.create_agent_event_relationship(agent_node_id, event_node_id, &event)?;
+        tracing::info!("Inference create_event_context_relationship event_id={}", event.id);
         self.create_event_context_relationship(event_node_id, context_node_id, &event)?;
+
+        // Create goal/tool/result relationships for richer learning graph
+        tracing::info!("Inference attach_goal_tool_result_relationships event_id={}", event.id);
+        self.attach_goal_tool_result_relationships(agent_node_id, event_node_id, &event)?;
         
         // Add to temporal buffer for causal analysis
+        tracing::info!("Inference update_temporal_buffer event_id={}", event.id);
         self.temporal_buffer.push_back(event.clone());
         if self.temporal_buffer.len() > self.config.batch_size {
             self.temporal_buffer.pop_front();
         }
         
         // Perform causal inference
+        tracing::info!("Inference infer_causal_relationships event_id={}", event.id);
         self.infer_causal_relationships(&event)?;
         
         // Infer contextual relationships
+        tracing::info!("Inference infer_contextual_relationships event_id={}", event.id);
         self.infer_contextual_relationships(&event)?;
         
         // Update statistics
@@ -168,9 +183,11 @@ impl GraphInference {
         
         // Periodically clean up buffer and detect patterns
         if self.stats.events_processed % 100 == 0 {
+            tracing::info!("Inference detect_patterns event_id={}", event.id);
             self.detect_patterns()?;
             self.cleanup_old_associations();
         }
+        tracing::info!("Inference done event_id={} nodes_created={}", event.id, created_nodes.len());
         
         Ok(created_nodes)
     }
@@ -242,6 +259,7 @@ impl GraphInference {
                 EventType::Observation { .. } => "observer_agent", 
                 EventType::Communication { .. } => "communicator_agent",
                 EventType::Cognitive { .. } => "cognitive_agent",
+                EventType::Learning { .. } => "learning_agent",
             };
             
             let node = GraphNode::new(NodeType::Agent {
@@ -263,15 +281,26 @@ impl GraphInference {
             EventType::Observation { observation_type, .. } => observation_type.clone(),
             EventType::Communication { message_type, .. } => message_type.clone(),
             EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
+            EventType::Learning { .. } => "LearningTelemetry".to_string(),
         };
         
         let significance = self.calculate_event_significance(event);
         
-        let node = GraphNode::new(NodeType::Event {
+        let mut node = GraphNode::new(NodeType::Event {
             event_id: event.id,
             event_type: event_type_name,
             significance,
         });
+
+        let tool_names = self.extract_tool_names(event);
+        let goal_ids: Vec<u64> = event.context.active_goals.iter().map(|goal| goal.id).collect();
+
+        node.properties.insert("agent_id".to_string(), json!(event.agent_id));
+        node.properties.insert("session_id".to_string(), json!(event.session_id));
+        node.properties.insert("agent_type".to_string(), json!(event.agent_type));
+        node.properties.insert("event_type".to_string(), json!(self.event_type_label(event)));
+        node.properties.insert("tool_names".to_string(), json!(tool_names));
+        node.properties.insert("goal_ids".to_string(), json!(goal_ids));
         
         let node_id = self.graph.add_node(node);
         self.stats.nodes_created += 1;
@@ -317,6 +346,7 @@ impl GraphInference {
             EventType::Observation { .. } => InteractionType::InformationExchange,
             EventType::Communication { .. } => InteractionType::Communication,
             EventType::Cognitive { .. } => InteractionType::Coordination,
+            EventType::Learning { .. } => InteractionType::Coordination,
         };
         
         let edge = GraphEdge::new(
@@ -356,10 +386,312 @@ impl GraphInference {
         self.stats.relationships_created += 1;
         Ok(())
     }
+
+    /// Attach goal, tool, and result relationships to enrich the graph
+    fn attach_goal_tool_result_relationships(
+        &mut self,
+        agent_node_id: NodeId,
+        event_node_id: NodeId,
+        event: &Event,
+    ) -> GraphResult<()> {
+        let goal_ids: Vec<_> = event.context.active_goals.iter().collect();
+        for goal in goal_ids {
+            let goal_node_id = self.ensure_goal_node(goal)?;
+            self.add_or_strengthen_association(
+                event_node_id,
+                goal_node_id,
+                "ContributesToGoal",
+                0.8,
+                json!({
+                    "event_id": event.id.to_string(),
+                    "agent_id": event.agent_id,
+                    "session_id": event.session_id,
+                    "goal_id": goal.id,
+                    "goal_priority": goal.priority,
+                }),
+            );
+            self.add_or_strengthen_association(
+                agent_node_id,
+                goal_node_id,
+                "ResponsibleForGoal",
+                0.6,
+                json!({
+                    "agent_id": event.agent_id,
+                    "session_id": event.session_id,
+                    "goal_id": goal.id,
+                }),
+            );
+        }
+
+        for tool_name in self.extract_tool_names(event) {
+            let tool_node_id = self.ensure_tool_node(&tool_name)?;
+            self.add_or_strengthen_association(
+                event_node_id,
+                tool_node_id,
+                "UsesTool",
+                0.7,
+                json!({
+                    "event_id": event.id.to_string(),
+                    "agent_id": event.agent_id,
+                    "session_id": event.session_id,
+                    "tool_name": tool_name,
+                }),
+            );
+        }
+
+        if let Some((result_type, summary)) = self.extract_result_summary(event) {
+            let result_key = format!("event:{}:{}", event.id, result_type);
+            let result_node_id = self.ensure_result_node(&result_key, &result_type, &summary)?;
+            self.add_or_strengthen_association(
+                event_node_id,
+                result_node_id,
+                "ProducesResult",
+                0.7,
+                json!({
+                    "event_id": event.id.to_string(),
+                    "agent_id": event.agent_id,
+                    "session_id": event.session_id,
+                    "result_type": result_type,
+                }),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn ensure_goal_node(&mut self, goal: &agent_db_events::core::Goal) -> GraphResult<NodeId> {
+        if let Some(node_id) = self.graph.get_goal_node(goal.id).map(|node| node.id) {
+            if let Some(existing) = self.graph.get_node_mut(node_id) {
+                existing.properties.insert("priority".to_string(), json!(goal.priority));
+                existing.properties.insert("progress".to_string(), json!(goal.progress));
+                if let Some(deadline) = goal.deadline {
+                    existing.properties.insert("deadline".to_string(), json!(deadline));
+                }
+                if let NodeType::Goal { description, priority, status, .. } = &mut existing.node_type {
+                    *description = goal.description.clone();
+                    *priority = goal.priority;
+                    *status = if goal.progress >= 1.0 {
+                        GoalStatus::Completed
+                    } else {
+                        GoalStatus::Active
+                    };
+                }
+                existing.touch();
+            }
+            Ok(node_id)
+        } else {
+            let status = if goal.progress >= 1.0 {
+                GoalStatus::Completed
+            } else {
+                GoalStatus::Active
+            };
+
+            let mut node = GraphNode::new(NodeType::Goal {
+                goal_id: goal.id,
+                description: goal.description.clone(),
+                priority: goal.priority,
+                status,
+            });
+            node.properties.insert("progress".to_string(), json!(goal.progress));
+            if let Some(deadline) = goal.deadline {
+                node.properties.insert("deadline".to_string(), json!(deadline));
+            }
+
+            let node_id = self.graph.add_node(node);
+            self.stats.nodes_created += 1;
+            Ok(node_id)
+        }
+    }
+
+    fn ensure_tool_node(&mut self, tool_name: &str) -> GraphResult<NodeId> {
+        if let Some(node_id) = self.graph.get_tool_node(tool_name).map(|node| node.id) {
+            if let Some(existing) = self.graph.get_node_mut(node_id) {
+                let count = existing
+                    .properties
+                    .get("usage_count")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                existing.properties.insert("usage_count".to_string(), json!(count));
+                existing.touch();
+            }
+            Ok(node_id)
+        } else {
+            let mut node = GraphNode::new(NodeType::Tool {
+                tool_name: tool_name.to_string(),
+                tool_type: "external".to_string(),
+            });
+            node.properties.insert("usage_count".to_string(), json!(1));
+            let node_id = self.graph.add_node(node);
+            self.stats.nodes_created += 1;
+            Ok(node_id)
+        }
+    }
+
+    fn ensure_result_node(
+        &mut self,
+        result_key: &str,
+        result_type: &str,
+        summary: &str,
+    ) -> GraphResult<NodeId> {
+        if let Some(node) = self.graph.get_result_node(result_key) {
+            Ok(node.id)
+        } else {
+            let mut node = GraphNode::new(NodeType::Result {
+                result_key: result_key.to_string(),
+                result_type: result_type.to_string(),
+                summary: summary.to_string(),
+            });
+            node.properties.insert("summary".to_string(), json!(summary));
+            let node_id = self.graph.add_node(node);
+            self.stats.nodes_created += 1;
+            Ok(node_id)
+        }
+    }
+
+    fn add_or_strengthen_association(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        association_type: &str,
+        weight: EdgeWeight,
+        properties: serde_json::Value,
+    ) {
+        if let Some(edge) = self.graph.get_edge_between_mut(source, target) {
+            edge.strengthen(weight * 0.1);
+            return;
+        }
+
+        let mut edge = GraphEdge::new(
+            source,
+            target,
+            EdgeType::Association {
+                association_type: association_type.to_string(),
+                evidence_count: 1,
+                statistical_significance: weight,
+            },
+            weight,
+        );
+        edge.properties.insert("details".to_string(), properties);
+        self.graph.add_edge(edge);
+        self.stats.relationships_created += 1;
+    }
+
+    fn extract_tool_names(&self, event: &Event) -> Vec<String> {
+        let mut tools: HashSet<String> = HashSet::new();
+
+        for key in ["tool", "tool_name", "tools", "tool_used"] {
+            if let Some(value) = event.metadata.get(key) {
+                self.collect_tools_from_metadata(value, &mut tools);
+            }
+        }
+
+        if let EventType::Action { parameters, .. } = &event.event_type {
+            self.collect_tools_from_json(parameters, &mut tools);
+        }
+
+        let mut list: Vec<String> = tools.into_iter().collect();
+        list.sort();
+        list
+    }
+
+    fn collect_tools_from_metadata(&self, value: &MetadataValue, tools: &mut HashSet<String>) {
+        match value {
+            MetadataValue::String(name) => {
+                if !name.trim().is_empty() {
+                    tools.insert(name.trim().to_string());
+                }
+            }
+            MetadataValue::Json(json) => {
+                self.collect_tools_from_json(json, tools);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_tools_from_json(&self, value: &serde_json::Value, tools: &mut HashSet<String>) {
+        match value {
+            serde_json::Value::String(name) => {
+                if !name.trim().is_empty() {
+                    tools.insert(name.trim().to_string());
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    self.collect_tools_from_json(item, tools);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for key in ["tool", "tool_name", "tools", "tool_used"] {
+                    if let Some(value) = map.get(key) {
+                        self.collect_tools_from_json(value, tools);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn extract_result_summary(&self, event: &Event) -> Option<(String, String)> {
+        match &event.event_type {
+            EventType::Action { outcome, .. } => match outcome {
+                ActionOutcome::Success { result } => {
+                    Some(("action_success".to_string(), self.format_json_summary(result)))
+                }
+                ActionOutcome::Failure { error, .. } => {
+                    Some(("action_failure".to_string(), self.truncate_summary(error)))
+                }
+                ActionOutcome::Partial { result, issues } => {
+                    let mut summary = self.format_json_summary(result);
+                    if !issues.is_empty() {
+                        summary.push_str(" | issues: ");
+                        summary.push_str(&issues.join(", "));
+                    }
+                    Some(("action_partial".to_string(), self.truncate_summary(&summary)))
+                }
+            },
+            EventType::Observation { data, .. } => {
+                Some(("observation".to_string(), self.format_json_summary(data)))
+            }
+            EventType::Cognitive { output, .. } => {
+                Some(("cognitive_output".to_string(), self.format_json_summary(output)))
+            }
+            EventType::Communication { content, .. } => {
+                Some(("communication".to_string(), self.format_json_summary(content)))
+            }
+            EventType::Learning { event } => {
+                Some(("learning_telemetry".to_string(), self.format_json_summary(&serde_json::json!(event))))
+            }
+        }
+    }
+
+    fn format_json_summary(&self, value: &serde_json::Value) -> String {
+        self.truncate_summary(&value.to_string())
+    }
+
+    fn truncate_summary(&self, value: &str) -> String {
+        let max_len = 200;
+        if value.len() <= max_len {
+            value.to_string()
+        } else {
+            format!("{}...", &value[..max_len])
+        }
+    }
+
+    fn event_type_label(&self, event: &Event) -> String {
+        match &event.event_type {
+            EventType::Action { .. } => "Action".to_string(),
+            EventType::Observation { .. } => "Observation".to_string(),
+            EventType::Communication { .. } => "Communication".to_string(),
+            EventType::Cognitive { .. } => "Cognitive".to_string(),
+            EventType::Learning { .. } => "Learning".to_string(),
+        }
+    }
     
     /// Infer causal relationships from temporal patterns
     fn infer_causal_relationships(&mut self, current_event: &Event) -> GraphResult<()> {
         let current_time = current_event.timestamp;
+        tracing::info!("Causal inference start event_id={}", current_event.id);
         
         // Collect causal candidates first to avoid borrowing issues
         let mut causal_candidates = Vec::new();
@@ -400,12 +732,13 @@ impl GraphInference {
                 }
             }
         }
-        
+        tracing::info!("Causal inference done event_id={}", current_event.id);
         Ok(())
     }
     
     /// Infer contextual relationships
     fn infer_contextual_relationships(&mut self, current_event: &Event) -> GraphResult<()> {
+        tracing::info!("Contextual inference start event_id={}", current_event.id);
         // Collect context pairs first to avoid borrowing issues
         let mut context_pairs = Vec::new();
         for previous_event in self.temporal_buffer.iter() {
@@ -446,7 +779,7 @@ impl GraphInference {
                 }
             }
         }
-        
+        tracing::info!("Contextual inference done event_id={}", current_event.id);
         Ok(())
     }
     
@@ -479,6 +812,7 @@ impl GraphInference {
                     EventType::Observation { observation_type, .. } => observation_type.clone(),
                     EventType::Communication { message_type, .. } => message_type.clone(),
                     EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
+                    EventType::Learning { .. } => "LearningTelemetry".to_string(),
                 })
                 .collect();
             
@@ -564,6 +898,7 @@ impl GraphInference {
             EventType::Communication { .. } => 0.3,
             EventType::Cognitive { .. } => 0.1,
             EventType::Observation { .. } => 0.1,
+            EventType::Learning { .. } => 0.05,
         };
         
         // Factor in causality chain length
@@ -811,8 +1146,8 @@ impl GraphInference {
                     self.graph.get_event_node(*event1_id),
                     self.graph.get_event_node(*event2_id),
                 ) {
-                    // Weaken the edge between them (negative strength)
-                    if self.strengthen_edge(node1.id, node2.id, strength.abs() * -1.0).await? {
+                    // Weaken the edge between them
+                    if self.weaken_edge(node1.id, node2.id, strength.abs()).await? {
                         weakened_count += 1;
                     }
                 }
@@ -822,24 +1157,22 @@ impl GraphInference {
         Ok(weakened_count)
     }
 
-    /// Update edge weight between two nodes
+    /// Update edge weight between two nodes (strengthen)
     async fn strengthen_edge(
         &mut self,
         from_node: NodeId,
         to_node: NodeId,
         delta: f32,
     ) -> GraphResult<bool> {
-        // Find or create edge between nodes
-        let neighbors = self.graph.get_neighbors(from_node);
-
-        if neighbors.contains(&to_node) {
+        // Try to find existing edge
+        if let Some(edge) = self.graph.get_edge_between_mut(from_node, to_node) {
             // Edge exists - strengthen it
-            // In a full implementation, we'd iterate through edges and update weight
-            // For now, this is a simplified version
+            edge.strengthen(delta);
+            edge.record_success();
             Ok(true)
         } else {
             // Create new edge if it doesn't exist
-            let edge = GraphEdge::new(
+            let mut edge = GraphEdge::new(
                 from_node,
                 to_node,
                 EdgeType::Temporal {
@@ -848,6 +1181,37 @@ impl GraphInference {
                 },
                 delta.max(0.1), // Ensure positive initial weight
             );
+            edge.record_success();
+            self.graph.add_edge(edge);
+            Ok(true)
+        }
+    }
+    
+    /// Update edge weight between two nodes (weaken)
+    async fn weaken_edge(
+        &mut self,
+        from_node: NodeId,
+        to_node: NodeId,
+        delta: f32,
+    ) -> GraphResult<bool> {
+        // Try to find existing edge
+        if let Some(edge) = self.graph.get_edge_between_mut(from_node, to_node) {
+            // Edge exists - weaken it
+            edge.weaken(delta);
+            edge.record_failure();
+            Ok(true)
+        } else {
+            // Create new edge with low weight if it doesn't exist
+            let mut edge = GraphEdge::new(
+                from_node,
+                to_node,
+                EdgeType::Temporal {
+                    average_interval_ms: 1000,
+                    sequence_confidence: 0.1,
+                },
+                0.1, // Low initial weight for failures
+            );
+            edge.record_failure();
             self.graph.add_edge(edge);
             Ok(true)
         }
@@ -882,7 +1246,7 @@ impl GraphInference {
     /// Consolidate highly successful patterns into reusable skills
     async fn consolidate_patterns(
         &mut self,
-        episode: &crate::episodes::Episode,
+        _episode: &crate::episodes::Episode,
     ) -> GraphResult<usize> {
         let mut consolidated = 0;
 

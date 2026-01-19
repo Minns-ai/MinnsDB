@@ -91,6 +91,7 @@ struct IndexEntry {
     size: u32,
     
     /// Timestamp for ordering
+    #[allow(dead_code)]
     timestamp: Timestamp,
     
     /// Whether data is compressed
@@ -118,6 +119,7 @@ pub struct StorageEngine {
 /// Data segment for storing events
 struct DataSegment {
     id: u32,
+    #[allow(dead_code)]
     file: File,
     mmap: MmapMut,
     current_offset: u64,
@@ -128,6 +130,7 @@ struct DataSegment {
 enum FlushRequest {
     Event { event: Event, compressed_data: Vec<u8> },
     Sync,
+    #[allow(dead_code)]
     Shutdown,
 }
 

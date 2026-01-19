@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(cargo build:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(npm run studio:*)",
+      "Bash(curl:*)",
+      "Bash(start \"\" \"http://127.0.0.1:5555\")",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(xargs:*)",
+      "Bash(cargo check:*)"
     ]
   }
 }

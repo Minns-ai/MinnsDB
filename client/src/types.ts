@@ -3,12 +3,21 @@
 // ============================================================================
 
 export type AgentId = number;
-export type ContextHash = string;
-export type EventId = string;
+export type ContextHash = number; // u64 in Rust
+export type EventId = number; // u128 in Rust
+export type SessionId = number; // u64 in Rust
 
 // ============================================================================
 // Event Types
 // ============================================================================
+
+// Metadata value types
+export type MetadataValue =
+  | { String: string }
+  | { Integer: number }
+  | { Float: number }
+  | { Boolean: boolean }
+  | { Json: any };
 
 export interface Event {
   id: EventId;
@@ -19,13 +28,22 @@ export interface Event {
   event_type: EventType;
   causality_chain: EventId[];
   context: EventContext;
-  metadata: Record<string, any>;
+  metadata: Record<string, MetadataValue>;
 }
 
 export type EventType =
   | { Action: ActionEvent }
   | { Observation: ObservationEvent }
-  | { Cognitive: CognitiveEvent };
+  | { Cognitive: CognitiveEvent }
+  | { Communication: CommunicationEvent }
+  | { Learning: LearningEvent };
+
+export type LearningEvent =
+  | { MemoryRetrieved: { query_id: string; memory_ids: number[] } }
+  | { MemoryUsed: { query_id: string; memory_id: number } }
+  | { StrategyServed: { query_id: string; strategy_ids: number[] } }
+  | { StrategyUsed: { query_id: string; strategy_id: number } }
+  | { Outcome: { query_id: string; success: boolean } };
 
 export interface ActionEvent {
   action_name: string;
@@ -37,6 +55,7 @@ export interface ActionEvent {
 export interface ObservationEvent {
   observation_type: string;
   data: any;
+  confidence: number;
   source: string;
 }
 
@@ -47,23 +66,106 @@ export interface CognitiveEvent {
   reasoning_trace: string[];
 }
 
+export interface CommunicationEvent {
+  message_type: string;
+  sender: AgentId;
+  recipient: AgentId;
+  content: any;
+}
+
 export type ActionOutcome =
   | { Success: { result: any } }
-  | { Failure: { error: string } }
-  | { Partial: { progress: number } };
+  | { Failure: { error: string; error_code: number } }
+  | { Partial: { result: any; issues: string[] } };
 
 export type CognitiveType =
-  | "Reasoning"
+  | "GoalFormation"
   | "Planning"
-  | "Learning"
-  | "Reflection";
+  | "Reasoning"
+  | "MemoryRetrieval"
+  | "LearningUpdate";
 
+// Spatial context
+export interface BoundingBox {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+export interface SpatialContext {
+  location: [number, number, number]; // x, y, z coordinates
+  bounds: BoundingBox | null;
+  reference_frame: string;
+}
+
+// Temporal context
+export interface TimeOfDay {
+  hour: number;
+  minute: number;
+  timezone: string;
+}
+
+export interface Deadline {
+  goal_id: number;
+  timestamp: number;
+  priority: number;
+}
+
+export interface TemporalPattern {
+  pattern_name: string;
+  frequency: number; // Duration in nanoseconds
+  phase: number;
+}
+
+export interface TemporalContext {
+  time_of_day: TimeOfDay | null;
+  deadlines: Deadline[];
+  patterns: TemporalPattern[];
+}
+
+// Environment state
+export interface EnvironmentState {
+  variables: Record<string, any>;
+  spatial: SpatialContext | null;
+  temporal: TemporalContext;
+}
+
+// Goals
+export interface Goal {
+  id: number;
+  description: string;
+  priority: number;
+  deadline: number | null;
+  progress: number;
+  subgoals: number[];
+}
+
+// Resources
+export interface ComputationalResources {
+  cpu_percent: number;
+  memory_bytes: number;
+  storage_bytes: number;
+  network_bandwidth: number;
+}
+
+export interface ResourceAvailability {
+  available: boolean;
+  capacity: number;
+  current_usage: number;
+  estimated_cost: number | null;
+}
+
+export interface ResourceState {
+  computational: ComputationalResources;
+  external: Record<string, ResourceAvailability>;
+}
+
+// Event context
 export interface EventContext {
-  task_description: string;
-  code_snapshot: string;
-  error_messages: string[];
-  recent_actions: string[];
-  environment_state: Record<string, any>;
+  environment: EnvironmentState;
+  active_goals: Goal[];
+  resources: ResourceState;
+  fingerprint?: ContextHash; // Optional - auto-computed by server if not provided
+  embeddings: number[] | null;
 }
 
 // ============================================================================
@@ -94,11 +196,24 @@ export interface ActionSuggestionsQuery {
 export interface MemoryResponse {
   id: number;
   agent_id: AgentId;
+  session_id: SessionId;
   strength: number;
   relevance_score: number;
   access_count: number;
-  created_at: number;
+  formed_at: number;
   last_accessed: number;
+  context_hash: ContextHash;
+  context: EventContext;
+  outcome: string;
+  memory_type: string;
+}
+
+export interface ContextMemoriesRequest {
+  context: EventContext;
+  limit?: number;
+  min_similarity?: number;
+  agent_id?: AgentId;
+  session_id?: SessionId;
 }
 
 export interface StrategyResponse {
@@ -109,6 +224,47 @@ export interface StrategyResponse {
   success_count: number;
   failure_count: number;
   reasoning_steps: ReasoningStepResponse[];
+  strategy_type: string;
+  support_count: number;
+  expected_success: number;
+  expected_cost: number;
+  expected_value: number;
+  confidence: number;
+  goal_bucket_id: number;
+  behavior_signature: string;
+  precondition: string;
+  action_hint: string;
+}
+
+export interface SimilarStrategyResponse {
+  score: number;
+  id: number;
+  name: string;
+  agent_id: AgentId;
+  quality_score: number;
+  success_count: number;
+  failure_count: number;
+  reasoning_steps: ReasoningStepResponse[];
+  strategy_type: string;
+  support_count: number;
+  expected_success: number;
+  expected_cost: number;
+  expected_value: number;
+  confidence: number;
+  goal_bucket_id: number;
+  behavior_signature: string;
+  precondition: string;
+  action_hint: string;
+}
+
+export interface StrategySimilarityRequest {
+  goal_ids?: number[];
+  tool_names?: string[];
+  result_types?: string[];
+  context_hash?: ContextHash;
+  agent_id?: AgentId;
+  limit?: number;
+  min_score?: number;
 }
 
 export interface ReasoningStepResponse {

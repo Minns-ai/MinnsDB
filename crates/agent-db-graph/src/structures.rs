@@ -6,7 +6,6 @@
 use agent_db_core::types::{EventId, AgentId, Timestamp, ContextHash};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
 
 /// Unique identifier for graph nodes
 pub type NodeId = u64;
@@ -76,6 +75,41 @@ pub enum NodeType {
         description: String,
         priority: f32,
         status: GoalStatus,
+    },
+
+    /// Episode node representing a coherent experience sequence
+    Episode {
+        episode_id: u64,
+        agent_id: AgentId,
+        session_id: u64,
+        outcome: String,
+    },
+
+    /// Memory node representing a stored experience
+    Memory {
+        memory_id: u64,
+        agent_id: AgentId,
+        session_id: u64,
+    },
+
+    /// Strategy node representing a reusable plan
+    Strategy {
+        strategy_id: u64,
+        agent_id: AgentId,
+        name: String,
+    },
+
+    /// Tool node representing external tools or resources
+    Tool {
+        tool_name: String,
+        tool_type: String,
+    },
+
+    /// Result node representing outputs or artifacts
+    Result {
+        result_key: String,
+        result_type: String,
+        summary: String,
     },
 }
 
@@ -211,35 +245,53 @@ pub enum GoalRelationType {
 #[derive(Debug)]
 pub struct Graph {
     /// All nodes in the graph
-    nodes: HashMap<NodeId, GraphNode>,
-    
+    pub(crate) nodes: HashMap<NodeId, GraphNode>,
+
     /// All edges in the graph
-    edges: HashMap<EdgeId, GraphEdge>,
-    
+    pub(crate) edges: HashMap<EdgeId, GraphEdge>,
+
     /// Adjacency list for fast traversal (outgoing edges)
-    adjacency_out: HashMap<NodeId, Vec<EdgeId>>,
-    
+    pub(crate) adjacency_out: HashMap<NodeId, Vec<EdgeId>>,
+
     /// Reverse adjacency list (incoming edges)
-    adjacency_in: HashMap<NodeId, Vec<EdgeId>>,
-    
+    pub(crate) adjacency_in: HashMap<NodeId, Vec<EdgeId>>,
+
     /// Index by node type for fast filtering
-    type_index: HashMap<String, HashSet<NodeId>>,
-    
+    pub(crate) type_index: HashMap<String, HashSet<NodeId>>,
+
     /// Spatial index for context nodes
-    context_index: HashMap<ContextHash, NodeId>,
-    
+    pub(crate) context_index: HashMap<ContextHash, NodeId>,
+
     /// Agent index for quick agent lookup
-    agent_index: HashMap<AgentId, NodeId>,
-    
+    pub(crate) agent_index: HashMap<AgentId, NodeId>,
+
     /// Event index for event-node mapping
-    event_index: HashMap<EventId, NodeId>,
-    
+    pub(crate) event_index: HashMap<EventId, NodeId>,
+
+    /// Goal index for goal-node mapping
+    pub(crate) goal_index: HashMap<u64, NodeId>,
+
+    /// Episode index for episode-node mapping
+    pub(crate) episode_index: HashMap<u64, NodeId>,
+
+    /// Memory index for memory-node mapping
+    pub(crate) memory_index: HashMap<u64, NodeId>,
+
+    /// Strategy index for strategy-node mapping
+    pub(crate) strategy_index: HashMap<u64, NodeId>,
+
+    /// Tool index for tool-node mapping
+    pub(crate) tool_index: HashMap<String, NodeId>,
+
+    /// Result index for result-node mapping
+    pub(crate) result_index: HashMap<String, NodeId>,
+
     /// Next available IDs
-    next_node_id: NodeId,
-    next_edge_id: EdgeId,
-    
+    pub(crate) next_node_id: NodeId,
+    pub(crate) next_edge_id: EdgeId,
+
     /// Statistics
-    stats: GraphStats,
+    pub(crate) stats: GraphStats,
 }
 
 /// Graph statistics for monitoring and optimization
@@ -281,6 +333,11 @@ impl GraphNode {
             NodeType::Context { .. } => "Context".to_string(),
             NodeType::Concept { .. } => "Concept".to_string(),
             NodeType::Goal { .. } => "Goal".to_string(),
+            NodeType::Episode { .. } => "Episode".to_string(),
+            NodeType::Memory { .. } => "Memory".to_string(),
+            NodeType::Strategy { .. } => "Strategy".to_string(),
+            NodeType::Tool { .. } => "Tool".to_string(),
+            NodeType::Result { .. } => "Result".to_string(),
         }
     }
     
@@ -327,6 +384,99 @@ impl GraphEdge {
         self.touch();
     }
     
+    /// Weaken the edge based on negative outcomes
+    pub fn weaken(&mut self, weight_delta: EdgeWeight) {
+        self.observation_count += 1;
+        self.weight = (self.weight - weight_delta).min(1.0).max(0.0);
+        
+        // Decrease confidence on failures (but more slowly than increase)
+        let confidence_penalty = (self.observation_count as f32).ln() * 0.05;
+        self.confidence = (self.confidence - confidence_penalty).max(0.0);
+        
+        self.touch();
+    }
+    
+    /// Record a success outcome for this edge
+    pub fn record_success(&mut self) {
+        let success_count = self.properties
+            .get("success_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        
+        self.properties.insert(
+            "success_count".to_string(),
+            serde_json::Value::Number((success_count + 1).into())
+        );
+        
+        self.update_success_rate();
+        self.touch();
+    }
+    
+    /// Record a failure outcome for this edge
+    pub fn record_failure(&mut self) {
+        let failure_count = self.properties
+            .get("failure_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        
+        self.properties.insert(
+            "failure_count".to_string(),
+            serde_json::Value::Number((failure_count + 1).into())
+        );
+        
+        self.update_success_rate();
+        self.touch();
+    }
+    
+    /// Update success rate based on success/failure counts
+    fn update_success_rate(&mut self) {
+        let success_count = self.properties
+            .get("success_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as f32;
+        
+        let failure_count = self.properties
+            .get("failure_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as f32;
+        
+        let total = success_count + failure_count;
+        if total > 0.0 {
+            let success_rate = success_count / total;
+            self.properties.insert(
+                "success_rate".to_string(),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(success_rate as f64)
+                        .unwrap_or(serde_json::Number::from(0))
+                )
+            );
+        }
+    }
+    
+    /// Get success rate from properties (0.0 to 1.0)
+    pub fn get_success_rate(&self) -> Option<f32> {
+        self.properties
+            .get("success_rate")
+            .and_then(|v| v.as_f64())
+            .map(|r| r as f32)
+    }
+    
+    /// Get success count
+    pub fn get_success_count(&self) -> u32 {
+        self.properties
+            .get("success_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32
+    }
+    
+    /// Get failure count
+    pub fn get_failure_count(&self) -> u32 {
+        self.properties
+            .get("failure_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32
+    }
+    
     /// Update the edge's timestamp
     pub fn touch(&mut self) {
         self.updated_at = std::time::SystemTime::now()
@@ -348,6 +498,12 @@ impl Graph {
             context_index: HashMap::new(),
             agent_index: HashMap::new(),
             event_index: HashMap::new(),
+            goal_index: HashMap::new(),
+            episode_index: HashMap::new(),
+            memory_index: HashMap::new(),
+            strategy_index: HashMap::new(),
+            tool_index: HashMap::new(),
+            result_index: HashMap::new(),
             next_node_id: 1,
             next_edge_id: 1,
             stats: GraphStats::default(),
@@ -375,6 +531,24 @@ impl Graph {
             }
             NodeType::Context { context_hash, .. } => {
                 self.context_index.insert(*context_hash, node_id);
+            }
+            NodeType::Goal { goal_id, .. } => {
+                self.goal_index.insert(*goal_id, node_id);
+            }
+            NodeType::Episode { episode_id, .. } => {
+                self.episode_index.insert(*episode_id, node_id);
+            }
+            NodeType::Memory { memory_id, .. } => {
+                self.memory_index.insert(*memory_id, node_id);
+            }
+            NodeType::Strategy { strategy_id, .. } => {
+                self.strategy_index.insert(*strategy_id, node_id);
+            }
+            NodeType::Tool { tool_name, .. } => {
+                self.tool_index.insert(tool_name.clone(), node_id);
+            }
+            NodeType::Result { result_key, .. } => {
+                self.result_index.insert(result_key.clone(), node_id);
             }
             _ => {}
         }
@@ -541,9 +715,98 @@ impl Graph {
     pub fn get_context_node(&self, context_hash: ContextHash) -> Option<&GraphNode> {
         self.context_index.get(&context_hash).and_then(|&node_id| self.nodes.get(&node_id))
     }
+
+    /// Get node by goal ID
+    pub fn get_goal_node(&self, goal_id: u64) -> Option<&GraphNode> {
+        self.goal_index.get(&goal_id).and_then(|&node_id| self.nodes.get(&node_id))
+    }
+
+    /// Get node by episode ID
+    pub fn get_episode_node(&self, episode_id: u64) -> Option<&GraphNode> {
+        self.episode_index.get(&episode_id).and_then(|&node_id| self.nodes.get(&node_id))
+    }
+
+    /// Get node by memory ID
+    pub fn get_memory_node(&self, memory_id: u64) -> Option<&GraphNode> {
+        self.memory_index.get(&memory_id).and_then(|&node_id| self.nodes.get(&node_id))
+    }
+
+    /// Get node by strategy ID
+    pub fn get_strategy_node(&self, strategy_id: u64) -> Option<&GraphNode> {
+        self.strategy_index.get(&strategy_id).and_then(|&node_id| self.nodes.get(&node_id))
+    }
+
+    /// Get node by tool name
+    pub fn get_tool_node(&self, tool_name: &str) -> Option<&GraphNode> {
+        self.tool_index.get(tool_name).and_then(|&node_id| self.nodes.get(&node_id))
+    }
+
+    /// Get node by result key
+    pub fn get_result_node(&self, result_key: &str) -> Option<&GraphNode> {
+        self.result_index.get(result_key).and_then(|&node_id| self.nodes.get(&node_id))
+    }
     
     /// Get mutable reference to node by ID
     pub fn get_node_mut(&mut self, node_id: NodeId) -> Option<&mut GraphNode> {
         self.nodes.get_mut(&node_id)
+    }
+    
+    /// Get edge between two nodes (source -> target)
+    pub fn get_edge_between(&self, source: NodeId, target: NodeId) -> Option<&GraphEdge> {
+        // Use adjacency list to find the edge efficiently
+        if let Some(edge_ids) = self.adjacency_out.get(&source) {
+            for &edge_id in edge_ids {
+                if let Some(edge) = self.edges.get(&edge_id) {
+                    if edge.target == target {
+                        return Some(edge);
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    /// Get mutable reference to edge between two nodes
+    pub fn get_edge_between_mut(&mut self, source: NodeId, target: NodeId) -> Option<&mut GraphEdge> {
+        // Find the edge ID first
+        let edge_id_opt = self.adjacency_out
+            .get(&source)
+            .and_then(|edge_ids| {
+                edge_ids.iter().find_map(|&edge_id| {
+                    self.edges.get(&edge_id)
+                        .filter(|edge| edge.target == target)
+                        .map(|_| edge_id)
+                })
+            });
+        
+        if let Some(edge_id) = edge_id_opt {
+            self.edges.get_mut(&edge_id)
+        } else {
+            None
+        }
+    }
+    
+    /// Get all edges from a source node
+    pub fn get_edges_from(&self, source: NodeId) -> Vec<&GraphEdge> {
+        self.adjacency_out
+            .get(&source)
+            .map(|edge_ids| {
+                edge_ids.iter()
+                    .filter_map(|&edge_id| self.edges.get(&edge_id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get all edges to a target node
+    pub fn get_edges_to(&self, target: NodeId) -> Vec<&GraphEdge> {
+        self.adjacency_in
+            .get(&target)
+            .map(|edge_ids| {
+                edge_ids.iter()
+                    .filter_map(|&edge_id| self.edges.get(&edge_id))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }

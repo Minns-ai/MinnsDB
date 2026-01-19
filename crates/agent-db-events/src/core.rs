@@ -2,7 +2,7 @@
 
 use agent_db_core::types::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap};
 use std::time::Duration;
 
 /// Complete event structure with all metadata
@@ -70,6 +70,21 @@ pub enum EventType {
         recipient: AgentId,
         content: serde_json::Value,
     },
+
+    /// Learning telemetry events (retrieved/used/outcome)
+    Learning {
+        event: LearningEvent,
+    },
+}
+
+/// Explicit learning telemetry events (no inference)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LearningEvent {
+    MemoryRetrieved { query_id: String, memory_ids: Vec<u64> },
+    MemoryUsed { query_id: String, memory_id: u64 },
+    StrategyServed { query_id: String, strategy_ids: Vec<u64> },
+    StrategyUsed { query_id: String, strategy_id: u64 },
+    Outcome { query_id: String, success: bool },
 }
 
 /// Outcome of an action event
@@ -95,18 +110,25 @@ pub enum CognitiveType {
 pub struct EventContext {
     /// Environment state snapshot
     pub environment: EnvironmentState,
-    
+
     /// Active goals
     pub active_goals: Vec<Goal>,
-    
+
     /// Available resources
     pub resources: ResourceState,
-    
+
     /// Context fingerprint for fast matching
+    /// If not provided during deserialization, it will be auto-computed
+    #[serde(default = "default_fingerprint")]
     pub fingerprint: ContextHash,
-    
+
     /// Context embeddings for similarity
     pub embeddings: Option<Vec<f32>>,
+}
+
+/// Default fingerprint (will be recomputed after deserialization)
+fn default_fingerprint() -> ContextHash {
+    0
 }
 
 /// Environment state variables
@@ -323,6 +345,364 @@ impl EventContext {
             } else {
                 0.0
             }
+        }
+    }
+    
+    /// Calculate comprehensive similarity using multi-component matching
+    /// This is a general-purpose algorithm that works across domains
+    pub fn comprehensive_similarity(&self, other: &EventContext, weights: Option<&ContextSimilarityWeights>) -> f32 {
+        // Fast path: exact fingerprint match
+        if self.fingerprint == other.fingerprint {
+            return 1.0;
+        }
+        
+        // Fast path: embeddings available (most accurate)
+        if let (Some(emb1), Some(emb2)) = (&self.embeddings, &other.embeddings) {
+            let emb_sim = cosine_similarity(emb1, emb2);
+            // Use embeddings as primary, other components as refinement
+            let component_sim = self.compute_component_similarity(other, weights);
+            return (0.7 * emb_sim + 0.3 * component_sim).clamp(0.0, 1.0);
+        }
+        
+        // Compute component-wise similarity
+        self.compute_component_similarity(other, weights)
+    }
+    
+    /// Compute similarity across all context components
+    fn compute_component_similarity(&self, other: &EventContext, weights: Option<&ContextSimilarityWeights>) -> f32 {
+        let default_weights = ContextSimilarityWeights::default();
+        let weights = weights.unwrap_or(&default_weights);
+        
+        weights.environment * self.environment_similarity(&other.environment) +
+        weights.goals * self.goals_similarity(&other.active_goals) +
+        weights.resources * self.resources_similarity(&other.resources) +
+        weights.temporal * self.temporal_similarity(&other.environment.temporal) +
+        weights.spatial * self.spatial_similarity(&other.environment.spatial) +
+        weights.embeddings * self.embeddings_similarity(&other.embeddings)
+    }
+    
+    /// Environment variables similarity (Jaccard + value similarity)
+    fn environment_similarity(&self, other: &EnvironmentState) -> f32 {
+        let vars1 = &self.environment.variables;
+        let vars2 = &other.variables;
+        
+        if vars1.is_empty() && vars2.is_empty() {
+            return 1.0;
+        }
+        
+        let all_keys: std::collections::HashSet<_> = vars1.keys()
+            .chain(vars2.keys())
+            .collect();
+        
+        if all_keys.is_empty() {
+            return 1.0;
+        }
+        
+        let mut matching_score = 0.0;
+        let total_keys = all_keys.len() as f32;
+        
+        for key in all_keys {
+            match (vars1.get(key), vars2.get(key)) {
+                (Some(v1), Some(v2)) => {
+                    matching_score += self.value_similarity(v1, v2);
+                }
+                _ => {
+                    // Missing key = different
+                    matching_score += 0.0;
+                }
+            }
+        }
+        
+        (matching_score / total_keys).clamp(0.0, 1.0)
+    }
+    
+    /// Goals similarity (priority distribution + description similarity)
+    fn goals_similarity(&self, other_goals: &[Goal]) -> f32 {
+        let goals1 = &self.active_goals;
+        let goals2 = other_goals;
+        
+        if goals1.is_empty() && goals2.is_empty() {
+            return 1.0;
+        }
+        if goals1.is_empty() || goals2.is_empty() {
+            return 0.0;
+        }
+        
+        // Priority distribution similarity
+        let priority_sim = self.priority_distribution_similarity(goals1, goals2);
+        
+        // Description similarity (if available)
+        let desc_sim = self.goal_description_similarity(goals1, goals2);
+        
+        // Weighted combination
+        0.6 * priority_sim + 0.4 * desc_sim
+    }
+    
+    /// Compare priority distributions using histogram intersection
+    fn priority_distribution_similarity(&self, goals1: &[Goal], goals2: &[Goal]) -> f32 {
+        // Create priority buckets: [0.0-0.2), [0.2-0.4), [0.4-0.6), [0.6-0.8), [0.8-1.0]
+        let mut hist1 = [0; 5];
+        let mut hist2 = [0; 5];
+        
+        for goal in goals1 {
+            let bucket = ((goal.priority * 5.0) as usize).min(4);
+            hist1[bucket] += 1;
+        }
+        
+        for goal in goals2 {
+            let bucket = ((goal.priority * 5.0) as usize).min(4);
+            hist2[bucket] += 1;
+        }
+        
+        // Histogram intersection (normalized)
+        let intersection: usize = hist1.iter().zip(hist2.iter())
+            .map(|(a, b)| a.min(b))
+            .sum();
+        let union: usize = hist1.iter().zip(hist2.iter())
+            .map(|(a, b)| a.max(b))
+            .sum();
+        
+        if union == 0 {
+            1.0
+        } else {
+            intersection as f32 / union as f32
+        }
+    }
+    
+    /// Goal description similarity (simple word overlap)
+    fn goal_description_similarity(&self, goals1: &[Goal], goals2: &[Goal]) -> f32 {
+        if goals1.is_empty() || goals2.is_empty() {
+            return 0.0;
+        }
+        
+        // Simple word-based similarity
+        let words1: std::collections::HashSet<_> = goals1.iter()
+            .flat_map(|g| g.description.split_whitespace())
+            .map(|w| w.to_lowercase())
+            .collect();
+        
+        let words2: std::collections::HashSet<_> = goals2.iter()
+            .flat_map(|g| g.description.split_whitespace())
+            .map(|w| w.to_lowercase())
+            .collect();
+        
+        if words1.is_empty() && words2.is_empty() {
+            return 1.0;
+        }
+        
+        let intersection = words1.intersection(&words2).count();
+        let union = words1.union(&words2).count();
+        
+        if union == 0 {
+            1.0
+        } else {
+            intersection as f32 / union as f32
+        }
+    }
+    
+    /// Resources similarity (normalized distance metrics)
+    fn resources_similarity(&self, other: &ResourceState) -> f32 {
+        let comp1 = &self.resources.computational;
+        let comp2 = &other.computational;
+        
+        // CPU similarity (normalized distance)
+        let cpu_sim = 1.0 - ((comp1.cpu_percent - comp2.cpu_percent).abs() / 100.0).min(1.0);
+        
+        // Memory similarity (normalized, assuming max 1TB)
+        let max_memory = 1_000_000_000_000.0;
+        let memory_diff = (comp1.memory_bytes as f64 - comp2.memory_bytes as f64).abs();
+        let memory_sim = 1.0 - (memory_diff / max_memory).min(1.0) as f32;
+        
+        // External resources (Jaccard similarity of keys)
+        let ext1: std::collections::HashSet<_> = self.resources.external.keys().collect();
+        let ext2: std::collections::HashSet<_> = other.external.keys().collect();
+        let ext_sim = if ext1.is_empty() && ext2.is_empty() {
+            1.0
+        } else {
+            let intersection = ext1.intersection(&ext2).count();
+            let union = ext1.union(&ext2).count();
+            if union == 0 {
+                1.0
+            } else {
+                intersection as f32 / union as f32
+            }
+        };
+        
+        // Weighted average
+        0.4 * cpu_sim + 0.3 * memory_sim + 0.3 * ext_sim
+    }
+    
+    /// Temporal similarity
+    fn temporal_similarity(&self, other: &TemporalContext) -> f32 {
+        let temp1 = &self.environment.temporal;
+        
+        // Deadline urgency similarity
+        let deadline_sim = if temp1.deadlines.is_empty() && other.deadlines.is_empty() {
+            1.0
+        } else if temp1.deadlines.is_empty() || other.deadlines.is_empty() {
+            0.5
+        } else {
+            // Simple: compare count and urgency
+            let count_sim = 1.0 - ((temp1.deadlines.len() as f32 - other.deadlines.len() as f32).abs() / 10.0).min(1.0);
+            count_sim
+        };
+        
+        // Time-of-day similarity
+        let time_sim = match (&temp1.time_of_day, &other.time_of_day) {
+            (Some(t1), Some(t2)) => {
+                let hour_diff = ((t1.hour as i32 - t2.hour as i32).abs()).min(24 - (t1.hour as i32 - t2.hour as i32).abs());
+                1.0 - (hour_diff as f32 / 12.0).min(1.0) // 12 hours apart = 0 similarity
+            }
+            (None, None) => 1.0,
+            _ => 0.5, // One missing = neutral
+        };
+        
+        // Pattern similarity (simple count comparison)
+        let pattern_sim = if temp1.patterns.is_empty() && other.patterns.is_empty() {
+            1.0
+        } else {
+            let count_diff = (temp1.patterns.len() as f32 - other.patterns.len() as f32).abs();
+            1.0 - (count_diff / 10.0).min(1.0)
+        };
+        
+        // Weighted combination
+        0.4 * deadline_sim + 0.2 * time_sim + 0.4 * pattern_sim
+    }
+    
+    /// Spatial similarity
+    fn spatial_similarity(&self, other: &Option<SpatialContext>) -> f32 {
+        match (&self.environment.spatial, other) {
+            (None, None) => 1.0, // Both missing = same
+            (Some(_), None) | (None, Some(_)) => 0.0, // One missing = different
+            (Some(s1), Some(s2)) => {
+                // Euclidean distance normalized
+                let dist = ((s1.location.0 - s2.location.0).powi(2) +
+                           (s1.location.1 - s2.location.1).powi(2) +
+                           (s1.location.2 - s2.location.2).powi(2)).sqrt();
+                
+                // Estimate max distance from bounds if available
+                let max_dist = 1000.0; // Default max distance
+                (1.0 - (dist / max_dist).min(1.0)) as f32
+            }
+        }
+    }
+    
+    /// Embeddings similarity
+    fn embeddings_similarity(&self, other: &Option<Vec<f32>>) -> f32 {
+        match (&self.embeddings, other) {
+            (Some(e1), Some(e2)) => cosine_similarity(e1, e2),
+            _ => 0.0, // Can't compute without embeddings
+        }
+    }
+    
+    /// Value similarity for JSON values (domain-agnostic)
+    fn value_similarity(&self, v1: &serde_json::Value, v2: &serde_json::Value) -> f32 {
+        match (v1, v2) {
+            // Numbers: normalized distance
+            (serde_json::Value::Number(n1), serde_json::Value::Number(n2)) => {
+                if let (Some(f1), Some(f2)) = (n1.as_f64(), n2.as_f64()) {
+                    let diff = (f1 - f2).abs();
+                    let max_val = f1.abs().max(f2.abs()).max(1.0);
+                    (1.0 - (diff / max_val).min(1.0)) as f32
+                } else {
+                    0.0
+                }
+            }
+            // Strings: Jaro-Winkler similarity (simplified to exact match for now)
+            (serde_json::Value::String(s1), serde_json::Value::String(s2)) => {
+                if s1 == s2 {
+                    1.0
+                } else {
+                    // Simple word overlap
+                    let words1: std::collections::HashSet<_> = s1.split_whitespace().collect();
+                    let words2: std::collections::HashSet<_> = s2.split_whitespace().collect();
+                    let intersection = words1.intersection(&words2).count();
+                    let union = words1.union(&words2).count();
+                    if union == 0 {
+                        1.0
+                    } else {
+                        intersection as f32 / union as f32
+                    }
+                }
+            }
+            // Booleans: exact match
+            (serde_json::Value::Bool(b1), serde_json::Value::Bool(b2)) => {
+                if b1 == b2 { 1.0 } else { 0.0 }
+            }
+            // Arrays: Jaccard similarity
+            (serde_json::Value::Array(a1), serde_json::Value::Array(a2)) => {
+                if a1.is_empty() && a2.is_empty() {
+                    1.0
+                } else {
+                    // Simple: compare lengths and some elements
+                    let len_sim = 1.0 - ((a1.len() as f32 - a2.len() as f32).abs() / (a1.len().max(a2.len()) as f32).max(1.0));
+                    len_sim * 0.5 // Simplified
+                }
+            }
+            // Objects: recursive similarity
+            (serde_json::Value::Object(o1), serde_json::Value::Object(o2)) => {
+                if o1.is_empty() && o2.is_empty() {
+                    1.0
+                } else {
+                    // Key overlap
+                    let keys1: std::collections::HashSet<_> = o1.keys().collect();
+                    let keys2: std::collections::HashSet<_> = o2.keys().collect();
+                    let key_sim = if keys1.is_empty() && keys2.is_empty() {
+                        1.0
+                    } else {
+                        let intersection = keys1.intersection(&keys2).count();
+                        let union = keys1.union(&keys2).count();
+                        if union == 0 {
+                            1.0
+                        } else {
+                            intersection as f32 / union as f32
+                        }
+                    };
+                    key_sim * 0.7 // Simplified
+                }
+            }
+            // Different types = not similar
+            _ => 0.0,
+        }
+    }
+}
+
+/// Weights for context similarity components
+#[derive(Debug, Clone)]
+pub struct ContextSimilarityWeights {
+    pub environment: f32,
+    pub goals: f32,
+    pub resources: f32,
+    pub temporal: f32,
+    pub spatial: f32,
+    pub embeddings: f32,
+}
+
+impl Default for ContextSimilarityWeights {
+    fn default() -> Self {
+        Self {
+            environment: 0.25,
+            goals: 0.30,
+            resources: 0.15,
+            temporal: 0.10,
+            spatial: 0.05,
+            embeddings: 0.15,
+        }
+    }
+}
+
+impl ContextSimilarityWeights {
+    /// Normalize weights to sum to 1.0
+    pub fn normalize(&mut self) {
+        let sum = self.environment + self.goals + self.resources + 
+                  self.temporal + self.spatial + self.embeddings;
+        if sum > 0.0 {
+            self.environment /= sum;
+            self.goals /= sum;
+            self.resources /= sum;
+            self.temporal /= sum;
+            self.spatial /= sum;
+            self.embeddings /= sum;
         }
     }
 }
