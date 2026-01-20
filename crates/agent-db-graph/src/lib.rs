@@ -50,11 +50,19 @@ pub mod strategies;
 pub mod contracts;
 pub mod stores;
 pub mod transitions;
+pub mod catalog;
+pub mod learning;
+pub mod decision_trace;
 
 // New advanced graph features (2026-01-15)
 pub mod indexing;
 pub mod algorithms;
 pub mod analytics;
+
+// Phase 5B: Graph Persistence (2026-01-20)
+pub mod compression;
+pub mod graph_store;
+pub mod redb_graph_store;
 
 // Re-export commonly used items
 pub use error::{GraphError, GraphResult};
@@ -84,6 +92,19 @@ pub use strategies::{
     Strategy, StrategyId, ReasoningStep, ContextPattern,
     StrategyExtractor, StrategyExtractionConfig, StrategyStats,
 };
+pub use stores::{
+    MemoryStore, StrategyStore, InMemoryMemoryStore, InMemoryStrategyStore,
+    RedbMemoryStore, RedbStrategyStore,
+};
+pub use catalog::{
+    EpisodeCatalog, EpisodeRecord, RedbEpisodeCatalog,
+};
+pub use learning::{
+    LearningStatsStore, TransitionStats, MotifStats, RedbLearningStatsStore,
+};
+pub use decision_trace::{
+    DecisionTraceStore, DecisionTrace, OutcomeSignal, RedbDecisionTraceStore,
+};
 
 // New advanced graph features
 pub use indexing::{
@@ -97,3 +118,16 @@ pub use algorithms::{
 pub use analytics::{
     GraphAnalytics, GraphMetrics, LearningMetrics,
 };
+
+// Phase 5B: Graph Persistence
+pub use compression::{
+    CompressedAdjacencyList, CompressionStats,
+};
+pub use graph_store::{
+    GraphStore, GraphStoreError,
+    GraphNode as PersistentGraphNode, GraphEdge as PersistentGraphEdge,
+    GraphNodeType as PersistentGraphNodeType, GraphEdgeType as PersistentGraphEdgeType,
+    GraphPath, Subgraph, BucketInfo,
+    InMemoryGraphStore,
+};
+pub use redb_graph_store::RedbGraphStore;

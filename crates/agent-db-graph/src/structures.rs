@@ -10,11 +10,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Unique identifier for graph nodes
 pub type NodeId = u64;
 
-/// Unique identifier for graph edges  
+/// Unique identifier for graph edges
 pub type EdgeId = u64;
 
 /// Weight type for edges (can represent similarity, causality strength, etc.)
 pub type EdgeWeight = f32;
+
+/// Unique identifier for goal buckets (semantic partitions)
+pub type GoalBucketId = u64;
 
 /// Core graph node representing entities in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
