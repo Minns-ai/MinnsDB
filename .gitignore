@@ -1,7 +1,7 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock should be committed for applications (uncommented)
 
 # IDE
 .vscode/
