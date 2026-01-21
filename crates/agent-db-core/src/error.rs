@@ -105,13 +105,7 @@ impl DatabaseError {
 
     /// Check if error is recoverable
     pub fn is_recoverable(&self) -> bool {
-        match self {
-            DatabaseError::Timeout(_) => true,
-            DatabaseError::ResourceExhausted(_) => true,
-            DatabaseError::NetworkError(_) => true,
-            DatabaseError::ConcurrentModification => true,
-            _ => false,
-        }
+        matches!(self, DatabaseError::Timeout(_) | DatabaseError::ResourceExhausted(_) | DatabaseError::NetworkError(_) | DatabaseError::ConcurrentModification)
     }
 
     /// Check if error indicates data corruption

@@ -86,6 +86,12 @@ pub struct ExponentialBackoff {
     max_attempts: usize,
 }
 
+impl Default for ExponentialBackoff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExponentialBackoff {
     pub fn new() -> Self {
         Self {

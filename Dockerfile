@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY server ./server
+COPY examples ./examples
 
 # Build release binary with optimizations
 RUN cargo build --release --package eventgraphdb-server
