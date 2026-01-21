@@ -294,13 +294,13 @@ impl ContextualEventValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EventType, ActionOutcome, CognitiveType};
+    use crate::core::{EventType, ActionOutcome};
     use serde_json::json;
-    use agent_db_core::types::{current_timestamp, generate_event_id};
     
     fn create_valid_event() -> Event {
         Event::new(
             123, // agent_id
+            "test_agent".to_string(), // agent_type
             456, // session_id
             EventType::Action {
                 action_name: "test_action".to_string(),

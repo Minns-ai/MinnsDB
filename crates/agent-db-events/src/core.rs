@@ -734,12 +734,13 @@ mod tests {
         let context = create_test_context();
         let event = Event::new(
             123, // agent_id
+            "test_agent".to_string(), // agent_type
             456, // session_id
             EventType::Action {
                 action_name: "test_action".to_string(),
                 parameters: json!({"x": 10, "y": 20}),
-                outcome: ActionOutcome::Success { 
-                    result: json!({"success": true}) 
+                outcome: ActionOutcome::Success {
+                    result: json!({"success": true})
                 },
                 duration_ns: 1_000_000,
             },
@@ -759,6 +760,7 @@ mod tests {
         
         let event = Event::new(
             123,
+            "test_agent".to_string(), // agent_type
             456,
             EventType::Cognitive {
                 process_type: CognitiveType::Reasoning,
@@ -778,6 +780,7 @@ mod tests {
         let context = create_test_context();
         let event = Event::new(
             123,
+            "test_agent".to_string(), // agent_type
             456,
             EventType::Observation {
                 observation_type: "sensor_reading".to_string(),

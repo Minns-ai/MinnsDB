@@ -29,12 +29,13 @@ fn create_test_event(agent_id: AgentId, session_id: SessionId) -> Event {
 
     Event::new(
         agent_id,
+        "benchmark_agent".to_string(), // agent_type
         session_id,
         EventType::Action {
             action_name: "test_action".to_string(),
             parameters: json!({"x": 10, "y": 20}),
-            outcome: ActionOutcome::Success { 
-                result: json!({"success": true}) 
+            outcome: ActionOutcome::Success {
+                result: json!({"success": true})
             },
             duration_ns: 1_000_000,
         },

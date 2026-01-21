@@ -403,9 +403,7 @@ impl RingEventBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{EventType, ActionOutcome};
     use serde_json::json;
-    use agent_db_core::types::current_timestamp;
     
     fn create_test_event(agent_id: u64) -> Event {
         use crate::core::*;
@@ -413,6 +411,7 @@ mod tests {
         
         Event::new(
             agent_id,
+            "test_agent".to_string(), // agent_type
             1, // session_id
             EventType::Action {
                 action_name: "test".to_string(),

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 fn create_test_event(sequence: u64) -> Event {
     Event::new(
         42,
+        "benchmark_agent".to_string(), // agent_type
         100,
         EventType::Action {
             action_name: "benchmark_action".to_string(),

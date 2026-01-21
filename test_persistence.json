@@ -1,0 +1,24 @@
+{
+  "event": {
+    "id": 1,
+    "agent_id": 123,
+    "session_id": "session-001",
+    "timestamp": 1000,
+    "context": {
+      "fingerprint": 0,
+      "goals": [{"id": 1, "description": "Test goal"}],
+      "active_tools": ["tool1", "tool2"],
+      "recent_results": ["success"],
+      "turn_count": 1,
+      "session_phase": "execution"
+    },
+    "event_type": {
+      "Action": {
+        "action_name": "test_action",
+        "parameters": {},
+        "reasoning": "Testing persistence"
+      }
+    },
+    "significance": 0.8
+  }
+}
