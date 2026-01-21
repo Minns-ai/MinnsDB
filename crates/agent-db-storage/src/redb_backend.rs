@@ -30,36 +30,49 @@ mod table_defs {
     use super::*;
 
     // Catalogs
-    pub const EPISODE_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("episode_catalog");
+    pub const EPISODE_CATALOG: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("episode_catalog");
     pub const PARTITION_MAP: TableDefinition<&[u8], &[u8]> = TableDefinition::new("partition_map");
 
     // Memory store
-    pub const MEMORY_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("memory_records");
+    pub const MEMORY_RECORDS: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("memory_records");
     pub const MEM_BY_BUCKET: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mem_by_bucket");
-    pub const MEM_BY_CONTEXT_HASH: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mem_by_context_hash");
-    pub const MEM_FEATURE_POSTINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mem_feature_postings");
+    pub const MEM_BY_CONTEXT_HASH: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("mem_by_context_hash");
+    pub const MEM_FEATURE_POSTINGS: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("mem_feature_postings");
 
     // Strategy store
-    pub const STRATEGY_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("strategy_records");
-    pub const STRATEGY_BY_BUCKET: TableDefinition<&[u8], &[u8]> = TableDefinition::new("strategy_by_bucket");
-    pub const STRATEGY_BY_SIGNATURE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("strategy_by_signature");
-    pub const STRATEGY_FEATURE_POSTINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("strategy_feature_postings");
+    pub const STRATEGY_RECORDS: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("strategy_records");
+    pub const STRATEGY_BY_BUCKET: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("strategy_by_bucket");
+    pub const STRATEGY_BY_SIGNATURE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("strategy_by_signature");
+    pub const STRATEGY_FEATURE_POSTINGS: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("strategy_feature_postings");
 
     // Learning stats
-    pub const TRANSITION_STATS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("transition_stats");
+    pub const TRANSITION_STATS: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("transition_stats");
     pub const MOTIF_STATS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("motif_stats");
 
     // Telemetry
-    pub const DECISION_TRACE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("decision_trace");
-    pub const OUTCOME_SIGNALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("outcome_signals");
+    pub const DECISION_TRACE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("decision_trace");
+    pub const OUTCOME_SIGNALS: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("outcome_signals");
 
     // Operational
     pub const ID_ALLOCATOR: TableDefinition<&[u8], &[u8]> = TableDefinition::new("id_allocator");
-    pub const SCHEMA_VERSIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("schema_versions");
+    pub const SCHEMA_VERSIONS: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("schema_versions");
 
     // Graph persistence (Phase 5B)
     pub const GRAPH_NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("graph_nodes");
-    pub const GRAPH_ADJACENCY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("graph_adjacency");
+    pub const GRAPH_ADJACENCY: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("graph_adjacency");
     pub const GRAPH_EDGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("graph_edges");
 }
 
@@ -120,8 +133,7 @@ impl RedbBackend {
     pub fn open(config: RedbConfig) -> StorageResult<Self> {
         // Create parent directory
         if let Some(parent) = config.data_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| StorageError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(|e| StorageError::Io(e))?;
         }
 
         // Open database
@@ -139,64 +151,85 @@ impl RedbBackend {
         };
 
         // Create all tables (idempotent)
-        let write_txn = db.begin_write()
+        let write_txn = db
+            .begin_write()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         {
             // Catalogs
-            let _ = write_txn.open_table(table_defs::EPISODE_CATALOG)
+            let _ = write_txn
+                .open_table(table_defs::EPISODE_CATALOG)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::PARTITION_MAP)
+            let _ = write_txn
+                .open_table(table_defs::PARTITION_MAP)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
             // Memory store
-            let _ = write_txn.open_table(table_defs::MEMORY_RECORDS)
+            let _ = write_txn
+                .open_table(table_defs::MEMORY_RECORDS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::MEM_BY_BUCKET)
+            let _ = write_txn
+                .open_table(table_defs::MEM_BY_BUCKET)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::MEM_BY_CONTEXT_HASH)
+            let _ = write_txn
+                .open_table(table_defs::MEM_BY_CONTEXT_HASH)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::MEM_FEATURE_POSTINGS)
+            let _ = write_txn
+                .open_table(table_defs::MEM_FEATURE_POSTINGS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
             // Strategy store
-            let _ = write_txn.open_table(table_defs::STRATEGY_RECORDS)
+            let _ = write_txn
+                .open_table(table_defs::STRATEGY_RECORDS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::STRATEGY_BY_BUCKET)
+            let _ = write_txn
+                .open_table(table_defs::STRATEGY_BY_BUCKET)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::STRATEGY_BY_SIGNATURE)
+            let _ = write_txn
+                .open_table(table_defs::STRATEGY_BY_SIGNATURE)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::STRATEGY_FEATURE_POSTINGS)
+            let _ = write_txn
+                .open_table(table_defs::STRATEGY_FEATURE_POSTINGS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
             // Learning stats
-            let _ = write_txn.open_table(table_defs::TRANSITION_STATS)
+            let _ = write_txn
+                .open_table(table_defs::TRANSITION_STATS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::MOTIF_STATS)
+            let _ = write_txn
+                .open_table(table_defs::MOTIF_STATS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
             // Telemetry
-            let _ = write_txn.open_table(table_defs::DECISION_TRACE)
+            let _ = write_txn
+                .open_table(table_defs::DECISION_TRACE)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::OUTCOME_SIGNALS)
+            let _ = write_txn
+                .open_table(table_defs::OUTCOME_SIGNALS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
             // Operational
-            let _ = write_txn.open_table(table_defs::ID_ALLOCATOR)
+            let _ = write_txn
+                .open_table(table_defs::ID_ALLOCATOR)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::SCHEMA_VERSIONS)
+            let _ = write_txn
+                .open_table(table_defs::SCHEMA_VERSIONS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
             // Graph persistence (Phase 5B)
-            let _ = write_txn.open_table(table_defs::GRAPH_NODES)
+            let _ = write_txn
+                .open_table(table_defs::GRAPH_NODES)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::GRAPH_ADJACENCY)
+            let _ = write_txn
+                .open_table(table_defs::GRAPH_ADJACENCY)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-            let _ = write_txn.open_table(table_defs::GRAPH_EDGES)
+            let _ = write_txn
+                .open_table(table_defs::GRAPH_EDGES)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
 
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
@@ -212,7 +245,9 @@ impl RedbBackend {
     }
 
     /// Helper: get table definition constant by name
-    fn get_table_def(table_name: &str) -> StorageResult<TableDefinition<'static, &'static [u8], &'static [u8]>> {
+    fn get_table_def(
+        table_name: &str,
+    ) -> StorageResult<TableDefinition<'static, &'static [u8], &'static [u8]>> {
         Ok(match table_name {
             table_names::EPISODE_CATALOG => table_defs::EPISODE_CATALOG,
             table_names::PARTITION_MAP => table_defs::PARTITION_MAP,
@@ -233,7 +268,12 @@ impl RedbBackend {
             table_names::GRAPH_NODES => table_defs::GRAPH_NODES,
             table_names::GRAPH_ADJACENCY => table_defs::GRAPH_ADJACENCY,
             table_names::GRAPH_EDGES => table_defs::GRAPH_EDGES,
-            _ => return Err(StorageError::DatabaseError(format!("Unknown table: {}", table_name))),
+            _ => {
+                return Err(StorageError::DatabaseError(format!(
+                    "Unknown table: {}",
+                    table_name
+                )))
+            },
         })
     }
 
@@ -244,21 +284,25 @@ impl RedbBackend {
         V: Serialize,
     {
         let table_def = Self::get_table_def(table_name)?;
-        let value_bytes = bincode::serialize(value)
-            .map_err(|e| StorageError::Serialization(e))?;
+        let value_bytes = bincode::serialize(value).map_err(|e| StorageError::Serialization(e))?;
 
-        let write_txn = self.db.begin_write()
+        let write_txn = self
+            .db
+            .begin_write()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         {
-            let mut table = write_txn.open_table(table_def)
+            let mut table = write_txn
+                .open_table(table_def)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-            table.insert(key.as_ref(), value_bytes.as_slice())
+            table
+                .insert(key.as_ref(), value_bytes.as_slice())
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
 
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         Ok(())
@@ -271,18 +315,23 @@ impl RedbBackend {
     {
         let table_def = Self::get_table_def(table_name)?;
 
-        let write_txn = self.db.begin_write()
+        let write_txn = self
+            .db
+            .begin_write()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         {
-            let mut table = write_txn.open_table(table_def)
+            let mut table = write_txn
+                .open_table(table_def)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-            table.insert(key.as_ref(), value)
+            table
+                .insert(key.as_ref(), value)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
 
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         Ok(())
@@ -296,20 +345,25 @@ impl RedbBackend {
     {
         let table_def = Self::get_table_def(table_name)?;
 
-        let read_txn = self.db.begin_read()
+        let read_txn = self
+            .db
+            .begin_read()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-        let table = read_txn.open_table(table_def)
+        let table = read_txn
+            .open_table(table_def)
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-        match table.get(key.as_ref())
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))? {
+        match table
+            .get(key.as_ref())
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?
+        {
             Some(access_guard) => {
                 let bytes = access_guard.value();
-                let value = bincode::deserialize(bytes)
-                    .map_err(|e| StorageError::Deserialization(e))?;
+                let value =
+                    bincode::deserialize(bytes).map_err(|e| StorageError::Deserialization(e))?;
                 Ok(Some(value))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -321,17 +375,20 @@ impl RedbBackend {
     {
         let table_def = Self::get_table_def(table_name)?;
 
-        let read_txn = self.db.begin_read()
+        let read_txn = self
+            .db
+            .begin_read()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-        let table = read_txn.open_table(table_def)
+        let table = read_txn
+            .open_table(table_def)
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-        match table.get(key.as_ref())
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))? {
-            Some(access_guard) => {
-                Ok(Some(access_guard.value().to_vec()))
-            }
+        match table
+            .get(key.as_ref())
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?
+        {
+            Some(access_guard) => Ok(Some(access_guard.value().to_vec())),
             None => Ok(None),
         }
     }
@@ -343,29 +400,30 @@ impl RedbBackend {
     {
         let table_def = Self::get_table_def(table_name)?;
 
-        let write_txn = self.db.begin_write()
+        let write_txn = self
+            .db
+            .begin_write()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         {
-            let mut table = write_txn.open_table(table_def)
+            let mut table = write_txn
+                .open_table(table_def)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-            table.remove(key.as_ref())
+            table
+                .remove(key.as_ref())
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
 
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         Ok(())
     }
 
     /// Scan with prefix (returns all key-value pairs with matching prefix)
-    pub fn scan_prefix<K, V>(
-        &self,
-        table_name: &str,
-        prefix: K,
-    ) -> StorageResult<Vec<(Vec<u8>, V)>>
+    pub fn scan_prefix<K, V>(&self, table_name: &str, prefix: K) -> StorageResult<Vec<(Vec<u8>, V)>>
     where
         K: AsRef<[u8]>,
         V: for<'de> Deserialize<'de>,
@@ -373,16 +431,20 @@ impl RedbBackend {
         let table_def = Self::get_table_def(table_name)?;
         let prefix_bytes = prefix.as_ref();
 
-        let read_txn = self.db.begin_read()
+        let read_txn = self
+            .db
+            .begin_read()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-        let table = read_txn.open_table(table_def)
+        let table = read_txn
+            .open_table(table_def)
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         let mut results = Vec::new();
 
         // Range scan from prefix to prefix+1
-        let iter = table.range(prefix_bytes..)
+        let iter = table
+            .range(prefix_bytes..)
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         for item in iter {
@@ -414,16 +476,20 @@ impl RedbBackend {
         let table_def = Self::get_table_def(table_name)?;
         let prefix_bytes = prefix.as_ref();
 
-        let read_txn = self.db.begin_read()
+        let read_txn = self
+            .db
+            .begin_read()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-        let table = read_txn.open_table(table_def)
+        let table = read_txn
+            .open_table(table_def)
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         let mut results = Vec::new();
 
         // Range scan from prefix to prefix+1
-        let iter = table.range(prefix_bytes..)
+        let iter = table
+            .range(prefix_bytes..)
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         for item in iter {
@@ -442,31 +508,45 @@ impl RedbBackend {
 
     /// Batch write operation (atomic)
     pub fn write_batch(&self, operations: Vec<BatchOperation>) -> StorageResult<()> {
-        let write_txn = self.db.begin_write()
+        let write_txn = self
+            .db
+            .begin_write()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         for op in operations {
             match op {
-                BatchOperation::Put { ref table_name, ref key, ref value } => {
+                BatchOperation::Put {
+                    ref table_name,
+                    ref key,
+                    ref value,
+                } => {
                     let table_def = Self::get_table_def(table_name)?;
-                    let mut table = write_txn.open_table(table_def)
+                    let mut table = write_txn
+                        .open_table(table_def)
                         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-                    table.insert(key.as_slice(), value.as_slice())
+                    table
+                        .insert(key.as_slice(), value.as_slice())
                         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-                }
-                BatchOperation::Delete { ref table_name, ref key } => {
+                },
+                BatchOperation::Delete {
+                    ref table_name,
+                    ref key,
+                } => {
                     let table_def = Self::get_table_def(table_name)?;
-                    let mut table = write_txn.open_table(table_def)
+                    let mut table = write_txn
+                        .open_table(table_def)
                         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-                    table.remove(key.as_slice())
+                    table
+                        .remove(key.as_slice())
                         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-                }
+                },
             }
         }
 
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         Ok(())
@@ -474,8 +554,8 @@ impl RedbBackend {
 
     /// Get approximate disk usage (bytes)
     pub fn disk_usage(&self) -> StorageResult<u64> {
-        let metadata = std::fs::metadata(&self.config.data_path)
-            .map_err(|e| StorageError::Io(e))?;
+        let metadata =
+            std::fs::metadata(&self.config.data_path).map_err(|e| StorageError::Io(e))?;
         Ok(metadata.len())
     }
 }
@@ -536,14 +616,20 @@ mod tests {
         };
 
         // Put
-        backend.put(table_names::MEMORY_RECORDS, b"test_key", &data).unwrap();
+        backend
+            .put(table_names::MEMORY_RECORDS, b"test_key", &data)
+            .unwrap();
 
         // Get
-        let retrieved: Option<TestData> = backend.get(table_names::MEMORY_RECORDS, b"test_key").unwrap();
+        let retrieved: Option<TestData> = backend
+            .get(table_names::MEMORY_RECORDS, b"test_key")
+            .unwrap();
         assert_eq!(retrieved, Some(data));
 
         // Get non-existent
-        let none: Option<TestData> = backend.get(table_names::MEMORY_RECORDS, b"missing").unwrap();
+        let none: Option<TestData> = backend
+            .get(table_names::MEMORY_RECORDS, b"missing")
+            .unwrap();
         assert_eq!(none, None);
     }
 
@@ -558,9 +644,15 @@ mod tests {
         let backend = RedbBackend::open(config).unwrap();
 
         // Insert multiple keys with same prefix
-        backend.put(table_names::MEMORY_RECORDS, b"agent_1_mem_1", &100u64).unwrap();
-        backend.put(table_names::MEMORY_RECORDS, b"agent_1_mem_2", &200u64).unwrap();
-        backend.put(table_names::MEMORY_RECORDS, b"agent_2_mem_1", &300u64).unwrap();
+        backend
+            .put(table_names::MEMORY_RECORDS, b"agent_1_mem_1", &100u64)
+            .unwrap();
+        backend
+            .put(table_names::MEMORY_RECORDS, b"agent_1_mem_2", &200u64)
+            .unwrap();
+        backend
+            .put(table_names::MEMORY_RECORDS, b"agent_2_mem_1", &300u64)
+            .unwrap();
 
         // Scan with prefix
         let results: Vec<(Vec<u8>, u64)> = backend
@@ -614,8 +706,12 @@ mod tests {
 
         let backend = RedbBackend::open(config).unwrap();
 
-        backend.put(table_names::MEMORY_RECORDS, b"key1", &100u64).unwrap();
-        backend.delete(table_names::MEMORY_RECORDS, b"key1").unwrap();
+        backend
+            .put(table_names::MEMORY_RECORDS, b"key1", &100u64)
+            .unwrap();
+        backend
+            .delete(table_names::MEMORY_RECORDS, b"key1")
+            .unwrap();
 
         let val: Option<u64> = backend.get(table_names::MEMORY_RECORDS, b"key1").unwrap();
         assert_eq!(val, None);

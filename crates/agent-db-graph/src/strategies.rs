@@ -5,10 +5,10 @@
 // Extracts generalizable strategies from successful episodes and reasoning traces,
 // enabling agents to reuse proven approaches in similar contexts.
 
+use crate::episodes::{Episode, EpisodeId, EpisodeOutcome};
 use crate::GraphResult;
-use crate::episodes::{Episode, EpisodeOutcome, EpisodeId};
-use agent_db_core::types::{AgentId, Timestamp, ContextHash, current_timestamp};
-use agent_db_events::core::{Event, EventType, CognitiveType, MetadataValue};
+use agent_db_core::types::{current_timestamp, AgentId, ContextHash, Timestamp};
+use agent_db_events::core::{CognitiveType, Event, EventType, MetadataValue};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -130,7 +130,6 @@ pub struct Strategy {
     pub metadata: HashMap<String, String>,
 
     // ========== Phase 1 Upgrades (Features J & K) ==========
-
     /// Self-judged quality score from the agent (0.0 to 1.0)
     /// None if agent hasn't provided self-assessment
     pub self_judged_quality: Option<f32>,
@@ -337,7 +336,10 @@ impl StrategyExtractor {
         events: &[Event],
     ) -> GraphResult<Option<StrategyUpsert>> {
         if let Some(existing_id) = self.episode_index.get(&episode.id).copied() {
-            let new_outcome = episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted);
+            let new_outcome = episode
+                .outcome
+                .clone()
+                .unwrap_or(EpisodeOutcome::Interrupted);
             self.apply_episode_outcome_correction(episode.id, existing_id, &new_outcome);
             return Ok(Some(StrategyUpsert {
                 id: existing_id,
@@ -345,7 +347,10 @@ impl StrategyExtractor {
             }));
         }
 
-        let outcome = episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted);
+        let outcome = episode
+            .outcome
+            .clone()
+            .unwrap_or(EpisodeOutcome::Interrupted);
         let strategy_type = match outcome {
             EpisodeOutcome::Success => StrategyType::Positive,
             EpisodeOutcome::Failure => StrategyType::Constraint,
@@ -355,7 +360,8 @@ impl StrategyExtractor {
 
         let goal_bucket_id = self.derive_goal_bucket_id(episode);
         let behavior_signature = self.compute_behavior_signature(events);
-        let eligibility_score = self.calculate_eligibility_score(episode, &behavior_signature, goal_bucket_id, events);
+        let eligibility_score =
+            self.calculate_eligibility_score(episode, &behavior_signature, goal_bucket_id, events);
         if eligibility_score < self.config.eligibility_threshold {
             tracing::info!(
                 "Strategy extraction rejected episode_id={} eligibility={:.3} min={:.3}",
@@ -392,13 +398,19 @@ impl StrategyExtractor {
         // Phase 1: Initialize quality with prediction-error weighting
         let quality_with_prediction = episode.significance * (1.0 + episode.prediction_error * 0.3);
 
-        let (precondition, action_hint, expected_cost) = self.extract_behavior_skeleton(events, &strategy_type, goal_bucket_id);
-        let (expected_success, expected_value, confidence) = self.derive_calibrated_metrics(&strategy_type, &outcome, events.len() as u32);
+        let (precondition, action_hint, expected_cost) =
+            self.extract_behavior_skeleton(events, &strategy_type, goal_bucket_id);
+        let (expected_success, expected_value, confidence) =
+            self.derive_calibrated_metrics(&strategy_type, &outcome, events.len() as u32);
         let mut strategy = Strategy {
             id: strategy_id,
             name: match strategy_type {
-                StrategyType::Positive => format!("strategy_{}_ep_{}", episode.agent_id, episode.id),
-                StrategyType::Constraint => format!("constraint_{}_ep_{}", episode.agent_id, episode.id),
+                StrategyType::Positive => {
+                    format!("strategy_{}_ep_{}", episode.agent_id, episode.id)
+                },
+                StrategyType::Constraint => {
+                    format!("constraint_{}_ep_{}", episode.agent_id, episode.id)
+                },
             },
             agent_id: episode.agent_id,
             reasoning_steps,
@@ -406,8 +418,16 @@ impl StrategyExtractor {
             success_indicators,
             failure_patterns,
             quality_score: quality_with_prediction.min(1.0),
-            success_count: if matches!(outcome, EpisodeOutcome::Success) { 1 } else { 0 },
-            failure_count: if matches!(outcome, EpisodeOutcome::Failure) { 1 } else { 0 },
+            success_count: if matches!(outcome, EpisodeOutcome::Success) {
+                1
+            } else {
+                0
+            },
+            failure_count: if matches!(outcome, EpisodeOutcome::Failure) {
+                1
+            } else {
+                0
+            },
             support_count: 1,
             strategy_type,
             precondition,
@@ -431,14 +451,29 @@ impl StrategyExtractor {
         };
 
         let (goal_ids, tool_names, result_types) = self.extract_graph_signature(episode, events);
-        strategy.metadata.insert("goal_ids".to_string(), json!(goal_ids).to_string());
-        strategy.metadata.insert("tool_names".to_string(), json!(tool_names).to_string());
-        strategy.metadata.insert("result_types".to_string(), json!(result_types).to_string());
-        strategy.metadata.insert("goal_bucket_id".to_string(), goal_bucket_id.to_string());
-        strategy.metadata.insert("behavior_signature".to_string(), behavior_signature.clone());
-        strategy.metadata.insert("strategy_type".to_string(), format!("{:?}", strategy.strategy_type));
+        strategy
+            .metadata
+            .insert("goal_ids".to_string(), json!(goal_ids).to_string());
+        strategy
+            .metadata
+            .insert("tool_names".to_string(), json!(tool_names).to_string());
+        strategy
+            .metadata
+            .insert("result_types".to_string(), json!(result_types).to_string());
+        strategy
+            .metadata
+            .insert("goal_bucket_id".to_string(), goal_bucket_id.to_string());
+        strategy
+            .metadata
+            .insert("behavior_signature".to_string(), behavior_signature.clone());
+        strategy.metadata.insert(
+            "strategy_type".to_string(),
+            format!("{:?}", strategy.strategy_type),
+        );
         let strategy_signature = self.compute_strategy_signature(&strategy);
-        strategy.metadata.insert("strategy_signature".to_string(), strategy_signature.clone());
+        strategy
+            .metadata
+            .insert("strategy_signature".to_string(), strategy_signature.clone());
 
         let stored_id = self.store_strategy(strategy, &context_patterns, goal_bucket_id);
         self.episode_index.insert(episode.id, stored_id);
@@ -503,7 +538,7 @@ impl StrategyExtractor {
         let mut generalized_steps = Vec::new();
         for (raw_step, seq_order) in raw_steps {
             let generalized = self.generalize_reasoning_step(&raw_step);
-            
+
             // Determine applicability based on abstraction level
             let applicability = if self.is_highly_abstract(&generalized) {
                 "general".to_string()
@@ -512,7 +547,7 @@ impl StrategyExtractor {
             } else {
                 "specific".to_string()
             };
-            
+
             generalized_steps.push(ReasoningStep {
                 description: generalized,
                 applicability,
@@ -523,11 +558,11 @@ impl StrategyExtractor {
 
         Ok(generalized_steps)
     }
-    
+
     /// Generalize a reasoning step by abstracting specific values
     fn generalize_reasoning_step(&self, step: &str) -> String {
         let mut generalized = step.to_string();
-        
+
         // Pattern 1: Abstract file paths (simple pattern matching)
         // Look for common path patterns: /path, C:\path, ./path, ../path
         let path_patterns = ["/", "\\", "./", "../", "C:", "D:", "E:"];
@@ -537,8 +572,10 @@ impl StrategyExtractor {
                 let words: Vec<&str> = generalized.split_whitespace().collect();
                 let mut new_words = Vec::new();
                 for word in words {
-                    if word.contains('/') || word.contains('\\') || 
-                       (word.starts_with('.') && word.len() > 1) {
+                    if word.contains('/')
+                        || word.contains('\\')
+                        || (word.starts_with('.') && word.len() > 1)
+                    {
                         new_words.push("<file_path>");
                     } else {
                         new_words.push(word);
@@ -548,9 +585,16 @@ impl StrategyExtractor {
                 break;
             }
         }
-        
+
         // Pattern 2: Abstract error messages
-        let error_keywords = ["error:", "exception:", "failure:", "error ", "exception ", "failed"];
+        let error_keywords = [
+            "error:",
+            "exception:",
+            "failure:",
+            "error ",
+            "exception ",
+            "failed",
+        ];
         for keyword in &error_keywords {
             if generalized.to_lowercase().contains(keyword) {
                 // Replace error message with placeholder
@@ -562,18 +606,21 @@ impl StrategyExtractor {
                         .find(|c: char| c == '.' || c == '\n' || c == '\r')
                         .map(|i| after_pos + i)
                         .unwrap_or(generalized.len());
-                    generalized = format!("{}<error_type>: <error_message>{}", 
-                                         before, 
-                                         &generalized[end_pos..]);
+                    generalized = format!(
+                        "{}<error_type>: <error_message>{}",
+                        before,
+                        &generalized[end_pos..]
+                    );
                 }
                 break;
             }
         }
-        
+
         // Pattern 3: Abstract URLs
         if generalized.contains("http://") || generalized.contains("https://") {
             let words: Vec<&str> = generalized.split_whitespace().collect();
-            let new_words: Vec<String> = words.iter()
+            let new_words: Vec<String> = words
+                .iter()
                 .map(|w| {
                     if w.starts_with("http://") || w.starts_with("https://") {
                         "<url>".to_string()
@@ -584,10 +631,11 @@ impl StrategyExtractor {
                 .collect();
             generalized = new_words.join(" ");
         }
-        
+
         // Pattern 4: Abstract large numbers (but keep small ones for structure)
         let words: Vec<&str> = generalized.split_whitespace().collect();
-        let new_words: Vec<String> = words.iter()
+        let new_words: Vec<String> = words
+            .iter()
             .map(|w| {
                 if let Ok(num) = w.parse::<u64>() {
                     if num > 100 {
@@ -601,45 +649,59 @@ impl StrategyExtractor {
             })
             .collect();
         generalized = new_words.join(" ");
-        
+
         // Pattern 5: Identify common reasoning structures
         generalized = self.identify_reasoning_structures(&generalized);
-        
+
         generalized
     }
-    
+
     /// Identify and label common reasoning structures
     fn identify_reasoning_structures(&self, step: &str) -> String {
         let step_lower = step.to_lowercase();
-        
+
         // If-then structure
-        if step_lower.contains("if") && (step_lower.contains("then") || step_lower.contains("check")) {
+        if step_lower.contains("if")
+            && (step_lower.contains("then") || step_lower.contains("check"))
+        {
             return format!("[IF-THEN] {}", step);
         }
-        
+
         // Try-catch/error handling
-        if step_lower.contains("try") || step_lower.contains("catch") || step_lower.contains("handle error") {
+        if step_lower.contains("try")
+            || step_lower.contains("catch")
+            || step_lower.contains("handle error")
+        {
             return format!("[ERROR-HANDLING] {}", step);
         }
-        
+
         // Decomposition
-        if step_lower.contains("break down") || step_lower.contains("decompose") || step_lower.contains("split") {
+        if step_lower.contains("break down")
+            || step_lower.contains("decompose")
+            || step_lower.contains("split")
+        {
             return format!("[DECOMPOSE] {}", step);
         }
-        
+
         // Verification/validation
-        if step_lower.contains("verify") || step_lower.contains("validate") || step_lower.contains("check") {
+        if step_lower.contains("verify")
+            || step_lower.contains("validate")
+            || step_lower.contains("check")
+        {
             return format!("[VERIFY] {}", step);
         }
-        
+
         // Search/lookup
-        if step_lower.contains("search") || step_lower.contains("find") || step_lower.contains("lookup") {
+        if step_lower.contains("search")
+            || step_lower.contains("find")
+            || step_lower.contains("lookup")
+        {
             return format!("[SEARCH] {}", step);
         }
-        
+
         step.to_string()
     }
-    
+
     /// Check if a step is highly abstract (reusable across domains)
     fn is_highly_abstract(&self, step: &str) -> bool {
         let abstract_patterns = [
@@ -649,19 +711,21 @@ impl StrategyExtractor {
             "[VERIFY]",
             "[SEARCH]",
         ];
-        
-        abstract_patterns.iter().any(|pattern| step.contains(pattern))
+
+        abstract_patterns
+            .iter()
+            .any(|pattern| step.contains(pattern))
     }
-    
+
     /// Check if a step is parameterized (has placeholders)
     fn is_parameterized(&self, step: &str) -> bool {
         step.contains("<") && step.contains(">")
     }
-    
+
     /// Infer expected outcome from reasoning step
     fn infer_expected_outcome(&self, step: &str) -> Option<String> {
         let step_lower = step.to_lowercase();
-        
+
         if step_lower.contains("solve") || step_lower.contains("fix") {
             Some("problem_resolved".to_string())
         } else if step_lower.contains("verify") || step_lower.contains("check") {
@@ -704,13 +768,13 @@ impl StrategyExtractor {
     /// Infer task type from event sequence
     fn infer_task_type(&self, events: &[Event]) -> String {
         // Simple heuristic based on event types
-        let has_cognitive = events.iter().any(|e| {
-            matches!(e.event_type, EventType::Cognitive { .. })
-        });
+        let has_cognitive = events
+            .iter()
+            .any(|e| matches!(e.event_type, EventType::Cognitive { .. }));
 
-        let has_action = events.iter().any(|e| {
-            matches!(e.event_type, EventType::Action { .. })
-        });
+        let has_action = events
+            .iter()
+            .any(|e| matches!(e.event_type, EventType::Action { .. }));
 
         if has_cognitive && has_action {
             "problem_solving".to_string()
@@ -722,7 +786,10 @@ impl StrategyExtractor {
     }
 
     /// Extract resource constraints from context
-    fn extract_resource_constraints(&self, context: &agent_db_events::core::EventContext) -> Vec<String> {
+    fn extract_resource_constraints(
+        &self,
+        context: &agent_db_events::core::EventContext,
+    ) -> Vec<String> {
         let mut constraints = Vec::new();
 
         if context.resources.computational.cpu_percent > 80.0 {
@@ -757,7 +824,11 @@ impl StrategyExtractor {
 
     /// Phase 1 Feature K: Extract failure patterns from failed events
     /// Identifies what went wrong so the agent can avoid repeating mistakes
-    fn extract_failure_patterns(&self, events: &[Event], outcome: &Option<EpisodeOutcome>) -> GraphResult<Vec<String>> {
+    fn extract_failure_patterns(
+        &self,
+        events: &[Event],
+        outcome: &Option<EpisodeOutcome>,
+    ) -> GraphResult<Vec<String>> {
         let mut patterns = Vec::new();
 
         // Only extract failure patterns if episode failed
@@ -767,7 +838,12 @@ impl StrategyExtractor {
 
         // Extract patterns from failed actions
         for event in events {
-            if let EventType::Action { outcome, action_name, .. } = &event.event_type {
+            if let EventType::Action {
+                outcome,
+                action_name,
+                ..
+            } = &event.event_type
+            {
                 if let agent_db_events::core::ActionOutcome::Failure { error, .. } = outcome {
                     // Record what action failed
                     patterns.push(format!("avoid_action:{}", action_name));
@@ -833,11 +909,11 @@ impl StrategyExtractor {
                 if !name.trim().is_empty() {
                     tools.insert(name.trim().to_string());
                 }
-            }
+            },
             MetadataValue::Json(json) => {
                 self.collect_tools_from_json(json, tools);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -847,20 +923,20 @@ impl StrategyExtractor {
                 if !name.trim().is_empty() {
                     tools.insert(name.trim().to_string());
                 }
-            }
+            },
             serde_json::Value::Array(items) => {
                 for item in items {
                     self.collect_tools_from_json(item, tools);
                 }
-            }
+            },
             serde_json::Value::Object(map) => {
                 for key in ["tool", "tool_name", "tools", "tool_used"] {
                     if let Some(value) = map.get(key) {
                         self.collect_tools_from_json(value, tools);
                     }
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -872,26 +948,26 @@ impl StrategyExtractor {
                 EventType::Action { outcome, .. } => match outcome {
                     agent_db_events::core::ActionOutcome::Success { .. } => {
                         types.insert("action_success".to_string());
-                    }
+                    },
                     agent_db_events::core::ActionOutcome::Failure { .. } => {
                         types.insert("action_failure".to_string());
-                    }
+                    },
                     agent_db_events::core::ActionOutcome::Partial { .. } => {
                         types.insert("action_partial".to_string());
-                    }
+                    },
                 },
                 EventType::Observation { .. } => {
                     types.insert("observation".to_string());
-                }
+                },
                 EventType::Cognitive { .. } => {
                     types.insert("cognitive_output".to_string());
-                }
+                },
                 EventType::Communication { .. } => {
                     types.insert("communication".to_string());
-                }
+                },
                 EventType::Learning { .. } => {
                     types.insert("learning_telemetry".to_string());
-                }
+                },
             }
         }
 
@@ -967,7 +1043,8 @@ impl StrategyExtractor {
         strategy.expected_success = (strategy.success_count as f32 + 1.0) / (total as f32 + 2.0);
         strategy.confidence = 1.0 - (-((total as f32) / 3.0)).exp();
 
-        self.episode_outcomes.insert(episode_id, new_outcome.clone());
+        self.episode_outcomes
+            .insert(episode_id, new_outcome.clone());
 
         tracing::info!(
             "Strategy updated from episode correction strategy_id={} episode_id={} success_count={} failure_count={}",
@@ -979,10 +1056,7 @@ impl StrategyExtractor {
     }
 
     /// Find strategies similar to a query signature
-    pub fn find_similar_strategies(
-        &self,
-        query: StrategySimilarityQuery,
-    ) -> Vec<(Strategy, f32)> {
+    pub fn find_similar_strategies(&self, query: StrategySimilarityQuery) -> Vec<(Strategy, f32)> {
         tracing::info!(
             "Strategy similarity query goals={} tools={} results={} context_hash={:?} agent_id={:?} min_score={:.3} limit={}",
             query.goal_ids.len(),
@@ -1040,7 +1114,9 @@ impl StrategyExtractor {
                     let goals_score = Self::jaccard_u64(&query_goals, &goal_ids);
                     let tools_score = Self::jaccard_string(&query_tools, &tool_names);
                     let results_score = Self::jaccard_string(&query_results, &result_types);
-                    (goals_score * goal_weight + tools_score * tool_weight + results_score * result_weight)
+                    (goals_score * goal_weight
+                        + tools_score * tool_weight
+                        + results_score * result_weight)
                         / weight_sum
                 };
                 (strategy.clone(), score)
@@ -1048,10 +1124,7 @@ impl StrategyExtractor {
             .filter(|(_, score)| *score >= query.min_score)
             .collect();
 
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         {
             let result = scored.into_iter().take(query.limit).collect::<Vec<_>>();
@@ -1065,7 +1138,10 @@ impl StrategyExtractor {
         self.strategies.get(&strategy_id)
     }
 
-    fn parse_graph_signature(&self, strategy: &Strategy) -> (HashSet<u64>, HashSet<String>, HashSet<String>) {
+    fn parse_graph_signature(
+        &self,
+        strategy: &Strategy,
+    ) -> (HashSet<u64>, HashSet<String>, HashSet<String>) {
         let goal_ids = strategy
             .metadata
             .get("goal_ids")
@@ -1117,13 +1193,14 @@ impl StrategyExtractor {
                 EventType::Observation { .. } => skeleton.push("Observe".to_string()),
                 EventType::Cognitive { process_type, .. } => {
                     skeleton.push(format!("Think:{:?}", process_type));
-                }
+                },
                 EventType::Action { action_name, .. } => {
-                    let tool = self.extract_tool_from_metadata(event)
+                    let tool = self
+                        .extract_tool_from_metadata(event)
                         .map(|t| format!(":{}", t))
                         .unwrap_or_default();
                     skeleton.push(format!("Act:{}{}", action_name, tool));
-                }
+                },
                 EventType::Communication { .. } => skeleton.push("Communicate".to_string()),
                 EventType::Learning { .. } => skeleton.push("Learn".to_string()),
             }
@@ -1160,7 +1237,11 @@ impl StrategyExtractor {
             .unwrap_or(&0);
         let novelty = 1.0 / (1.0 + context_count as f32);
 
-        let outcome_utility = match episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted) {
+        let outcome_utility = match episode
+            .outcome
+            .clone()
+            .unwrap_or(EpisodeOutcome::Interrupted)
+        {
             EpisodeOutcome::Success => 1.0,
             EpisodeOutcome::Partial => 0.7,
             EpisodeOutcome::Failure => 0.8,
@@ -1173,7 +1254,11 @@ impl StrategyExtractor {
             .goal_bucket_counts
             .get(&(episode.agent_id, goal_bucket_id))
             .unwrap_or(&0);
-        let reuse_potential = if bucket_count == 0 { 0.0 } else { (bucket_count as f32 / 10.0).min(1.0) };
+        let reuse_potential = if bucket_count == 0 {
+            0.0
+        } else {
+            (bucket_count as f32 / 10.0).min(1.0)
+        };
 
         let redundancy = self.estimate_redundancy(goal_bucket_id, behavior_signature);
 
@@ -1222,9 +1307,7 @@ impl StrategyExtractor {
     fn compute_strategy_signature(&self, strategy: &Strategy) -> String {
         let raw = format!(
             "{}|{}|{:?}",
-            strategy.precondition,
-            strategy.action_hint,
-            strategy.strategy_type
+            strategy.precondition, strategy.action_hint, strategy.strategy_type
         );
         format!("{:x}", self.hash_str(&raw))
     }
@@ -1248,8 +1331,12 @@ impl StrategyExtractor {
                 existing.success_count += strategy.success_count;
                 existing.failure_count += strategy.failure_count;
                 existing.last_used = current_timestamp();
-                existing.source_episodes.extend(strategy.source_episodes.drain(..));
-                existing.source_outcomes.extend(strategy.source_outcomes.drain(..));
+                existing
+                    .source_episodes
+                    .extend(strategy.source_episodes.drain(..));
+                existing
+                    .source_outcomes
+                    .extend(strategy.source_outcomes.drain(..));
 
                 let expected_success = (existing.success_count as f32 + self.config.alpha)
                     / (existing.support_count as f32 + self.config.alpha + self.config.beta);
@@ -1292,9 +1379,12 @@ impl StrategyExtractor {
             .or_insert_with(Vec::new)
             .push(strategy_id);
 
-        if let Some(sig) = self.strategies.get(&strategy_id)
+        if let Some(sig) = self
+            .strategies
+            .get(&strategy_id)
             .and_then(|s| s.metadata.get("behavior_signature"))
-            .cloned() {
+            .cloned()
+        {
             self.behavior_index
                 .entry(sig)
                 .or_insert_with(Vec::new)
@@ -1308,7 +1398,13 @@ impl StrategyExtractor {
         bucket_count % self.config.distill_every == 0
     }
 
-    fn update_motif_stats(&mut self, agent_id: AgentId, goal_bucket_id: u64, outcome: EpisodeOutcome, events: &[Event]) {
+    fn update_motif_stats(
+        &mut self,
+        agent_id: AgentId,
+        goal_bucket_id: u64,
+        outcome: EpisodeOutcome,
+        events: &[Event],
+    ) {
         let motifs = self.extract_motifs(events);
         let bucket_stats = self
             .motif_stats_by_bucket
@@ -1338,7 +1434,10 @@ impl StrategyExtractor {
             Some(stats) => stats.clone(),
             None => return,
         };
-        let cache = match self.episode_cache_by_bucket.get(&(agent_id, goal_bucket_id)) {
+        let cache = match self
+            .episode_cache_by_bucket
+            .get(&(agent_id, goal_bucket_id))
+        {
             Some(records) => records.clone(),
             None => return,
         };
@@ -1358,14 +1457,17 @@ impl StrategyExtractor {
             let success_total_f = success_total as f32;
             let failure_total_f = failure_total as f32;
 
-            let p_s = (s + self.config.alpha) / (success_total_f + self.config.alpha + self.config.beta);
-            let p_f = (f + self.config.alpha) / (failure_total_f + self.config.alpha + self.config.beta);
+            let p_s =
+                (s + self.config.alpha) / (success_total_f + self.config.alpha + self.config.beta);
+            let p_f =
+                (f + self.config.alpha) / (failure_total_f + self.config.alpha + self.config.beta);
 
             let lift = Self::log_odds(p_s) - Self::log_odds(p_f);
             let uplift = p_s - baseline_success;
             let failure_uplift = p_f - baseline_failure;
 
-            let strategy_type = if lift >= self.config.min_lift && uplift >= self.config.min_uplift {
+            let strategy_type = if lift >= self.config.min_lift && uplift >= self.config.min_uplift
+            {
                 StrategyType::Positive
             } else if lift <= -self.config.min_lift && failure_uplift >= self.config.min_uplift {
                 StrategyType::Constraint
@@ -1378,10 +1480,13 @@ impl StrategyExtractor {
                 StrategyType::Constraint => stats.failure_count,
             };
 
-            if strategy_type == StrategyType::Positive && support < self.config.min_support_success {
+            if strategy_type == StrategyType::Positive && support < self.config.min_support_success
+            {
                 continue;
             }
-            if strategy_type == StrategyType::Constraint && support < self.config.min_support_failure {
+            if strategy_type == StrategyType::Constraint
+                && support < self.config.min_support_failure
+            {
                 continue;
             }
 
@@ -1416,8 +1521,16 @@ impl StrategyExtractor {
                 success_indicators: Vec::new(),
                 failure_patterns: vec![motif.clone()],
                 quality_score: (expected_success).min(1.0),
-                success_count: if strategy_type == StrategyType::Positive { support } else { 0 },
-                failure_count: if strategy_type == StrategyType::Constraint { support } else { 0 },
+                success_count: if strategy_type == StrategyType::Positive {
+                    support
+                } else {
+                    0
+                },
+                failure_count: if strategy_type == StrategyType::Constraint {
+                    support
+                } else {
+                    0
+                },
                 support_count: support,
                 strategy_type,
                 precondition,
@@ -1439,10 +1552,20 @@ impl StrategyExtractor {
                 parent_strategy: None,
             };
 
-            strategy.metadata.insert("strategy_signature".to_string(), self.compute_strategy_signature(&strategy));
-            strategy.metadata.insert("behavior_signature".to_string(), motif.clone());
-            strategy.metadata.insert("goal_bucket_id".to_string(), goal_bucket_id.to_string());
-            strategy.metadata.insert("strategy_type".to_string(), format!("{:?}", strategy.strategy_type));
+            strategy.metadata.insert(
+                "strategy_signature".to_string(),
+                self.compute_strategy_signature(&strategy),
+            );
+            strategy
+                .metadata
+                .insert("behavior_signature".to_string(), motif.clone());
+            strategy
+                .metadata
+                .insert("goal_bucket_id".to_string(), goal_bucket_id.to_string());
+            strategy.metadata.insert(
+                "strategy_type".to_string(),
+                format!("{:?}", strategy.strategy_type),
+            );
 
             let _ = self.store_strategy(strategy, &[], goal_bucket_id);
         }
@@ -1471,8 +1594,14 @@ impl StrategyExtractor {
             return false;
         }
 
-        let success_matches = matches.iter().filter(|o| matches!(o, EpisodeOutcome::Success)).count();
-        let failure_matches = matches.iter().filter(|o| matches!(o, EpisodeOutcome::Failure)).count();
+        let success_matches = matches
+            .iter()
+            .filter(|o| matches!(o, EpisodeOutcome::Success))
+            .count();
+        let failure_matches = matches
+            .iter()
+            .filter(|o| matches!(o, EpisodeOutcome::Failure))
+            .count();
 
         let precision = success_matches as f32 / matches.len().max(1) as f32;
         let failure_rate = failure_matches as f32 / matches.len().max(1) as f32;
@@ -1490,10 +1619,22 @@ impl StrategyExtractor {
         let mid = matches.len() / 2;
         if mid > 0 {
             let (first, second) = matches.split_at(mid);
-            let first_success = first.iter().filter(|o| matches!(o, EpisodeOutcome::Success)).count();
-            let second_success = second.iter().filter(|o| matches!(o, EpisodeOutcome::Success)).count();
-            let first_failure = first.iter().filter(|o| matches!(o, EpisodeOutcome::Failure)).count();
-            let second_failure = second.iter().filter(|o| matches!(o, EpisodeOutcome::Failure)).count();
+            let first_success = first
+                .iter()
+                .filter(|o| matches!(o, EpisodeOutcome::Success))
+                .count();
+            let second_success = second
+                .iter()
+                .filter(|o| matches!(o, EpisodeOutcome::Success))
+                .count();
+            let first_failure = first
+                .iter()
+                .filter(|o| matches!(o, EpisodeOutcome::Failure))
+                .count();
+            let second_failure = second
+                .iter()
+                .filter(|o| matches!(o, EpisodeOutcome::Failure))
+                .count();
 
             match strategy_type {
                 StrategyType::Positive => {
@@ -1502,14 +1643,14 @@ impl StrategyExtractor {
                     if first_rate - second_rate > self.config.drift_max_drop {
                         return false;
                     }
-                }
+                },
                 StrategyType::Constraint => {
                     let first_rate = first_failure as f32 / first.len().max(1) as f32;
                     let second_rate = second_failure as f32 / second.len().max(1) as f32;
                     if first_rate - second_rate > self.config.drift_max_drop {
                         return false;
                     }
-                }
+                },
             }
         }
 
@@ -1523,7 +1664,10 @@ impl StrategyExtractor {
         for i in 0..tokens.len().saturating_sub(1) {
             let left = tokens[i].clone();
             let right = tokens[i + 1].clone();
-            motifs.insert(Self::motif_key(MotifClass::Transition, format!("{}->{}", left, right)));
+            motifs.insert(Self::motif_key(
+                MotifClass::Transition,
+                format!("{}->{}", left, right),
+            ));
         }
 
         let anchors = self.find_anchor_indices(events);
@@ -1552,23 +1696,30 @@ impl StrategyExtractor {
         let mut anchors = Vec::new();
         for (idx, event) in events.iter().enumerate() {
             match &event.event_type {
-                EventType::Action { action_name, outcome, .. } => {
+                EventType::Action {
+                    action_name,
+                    outcome,
+                    ..
+                } => {
                     if action_name == "user_feedback" {
                         anchors.push(idx);
                     }
                     match outcome {
                         agent_db_events::core::ActionOutcome::Success { .. } => anchors.push(idx),
                         agent_db_events::core::ActionOutcome::Failure { .. } => anchors.push(idx),
-                        _ => {}
+                        _ => {},
                     }
-                }
+                },
                 EventType::Observation { data, .. } => {
                     let text = data.to_string().to_lowercase();
-                    if text.contains("error") || text.contains("failed") || text.contains("exception") {
+                    if text.contains("error")
+                        || text.contains("failed")
+                        || text.contains("exception")
+                    {
                         anchors.push(idx);
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         anchors
@@ -1578,7 +1729,8 @@ impl StrategyExtractor {
         let mut tokens = Vec::new();
         for event in events {
             if let EventType::Action { action_name, .. } = &event.event_type {
-                let tool = self.extract_tool_from_metadata(event)
+                let tool = self
+                    .extract_tool_from_metadata(event)
                     .map(|t| format!(":{}", t))
                     .unwrap_or_default();
                 tokens.push(format!("{}{}", action_name, tool));
@@ -1641,7 +1793,11 @@ impl StrategyExtractor {
         }
         let intersection = a.intersection(b).count() as f32;
         let union = a.union(b).count() as f32;
-        if union == 0.0 { 0.0 } else { intersection / union }
+        if union == 0.0 {
+            0.0
+        } else {
+            intersection / union
+        }
     }
 
     fn jaccard_string(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
@@ -1650,7 +1806,11 @@ impl StrategyExtractor {
         }
         let intersection = a.intersection(b).count() as f32;
         let union = a.union(b).count() as f32;
-        if union == 0.0 { 0.0 } else { intersection / union }
+        if union == 0.0 {
+            0.0
+        } else {
+            intersection / union
+        }
     }
 
     /// Get all strategies for an agent
@@ -1694,7 +1854,8 @@ impl StrategyExtractor {
                 strategy.quality_score = strategy.success_count as f32 / total as f32;
             }
             strategy.support_count = total;
-            strategy.expected_success = (strategy.success_count as f32 + 1.0) / (total as f32 + 2.0);
+            strategy.expected_success =
+                (strategy.success_count as f32 + 1.0) / (total as f32 + 2.0);
             strategy.confidence = 1.0 - (-((total as f32) / 3.0)).exp();
 
             strategy.last_used = current_timestamp();
@@ -1714,7 +1875,10 @@ impl StrategyExtractor {
                 .count(),
             agents_with_strategies: self.agent_strategies.len(),
             average_quality: if !self.strategies.is_empty() {
-                self.strategies.values().map(|s| s.quality_score).sum::<f32>()
+                self.strategies
+                    .values()
+                    .map(|s| s.quality_score)
+                    .sum::<f32>()
                     / self.strategies.len() as f32
             } else {
                 0.0

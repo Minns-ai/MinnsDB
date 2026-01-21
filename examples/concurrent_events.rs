@@ -3,9 +3,12 @@
 //! Demonstrates how the Agentic Database handles out-of-order events
 //! from multiple concurrent sources while maintaining correct causal relationships.
 
-use agent_db_core::types::{AgentId, SessionId, generate_event_id, current_timestamp};
-use agent_db_events::{Event, EventContext, EventType, ActionOutcome, EnvironmentState, TemporalContext, ResourceState, ComputationalResources};
-use agent_db_graph::{GraphEngine, GraphEngineConfig, event_ordering::OrderingConfig};
+use agent_db_core::types::{current_timestamp, generate_event_id, AgentId, SessionId};
+use agent_db_events::{
+    ActionOutcome, ComputationalResources, EnvironmentState, Event, EventContext, EventType,
+    ResourceState, TemporalContext,
+};
+use agent_db_graph::{event_ordering::OrderingConfig, GraphEngine, GraphEngineConfig};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -17,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure with shorter reorder window for demo
     let config = GraphEngineConfig {
         ordering_config: OrderingConfig {
-            reorder_window_ms: 2000,  // 2 second reorder window
+            reorder_window_ms: 2000, // 2 second reorder window
             max_buffer_size: 100,
             flush_interval_ms: 500,
             watermark_window_ms: 2000,
@@ -44,29 +47,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("⏰ Event Timeline (as they should logically happen):");
     for (i, event) in events.iter().enumerate() {
-        println!("  {}. Agent {} at T+{}ms: {:?}", 
-                 i+1, 
-                 event.agent_id, 
-                 (event.timestamp % 1_000_000_000) / 1_000_000,  // Show relative time in ms
-                 get_event_name(&event.event_type));
+        println!(
+            "  {}. Agent {} at T+{}ms: {:?}",
+            i + 1,
+            event.agent_id,
+            (event.timestamp % 1_000_000_000) / 1_000_000, // Show relative time in ms
+            get_event_name(&event.event_type)
+        );
     }
 
     // Simulate network delays and out-of-order arrival
     println!("\n📡 Processing events as they arrive (out of order):");
-    
+
     // Reorder events to simulate real network conditions
     let mut shuffled_events = events.clone();
-    
+
     // Agent A: Events 1,3 arrive first
     let result_1 = engine.process_event(shuffled_events[0].clone()).await?;
-    println!("  ✅ Processed Agent A Event 1: {} nodes created, {} buffered", 
-             result_1.nodes_created.len(), 
-             if result_1.patterns_detected.contains(&"event_reordering_occurred".to_string()) { "reordered" } else { "in-order" });
+    println!(
+        "  ✅ Processed Agent A Event 1: {} nodes created, {} buffered",
+        result_1.nodes_created.len(),
+        if result_1
+            .patterns_detected
+            .contains(&"event_reordering_occurred".to_string())
+        {
+            "reordered"
+        } else {
+            "in-order"
+        }
+    );
 
-    // Agent B: Event 2 arrives late  
+    // Agent B: Event 2 arrives late
     sleep(Duration::from_millis(100)).await;
     let result_2 = engine.process_event(shuffled_events[3].clone()).await?; // Agent B Event 1
-    println!("  ✅ Processed Agent B Event 1: {} nodes created", result_2.nodes_created.len());
+    println!(
+        "  ✅ Processed Agent B Event 1: {} nodes created",
+        result_2.nodes_created.len()
+    );
 
     // Agent A: Event 3 arrives before Event 2
     let result_3 = engine.process_event(shuffled_events[2].clone()).await?; // Agent A Event 3
@@ -74,13 +91,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Agent C: Events arrive
     let result_4 = engine.process_event(shuffled_events[4].clone()).await?;
-    println!("  ✅ Processed Agent C Event 1: {} nodes created", result_4.nodes_created.len());
+    println!(
+        "  ✅ Processed Agent C Event 1: {} nodes created",
+        result_4.nodes_created.len()
+    );
 
     // Agent A: Event 2 finally arrives (triggers processing of buffered Event 3)
     sleep(Duration::from_millis(200)).await;
     let result_5 = engine.process_event(shuffled_events[1].clone()).await?; // Agent A Event 2
     println!("  ✅ Agent A Event 2 arrived - triggered processing of buffered events");
-    println!("     {} total nodes created (including buffered Event 3)", result_5.nodes_created.len());
+    println!(
+        "     {} total nodes created (including buffered Event 3)",
+        result_5.nodes_created.len()
+    );
 
     // Remaining events
     sleep(Duration::from_millis(50)).await;
@@ -103,10 +126,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn create_event_scenario(agent_a: AgentId, agent_b: AgentId, agent_c: AgentId, context: &EventContext) -> Vec<Event> {
+async fn create_event_scenario(
+    agent_a: AgentId,
+    agent_b: AgentId,
+    agent_c: AgentId,
+    context: &EventContext,
+) -> Vec<Event> {
     let base_time = current_timestamp();
     let session_id: SessionId = 200;
-    
+
     vec![
         // Agent A sequence: start_task → process_data → complete_task
         Event {
@@ -118,7 +146,9 @@ async fn create_event_scenario(agent_a: AgentId, agent_b: AgentId, agent_c: Agen
             event_type: EventType::Action {
                 action_name: "start_task".to_string(),
                 parameters: serde_json::json!({"task_id": "task_001"}),
-                outcome: ActionOutcome::Success { result: serde_json::json!("Task started") },
+                outcome: ActionOutcome::Success {
+                    result: serde_json::json!("Task started"),
+                },
                 duration_ns: 1_000_000,
             },
             causality_chain: Vec::new(),
@@ -134,7 +164,9 @@ async fn create_event_scenario(agent_a: AgentId, agent_b: AgentId, agent_c: Agen
             event_type: EventType::Action {
                 action_name: "process_data".to_string(),
                 parameters: serde_json::json!({"data_size": 1024}),
-                outcome: ActionOutcome::Success { result: serde_json::json!("Data processed") },
+                outcome: ActionOutcome::Success {
+                    result: serde_json::json!("Data processed"),
+                },
                 duration_ns: 2_000_000,
             },
             causality_chain: Vec::new(), // Will be linked by inference
@@ -143,22 +175,23 @@ async fn create_event_scenario(agent_a: AgentId, agent_b: AgentId, agent_c: Agen
         },
         Event {
             id: generate_event_id(),
-            timestamp: base_time + 1_000_000_000, // 1s later  
+            timestamp: base_time + 1_000_000_000, // 1s later
             agent_id: agent_a,
             agent_type: "task-processor".to_string(),
             session_id,
             event_type: EventType::Action {
                 action_name: "complete_task".to_string(),
                 parameters: serde_json::json!({"task_id": "task_001"}),
-                outcome: ActionOutcome::Success { result: serde_json::json!("Task completed") },
+                outcome: ActionOutcome::Success {
+                    result: serde_json::json!("Task completed"),
+                },
                 duration_ns: 500_000,
             },
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
         },
-
-        // Agent B sequence: start_analysis → generate_report  
+        // Agent B sequence: start_analysis → generate_report
         Event {
             id: generate_event_id(),
             timestamp: base_time + 200_000_000, // 200ms after start
@@ -168,14 +201,15 @@ async fn create_event_scenario(agent_a: AgentId, agent_b: AgentId, agent_c: Agen
             event_type: EventType::Action {
                 action_name: "start_analysis".to_string(),
                 parameters: serde_json::json!({"analysis_type": "performance"}),
-                outcome: ActionOutcome::Success { result: serde_json::json!("Analysis started") },
+                outcome: ActionOutcome::Success {
+                    result: serde_json::json!("Analysis started"),
+                },
                 duration_ns: 1_500_000,
             },
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
         },
-
         // Agent C sequence: monitor_system → alert_threshold
         Event {
             id: generate_event_id(),
@@ -193,7 +227,6 @@ async fn create_event_scenario(agent_a: AgentId, agent_b: AgentId, agent_c: Agen
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
         },
-
         // Agent B Event 2
         Event {
             id: generate_event_id(),
@@ -204,15 +237,16 @@ async fn create_event_scenario(agent_a: AgentId, agent_b: AgentId, agent_c: Agen
             event_type: EventType::Action {
                 action_name: "generate_report".to_string(),
                 parameters: serde_json::json!({"format": "pdf"}),
-                outcome: ActionOutcome::Success { result: serde_json::json!("Report generated") },
+                outcome: ActionOutcome::Success {
+                    result: serde_json::json!("Report generated"),
+                },
                 duration_ns: 3_000_000,
             },
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
         },
-
-        // Agent C Event 2  
+        // Agent C Event 2
         Event {
             id: generate_event_id(),
             timestamp: base_time + 900_000_000, // 900ms after start
@@ -222,7 +256,9 @@ async fn create_event_scenario(agent_a: AgentId, agent_b: AgentId, agent_c: Agen
             event_type: EventType::Action {
                 action_name: "send_alert".to_string(),
                 parameters: serde_json::json!({"threshold": "high_cpu", "recipients": ["admin"]}),
-                outcome: ActionOutcome::Success { result: serde_json::json!("Alert sent") },
+                outcome: ActionOutcome::Success {
+                    result: serde_json::json!("Alert sent"),
+                },
                 duration_ns: 100_000,
             },
             causality_chain: Vec::new(),
@@ -247,9 +283,9 @@ fn create_context() -> EventContext {
         resources: ResourceState {
             computational: ComputationalResources {
                 cpu_percent: 75.0,
-                memory_bytes: 2 * 1024 * 1024 * 1024, // 2GB
+                memory_bytes: 2 * 1024 * 1024 * 1024,   // 2GB
                 storage_bytes: 50 * 1024 * 1024 * 1024, // 50GB
-                network_bandwidth: 1000 * 1000 * 100, // 100Mbps in bytes/sec
+                network_bandwidth: 1000 * 1000 * 100,   // 100Mbps in bytes/sec
             },
             external: std::collections::HashMap::new(),
         },
@@ -261,11 +297,13 @@ fn create_context() -> EventContext {
 fn get_event_name(event_type: &EventType) -> &str {
     match event_type {
         EventType::Action { action_name, .. } => action_name,
-        EventType::Observation { observation_type, .. } => observation_type,
+        EventType::Observation {
+            observation_type, ..
+        } => observation_type,
         EventType::Communication { message_type, .. } => message_type,
         EventType::Cognitive { process_type, .. } => match process_type {
             agent_db_events::CognitiveType::GoalFormation => "goal_formation",
-            agent_db_events::CognitiveType::Planning => "planning", 
+            agent_db_events::CognitiveType::Planning => "planning",
             agent_db_events::CognitiveType::Reasoning => "reasoning",
             agent_db_events::CognitiveType::MemoryRetrieval => "memory_retrieval",
             agent_db_events::CognitiveType::LearningUpdate => "learning_update",

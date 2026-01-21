@@ -5,9 +5,11 @@
 // Automatically detects episode boundaries from event streams for memory formation.
 // Episodes are meaningful sequences of events that form coherent units of experience.
 
-use crate::structures::{Graph};
-use agent_db_core::types::{AgentId, EventId, Timestamp, ContextHash, SessionId};
-use agent_db_events::core::{Event, EventType, ActionOutcome, CognitiveType, EventContext, MetadataValue};
+use crate::structures::Graph;
+use agent_db_core::types::{AgentId, ContextHash, EventId, SessionId, Timestamp};
+use agent_db_events::core::{
+    ActionOutcome, CognitiveType, Event, EventContext, EventType, MetadataValue,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,7 +60,6 @@ pub struct Episode {
     pub significance: f32,
 
     // ========== Phase 1 Upgrades ==========
-
     /// Prediction error: difference between expected and actual outcome (0.0 to 1.0)
     /// Higher values indicate surprising outcomes that should be weighted more in learning
     pub prediction_error: f32,
@@ -118,7 +119,7 @@ impl Default for EpisodeDetectorConfig {
             max_time_gap_ns: 3_600_000_000_000, // 1 hour
             min_events_per_episode: 3,
             consolidation_interval_ns: 3_600_000_000_000, // 1 hour
-            late_event_window_ns: 5_000_000_000, // 5 seconds
+            late_event_window_ns: 5_000_000_000,          // 5 seconds
         }
     }
 }
@@ -145,12 +146,11 @@ pub struct EpisodeDetector {
     last_consolidation: HashMap<AgentId, Timestamp>,
 
     // ========== Novelty Tracking (for significance calculation) ==========
-
     /// Track seen context hashes for novelty detection
-    seen_contexts: HashMap<ContextHash, u32>,  // hash -> count
+    seen_contexts: HashMap<ContextHash, u32>, // hash -> count
 
     /// Track seen event types for novelty detection
-    seen_event_types: HashMap<String, u32>,  // event_type_name -> count
+    seen_event_types: HashMap<String, u32>, // event_type_name -> count
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -203,7 +203,8 @@ impl EpisodeDetector {
             episode.events.push(event.id);
 
             // Update episode significance incrementally as events are added
-            let weighted_avg = (episode.significance * (episode.events.len() - 1) as f32 + event_significance)
+            let weighted_avg = (episode.significance * (episode.events.len() - 1) as f32
+                + event_significance)
                 / episode.events.len() as f32;
             let max_significance = episode.significance.max(event_significance);
             episode.significance = (max_significance * 0.7 + weighted_avg * 0.3).min(1.0);
@@ -262,7 +263,7 @@ impl EpisodeDetector {
         match &event.event_type {
             EventType::Cognitive { process_type, .. } => {
                 matches!(process_type, CognitiveType::GoalFormation)
-            }
+            },
             _ => false,
         }
     }
@@ -278,8 +279,8 @@ impl EpisodeDetector {
             match outcome {
                 ActionOutcome::Success { .. } | ActionOutcome::Failure { .. } => {
                     return true;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
 
@@ -323,18 +324,10 @@ impl EpisodeDetector {
         let goals_b: std::collections::HashSet<u64> = b.active_goals.iter().map(|g| g.id).collect();
         let goal_score = Self::jaccard_u64(&goals_a, &goals_b);
 
-        let keys_a: std::collections::HashSet<String> = a
-            .environment
-            .variables
-            .keys()
-            .cloned()
-            .collect();
-        let keys_b: std::collections::HashSet<String> = b
-            .environment
-            .variables
-            .keys()
-            .cloned()
-            .collect();
+        let keys_a: std::collections::HashSet<String> =
+            a.environment.variables.keys().cloned().collect();
+        let keys_b: std::collections::HashSet<String> =
+            b.environment.variables.keys().cloned().collect();
         let env_score = Self::jaccard_string(&keys_a, &keys_b);
 
         (goal_score * 0.7 + env_score * 0.3).clamp(0.0, 1.0)
@@ -364,16 +357,27 @@ impl EpisodeDetector {
         }
         let intersection = a.intersection(b).count() as f32;
         let union = a.union(b).count() as f32;
-        if union == 0.0 { 0.0 } else { intersection / union }
+        if union == 0.0 {
+            0.0
+        } else {
+            intersection / union
+        }
     }
 
-    fn jaccard_string(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f32 {
+    fn jaccard_string(
+        a: &std::collections::HashSet<String>,
+        b: &std::collections::HashSet<String>,
+    ) -> f32 {
         if a.is_empty() && b.is_empty() {
             return 0.0;
         }
         let intersection = a.intersection(b).count() as f32;
         let union = a.union(b).count() as f32;
-        if union == 0.0 { 0.0 } else { intersection / union }
+        if union == 0.0 {
+            0.0
+        } else {
+            intersection / union
+        }
     }
 
     /// Start a new episode
@@ -406,7 +410,10 @@ impl EpisodeDetector {
 
     /// Complete the current episode for an agent
     fn complete_episode(&mut self, agent_id: AgentId, end_event: &Event) -> Episode {
-        let mut episode = self.active_episodes.remove(&agent_id).expect("Episode must exist");
+        let mut episode = self
+            .active_episodes
+            .remove(&agent_id)
+            .expect("Episode must exist");
 
         episode.end_event = Some(end_event.id);
         episode.end_timestamp = Some(end_event.timestamp);
@@ -416,7 +423,9 @@ impl EpisodeDetector {
         episode.prediction_error = self.calculate_prediction_error(&episode);
         episode.salience_score = self.calculate_salience(&episode);
 
-        if Self::is_feedback_event(end_event) && episode.significance < self.config.min_significance_threshold {
+        if Self::is_feedback_event(end_event)
+            && episode.significance < self.config.min_significance_threshold
+        {
             episode.significance = self.config.min_significance_threshold;
         }
 
@@ -451,18 +460,20 @@ impl EpisodeDetector {
     /// Determine episode outcome from the final event
     fn determine_outcome(&self, event: &Event) -> EpisodeOutcome {
         match &event.event_type {
-            EventType::Action { outcome, .. } => {
-                match outcome {
-                    ActionOutcome::Success { .. } => EpisodeOutcome::Success,
-                    ActionOutcome::Failure { .. } => EpisodeOutcome::Failure,
-                    ActionOutcome::Partial { .. } => EpisodeOutcome::Partial,
-                }
-            }
+            EventType::Action { outcome, .. } => match outcome {
+                ActionOutcome::Success { .. } => EpisodeOutcome::Success,
+                ActionOutcome::Failure { .. } => EpisodeOutcome::Failure,
+                ActionOutcome::Partial { .. } => EpisodeOutcome::Partial,
+            },
             _ => EpisodeOutcome::Interrupted,
         }
     }
 
-    fn apply_late_event_correction(&mut self, event: &Event, event_significance: f32) -> Option<EpisodeId> {
+    fn apply_late_event_correction(
+        &mut self,
+        event: &Event,
+        event_significance: f32,
+    ) -> Option<EpisodeId> {
         let window = self.config.late_event_window_ns;
         if window == 0 {
             return None;
@@ -495,43 +506,45 @@ impl EpisodeDetector {
 
         {
             let episode = &mut self.completed_episodes[idx];
-        if episode.events.contains(&event.id) {
-            return Some(episode.id);
-        }
-
-        episode.episode_version = episode.episode_version.saturating_add(1);
-
-        let previous_count = episode.events.len() as f32;
-        episode.events.push(event.id);
-        let weighted_avg = (episode.significance * previous_count + event_significance)
-            / (previous_count + 1.0);
-        let max_significance = episode.significance.max(event_significance);
-        episode.significance = (max_significance * 0.7 + weighted_avg * 0.3).min(1.0);
-        episode.context = event.context.clone();
-
-        if let Some(end_ts) = episode.end_timestamp {
-            if event.timestamp >= end_ts {
-                episode.end_timestamp = Some(event.timestamp);
-                episode.end_event = Some(event.id);
+            if episode.events.contains(&event.id) {
+                return Some(episode.id);
             }
-        }
 
-        if matches!(episode.outcome, Some(EpisodeOutcome::Interrupted) | None) {
-            if let EventType::Action { outcome, .. } = &event.event_type {
-                match outcome {
-                    ActionOutcome::Success { .. }
-                    | ActionOutcome::Failure { .. }
-                    | ActionOutcome::Partial { .. } => {
-                        episode.outcome = Some(outcome_from_event.clone());
+            episode.episode_version = episode.episode_version.saturating_add(1);
+
+            let previous_count = episode.events.len() as f32;
+            episode.events.push(event.id);
+            let weighted_avg = (episode.significance * previous_count + event_significance)
+                / (previous_count + 1.0);
+            let max_significance = episode.significance.max(event_significance);
+            episode.significance = (max_significance * 0.7 + weighted_avg * 0.3).min(1.0);
+            episode.context = event.context.clone();
+
+            if let Some(end_ts) = episode.end_timestamp {
+                if event.timestamp >= end_ts {
+                    episode.end_timestamp = Some(event.timestamp);
+                    episode.end_event = Some(event.id);
+                }
+            }
+
+            if matches!(episode.outcome, Some(EpisodeOutcome::Interrupted) | None) {
+                if let EventType::Action { outcome, .. } = &event.event_type {
+                    match outcome {
+                        ActionOutcome::Success { .. }
+                        | ActionOutcome::Failure { .. }
+                        | ActionOutcome::Partial { .. } => {
+                            episode.outcome = Some(outcome_from_event.clone());
+                        },
                     }
                 }
             }
-        }
 
-        if Self::is_feedback_event(event) && episode.significance < self.config.min_significance_threshold {
-            episode.significance = self.config.min_significance_threshold;
-        }
-        tracing::info!(
+            if Self::is_feedback_event(event)
+                && episode.significance < self.config.min_significance_threshold
+            {
+                episode.significance = self.config.min_significance_threshold;
+            }
+            tracing::info!(
             "EpisodeDetector applied late correction episode_id={} event_id={} events={} significance={:.3}",
             episode.id,
             event.id,
@@ -593,7 +606,8 @@ impl EpisodeDetector {
         significance += chain_significance;
 
         // 4) Event duration/effort: check metadata for duration or use event-specific duration
-        let duration_significance = if let Some(duration_value) = event.metadata.get("duration_ns") {
+        let duration_significance = if let Some(duration_value) = event.metadata.get("duration_ns")
+        {
             // Custom duration from metadata
             let duration_ns = match duration_value {
                 MetadataValue::String(s) => s.parse::<u64>().ok(),
@@ -631,7 +645,7 @@ impl EpisodeDetector {
             match outcome {
                 ActionOutcome::Success { .. } => significance += 0.10,
                 ActionOutcome::Failure { .. } => significance += 0.12, // Failures slightly more memorable
-                _ => {}
+                _ => {},
             }
         }
 
@@ -647,7 +661,7 @@ impl EpisodeDetector {
                 // Novelty decays as we see it more: 1/(1 + log(count))
                 let novelty = 1.0 / (1.0 + (count as f32).log2());
                 novelty.max(0.0).min(1.0)
-            }
+            },
         }
     }
 
@@ -656,8 +670,12 @@ impl EpisodeDetector {
         let event_type_name = match &event.event_type {
             EventType::Action { action_name, .. } => format!("Action:{}", action_name),
             EventType::Cognitive { process_type, .. } => format!("Cognitive:{:?}", process_type),
-            EventType::Communication { message_type, .. } => format!("Communication:{:?}", message_type),
-            EventType::Observation { observation_type, .. } => format!("Observation:{}", observation_type),
+            EventType::Communication { message_type, .. } => {
+                format!("Communication:{:?}", message_type)
+            },
+            EventType::Observation {
+                observation_type, ..
+            } => format!("Observation:{}", observation_type),
             EventType::Learning { .. } => "Learning".to_string(),
         };
 
@@ -666,7 +684,7 @@ impl EpisodeDetector {
             Some(&count) => {
                 let novelty = 1.0 / (1.0 + (count as f32).log2());
                 novelty.max(0.0).min(1.0)
-            }
+            },
         }
     }
 
@@ -686,7 +704,8 @@ impl EpisodeDetector {
         // 3. Weighted average that emphasizes significant events
 
         // Weight towards higher significance (episodes become more significant, rarely less)
-        let weighted_avg = (episode.significance * episode.events.len() as f32 + event_significance)
+        let weighted_avg = (episode.significance * episode.events.len() as f32
+            + event_significance)
             / (episode.events.len() as f32 + 1.0);
 
         let max_significance = episode.significance.max(event_significance);
@@ -698,14 +717,21 @@ impl EpisodeDetector {
     /// Track an event for novelty detection
     fn track_event_for_novelty(&mut self, event: &Event) {
         // Track context hash
-        *self.seen_contexts.entry(event.context.fingerprint).or_insert(0) += 1;
+        *self
+            .seen_contexts
+            .entry(event.context.fingerprint)
+            .or_insert(0) += 1;
 
         // Track event type
         let event_type_name = match &event.event_type {
             EventType::Action { action_name, .. } => format!("Action:{}", action_name),
             EventType::Cognitive { process_type, .. } => format!("Cognitive:{:?}", process_type),
-            EventType::Communication { message_type, .. } => format!("Communication:{:?}", message_type),
-            EventType::Observation { observation_type, .. } => format!("Observation:{}", observation_type),
+            EventType::Communication { message_type, .. } => {
+                format!("Communication:{:?}", message_type)
+            },
+            EventType::Observation {
+                observation_type, ..
+            } => format!("Observation:{}", observation_type),
             EventType::Learning { .. } => "Learning".to_string(),
         };
         *self.seen_event_types.entry(event_type_name).or_insert(0) += 1;
@@ -727,8 +753,8 @@ impl EpisodeDetector {
         // Expected outcome based on episode significance and length
         // High significance + many events => expect success
         // Low significance + few events => expect partial/failure
-        let episode_quality = (episode.significance * 0.7)
-            + ((episode.events.len() as f32 / 10.0).min(1.0) * 0.3);
+        let episode_quality =
+            (episode.significance * 0.7) + ((episode.events.len() as f32 / 10.0).min(1.0) * 0.3);
         let expected_outcome = episode_quality.min(0.9); // Cap expectation at 0.9
 
         // Prediction error is the absolute difference
@@ -755,9 +781,8 @@ impl EpisodeDetector {
         let goal_relevance = significance;
 
         // Weighted combination: emphasize surprise and outcome importance
-        let salience = (prediction_error * 0.4)
-            + (outcome_importance * 0.4)
-            + (goal_relevance * 0.2);
+        let salience =
+            (prediction_error * 0.4) + (outcome_importance * 0.4) + (goal_relevance * 0.2);
 
         salience.min(1.0)
     }
@@ -779,7 +804,11 @@ impl EpisodeDetector {
     }
 
     /// Consolidate active episode for an agent
-    fn consolidate_agent_episode(&mut self, agent_id: AgentId, current_time: Timestamp) -> Option<EpisodeId> {
+    fn consolidate_agent_episode(
+        &mut self,
+        agent_id: AgentId,
+        current_time: Timestamp,
+    ) -> Option<EpisodeId> {
         self.last_consolidation.insert(agent_id, current_time);
 
         if let Some(episode) = self.active_episodes.get(&agent_id) {
@@ -833,11 +862,11 @@ impl EpisodeDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_db_events::core::{EventType, CognitiveType};
-    use agent_db_events::{
-        EnvironmentState, TemporalContext, ResourceState, ComputationalResources, Goal,
-    };
     use agent_db_core::types::current_timestamp;
+    use agent_db_events::core::{CognitiveType, EventType};
+    use agent_db_events::{
+        ComputationalResources, EnvironmentState, Goal, ResourceState, TemporalContext,
+    };
 
     fn create_test_event(agent_id: AgentId, event_type: EventType) -> Event {
         Event {
@@ -954,7 +983,8 @@ mod tests {
         start_event.context.active_goals = vec![]; // No goals initially
 
         detector.process_event(&start_event);
-        let initial_significance = detector.get_active_episode(1)
+        let initial_significance = detector
+            .get_active_episode(1)
             .map(|ep| ep.significance)
             .unwrap_or(0.0);
 
@@ -989,14 +1019,18 @@ mod tests {
         ];
 
         detector.process_event(&goal_event);
-        let updated_significance = detector.get_active_episode(1)
+        let updated_significance = detector
+            .get_active_episode(1)
             .map(|ep| ep.significance)
             .unwrap_or(0.0);
 
         // Significance should increase with goal-relevant events
-        assert!(updated_significance > initial_significance,
+        assert!(
+            updated_significance > initial_significance,
             "Significance should increase from {:.3} to {:.3} when goals are present",
-            initial_significance, updated_significance);
+            initial_significance,
+            updated_significance
+        );
     }
 
     #[test]
@@ -1017,14 +1051,19 @@ mod tests {
                 duration_ns: 1000,
             },
         );
-        event.metadata.insert("significance".to_string(), MetadataValue::String("0.95".to_string()));
+        event.metadata.insert(
+            "significance".to_string(),
+            MetadataValue::String("0.95".to_string()),
+        );
 
         let significance = detector.calculate_significance(&event);
 
         // Should use the override value
-        assert_eq!(significance, 0.95,
+        assert_eq!(
+            significance, 0.95,
             "Manual override should set significance to 0.95, got {:.3}",
-            significance);
+            significance
+        );
     }
 
     #[test]
@@ -1045,14 +1084,19 @@ mod tests {
                 duration_ns: 1000,
             },
         );
-        event.metadata.insert("significance".to_string(), MetadataValue::String("1.5".to_string()));
+        event.metadata.insert(
+            "significance".to_string(),
+            MetadataValue::String("1.5".to_string()),
+        );
 
         let significance = detector.calculate_significance(&event);
 
         // Should be clamped to 1.0
-        assert_eq!(significance, 1.0,
+        assert_eq!(
+            significance, 1.0,
             "Override should be clamped to 1.0, got {:.3}",
-            significance);
+            significance
+        );
     }
 
     #[test]
@@ -1093,9 +1137,12 @@ mod tests {
         let sig_with_chain = detector.calculate_significance(&event_with_chain);
 
         // Longer causal chain should increase significance
-        assert!(sig_with_chain > sig_no_chain,
+        assert!(
+            sig_with_chain > sig_no_chain,
             "Longer causality chain should increase significance from {:.3} to {:.3}",
-            sig_no_chain, sig_with_chain);
+            sig_no_chain,
+            sig_with_chain
+        );
     }
 
     #[test]
@@ -1129,9 +1176,12 @@ mod tests {
         let sig_familiar = detector.calculate_significance(&event1);
 
         // Novel events should have higher significance than familiar ones
-        assert!(sig_novel > sig_familiar,
+        assert!(
+            sig_novel > sig_familiar,
             "Novel event significance ({:.3}) should be higher than familiar ({:.3})",
-            sig_novel, sig_familiar);
+            sig_novel,
+            sig_familiar
+        );
     }
 
     #[test]
@@ -1143,7 +1193,10 @@ mod tests {
 
         // First time seeing this context (brand new)
         let novelty_first = detector.calculate_context_novelty(context_hash);
-        assert_eq!(novelty_first, 1.0, "Brand new context should have novelty 1.0");
+        assert_eq!(
+            novelty_first, 1.0,
+            "Brand new context should have novelty 1.0"
+        );
 
         // Track it a few times to get past the log2 edge case
         for _ in 0..5 {
@@ -1158,12 +1211,18 @@ mod tests {
         let novelty_familiar = detector.calculate_context_novelty(context_hash);
 
         // Novelty should decay with repeated exposure
-        assert!(novelty_first > novelty_second,
+        assert!(
+            novelty_first > novelty_second,
             "Novelty should decrease after first exposure: {:.3} -> {:.3}",
-            novelty_first, novelty_second);
-        assert!(novelty_second > novelty_familiar,
+            novelty_first,
+            novelty_second
+        );
+        assert!(
+            novelty_second > novelty_familiar,
             "Novelty should continue decreasing: {:.3} -> {:.3}",
-            novelty_second, novelty_familiar);
+            novelty_second,
+            novelty_familiar
+        );
     }
 
     #[test]
@@ -1198,22 +1257,23 @@ mod tests {
             },
         );
         goal_event.id = 2;
-        goal_event.context.active_goals = vec![
-            Goal {
-                id: 1,
-                description: "goal1".to_string(),
-                priority: 1.0,
-                deadline: None,
-                progress: 0.0,
-                subgoals: vec![],
-            },
-        ];
+        goal_event.context.active_goals = vec![Goal {
+            id: 1,
+            description: "goal1".to_string(),
+            priority: 1.0,
+            deadline: None,
+            progress: 0.0,
+            subgoals: vec![],
+        }];
         detector.process_event(&goal_event);
         let sig_after_goal = detector.get_active_episode(1).unwrap().significance;
 
         // Significance should have increased
-        assert!(sig_after_goal > sig_after_start,
+        assert!(
+            sig_after_goal > sig_after_start,
             "Episode significance should grow from {:.3} to {:.3} as important events are added",
-            sig_after_start, sig_after_goal);
+            sig_after_start,
+            sig_after_goal
+        );
     }
 }

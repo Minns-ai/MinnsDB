@@ -1,12 +1,11 @@
 //! Basic event pipeline example
-//! 
+//!
 //! Demonstrates creating events, validating them, and buffering them
 //! to showcase the core functionality of the agentic database.
 
 use agent_db_events::{
-    Event, EventType, ActionOutcome, EventContext, EnvironmentState, Goal,
-    ResourceState, ComputationalResources, TemporalContext, BasicEventValidator,
-    EventBuffer
+    ActionOutcome, BasicEventValidator, ComputationalResources, EnvironmentState, Event,
+    EventBuffer, EventContext, EventType, Goal, ResourceState, TemporalContext,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -15,28 +14,28 @@ use std::time::Instant;
 fn main() {
     println!("🚀 Agent Database - Basic Pipeline Example");
     println!("==========================================");
-    
+
     // Create validator
     let validator = BasicEventValidator::new();
     println!("✅ Created event validator");
-    
+
     // Create event buffer
     let mut buffer = EventBuffer::new(1000);
     println!("✅ Created event buffer with capacity 1000");
-    
+
     // Performance tracking
     let start_time = Instant::now();
     let target_events = 10_000;
-    
+
     println!("\n📊 Creating and processing {} events...", target_events);
-    
+
     let mut successful_events = 0;
     let mut validation_errors = 0;
-    
+
     for i in 0..target_events {
         // Create a test event
         let event = create_test_event(i as u64);
-        
+
         // Validate the event
         match validator.validate_event(&event) {
             Ok(()) => {
@@ -45,50 +44,50 @@ fn main() {
                     Ok(()) => successful_events += 1,
                     Err(e) => println!("Buffer error: {}", e),
                 }
-            }
+            },
             Err(e) => {
                 validation_errors += 1;
                 if validation_errors <= 5 {
                     println!("Validation error: {}", e);
                 }
-            }
+            },
         }
-        
+
         // Progress indicator
         if i > 0 && i % 1000 == 0 {
             println!("  Processed: {} events", i);
         }
     }
-    
+
     let duration = start_time.elapsed();
     let events_per_second = successful_events as f64 / duration.as_secs_f64();
-    
+
     println!("\n📈 Performance Results:");
     println!("  Total events processed: {}", target_events);
     println!("  Successful events: {}", successful_events);
     println!("  Validation errors: {}", validation_errors);
     println!("  Total time: {:.2?}", duration);
     println!("  Events per second: {:.0}", events_per_second);
-    
+
     // Display buffer statistics
     let stats = buffer.stats();
     println!("\n📊 Buffer Statistics:");
     println!("  Events in buffer: {}", buffer.len());
     println!("  Total added: {}", stats.total_added);
     println!("  Total dropped: {}", stats.total_dropped);
-    
+
     if events_per_second > 10_000.0 {
         println!("\n🎉 SUCCESS: Achieved target of 10K+ events/second!");
     } else {
         println!("\n⚠️  Target not met, but basic pipeline working!");
     }
-    
+
     println!("\n🔍 Testing context fingerprinting...");
     let event1 = create_test_event(1);
     let event2 = create_test_event(2);
     let same_context = event1.context.fingerprint == event2.context.fingerprint;
     println!("  Context fingerprint working: {}", same_context);
-    
+
     println!("\n✅ Basic pipeline example completed successfully!");
 }
 
@@ -110,7 +109,7 @@ fn create_test_event(sequence: u64) -> Event {
                 result: json!({
                     "processed": true,
                     "sequence": sequence
-                })
+                }),
             },
             duration_ns: 1_000_000 + (sequence * 1000), // Varying duration
         },

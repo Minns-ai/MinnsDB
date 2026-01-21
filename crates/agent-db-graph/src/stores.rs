@@ -8,10 +8,12 @@ use agent_db_storage::{RedbBackend, StorageResult};
 use std::sync::Arc;
 
 use crate::episodes::Episode;
-use crate::memory::{Memory, MemoryFormation, MemoryFormationConfig, MemoryId, MemoryStats, MemoryUpsert, MemoryType};
+use crate::memory::{
+    Memory, MemoryFormation, MemoryFormationConfig, MemoryId, MemoryStats, MemoryType, MemoryUpsert,
+};
 use crate::strategies::{
-    Strategy, StrategyExtractor, StrategyExtractionConfig, StrategyId, StrategyStats,
-    StrategySimilarityQuery, StrategyUpsert,
+    Strategy, StrategyExtractionConfig, StrategyExtractor, StrategyId, StrategySimilarityQuery,
+    StrategyStats, StrategyUpsert,
 };
 
 pub trait MemoryStore: Send + Sync {
@@ -54,7 +56,8 @@ impl MemoryStore for InMemoryMemoryStore {
     }
 
     fn get_agent_memories(&self, agent_id: AgentId, limit: usize) -> Vec<Memory> {
-        self.inner.retrieve_by_agent(agent_id, limit)
+        self.inner
+            .retrieve_by_agent(agent_id, limit)
             .into_iter()
             .cloned()
             .collect()
@@ -125,7 +128,11 @@ impl RedbMemoryStore {
     /// * `backend` - Redb backend for persistence
     /// * `config` - Memory formation configuration
     /// * `max_cache_size` - Maximum number of memories to keep in LRU cache
-    pub fn new(backend: Arc<RedbBackend>, config: MemoryFormationConfig, max_cache_size: usize) -> Self {
+    pub fn new(
+        backend: Arc<RedbBackend>,
+        config: MemoryFormationConfig,
+        max_cache_size: usize,
+    ) -> Self {
         Self {
             backend,
             config,
@@ -138,7 +145,8 @@ impl RedbMemoryStore {
     /// Initialize next_memory_id by scanning existing memories
     pub fn initialize(&mut self) -> StorageResult<()> {
         // Scan all memory IDs to find the highest
-        let memories: Vec<(Vec<u8>, Memory)> = self.backend.scan_prefix("memory_records", vec![])?;
+        let memories: Vec<(Vec<u8>, Memory)> =
+            self.backend.scan_prefix("memory_records", vec![])?;
 
         for (_, memory) in memories {
             if memory.id >= self.next_memory_id {
@@ -146,7 +154,10 @@ impl RedbMemoryStore {
             }
         }
 
-        tracing::info!("Initialized RedbMemoryStore with next_memory_id={}", self.next_memory_id);
+        tracing::info!(
+            "Initialized RedbMemoryStore with next_memory_id={}",
+            self.next_memory_id
+        );
         Ok(())
     }
 
@@ -154,8 +165,11 @@ impl RedbMemoryStore {
     fn evict_if_needed(&mut self) {
         if self.memory_cache.len() >= self.max_cache_size {
             // Find LRU entry
-            if let Some((&lru_id, _)) = self.memory_cache.iter()
-                .min_by_key(|(_, entry)| entry.last_accessed) {
+            if let Some((&lru_id, _)) = self
+                .memory_cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_accessed)
+            {
                 self.memory_cache.remove(&lru_id);
                 tracing::debug!("Evicted memory {} from cache (LRU)", lru_id);
             }
@@ -171,42 +185,48 @@ impl RedbMemoryStore {
         }
 
         // Cache miss - load from redb
-        match self.backend.get::<_, Memory>("memory_records", memory_id.to_be_bytes().to_vec()) {
+        match self
+            .backend
+            .get::<_, Memory>("memory_records", memory_id.to_be_bytes().to_vec())
+        {
             Ok(Some(memory)) => {
                 // Add to cache
                 self.evict_if_needed();
-                self.memory_cache.insert(memory_id, MemoryCacheEntry {
-                    memory: memory.clone(),
-                    last_accessed: std::time::Instant::now(),
-                });
+                self.memory_cache.insert(
+                    memory_id,
+                    MemoryCacheEntry {
+                        memory: memory.clone(),
+                        last_accessed: std::time::Instant::now(),
+                    },
+                );
                 tracing::debug!("Loaded memory {} from redb into cache", memory_id);
                 Some(memory)
-            }
+            },
             Ok(None) => None,
             Err(e) => {
                 tracing::error!("Failed to load memory {} from redb: {:?}", memory_id, e);
                 None
-            }
+            },
         }
     }
 
     /// Add memory to cache
     fn cache_memory(&mut self, memory: Memory) {
         self.evict_if_needed();
-        self.memory_cache.insert(memory.id, MemoryCacheEntry {
-            memory,
-            last_accessed: std::time::Instant::now(),
-        });
+        self.memory_cache.insert(
+            memory.id,
+            MemoryCacheEntry {
+                memory,
+                last_accessed: std::time::Instant::now(),
+            },
+        );
     }
 
     /// Persist a memory to redb
     fn persist_memory(&self, memory: &Memory) -> StorageResult<()> {
         // Store main record
-        self.backend.put(
-            "memory_records",
-            memory.id.to_be_bytes().to_vec(),
-            memory,
-        )?;
+        self.backend
+            .put("memory_records", memory.id.to_be_bytes().to_vec(), memory)?;
 
         // Index by context hash: (context_hash, memory_id) → empty
         let mut context_key = Vec::with_capacity(16);
@@ -227,10 +247,8 @@ impl RedbMemoryStore {
     #[allow(dead_code)]
     fn delete_memory(&self, memory: &Memory) -> StorageResult<()> {
         // Delete main record
-        self.backend.delete(
-            "memory_records",
-            memory.id.to_be_bytes().to_vec(),
-        )?;
+        self.backend
+            .delete("memory_records", memory.id.to_be_bytes().to_vec())?;
 
         // Delete context index
         let mut context_key = Vec::with_capacity(16);
@@ -250,8 +268,8 @@ impl RedbMemoryStore {
 
 impl MemoryStore for RedbMemoryStore {
     fn store_episode(&mut self, episode: &Episode) -> Option<MemoryUpsert> {
-        use agent_db_core::types::current_timestamp;
         use crate::episodes::EpisodeOutcome;
+        use agent_db_core::types::current_timestamp;
 
         // Check significance threshold
         if episode.significance < self.config.min_significance {
@@ -270,15 +288,13 @@ impl MemoryStore for RedbMemoryStore {
         // Determine memory type based on outcome
         let memory_type = match episode.outcome {
             Some(EpisodeOutcome::Failure) => {
-                let failure_pattern = format!(
-                    "Failed episode {} - avoid similar context",
-                    episode.id
-                );
+                let failure_pattern =
+                    format!("Failed episode {} - avoid similar context", episode.id);
                 MemoryType::Negative {
                     failure_severity: episode.significance,
                     failure_pattern,
                 }
-            }
+            },
             _ => MemoryType::Episodic {
                 significance: episode.significance,
             },
@@ -286,7 +302,8 @@ impl MemoryStore for RedbMemoryStore {
 
         // Create memory
         let current_time = current_timestamp();
-        let prediction_weighted_strength = self.config.initial_strength * (1.0 + episode.prediction_error);
+        let prediction_weighted_strength =
+            self.config.initial_strength * (1.0 + episode.prediction_error);
 
         let mut context = episode.context.clone();
         if context.fingerprint == 0 {
@@ -305,7 +322,10 @@ impl MemoryStore for RedbMemoryStore {
             formed_at: current_time,
             last_accessed: current_time,
             access_count: 0,
-            outcome: episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted),
+            outcome: episode
+                .outcome
+                .clone()
+                .unwrap_or(EpisodeOutcome::Interrupted),
             memory_type,
             metadata: std::collections::HashMap::new(),
         };
@@ -333,25 +353,29 @@ impl MemoryStore for RedbMemoryStore {
         }
 
         // Load from redb
-        match self.backend.get::<_, Memory>("memory_records", memory_id.to_be_bytes().to_vec()) {
+        match self
+            .backend
+            .get::<_, Memory>("memory_records", memory_id.to_be_bytes().to_vec())
+        {
             Ok(memory) => memory,
             Err(e) => {
                 tracing::error!("Failed to load memory {} from storage: {:?}", memory_id, e);
                 None
-            }
+            },
         }
     }
 
     fn get_agent_memories(&self, agent_id: AgentId, limit: usize) -> Vec<Memory> {
         // Scan agent index
         let agent_prefix = agent_id.to_be_bytes().to_vec();
-        let results: Vec<(Vec<u8>, ())> = match self.backend.scan_prefix("mem_by_bucket", agent_prefix) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Failed to scan agent memories: {:?}", e);
-                return Vec::new();
-            }
-        };
+        let results: Vec<(Vec<u8>, ())> =
+            match self.backend.scan_prefix("mem_by_bucket", agent_prefix) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("Failed to scan agent memories: {:?}", e);
+                    return Vec::new();
+                },
+            };
 
         // Extract memory IDs from keys
         let mut memories = Vec::new();
@@ -379,12 +403,15 @@ impl MemoryStore for RedbMemoryStore {
         };
 
         let context_prefix = context_hash.to_be_bytes().to_vec();
-        let results: Vec<(Vec<u8>, ())> = match self.backend.scan_prefix("mem_by_context_hash", context_prefix) {
+        let results: Vec<(Vec<u8>, ())> = match self
+            .backend
+            .scan_prefix("mem_by_context_hash", context_prefix)
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to scan context memories: {:?}", e);
                 return Vec::new();
-            }
+            },
         };
 
         // Extract memory IDs and load memories
@@ -444,11 +471,10 @@ impl MemoryStore for RedbMemoryStore {
 
         // Update strength based on outcome
         if success {
-            memory.strength = (memory.strength + self.config.access_strength_boost)
-                .min(self.config.max_strength);
+            memory.strength =
+                (memory.strength + self.config.access_strength_boost).min(self.config.max_strength);
         } else {
-            memory.strength = (memory.strength - self.config.access_strength_boost * 0.5)
-                .max(0.0);
+            memory.strength = (memory.strength - self.config.access_strength_boost * 0.5).max(0.0);
         }
 
         memory.access_count += 1;
@@ -456,7 +482,11 @@ impl MemoryStore for RedbMemoryStore {
 
         // Persist updated memory
         if let Err(e) = self.persist_memory(&memory) {
-            tracing::error!("Failed to persist memory {} after outcome: {:?}", memory_id, e);
+            tracing::error!(
+                "Failed to persist memory {} after outcome: {:?}",
+                memory_id,
+                e
+            );
             return false;
         }
 
@@ -468,7 +498,10 @@ impl MemoryStore for RedbMemoryStore {
 
     fn get_stats(&self) -> MemoryStats {
         // Count total memories in redb (slow but accurate)
-        let total_memories = match self.backend.scan_prefix::<Vec<u8>, Memory>("memory_records", vec![]) {
+        let total_memories = match self
+            .backend
+            .scan_prefix::<Vec<u8>, Memory>("memory_records", vec![])
+        {
             Ok(memories) => memories.len(),
             Err(_) => 0,
         };
@@ -476,13 +509,21 @@ impl MemoryStore for RedbMemoryStore {
         // Compute stats from cache (approximate)
         let cached_memories: Vec<_> = self.memory_cache.values().collect();
         let avg_strength = if !cached_memories.is_empty() {
-            cached_memories.iter().map(|e| e.memory.strength).sum::<f32>() / cached_memories.len() as f32
+            cached_memories
+                .iter()
+                .map(|e| e.memory.strength)
+                .sum::<f32>()
+                / cached_memories.len() as f32
         } else {
             0.0
         };
 
         let avg_access_count = if !cached_memories.is_empty() {
-            cached_memories.iter().map(|e| e.memory.access_count).sum::<u32>() / cached_memories.len() as u32
+            cached_memories
+                .iter()
+                .map(|e| e.memory.access_count)
+                .sum::<u32>()
+                / cached_memories.len() as u32
         } else {
             0
         };
@@ -526,12 +567,20 @@ impl MemoryStore for RedbMemoryStore {
 }
 
 pub trait StrategyStore: Send + Sync {
-    fn store_episode(&mut self, episode: &Episode, events: &[agent_db_events::core::Event]) -> crate::GraphResult<Option<StrategyUpsert>>;
+    fn store_episode(
+        &mut self,
+        episode: &Episode,
+        events: &[agent_db_events::core::Event],
+    ) -> crate::GraphResult<Option<StrategyUpsert>>;
     fn get_strategy(&self, strategy_id: StrategyId) -> Option<Strategy>;
     fn get_agent_strategies(&self, agent_id: AgentId, limit: usize) -> Vec<Strategy>;
     fn get_strategies_for_context(&self, context_hash: ContextHash, limit: usize) -> Vec<Strategy>;
     fn find_similar_strategies(&self, query: StrategySimilarityQuery) -> Vec<(Strategy, f32)>;
-    fn update_strategy_outcome(&mut self, strategy_id: StrategyId, success: bool) -> crate::GraphResult<()>;
+    fn update_strategy_outcome(
+        &mut self,
+        strategy_id: StrategyId,
+        success: bool,
+    ) -> crate::GraphResult<()>;
     fn get_stats(&self) -> StrategyStats;
 }
 
@@ -580,7 +629,11 @@ impl StrategyStore for InMemoryStrategyStore {
         self.inner.find_similar_strategies(query)
     }
 
-    fn update_strategy_outcome(&mut self, strategy_id: StrategyId, success: bool) -> crate::GraphResult<()> {
+    fn update_strategy_outcome(
+        &mut self,
+        strategy_id: StrategyId,
+        success: bool,
+    ) -> crate::GraphResult<()> {
         self.inner.update_strategy_outcome(strategy_id, success)
     }
 
@@ -628,7 +681,11 @@ impl RedbStrategyStore {
     /// * `backend` - Redb backend for persistence
     /// * `config` - Strategy extraction configuration
     /// * `max_cache_size` - Maximum number of strategies to keep in LRU cache
-    pub fn new(backend: Arc<RedbBackend>, config: StrategyExtractionConfig, max_cache_size: usize) -> Self {
+    pub fn new(
+        backend: Arc<RedbBackend>,
+        config: StrategyExtractionConfig,
+        max_cache_size: usize,
+    ) -> Self {
         Self {
             backend,
             config: config.clone(),
@@ -642,7 +699,8 @@ impl RedbStrategyStore {
     /// Initialize next_strategy_id by scanning existing strategies
     pub fn initialize(&mut self) -> StorageResult<()> {
         // Scan all strategy IDs to find the highest
-        let strategies: Vec<(Vec<u8>, Strategy)> = self.backend.scan_prefix("strategy_records", vec![])?;
+        let strategies: Vec<(Vec<u8>, Strategy)> =
+            self.backend.scan_prefix("strategy_records", vec![])?;
 
         for (_, strategy) in strategies {
             if strategy.id >= self.next_strategy_id {
@@ -650,7 +708,10 @@ impl RedbStrategyStore {
             }
         }
 
-        tracing::info!("Initialized RedbStrategyStore with next_strategy_id={}", self.next_strategy_id);
+        tracing::info!(
+            "Initialized RedbStrategyStore with next_strategy_id={}",
+            self.next_strategy_id
+        );
         Ok(())
     }
 
@@ -658,8 +719,11 @@ impl RedbStrategyStore {
     fn evict_if_needed(&mut self) {
         if self.strategy_cache.len() >= self.max_cache_size {
             // Find LRU entry
-            if let Some((&lru_id, _)) = self.strategy_cache.iter()
-                .min_by_key(|(_, entry)| entry.last_accessed) {
+            if let Some((&lru_id, _)) = self
+                .strategy_cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_accessed)
+            {
                 self.strategy_cache.remove(&lru_id);
                 tracing::debug!("Evicted strategy {} from cache (LRU)", lru_id);
             }
@@ -675,32 +739,41 @@ impl RedbStrategyStore {
         }
 
         // Cache miss - load from redb
-        match self.backend.get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes().to_vec()) {
+        match self
+            .backend
+            .get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes().to_vec())
+        {
             Ok(Some(strategy)) => {
                 // Add to cache
                 self.evict_if_needed();
-                self.strategy_cache.insert(strategy_id, StrategyCacheEntry {
-                    strategy: strategy.clone(),
-                    last_accessed: std::time::Instant::now(),
-                });
+                self.strategy_cache.insert(
+                    strategy_id,
+                    StrategyCacheEntry {
+                        strategy: strategy.clone(),
+                        last_accessed: std::time::Instant::now(),
+                    },
+                );
                 tracing::debug!("Loaded strategy {} from redb into cache", strategy_id);
                 Some(strategy)
-            }
+            },
             Ok(None) => None,
             Err(e) => {
                 tracing::error!("Failed to load strategy {} from redb: {:?}", strategy_id, e);
                 None
-            }
+            },
         }
     }
 
     /// Add strategy to cache
     fn cache_strategy(&mut self, strategy: Strategy) {
         self.evict_if_needed();
-        self.strategy_cache.insert(strategy.id, StrategyCacheEntry {
-            strategy,
-            last_accessed: std::time::Instant::now(),
-        });
+        self.strategy_cache.insert(
+            strategy.id,
+            StrategyCacheEntry {
+                strategy,
+                last_accessed: std::time::Instant::now(),
+            },
+        );
     }
 
     /// Persist a strategy to redb
@@ -729,14 +802,19 @@ impl RedbStrategyStore {
         let mut signature_key = Vec::with_capacity(16);
         signature_key.extend_from_slice(&signature_hash.to_be_bytes());
         signature_key.extend_from_slice(&strategy.id.to_be_bytes());
-        self.backend.put("strategy_by_signature", signature_key, &())?;
+        self.backend
+            .put("strategy_by_signature", signature_key, &())?;
 
         // Index by agent: using strategy_by_bucket with agent_id as first key
         let mut agent_key = Vec::with_capacity(16);
         agent_key.extend_from_slice(&strategy.agent_id.to_be_bytes());
         agent_key.extend_from_slice(&strategy.id.to_be_bytes());
         // Reuse strategy_feature_postings for agent index (optimized reuse of tables)
-        self.backend.put("strategy_feature_postings", agent_key, &strategy.quality_score)?;
+        self.backend.put(
+            "strategy_feature_postings",
+            agent_key,
+            &strategy.quality_score,
+        )?;
 
         Ok(())
     }
@@ -745,10 +823,8 @@ impl RedbStrategyStore {
     #[allow(dead_code)]
     fn delete_strategy(&self, strategy: &Strategy) -> StorageResult<()> {
         // Delete main record
-        self.backend.delete(
-            "strategy_records",
-            strategy.id.to_be_bytes().to_vec(),
-        )?;
+        self.backend
+            .delete("strategy_records", strategy.id.to_be_bytes().to_vec())?;
 
         // Delete bucket index
         let mut bucket_key = Vec::with_capacity(16);
@@ -767,13 +843,15 @@ impl RedbStrategyStore {
         let mut signature_key = Vec::with_capacity(16);
         signature_key.extend_from_slice(&signature_hash.to_be_bytes());
         signature_key.extend_from_slice(&strategy.id.to_be_bytes());
-        self.backend.delete("strategy_by_signature", signature_key)?;
+        self.backend
+            .delete("strategy_by_signature", signature_key)?;
 
         // Delete agent index
         let mut agent_key = Vec::with_capacity(16);
         agent_key.extend_from_slice(&strategy.agent_id.to_be_bytes());
         agent_key.extend_from_slice(&strategy.id.to_be_bytes());
-        self.backend.delete("strategy_feature_postings", agent_key)?;
+        self.backend
+            .delete("strategy_feature_postings", agent_key)?;
 
         Ok(())
     }
@@ -786,7 +864,9 @@ impl StrategyStore for RedbStrategyStore {
         events: &[agent_db_events::core::Event],
     ) -> crate::GraphResult<Option<StrategyUpsert>> {
         // Extract strategy using extractor (stateless)
-        let upsert = self.strategy_extractor.extract_from_episode(episode, events)?;
+        let upsert = self
+            .strategy_extractor
+            .extract_from_episode(episode, events)?;
 
         // Persist to redb if a strategy was extracted
         if let Some(ref upsert_result) = upsert {
@@ -811,25 +891,35 @@ impl StrategyStore for RedbStrategyStore {
         }
 
         // Fall back to persistent storage
-        match self.backend.get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes().to_vec()) {
+        match self
+            .backend
+            .get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes().to_vec())
+        {
             Ok(Some(strategy)) => Some(strategy),
             Ok(None) => None,
             Err(e) => {
-                tracing::error!("Failed to load strategy {} from storage: {:?}", strategy_id, e);
+                tracing::error!(
+                    "Failed to load strategy {} from storage: {:?}",
+                    strategy_id,
+                    e
+                );
                 None
-            }
+            },
         }
     }
 
     fn get_agent_strategies(&self, agent_id: AgentId, limit: usize) -> Vec<Strategy> {
         // Scan agent index (using strategy_feature_postings table)
         let agent_prefix = agent_id.to_be_bytes().to_vec();
-        let results: Vec<(Vec<u8>, f32)> = match self.backend.scan_prefix("strategy_feature_postings", agent_prefix) {
+        let results: Vec<(Vec<u8>, f32)> = match self
+            .backend
+            .scan_prefix("strategy_feature_postings", agent_prefix)
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to scan agent strategies: {:?}", e);
                 return Vec::new();
-            }
+            },
         };
 
         // Extract strategy IDs from keys
@@ -852,12 +942,15 @@ impl StrategyStore for RedbStrategyStore {
     fn get_strategies_for_context(&self, context_hash: ContextHash, limit: usize) -> Vec<Strategy> {
         // Scan goal bucket index (using context_hash as proxy)
         let bucket_prefix = context_hash.to_be_bytes().to_vec();
-        let results: Vec<(Vec<u8>, ())> = match self.backend.scan_prefix("strategy_by_bucket", bucket_prefix) {
+        let results: Vec<(Vec<u8>, ())> = match self
+            .backend
+            .scan_prefix("strategy_by_bucket", bucket_prefix)
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to scan context strategies: {:?}", e);
                 return Vec::new();
-            }
+            },
         };
 
         // Extract strategy IDs and load strategies
@@ -882,13 +975,20 @@ impl StrategyStore for RedbStrategyStore {
         self.strategy_extractor.find_similar_strategies(query)
     }
 
-    fn update_strategy_outcome(&mut self, strategy_id: StrategyId, success: bool) -> crate::GraphResult<()> {
+    fn update_strategy_outcome(
+        &mut self,
+        strategy_id: StrategyId,
+        success: bool,
+    ) -> crate::GraphResult<()> {
         // Load strategy
         let mut strategy = match self.load_strategy(strategy_id) {
             Some(s) => s,
-            None => return Err(crate::GraphError::InvalidOperation(
-                format!("Strategy {} not found", strategy_id)
-            )),
+            None => {
+                return Err(crate::GraphError::InvalidOperation(format!(
+                    "Strategy {} not found",
+                    strategy_id
+                )))
+            },
         };
 
         // Update outcome
@@ -906,10 +1006,15 @@ impl StrategyStore for RedbStrategyStore {
 
         // Persist updated strategy
         if let Err(e) = self.persist_strategy(&strategy) {
-            tracing::error!("Failed to persist strategy {} after outcome: {:?}", strategy_id, e);
-            return Err(crate::GraphError::OperationError(
-                format!("Failed to persist strategy: {:?}", e)
-            ));
+            tracing::error!(
+                "Failed to persist strategy {} after outcome: {:?}",
+                strategy_id,
+                e
+            );
+            return Err(crate::GraphError::OperationError(format!(
+                "Failed to persist strategy: {:?}",
+                e
+            )));
         }
 
         // Update cache
@@ -920,18 +1025,22 @@ impl StrategyStore for RedbStrategyStore {
 
     fn get_stats(&self) -> StrategyStats {
         // Count total strategies in redb (slow but accurate)
-        let strategies: Vec<(Vec<u8>, Strategy)> = match self.backend.scan_prefix("strategy_records", vec![]) {
-            Ok(s) => s,
-            Err(_) => return StrategyStats {
-                total_strategies: 0,
-                high_quality_strategies: 0,
-                agents_with_strategies: 0,
-                average_quality: 0.0,
-            },
-        };
+        let strategies: Vec<(Vec<u8>, Strategy)> =
+            match self.backend.scan_prefix("strategy_records", vec![]) {
+                Ok(s) => s,
+                Err(_) => {
+                    return StrategyStats {
+                        total_strategies: 0,
+                        high_quality_strategies: 0,
+                        agents_with_strategies: 0,
+                        average_quality: 0.0,
+                    }
+                },
+            };
 
         let total = strategies.len();
-        let high_quality = strategies.iter()
+        let high_quality = strategies
+            .iter()
             .filter(|(_, s)| s.quality_score > 0.8)
             .count();
 

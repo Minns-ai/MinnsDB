@@ -6,7 +6,9 @@
 // strength tracking, and time-based decay.
 
 use crate::episodes::{Episode, EpisodeId, EpisodeOutcome};
-use agent_db_core::types::{AgentId, EventId, Timestamp, ContextHash, SessionId, current_timestamp};
+use agent_db_core::types::{
+    current_timestamp, AgentId, ContextHash, EventId, SessionId, Timestamp,
+};
 use agent_db_core::utils::cosine_similarity;
 use agent_db_events::core::EventContext;
 use std::collections::{HashMap, HashSet};
@@ -217,19 +219,19 @@ impl MemoryFormation {
                     failure_severity: episode.significance,
                     failure_pattern,
                 }
-            }
+            },
             _ => {
                 // Success, Partial, or Interrupted create episodic memories
                 MemoryType::Episodic {
                     significance: episode.significance,
                 }
-            }
+            },
         };
 
         // Phase 1 Feature A: Apply prediction error weighting to memory strength
         // Surprising outcomes (high prediction error) get stronger initial strength
-        let prediction_weighted_strength = self.config.initial_strength
-            * (1.0 + episode.prediction_error);
+        let prediction_weighted_strength =
+            self.config.initial_strength * (1.0 + episode.prediction_error);
 
         // Use the latest episode context snapshot for retrieval
         let mut context = episode.context.clone();
@@ -250,7 +252,10 @@ impl MemoryFormation {
             formed_at: current_time,
             last_accessed: current_time,
             access_count: 0,
-            outcome: episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted),
+            outcome: episode
+                .outcome
+                .clone()
+                .unwrap_or(EpisodeOutcome::Interrupted),
             memory_type,
             metadata: HashMap::new(),
         };
@@ -303,7 +308,10 @@ impl MemoryFormation {
 
         memory.context = context;
         memory.key_events = episode.events.clone();
-        memory.outcome = episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted);
+        memory.outcome = episode
+            .outcome
+            .clone()
+            .unwrap_or(EpisodeOutcome::Interrupted);
         memory.memory_type = match episode.outcome {
             Some(EpisodeOutcome::Failure) => MemoryType::Negative {
                 failure_severity: episode.significance,
@@ -317,8 +325,8 @@ impl MemoryFormation {
             },
         };
 
-        let prediction_weighted_strength = self.config.initial_strength
-            * (1.0 + episode.prediction_error);
+        let prediction_weighted_strength =
+            self.config.initial_strength * (1.0 + episode.prediction_error);
         memory.strength = memory
             .strength
             .max(prediction_weighted_strength)
@@ -350,11 +358,7 @@ impl MemoryFormation {
     /// Retrieve memories by context similarity
     ///
     /// Returns top-k most relevant memories sorted by relevance
-    pub fn retrieve_by_context(
-        &mut self,
-        context: &EventContext,
-        limit: usize,
-    ) -> Vec<Memory> {
+    pub fn retrieve_by_context(&mut self, context: &EventContext, limit: usize) -> Vec<Memory> {
         let context_hash = context.fingerprint;
         tracing::info!(
             "Memory retrieve_by_context hash={} limit={}",
@@ -454,10 +458,7 @@ impl MemoryFormation {
             })
             .collect();
 
-        candidates.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         {
             let result = candidates
@@ -465,7 +466,10 @@ impl MemoryFormation {
                 .take(limit)
                 .map(|(_, memory)| memory)
                 .collect::<Vec<_>>();
-            tracing::info!("Memory retrieve_by_context_similar results={}", result.len());
+            tracing::info!(
+                "Memory retrieve_by_context_similar results={}",
+                result.len()
+            );
             result
         }
     }
@@ -481,8 +485,8 @@ impl MemoryFormation {
         memory.last_accessed = current_time;
 
         if success {
-            memory.strength = (memory.strength + self.config.access_strength_boost)
-                .min(self.config.max_strength);
+            memory.strength =
+                (memory.strength + self.config.access_strength_boost).min(self.config.max_strength);
             memory.relevance_score = (memory.relevance_score + 0.02).min(1.0);
         } else {
             memory.strength = (memory.strength - self.config.decay_rate_per_hour)
@@ -600,10 +604,8 @@ impl MemoryFormation {
         self.agent_memories
             .get(&agent_id)
             .map(|ids| {
-                let mut memories: Vec<&Memory> = ids
-                    .iter()
-                    .filter_map(|id| self.memories.get(id))
-                    .collect();
+                let mut memories: Vec<&Memory> =
+                    ids.iter().filter_map(|id| self.memories.get(id)).collect();
 
                 // Sort by relevance
                 memories.sort_by(|a, b| {
@@ -650,7 +652,8 @@ impl MemoryFormation {
                 }
 
                 // Remove from context index
-                if let Some(context_mems) = self.context_index.get_mut(&memory.context.fingerprint) {
+                if let Some(context_mems) = self.context_index.get_mut(&memory.context.fingerprint)
+                {
                     context_mems.retain(|&mid| mid != id);
                 }
             }
@@ -751,7 +754,9 @@ pub struct MemoryStats {
 mod tests {
     use super::*;
     use crate::episodes::{Episode, EpisodeOutcome};
-    use agent_db_events::{EnvironmentState, TemporalContext, ResourceState, ComputationalResources};
+    use agent_db_events::{
+        ComputationalResources, EnvironmentState, ResourceState, TemporalContext,
+    };
     use std::collections::HashMap;
 
     fn test_context() -> EventContext {
@@ -853,7 +858,11 @@ mod tests {
         let initial_strength = memory_formation.get_memory(memory_id).unwrap().strength;
 
         // Access memory multiple times
-        let context = memory_formation.get_memory(memory_id).unwrap().context.clone();
+        let context = memory_formation
+            .get_memory(memory_id)
+            .unwrap()
+            .context
+            .clone();
 
         memory_formation.retrieve_by_context(&context, 10);
         memory_formation.retrieve_by_context(&context, 10);

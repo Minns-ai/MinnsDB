@@ -4,7 +4,7 @@
 //! for 100-1000x faster property-based queries.
 
 use crate::structures::NodeId;
-use crate::{GraphResult, GraphError};
+use crate::{GraphError, GraphResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -89,7 +89,7 @@ impl From<&serde_json::Value> for IndexKey {
                 } else {
                     IndexKey::Null
                 }
-            }
+            },
             serde_json::Value::Bool(b) => IndexKey::Bool(*b),
             serde_json::Value::Null => IndexKey::Null,
             _ => IndexKey::Null, // Arrays and objects not supported as keys
@@ -120,13 +120,13 @@ impl PropertyIndex {
                     .entry(key)
                     .or_insert_with(Vec::new)
                     .push(node_id);
-            }
+            },
             IndexType::Hash => {
                 self.hash_index
                     .entry(key)
                     .or_insert_with(Vec::new)
                     .push(node_id);
-            }
+            },
             IndexType::FullText => {
                 // For full-text, index each word
                 if let serde_json::Value::String(s) = value {
@@ -138,7 +138,7 @@ impl PropertyIndex {
                             .push(node_id);
                     }
                 }
-            }
+            },
         }
 
         self.stats.insert_count += 1;
@@ -156,7 +156,7 @@ impl PropertyIndex {
                         self.btree_index.remove(&key);
                     }
                 }
-            }
+            },
             IndexType::Hash => {
                 if let Some(nodes) = self.hash_index.get_mut(&key) {
                     nodes.retain(|&id| id != node_id);
@@ -164,7 +164,7 @@ impl PropertyIndex {
                         self.hash_index.remove(&key);
                     }
                 }
-            }
+            },
             IndexType::FullText => {
                 if let serde_json::Value::String(s) = value {
                     for word in s.split_whitespace() {
@@ -177,7 +177,7 @@ impl PropertyIndex {
                         }
                     }
                 }
-            }
+            },
         }
     }
 
@@ -187,12 +187,10 @@ impl PropertyIndex {
         let key = IndexKey::from(value);
 
         let result = match self.index_type {
-            IndexType::BTree => {
-                self.btree_index.get(&key).cloned().unwrap_or_default()
-            }
+            IndexType::BTree => self.btree_index.get(&key).cloned().unwrap_or_default(),
             IndexType::Hash | IndexType::FullText => {
                 self.hash_index.get(&key).cloned().unwrap_or_default()
-            }
+            },
         };
 
         if result.is_empty() {
@@ -205,10 +203,14 @@ impl PropertyIndex {
     }
 
     /// Range query (min <= value <= max) - only for BTree indexes
-    pub fn range_query(&mut self, min: &serde_json::Value, max: &serde_json::Value) -> GraphResult<Vec<NodeId>> {
+    pub fn range_query(
+        &mut self,
+        min: &serde_json::Value,
+        max: &serde_json::Value,
+    ) -> GraphResult<Vec<NodeId>> {
         if !matches!(self.index_type, IndexType::BTree) {
             return Err(GraphError::InvalidOperation(
-                "Range queries only supported on BTree indexes".to_string()
+                "Range queries only supported on BTree indexes".to_string(),
             ));
         }
 
@@ -217,7 +219,8 @@ impl PropertyIndex {
         let min_key = IndexKey::from(min);
         let max_key = IndexKey::from(max);
 
-        let result: Vec<NodeId> = self.btree_index
+        let result: Vec<NodeId> = self
+            .btree_index
             .range(min_key..=max_key)
             .flat_map(|(_, nodes)| nodes.iter().copied())
             .collect();
@@ -235,7 +238,7 @@ impl PropertyIndex {
     pub fn greater_than(&mut self, min: &serde_json::Value) -> GraphResult<Vec<NodeId>> {
         if !matches!(self.index_type, IndexType::BTree) {
             return Err(GraphError::InvalidOperation(
-                "Range queries only supported on BTree indexes".to_string()
+                "Range queries only supported on BTree indexes".to_string(),
             ));
         }
 
@@ -243,8 +246,12 @@ impl PropertyIndex {
 
         let min_key = IndexKey::from(min);
 
-        let result: Vec<NodeId> = self.btree_index
-            .range((std::ops::Bound::Excluded(min_key), std::ops::Bound::Unbounded))
+        let result: Vec<NodeId> = self
+            .btree_index
+            .range((
+                std::ops::Bound::Excluded(min_key),
+                std::ops::Bound::Unbounded,
+            ))
             .flat_map(|(_, nodes)| nodes.iter().copied())
             .collect();
 
@@ -255,7 +262,7 @@ impl PropertyIndex {
     pub fn less_than(&mut self, max: &serde_json::Value) -> GraphResult<Vec<NodeId>> {
         if !matches!(self.index_type, IndexType::BTree) {
             return Err(GraphError::InvalidOperation(
-                "Range queries only supported on BTree indexes".to_string()
+                "Range queries only supported on BTree indexes".to_string(),
             ));
         }
 
@@ -263,8 +270,12 @@ impl PropertyIndex {
 
         let max_key = IndexKey::from(max);
 
-        let result: Vec<NodeId> = self.btree_index
-            .range((std::ops::Bound::Unbounded, std::ops::Bound::Excluded(max_key)))
+        let result: Vec<NodeId> = self
+            .btree_index
+            .range((
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Excluded(max_key),
+            ))
             .flat_map(|(_, nodes)| nodes.iter().copied())
             .collect();
 
@@ -275,16 +286,14 @@ impl PropertyIndex {
     pub fn search_text(&mut self, query: &str) -> GraphResult<Vec<NodeId>> {
         if !matches!(self.index_type, IndexType::FullText) {
             return Err(GraphError::InvalidOperation(
-                "Text search only supported on FullText indexes".to_string()
+                "Text search only supported on FullText indexes".to_string(),
             ));
         }
 
         self.stats.query_count += 1;
 
         // Split query into words and find nodes containing all words (AND query)
-        let words: Vec<String> = query.split_whitespace()
-            .map(|w| w.to_lowercase())
-            .collect();
+        let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
 
         if words.is_empty() {
             return Ok(Vec::new());
@@ -292,7 +301,8 @@ impl PropertyIndex {
 
         // Get nodes for first word
         let first_word_key = IndexKey::String(words[0].clone());
-        let mut result: HashSet<NodeId> = self.hash_index
+        let mut result: HashSet<NodeId> = self
+            .hash_index
             .get(&first_word_key)
             .cloned()
             .unwrap_or_default()
@@ -371,11 +381,17 @@ impl IndexManager {
     }
 
     /// Create a new index
-    pub fn create_index(&mut self, name: String, property_key: String, index_type: IndexType) -> GraphResult<()> {
+    pub fn create_index(
+        &mut self,
+        name: String,
+        property_key: String,
+        index_type: IndexType,
+    ) -> GraphResult<()> {
         if self.property_indexes.contains_key(&name) {
-            return Err(GraphError::InvalidOperation(
-                format!("Index '{}' already exists", name)
-            ));
+            return Err(GraphError::InvalidOperation(format!(
+                "Index '{}' already exists",
+                name
+            )));
         }
 
         let index = PropertyIndex::new(name.clone(), property_key, index_type);
@@ -387,9 +403,10 @@ impl IndexManager {
     /// Drop an existing index
     pub fn drop_index(&mut self, name: &str) -> GraphResult<()> {
         if self.property_indexes.remove(name).is_none() {
-            return Err(GraphError::InvalidOperation(
-                format!("Index '{}' does not exist", name)
-            ));
+            return Err(GraphError::InvalidOperation(format!(
+                "Index '{}' does not exist",
+                name
+            )));
         }
 
         Ok(())
@@ -407,19 +424,22 @@ impl IndexManager {
 
     /// Find index for a property key
     pub fn find_index_for_property(&mut self, property_key: &str) -> Option<&mut PropertyIndex> {
-        self.property_indexes.values_mut()
+        self.property_indexes
+            .values_mut()
             .find(|idx| idx.property_key() == property_key)
     }
 
     /// Check if an index exists for a property
     pub fn has_index_for_property(&self, property_key: &str) -> bool {
-        self.property_indexes.values()
+        self.property_indexes
+            .values()
             .any(|idx| idx.property_key() == property_key)
     }
 
     /// Record a query on a property (for auto-indexing)
     pub fn record_property_query(&mut self, property_key: &str) {
-        let counter = self.query_frequency
+        let counter = self
+            .query_frequency
             .entry(property_key.to_string())
             .or_insert_with(|| AtomicU64::new(0));
 
@@ -436,14 +456,16 @@ impl IndexManager {
 
     /// List all indexes
     pub fn list_indexes(&self) -> Vec<(&str, &str, &IndexType)> {
-        self.property_indexes.values()
+        self.property_indexes
+            .values()
             .map(|idx| (idx.name(), idx.property_key(), idx.index_type()))
             .collect()
     }
 
     /// Get statistics for all indexes
     pub fn get_all_stats(&self) -> HashMap<String, IndexStats> {
-        self.property_indexes.iter()
+        self.property_indexes
+            .iter()
             .map(|(name, idx)| (name.clone(), idx.stats().clone()))
             .collect()
     }
@@ -462,11 +484,8 @@ mod tests {
 
     #[test]
     fn test_btree_index_insert_query() {
-        let mut index = PropertyIndex::new(
-            "test_idx".to_string(),
-            "age".to_string(),
-            IndexType::BTree,
-        );
+        let mut index =
+            PropertyIndex::new("test_idx".to_string(), "age".to_string(), IndexType::BTree);
 
         // Insert some nodes
         index.insert(1, &json!(25));
@@ -482,11 +501,8 @@ mod tests {
 
     #[test]
     fn test_range_query() {
-        let mut index = PropertyIndex::new(
-            "test_idx".to_string(),
-            "age".to_string(),
-            IndexType::BTree,
-        );
+        let mut index =
+            PropertyIndex::new("test_idx".to_string(), "age".to_string(), IndexType::BTree);
 
         index.insert(1, &json!(20));
         index.insert(2, &json!(25));
@@ -523,11 +539,9 @@ mod tests {
         let mut manager = IndexManager::new();
 
         // Create index
-        manager.create_index(
-            "age_idx".to_string(),
-            "age".to_string(),
-            IndexType::BTree,
-        ).unwrap();
+        manager
+            .create_index("age_idx".to_string(), "age".to_string(), IndexType::BTree)
+            .unwrap();
 
         assert!(manager.has_index_for_property("age"));
 

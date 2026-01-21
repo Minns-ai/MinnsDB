@@ -2,7 +2,7 @@
 
 use agent_db_core::types::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Complete event structure with all metadata
@@ -10,28 +10,28 @@ use std::time::Duration;
 pub struct Event {
     /// Unique event identifier
     pub id: EventId,
-    
+
     /// High-precision timestamp
     pub timestamp: Timestamp,
-    
+
     /// Agent that generated this event
     pub agent_id: AgentId,
-    
+
     /// Agent type classification (e.g., "coding-assistant", "data-analyst")
     pub agent_type: AgentType,
-    
+
     /// Session identifier for grouping
     pub session_id: SessionId,
-    
+
     /// Type and payload of the event
     pub event_type: EventType,
-    
+
     /// Parent events in causality chain
     pub causality_chain: Vec<EventId>,
-    
+
     /// Environmental context
     pub context: EventContext,
-    
+
     /// Additional metadata
     pub metadata: HashMap<String, MetadataValue>,
 }
@@ -46,7 +46,7 @@ pub enum EventType {
         outcome: ActionOutcome,
         duration_ns: u64,
     },
-    
+
     /// Environmental observations
     Observation {
         observation_type: String,
@@ -54,7 +54,7 @@ pub enum EventType {
         confidence: f32,
         source: String,
     },
-    
+
     /// Cognitive processes
     Cognitive {
         process_type: CognitiveType,
@@ -62,7 +62,7 @@ pub enum EventType {
         output: serde_json::Value,
         reasoning_trace: Vec<String>,
     },
-    
+
     /// Communication events
     Communication {
         message_type: String,
@@ -72,27 +72,48 @@ pub enum EventType {
     },
 
     /// Learning telemetry events (retrieved/used/outcome)
-    Learning {
-        event: LearningEvent,
-    },
+    Learning { event: LearningEvent },
 }
 
 /// Explicit learning telemetry events (no inference)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LearningEvent {
-    MemoryRetrieved { query_id: String, memory_ids: Vec<u64> },
-    MemoryUsed { query_id: String, memory_id: u64 },
-    StrategyServed { query_id: String, strategy_ids: Vec<u64> },
-    StrategyUsed { query_id: String, strategy_id: u64 },
-    Outcome { query_id: String, success: bool },
+    MemoryRetrieved {
+        query_id: String,
+        memory_ids: Vec<u64>,
+    },
+    MemoryUsed {
+        query_id: String,
+        memory_id: u64,
+    },
+    StrategyServed {
+        query_id: String,
+        strategy_ids: Vec<u64>,
+    },
+    StrategyUsed {
+        query_id: String,
+        strategy_id: u64,
+    },
+    Outcome {
+        query_id: String,
+        success: bool,
+    },
 }
 
 /// Outcome of an action event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActionOutcome {
-    Success { result: serde_json::Value },
-    Failure { error: String, error_code: u32 },
-    Partial { result: serde_json::Value, issues: Vec<String> },
+    Success {
+        result: serde_json::Value,
+    },
+    Failure {
+        error: String,
+        error_code: u32,
+    },
+    Partial {
+        result: serde_json::Value,
+        issues: Vec<String>,
+    },
 }
 
 /// Types of cognitive processes
@@ -136,10 +157,10 @@ fn default_fingerprint() -> ContextHash {
 pub struct EnvironmentState {
     /// Key-value environment variables
     pub variables: HashMap<String, serde_json::Value>,
-    
+
     /// Spatial context if applicable
     pub spatial: Option<SpatialContext>,
-    
+
     /// Temporal context
     pub temporal: TemporalContext,
 }
@@ -160,7 +181,7 @@ pub struct Goal {
 pub struct ResourceState {
     /// Available computational resources
     pub computational: ComputationalResources,
-    
+
     /// Available external resources
     pub external: HashMap<String, ResourceAvailability>,
 }
@@ -185,10 +206,10 @@ pub struct BoundingBox {
 pub struct TemporalContext {
     /// Time of day effects
     pub time_of_day: Option<TimeOfDay>,
-    
+
     /// Active deadlines
     pub deadlines: Vec<Deadline>,
-    
+
     /// Temporal patterns
     pub patterns: Vec<TemporalPattern>,
 }
@@ -266,27 +287,27 @@ impl Event {
             metadata: HashMap::new(),
         }
     }
-    
+
     /// Add parent event to causality chain
     pub fn with_parent(mut self, parent_id: EventId) -> Self {
         self.causality_chain.push(parent_id);
         self
     }
-    
+
     /// Add metadata to event
     pub fn with_metadata(mut self, key: String, value: MetadataValue) -> Self {
         self.metadata.insert(key, value);
         self
     }
-    
+
     /// Get event size in bytes (for storage calculations)
     pub fn size_bytes(&self) -> usize {
         // Rough estimate - would be more precise with actual serialization
-        std::mem::size_of::<Self>() 
+        std::mem::size_of::<Self>()
             + self.causality_chain.len() * std::mem::size_of::<EventId>()
             + self.metadata.len() * 64 // rough estimate for metadata
     }
-    
+
     /// Check if event references specific parent
     pub fn has_parent(&self, parent_id: EventId) -> bool {
         self.causality_chain.contains(&parent_id)
@@ -295,7 +316,11 @@ impl Event {
 
 impl EventContext {
     /// Create new context with computed fingerprint
-    pub fn new(environment: EnvironmentState, active_goals: Vec<Goal>, resources: ResourceState) -> Self {
+    pub fn new(
+        environment: EnvironmentState,
+        active_goals: Vec<Goal>,
+        resources: ResourceState,
+    ) -> Self {
         let mut context = Self {
             environment,
             active_goals,
@@ -306,33 +331,37 @@ impl EventContext {
         context.fingerprint = context.compute_fingerprint();
         context
     }
-    
+
     /// Compute context fingerprint for fast matching
     pub fn compute_fingerprint(&self) -> ContextHash {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
-        
+
         // Hash environment variables (simplified)
         for (key, _value) in &self.environment.variables {
             key.hash(&mut hasher);
             // Note: Would need to implement Hash for serde_json::Value or convert to string
         }
-        
+
         // Hash active goals
         for goal in &self.active_goals {
             goal.id.hash(&mut hasher);
             goal.priority.to_bits().hash(&mut hasher);
         }
-        
+
         // Hash resource state
-        self.resources.computational.cpu_percent.to_bits().hash(&mut hasher);
+        self.resources
+            .computational
+            .cpu_percent
+            .to_bits()
+            .hash(&mut hasher);
         self.resources.computational.memory_bytes.hash(&mut hasher);
-        
+
         hasher.finish()
     }
-    
+
     /// Calculate similarity to another context (0.0 to 1.0)
     pub fn similarity(&self, other: &EventContext) -> f32 {
         if let (Some(embed1), Some(embed2)) = (&self.embeddings, &other.embeddings) {
@@ -347,15 +376,19 @@ impl EventContext {
             }
         }
     }
-    
+
     /// Calculate comprehensive similarity using multi-component matching
     /// This is a general-purpose algorithm that works across domains
-    pub fn comprehensive_similarity(&self, other: &EventContext, weights: Option<&ContextSimilarityWeights>) -> f32 {
+    pub fn comprehensive_similarity(
+        &self,
+        other: &EventContext,
+        weights: Option<&ContextSimilarityWeights>,
+    ) -> f32 {
         // Fast path: exact fingerprint match
         if self.fingerprint == other.fingerprint {
             return 1.0;
         }
-        
+
         // Fast path: embeddings available (most accurate)
         if let (Some(emb1), Some(emb2)) = (&self.embeddings, &other.embeddings) {
             let emb_sim = cosine_similarity(emb1, emb2);
@@ -363,156 +396,156 @@ impl EventContext {
             let component_sim = self.compute_component_similarity(other, weights);
             return (0.7 * emb_sim + 0.3 * component_sim).clamp(0.0, 1.0);
         }
-        
+
         // Compute component-wise similarity
         self.compute_component_similarity(other, weights)
     }
-    
+
     /// Compute similarity across all context components
-    fn compute_component_similarity(&self, other: &EventContext, weights: Option<&ContextSimilarityWeights>) -> f32 {
+    fn compute_component_similarity(
+        &self,
+        other: &EventContext,
+        weights: Option<&ContextSimilarityWeights>,
+    ) -> f32 {
         let default_weights = ContextSimilarityWeights::default();
         let weights = weights.unwrap_or(&default_weights);
-        
-        weights.environment * self.environment_similarity(&other.environment) +
-        weights.goals * self.goals_similarity(&other.active_goals) +
-        weights.resources * self.resources_similarity(&other.resources) +
-        weights.temporal * self.temporal_similarity(&other.environment.temporal) +
-        weights.spatial * self.spatial_similarity(&other.environment.spatial) +
-        weights.embeddings * self.embeddings_similarity(&other.embeddings)
+
+        weights.environment * self.environment_similarity(&other.environment)
+            + weights.goals * self.goals_similarity(&other.active_goals)
+            + weights.resources * self.resources_similarity(&other.resources)
+            + weights.temporal * self.temporal_similarity(&other.environment.temporal)
+            + weights.spatial * self.spatial_similarity(&other.environment.spatial)
+            + weights.embeddings * self.embeddings_similarity(&other.embeddings)
     }
-    
+
     /// Environment variables similarity (Jaccard + value similarity)
     fn environment_similarity(&self, other: &EnvironmentState) -> f32 {
         let vars1 = &self.environment.variables;
         let vars2 = &other.variables;
-        
+
         if vars1.is_empty() && vars2.is_empty() {
             return 1.0;
         }
-        
-        let all_keys: std::collections::HashSet<_> = vars1.keys()
-            .chain(vars2.keys())
-            .collect();
-        
+
+        let all_keys: std::collections::HashSet<_> = vars1.keys().chain(vars2.keys()).collect();
+
         if all_keys.is_empty() {
             return 1.0;
         }
-        
+
         let mut matching_score = 0.0;
         let total_keys = all_keys.len() as f32;
-        
+
         for key in all_keys {
             match (vars1.get(key), vars2.get(key)) {
                 (Some(v1), Some(v2)) => {
                     matching_score += self.value_similarity(v1, v2);
-                }
+                },
                 _ => {
                     // Missing key = different
                     matching_score += 0.0;
-                }
+                },
             }
         }
-        
+
         (matching_score / total_keys).clamp(0.0, 1.0)
     }
-    
+
     /// Goals similarity (priority distribution + description similarity)
     fn goals_similarity(&self, other_goals: &[Goal]) -> f32 {
         let goals1 = &self.active_goals;
         let goals2 = other_goals;
-        
+
         if goals1.is_empty() && goals2.is_empty() {
             return 1.0;
         }
         if goals1.is_empty() || goals2.is_empty() {
             return 0.0;
         }
-        
+
         // Priority distribution similarity
         let priority_sim = self.priority_distribution_similarity(goals1, goals2);
-        
+
         // Description similarity (if available)
         let desc_sim = self.goal_description_similarity(goals1, goals2);
-        
+
         // Weighted combination
         0.6 * priority_sim + 0.4 * desc_sim
     }
-    
+
     /// Compare priority distributions using histogram intersection
     fn priority_distribution_similarity(&self, goals1: &[Goal], goals2: &[Goal]) -> f32 {
         // Create priority buckets: [0.0-0.2), [0.2-0.4), [0.4-0.6), [0.6-0.8), [0.8-1.0]
         let mut hist1 = [0; 5];
         let mut hist2 = [0; 5];
-        
+
         for goal in goals1 {
             let bucket = ((goal.priority * 5.0) as usize).min(4);
             hist1[bucket] += 1;
         }
-        
+
         for goal in goals2 {
             let bucket = ((goal.priority * 5.0) as usize).min(4);
             hist2[bucket] += 1;
         }
-        
+
         // Histogram intersection (normalized)
-        let intersection: usize = hist1.iter().zip(hist2.iter())
-            .map(|(a, b)| a.min(b))
-            .sum();
-        let union: usize = hist1.iter().zip(hist2.iter())
-            .map(|(a, b)| a.max(b))
-            .sum();
-        
+        let intersection: usize = hist1.iter().zip(hist2.iter()).map(|(a, b)| a.min(b)).sum();
+        let union: usize = hist1.iter().zip(hist2.iter()).map(|(a, b)| a.max(b)).sum();
+
         if union == 0 {
             1.0
         } else {
             intersection as f32 / union as f32
         }
     }
-    
+
     /// Goal description similarity (simple word overlap)
     fn goal_description_similarity(&self, goals1: &[Goal], goals2: &[Goal]) -> f32 {
         if goals1.is_empty() || goals2.is_empty() {
             return 0.0;
         }
-        
+
         // Simple word-based similarity
-        let words1: std::collections::HashSet<_> = goals1.iter()
+        let words1: std::collections::HashSet<_> = goals1
+            .iter()
             .flat_map(|g| g.description.split_whitespace())
             .map(|w| w.to_lowercase())
             .collect();
-        
-        let words2: std::collections::HashSet<_> = goals2.iter()
+
+        let words2: std::collections::HashSet<_> = goals2
+            .iter()
             .flat_map(|g| g.description.split_whitespace())
             .map(|w| w.to_lowercase())
             .collect();
-        
+
         if words1.is_empty() && words2.is_empty() {
             return 1.0;
         }
-        
+
         let intersection = words1.intersection(&words2).count();
         let union = words1.union(&words2).count();
-        
+
         if union == 0 {
             1.0
         } else {
             intersection as f32 / union as f32
         }
     }
-    
+
     /// Resources similarity (normalized distance metrics)
     fn resources_similarity(&self, other: &ResourceState) -> f32 {
         let comp1 = &self.resources.computational;
         let comp2 = &other.computational;
-        
+
         // CPU similarity (normalized distance)
         let cpu_sim = 1.0 - ((comp1.cpu_percent - comp2.cpu_percent).abs() / 100.0).min(1.0);
-        
+
         // Memory similarity (normalized, assuming max 1TB)
         let max_memory = 1_000_000_000_000.0;
         let memory_diff = (comp1.memory_bytes as f64 - comp2.memory_bytes as f64).abs();
         let memory_sim = 1.0 - (memory_diff / max_memory).min(1.0) as f32;
-        
+
         // External resources (Jaccard similarity of keys)
         let ext1: std::collections::HashSet<_> = self.resources.external.keys().collect();
         let ext2: std::collections::HashSet<_> = other.external.keys().collect();
@@ -527,15 +560,15 @@ impl EventContext {
                 intersection as f32 / union as f32
             }
         };
-        
+
         // Weighted average
         0.4 * cpu_sim + 0.3 * memory_sim + 0.3 * ext_sim
     }
-    
+
     /// Temporal similarity
     fn temporal_similarity(&self, other: &TemporalContext) -> f32 {
         let temp1 = &self.environment.temporal;
-        
+
         // Deadline urgency similarity
         let deadline_sim = if temp1.deadlines.is_empty() && other.deadlines.is_empty() {
             1.0
@@ -543,20 +576,23 @@ impl EventContext {
             0.5
         } else {
             // Simple: compare count and urgency
-            let count_sim = 1.0 - ((temp1.deadlines.len() as f32 - other.deadlines.len() as f32).abs() / 10.0).min(1.0);
+            let count_sim = 1.0
+                - ((temp1.deadlines.len() as f32 - other.deadlines.len() as f32).abs() / 10.0)
+                    .min(1.0);
             count_sim
         };
-        
+
         // Time-of-day similarity
         let time_sim = match (&temp1.time_of_day, &other.time_of_day) {
             (Some(t1), Some(t2)) => {
-                let hour_diff = ((t1.hour as i32 - t2.hour as i32).abs()).min(24 - (t1.hour as i32 - t2.hour as i32).abs());
+                let hour_diff = ((t1.hour as i32 - t2.hour as i32).abs())
+                    .min(24 - (t1.hour as i32 - t2.hour as i32).abs());
                 1.0 - (hour_diff as f32 / 12.0).min(1.0) // 12 hours apart = 0 similarity
-            }
+            },
             (None, None) => 1.0,
             _ => 0.5, // One missing = neutral
         };
-        
+
         // Pattern similarity (simple count comparison)
         let pattern_sim = if temp1.patterns.is_empty() && other.patterns.is_empty() {
             1.0
@@ -564,29 +600,30 @@ impl EventContext {
             let count_diff = (temp1.patterns.len() as f32 - other.patterns.len() as f32).abs();
             1.0 - (count_diff / 10.0).min(1.0)
         };
-        
+
         // Weighted combination
         0.4 * deadline_sim + 0.2 * time_sim + 0.4 * pattern_sim
     }
-    
+
     /// Spatial similarity
     fn spatial_similarity(&self, other: &Option<SpatialContext>) -> f32 {
         match (&self.environment.spatial, other) {
-            (None, None) => 1.0, // Both missing = same
+            (None, None) => 1.0,                      // Both missing = same
             (Some(_), None) | (None, Some(_)) => 0.0, // One missing = different
             (Some(s1), Some(s2)) => {
                 // Euclidean distance normalized
-                let dist = ((s1.location.0 - s2.location.0).powi(2) +
-                           (s1.location.1 - s2.location.1).powi(2) +
-                           (s1.location.2 - s2.location.2).powi(2)).sqrt();
-                
+                let dist = ((s1.location.0 - s2.location.0).powi(2)
+                    + (s1.location.1 - s2.location.1).powi(2)
+                    + (s1.location.2 - s2.location.2).powi(2))
+                .sqrt();
+
                 // Estimate max distance from bounds if available
                 let max_dist = 1000.0; // Default max distance
                 (1.0 - (dist / max_dist).min(1.0)) as f32
-            }
+            },
         }
     }
-    
+
     /// Embeddings similarity
     fn embeddings_similarity(&self, other: &Option<Vec<f32>>) -> f32 {
         match (&self.embeddings, other) {
@@ -594,7 +631,7 @@ impl EventContext {
             _ => 0.0, // Can't compute without embeddings
         }
     }
-    
+
     /// Value similarity for JSON values (domain-agnostic)
     fn value_similarity(&self, v1: &serde_json::Value, v2: &serde_json::Value) -> f32 {
         match (v1, v2) {
@@ -607,7 +644,7 @@ impl EventContext {
                 } else {
                     0.0
                 }
-            }
+            },
             // Strings: Jaro-Winkler similarity (simplified to exact match for now)
             (serde_json::Value::String(s1), serde_json::Value::String(s2)) => {
                 if s1 == s2 {
@@ -624,21 +661,27 @@ impl EventContext {
                         intersection as f32 / union as f32
                     }
                 }
-            }
+            },
             // Booleans: exact match
             (serde_json::Value::Bool(b1), serde_json::Value::Bool(b2)) => {
-                if b1 == b2 { 1.0 } else { 0.0 }
-            }
+                if b1 == b2 {
+                    1.0
+                } else {
+                    0.0
+                }
+            },
             // Arrays: Jaccard similarity
             (serde_json::Value::Array(a1), serde_json::Value::Array(a2)) => {
                 if a1.is_empty() && a2.is_empty() {
                     1.0
                 } else {
                     // Simple: compare lengths and some elements
-                    let len_sim = 1.0 - ((a1.len() as f32 - a2.len() as f32).abs() / (a1.len().max(a2.len()) as f32).max(1.0));
+                    let len_sim = 1.0
+                        - ((a1.len() as f32 - a2.len() as f32).abs()
+                            / (a1.len().max(a2.len()) as f32).max(1.0));
                     len_sim * 0.5 // Simplified
                 }
-            }
+            },
             // Objects: recursive similarity
             (serde_json::Value::Object(o1), serde_json::Value::Object(o2)) => {
                 if o1.is_empty() && o2.is_empty() {
@@ -660,7 +703,7 @@ impl EventContext {
                     };
                     key_sim * 0.7 // Simplified
                 }
-            }
+            },
             // Different types = not similar
             _ => 0.0,
         }
@@ -694,8 +737,12 @@ impl Default for ContextSimilarityWeights {
 impl ContextSimilarityWeights {
     /// Normalize weights to sum to 1.0
     pub fn normalize(&mut self) {
-        let sum = self.environment + self.goals + self.resources + 
-                  self.temporal + self.spatial + self.embeddings;
+        let sum = self.environment
+            + self.goals
+            + self.resources
+            + self.temporal
+            + self.spatial
+            + self.embeddings;
         if sum > 0.0 {
             self.environment /= sum;
             self.goals /= sum;
@@ -712,11 +759,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
     }
-    
+
     let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    
+
     if norm_a == 0.0 || norm_b == 0.0 {
         0.0
     } else {
@@ -728,36 +775,36 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
     use serde_json::json;
-    
+
     #[test]
     fn test_event_creation() {
         let context = create_test_context();
         let event = Event::new(
-            123, // agent_id
+            123,                      // agent_id
             "test_agent".to_string(), // agent_type
-            456, // session_id
+            456,                      // session_id
             EventType::Action {
                 action_name: "test_action".to_string(),
                 parameters: json!({"x": 10, "y": 20}),
                 outcome: ActionOutcome::Success {
-                    result: json!({"success": true})
+                    result: json!({"success": true}),
                 },
                 duration_ns: 1_000_000,
             },
             context,
         );
-        
+
         assert_eq!(event.agent_id, 123);
         assert_eq!(event.session_id, 456);
         assert!(!event.id.to_string().is_empty());
         assert!(event.timestamp > 0);
     }
-    
+
     #[test]
     fn test_causality_chain() {
         let parent_id = generate_event_id();
         let context = create_test_context();
-        
+
         let event = Event::new(
             123,
             "test_agent".to_string(), // agent_type
@@ -769,12 +816,13 @@ mod tests {
                 reasoning_trace: vec!["step1".to_string()],
             },
             context,
-        ).with_parent(parent_id);
-        
+        )
+        .with_parent(parent_id);
+
         assert!(event.has_parent(parent_id));
         assert_eq!(event.causality_chain.len(), 1);
     }
-    
+
     #[test]
     fn test_event_serialization() {
         let context = create_test_context();
@@ -790,31 +838,31 @@ mod tests {
             },
             context,
         );
-        
+
         // Test JSON serialization
         let json_str = serde_json::to_string(&event).unwrap();
         let deserialized: Event = serde_json::from_str(&json_str).unwrap();
         assert_eq!(event.id, deserialized.id);
-        
+
         // Test binary serialization
         let binary = bincode::serialize(&event).unwrap();
         let deserialized_binary: Event = bincode::deserialize(&binary).unwrap();
         assert_eq!(event.id, deserialized_binary.id);
     }
-    
+
     #[test]
     fn test_context_fingerprinting() {
         let context1 = create_test_context();
         let context2 = create_test_context();
         let context3 = create_different_context();
-        
+
         // Same contexts should have same fingerprint
         assert_eq!(context1.fingerprint, context2.fingerprint);
-        
+
         // Different contexts should have different fingerprints (most likely)
         assert_ne!(context1.fingerprint, context3.fingerprint);
     }
-    
+
     fn create_test_context() -> EventContext {
         EventContext::new(
             EnvironmentState {
@@ -858,7 +906,7 @@ mod tests {
             },
         )
     }
-    
+
     fn create_different_context() -> EventContext {
         EventContext::new(
             EnvironmentState {

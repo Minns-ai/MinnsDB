@@ -3,20 +3,19 @@
 //! Tests the complete self-evolution pipeline:
 //! Event → Episode → Memory → Strategy → Reinforcement → Policy Guide
 
-use agent_db_core::types::{AgentId, SessionId, AgentType, generate_event_id, current_timestamp};
+use agent_db_core::types::{current_timestamp, generate_event_id, AgentId, AgentType, SessionId};
 use agent_db_events::{
-    Event, EventContext, EventType, ActionOutcome, CognitiveType,
-    EnvironmentState, TemporalContext, ResourceState, ComputationalResources,
+    ActionOutcome, CognitiveType, ComputationalResources, EnvironmentState, Event, EventContext,
+    EventType, ResourceState, TemporalContext,
 };
 use agent_db_graph::{
-    Graph, EpisodeDetector, EpisodeDetectorConfig, EpisodeOutcome,
-    MemoryFormation, MemoryFormationConfig, MemoryType,
-    StrategyExtractor, StrategyExtractionConfig,
-    GraphInference, EpisodeMetrics,
+    EpisodeDetector, EpisodeDetectorConfig, EpisodeMetrics, EpisodeOutcome, Graph, GraphInference,
+    MemoryFormation, MemoryFormationConfig, MemoryType, StrategyExtractionConfig,
+    StrategyExtractor,
 };
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde_json::json;
 
 fn create_test_context() -> EventContext {
     EventContext {
@@ -64,7 +63,9 @@ fn create_test_event(
         event_type: EventType::Action {
             action_name: "debug_typescript_error".to_string(),
             parameters: json!({"error_type": "TypeError", "fix": "add_null_check"}),
-            outcome: ActionOutcome::Success { result: json!("fixed") },
+            outcome: ActionOutcome::Success {
+                result: json!("fixed"),
+            },
             duration_ns: 1_000_000,
         },
         causality_chain: Vec::new(),
@@ -120,7 +121,13 @@ async fn test_episode_detection() -> Result<(), Box<dyn std::error::Error>> {
             base_time,
             vec!["Check error".to_string(), "Add null check".to_string()],
         ),
-        create_test_event(1, "debug-agent".to_string(), 1, &context, base_time + 500_000_000),
+        create_test_event(
+            1,
+            "debug-agent".to_string(),
+            1,
+            &context,
+            base_time + 500_000_000,
+        ),
     ];
 
     // Process events
@@ -158,7 +165,13 @@ async fn test_memory_formation() -> Result<(), Box<dyn std::error::Error>> {
             base_time,
             vec!["Check null safety".to_string(), "Verify types".to_string()],
         ),
-        create_test_event(1, "code-reviewer".to_string(), 1, &context, base_time + 500_000_000),
+        create_test_event(
+            1,
+            "code-reviewer".to_string(),
+            1,
+            &context,
+            base_time + 500_000_000,
+        ),
     ];
 
     for event in &events {
@@ -169,7 +182,7 @@ async fn test_memory_formation() -> Result<(), Box<dyn std::error::Error>> {
 
     if !episodes.is_empty() {
         let mut episode = episodes[0].clone();
-        episode.significance = 0.8;  // Set high significance
+        episode.significance = 0.8; // Set high significance
         episode.outcome = Some(EpisodeOutcome::Success);
 
         let memory_id = memory_formation.form_memory(&episode);
@@ -184,8 +197,8 @@ async fn test_memory_formation() -> Result<(), Box<dyn std::error::Error>> {
                 match retrieved[0].memory_type {
                     MemoryType::Episodic { .. } => {
                         println!("   ✓ Memory is Episodic type");
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
         }
@@ -224,7 +237,13 @@ async fn test_strategy_extraction() -> Result<(), Box<dyn std::error::Error>> {
                 "Add assertions".to_string(),
             ],
         ),
-        create_test_event(1, "test-generator".to_string(), 1, &context, base_time + 500_000_000),
+        create_test_event(
+            1,
+            "test-generator".to_string(),
+            1,
+            &context,
+            base_time + 500_000_000,
+        ),
     ];
 
     for event in &events {
@@ -247,7 +266,10 @@ async fn test_strategy_extraction() -> Result<(), Box<dyn std::error::Error>> {
             println!("   ✓ Strategies found: {}", strategies.len());
 
             if !strategies.is_empty() {
-                println!("   ✓ Reasoning steps: {}", strategies[0].reasoning_steps.len());
+                println!(
+                    "   ✓ Reasoning steps: {}",
+                    strategies[0].reasoning_steps.len()
+                );
                 assert_eq!(strategies[0].agent_id, 1);
             }
         }
@@ -274,7 +296,13 @@ async fn test_reinforcement_learning() -> Result<(), Box<dyn std::error::Error>>
 
     let events = vec![
         create_test_event(1, "debugger".to_string(), 1, &context, base_time),
-        create_test_event(1, "debugger".to_string(), 1, &context, base_time + 500_000_000),
+        create_test_event(
+            1,
+            "debugger".to_string(),
+            1,
+            &context,
+            base_time + 500_000_000,
+        ),
     ];
 
     for event in &events {
@@ -294,9 +322,14 @@ async fn test_reinforcement_learning() -> Result<(), Box<dyn std::error::Error>>
             custom_metrics: HashMap::new(),
         };
 
-        let result = inference.reinforce_patterns(&episode, true, Some(metrics)).await?;
+        let result = inference
+            .reinforce_patterns(&episode, true, Some(metrics))
+            .await?;
 
-        println!("   ✓ Patterns strengthened: {}", result.patterns_strengthened);
+        println!(
+            "   ✓ Patterns strengthened: {}",
+            result.patterns_strengthened
+        );
         println!("   ✓ Patterns updated: {}", result.patterns_updated);
 
         let stats = inference.get_reinforcement_stats();
@@ -313,7 +346,8 @@ async fn test_complete_self_evolution_pipeline() -> Result<(), Box<dyn std::erro
 
     // Initialize all components
     let graph = Arc::new(Graph::new());
-    let mut episode_detector = EpisodeDetector::new(graph.clone(), EpisodeDetectorConfig::default());
+    let mut episode_detector =
+        EpisodeDetector::new(graph.clone(), EpisodeDetectorConfig::default());
     let mut memory_formation = MemoryFormation::new(MemoryFormationConfig::default());
     let mut strategy_extractor = StrategyExtractor::new(StrategyExtractionConfig::default());
     let mut inference = GraphInference::new();
@@ -337,7 +371,13 @@ async fn test_complete_self_evolution_pipeline() -> Result<(), Box<dyn std::erro
                 "Run tests".to_string(),
             ],
         ),
-        create_test_event(1, "self-learning-agent".to_string(), 1, &context, base_time + 500_000_000),
+        create_test_event(
+            1,
+            "self-learning-agent".to_string(),
+            1,
+            &context,
+            base_time + 500_000_000,
+        ),
     ];
 
     // Step 2: Episode detection
@@ -373,8 +413,13 @@ async fn test_complete_self_evolution_pipeline() -> Result<(), Box<dyn std::erro
             custom_metrics: HashMap::new(),
         };
 
-        let reinforcement_result = inference.reinforce_patterns(&episode, true, Some(metrics)).await?;
-        println!("      ✓ Patterns strengthened: {}", reinforcement_result.patterns_strengthened);
+        let reinforcement_result = inference
+            .reinforce_patterns(&episode, true, Some(metrics))
+            .await?;
+        println!(
+            "      ✓ Patterns strengthened: {}",
+            reinforcement_result.patterns_strengthened
+        );
 
         // Step 6: Verify learnings
         println!("   Step 6: Testing retrieval...");
@@ -386,7 +431,10 @@ async fn test_complete_self_evolution_pipeline() -> Result<(), Box<dyn std::erro
         println!("   ═══════════════════════════════════");
         println!("   Events processed:       {}", events.len());
         println!("   Episodes detected:      {}", episodes.len());
-        println!("   Patterns reinforced:    {}", reinforcement_result.patterns_strengthened);
+        println!(
+            "   Patterns reinforced:    {}",
+            reinforcement_result.patterns_strengthened
+        );
         println!("   ═══════════════════════════════════");
     } else {
         println!("   ⚠️  No episodes detected (detector may need more events)");

@@ -1,6 +1,6 @@
 //! Configuration management for the Agentic Database
 
-use crate::types::{IngestionConfig, StorageConfig, GraphConfig, MemoryConfig};
+use crate::types::{GraphConfig, IngestionConfig, MemoryConfig, StorageConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -9,16 +9,16 @@ use std::path::PathBuf;
 pub struct DatabaseConfig {
     /// Base directory for data storage
     pub data_directory: PathBuf,
-    
+
     /// Event ingestion configuration
     pub ingestion: IngestionConfig,
-    
+
     /// Storage configuration
     pub storage: StorageConfig,
-    
+
     /// Graph configuration
     pub graph: GraphConfig,
-    
+
     /// Memory system configuration
     pub memory: MemoryConfig,
 }
@@ -78,46 +78,51 @@ impl Default for MemoryConfig {
 
 impl DatabaseConfig {
     /// Load configuration from file
-    pub fn load_from_file(path: impl AsRef<std::path::Path>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load_from_file(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         let config: DatabaseConfig = serde_json::from_str(&contents)?;
         Ok(config)
     }
-    
+
     /// Save configuration to file
-    pub fn save_to_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_to_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let contents = serde_json::to_string_pretty(self)?;
         std::fs::write(path, contents)?;
         Ok(())
     }
-    
+
     /// Validate configuration settings
     pub fn validate(&self) -> Result<(), String> {
         if self.ingestion.buffer_size == 0 {
             return Err("Buffer size must be greater than 0".to_string());
         }
-        
+
         if self.storage.hot_partitions == 0 {
             return Err("Hot partitions must be greater than 0".to_string());
         }
-        
+
         if self.storage.compression_level > 9 {
             return Err("Compression level must be between 0 and 9".to_string());
         }
-        
+
         if self.graph.min_edge_weight <= 0.0 {
             return Err("Minimum edge weight must be positive".to_string());
         }
-        
+
         Ok(())
     }
-    
+
     /// Get total memory budget in bytes
     pub fn estimated_memory_usage(&self) -> u64 {
         let events_memory = self.ingestion.buffer_size as u64 * 1000; // rough estimate
         let graph_memory = self.graph.max_edges_per_node as u64 * 1000 * 100; // rough estimate
         let memory_system = self.memory.max_memories_per_agent as u64 * 1000 * 100; // rough estimate
-        
+
         events_memory + graph_memory + memory_system
     }
 }
@@ -125,33 +130,39 @@ impl DatabaseConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_default_config() {
         let config = DatabaseConfig::default();
         assert!(config.validate().is_ok());
         assert!(config.estimated_memory_usage() > 0);
     }
-    
+
     #[test]
     fn test_config_serialization() {
         let config = DatabaseConfig::default();
         let serialized = serde_json::to_string(&config).unwrap();
         let deserialized: DatabaseConfig = serde_json::from_str(&serialized).unwrap();
-        
-        assert_eq!(config.ingestion.buffer_size, deserialized.ingestion.buffer_size);
-        assert_eq!(config.storage.hot_partitions, deserialized.storage.hot_partitions);
+
+        assert_eq!(
+            config.ingestion.buffer_size,
+            deserialized.ingestion.buffer_size
+        );
+        assert_eq!(
+            config.storage.hot_partitions,
+            deserialized.storage.hot_partitions
+        );
     }
-    
+
     #[test]
     fn test_config_validation() {
         let mut config = DatabaseConfig::default();
         assert!(config.validate().is_ok());
-        
+
         // Test invalid buffer size
         config.ingestion.buffer_size = 0;
         assert!(config.validate().is_err());
-        
+
         // Reset and test invalid edge weight
         config = DatabaseConfig::default();
         config.graph.min_edge_weight = -1.0;

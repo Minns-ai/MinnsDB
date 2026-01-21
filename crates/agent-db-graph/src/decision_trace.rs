@@ -4,9 +4,9 @@
 //! It enables auditing of which memories/strategies were retrieved, which were actually used,
 //! and what outcomes resulted from their application.
 
-use agent_db_core::types::{AgentId, SessionId, Timestamp, current_timestamp};
+use agent_db_core::types::{current_timestamp, AgentId, SessionId, Timestamp};
 use agent_db_storage::{RedbBackend, StorageResult};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -80,7 +80,11 @@ pub trait DecisionTraceStore: Send + Sync {
     fn mark_memory_used(&mut self, query_id: String, memory_id: MemoryId) -> StorageResult<()>;
 
     /// Mark a strategy as used (agent actually applied it)
-    fn mark_strategy_used(&mut self, query_id: String, strategy_id: StrategyId) -> StorageResult<()>;
+    fn mark_strategy_used(
+        &mut self,
+        query_id: String,
+        strategy_id: StrategyId,
+    ) -> StorageResult<()>;
 
     /// Close the trace with an outcome signal
     fn close(&mut self, query_id: String, outcome: OutcomeSignal) -> StorageResult<()>;
@@ -126,7 +130,7 @@ impl RedbDecisionTraceStore {
     fn decode_agent_index_key(key: &[u8]) -> StorageResult<(AgentId, Timestamp, String)> {
         if key.len() < 17 {
             return Err(agent_db_storage::StorageError::DatabaseError(
-                "Agent index key too short".to_string()
+                "Agent index key too short".to_string(),
             ));
         }
 
@@ -135,7 +139,9 @@ impl RedbDecisionTraceStore {
 
         // Find the separator
         let separator_idx = key.iter().position(|&b| b == 0xFF).ok_or_else(|| {
-            agent_db_storage::StorageError::DatabaseError("No separator in agent index key".to_string())
+            agent_db_storage::StorageError::DatabaseError(
+                "No separator in agent index key".to_string(),
+            )
         })?;
 
         let query_id = String::from_utf8_lossy(&key[separator_idx + 1..]).to_string();
@@ -188,10 +194,15 @@ impl DecisionTraceStore for RedbDecisionTraceStore {
     fn mark_memory_used(&mut self, query_id: String, memory_id: MemoryId) -> StorageResult<()> {
         // Load existing trace
         let key = Self::encode_query_key(&query_id);
-        let mut trace: DecisionTrace = self.backend.get("decision_trace", key.clone())?
-            .ok_or_else(|| agent_db_storage::StorageError::DatabaseError(
-                format!("Decision trace not found: {}", query_id)
-            ))?;
+        let mut trace: DecisionTrace = self
+            .backend
+            .get("decision_trace", key.clone())?
+            .ok_or_else(|| {
+                agent_db_storage::StorageError::DatabaseError(format!(
+                    "Decision trace not found: {}",
+                    query_id
+                ))
+            })?;
 
         // Add memory to used list if not already there
         if !trace.used_memory_ids.contains(&memory_id) {
@@ -204,13 +215,22 @@ impl DecisionTraceStore for RedbDecisionTraceStore {
         Ok(())
     }
 
-    fn mark_strategy_used(&mut self, query_id: String, strategy_id: StrategyId) -> StorageResult<()> {
+    fn mark_strategy_used(
+        &mut self,
+        query_id: String,
+        strategy_id: StrategyId,
+    ) -> StorageResult<()> {
         // Load existing trace
         let key = Self::encode_query_key(&query_id);
-        let mut trace: DecisionTrace = self.backend.get("decision_trace", key.clone())?
-            .ok_or_else(|| agent_db_storage::StorageError::DatabaseError(
-                format!("Decision trace not found: {}", query_id)
-            ))?;
+        let mut trace: DecisionTrace = self
+            .backend
+            .get("decision_trace", key.clone())?
+            .ok_or_else(|| {
+                agent_db_storage::StorageError::DatabaseError(format!(
+                    "Decision trace not found: {}",
+                    query_id
+                ))
+            })?;
 
         // Add strategy to used list if not already there
         if !trace.used_strategy_ids.contains(&strategy_id) {
@@ -226,10 +246,15 @@ impl DecisionTraceStore for RedbDecisionTraceStore {
     fn close(&mut self, query_id: String, outcome: OutcomeSignal) -> StorageResult<()> {
         // Load existing trace
         let key = Self::encode_query_key(&query_id);
-        let mut trace: DecisionTrace = self.backend.get("decision_trace", key.clone())?
-            .ok_or_else(|| agent_db_storage::StorageError::DatabaseError(
-                format!("Decision trace not found: {}", query_id)
-            ))?;
+        let mut trace: DecisionTrace = self
+            .backend
+            .get("decision_trace", key.clone())?
+            .ok_or_else(|| {
+                agent_db_storage::StorageError::DatabaseError(format!(
+                    "Decision trace not found: {}",
+                    query_id
+                ))
+            })?;
 
         // Close trace
         trace.outcome = Some(outcome);
@@ -313,13 +338,9 @@ mod tests {
         let (backend, _temp) = create_test_backend();
         let mut store = RedbDecisionTraceStore::new(backend);
 
-        store.start(
-            "query_1".to_string(),
-            100,
-            1,
-            vec![1, 2, 3],
-            vec![10, 20],
-        ).unwrap();
+        store
+            .start("query_1".to_string(), 100, 1, vec![1, 2, 3], vec![10, 20])
+            .unwrap();
 
         let trace = store.get("query_1".to_string()).unwrap();
         assert!(trace.is_some());
@@ -333,13 +354,9 @@ mod tests {
         let (backend, _temp) = create_test_backend();
         let mut store = RedbDecisionTraceStore::new(backend);
 
-        store.start(
-            "query_1".to_string(),
-            100,
-            1,
-            vec![1, 2, 3],
-            vec![],
-        ).unwrap();
+        store
+            .start("query_1".to_string(), 100, 1, vec![1, 2, 3], vec![])
+            .unwrap();
 
         store.mark_memory_used("query_1".to_string(), 2).unwrap();
 
@@ -352,13 +369,9 @@ mod tests {
         let (backend, _temp) = create_test_backend();
         let mut store = RedbDecisionTraceStore::new(backend);
 
-        store.start(
-            "query_1".to_string(),
-            100,
-            1,
-            vec![1, 2],
-            vec![10],
-        ).unwrap();
+        store
+            .start("query_1".to_string(), 100, 1, vec![1, 2], vec![10])
+            .unwrap();
 
         let outcome = OutcomeSignal {
             success: true,
@@ -378,9 +391,15 @@ mod tests {
         let mut store = RedbDecisionTraceStore::new(backend);
 
         // Create multiple traces
-        store.start("query_1".to_string(), 100, 1, vec![1], vec![]).unwrap();
-        store.start("query_2".to_string(), 100, 1, vec![2], vec![]).unwrap();
-        store.start("query_3".to_string(), 100, 1, vec![3], vec![]).unwrap();
+        store
+            .start("query_1".to_string(), 100, 1, vec![1], vec![])
+            .unwrap();
+        store
+            .start("query_2".to_string(), 100, 1, vec![2], vec![])
+            .unwrap();
+        store
+            .start("query_3".to_string(), 100, 1, vec![3], vec![])
+            .unwrap();
 
         // List recent traces
         let traces = store.list_recent(100, 10).unwrap();

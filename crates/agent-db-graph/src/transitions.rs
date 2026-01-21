@@ -104,12 +104,11 @@ impl TransitionModel {
             }
         }
 
-        let bucket = self.buckets.entry(goal_bucket_id).or_insert_with(HashMap::new);
-        let keys: Vec<TransitionKey> = trace
-            .transitions
-            .iter()
-            .map(TransitionKey::from)
-            .collect();
+        let bucket = self
+            .buckets
+            .entry(goal_bucket_id)
+            .or_insert_with(HashMap::new);
+        let keys: Vec<TransitionKey> = trace.transitions.iter().map(TransitionKey::from).collect();
 
         for key in &keys {
             let stats = bucket.entry(key.clone()).or_insert(TransitionStats {

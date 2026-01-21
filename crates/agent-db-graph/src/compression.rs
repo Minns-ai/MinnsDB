@@ -155,7 +155,8 @@ impl CompressionStats {
         let compressed_bytes = if node_count == 0 {
             0
         } else {
-            std::mem::size_of::<NodeId>() + (node_count.saturating_sub(1) * std::mem::size_of::<u32>())
+            std::mem::size_of::<NodeId>()
+                + (node_count.saturating_sub(1) * std::mem::size_of::<u32>())
         };
 
         let ratio = if original_bytes == 0 {
@@ -256,7 +257,7 @@ mod tests {
         assert!(!compressed.contains(107)); // Gap
         assert!(compressed.contains(110));
         assert!(!compressed.contains(111)); // Beyond end
-        assert!(!compressed.contains(99));  // Before start
+        assert!(!compressed.contains(99)); // Before start
     }
 
     #[test]
@@ -333,7 +334,11 @@ mod tests {
         let stats = CompressionStats::calculate(&nodes);
 
         // Should achieve >40% compression (ratio < 0.6 for u64 = 8 bytes)
-        assert!(stats.ratio < 0.6, "Expected >40% compression, got ratio: {}", stats.ratio);
+        assert!(
+            stats.ratio < 0.6,
+            "Expected >40% compression, got ratio: {}",
+            stats.ratio
+        );
 
         // Verify roundtrip
         let compressed = CompressedAdjacencyList::compress(&nodes);

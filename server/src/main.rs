@@ -2,22 +2,22 @@
 //
 // Provides HTTP endpoints for the self-evolving agent database
 
+use agent_db_core::types::{AgentId, AgentType, ContextHash, SessionId};
+use agent_db_events::core::EventContext;
+use agent_db_events::core::EventType;
+use agent_db_events::Event;
+use agent_db_graph::integration::StorageBackend;
+use agent_db_graph::{GraphEngine, GraphEngineConfig};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response, Json},
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
-use agent_db_graph::{GraphEngine, GraphEngineConfig};
-use agent_db_graph::integration::StorageBackend;
-use agent_db_events::Event;
-use agent_db_events::core::EventType;
-use agent_db_core::types::{AgentId, AgentType, ContextHash, SessionId};
-use agent_db_events::core::EventContext;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -330,8 +330,16 @@ enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message, details) = match self {
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error".to_string(), Some(msg)),
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "Bad Request".to_string(), Some(msg)),
+            ApiError::Internal(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error".to_string(),
+                Some(msg),
+            ),
+            ApiError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                "Bad Request".to_string(),
+                Some(msg),
+            ),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "Not Found".to_string(), Some(msg)),
         };
 
@@ -395,11 +403,10 @@ async fn process_event(
         event.context.fingerprint = event.context.compute_fingerprint();
     }
 
-    let result = state.engine.process_event(event).await
-        .map_err(|e| {
-            info!("Error processing event: {:?}", e);
-            ApiError::Internal(e.to_string())
-        })?;
+    let result = state.engine.process_event(event).await.map_err(|e| {
+        info!("Error processing event: {:?}", e);
+        ApiError::Internal(e.to_string())
+    })?;
 
     info!(
         "Processed event {}: nodes_created={} patterns_detected={} processing_time_ms={} total_handler_ms={}",
@@ -426,22 +433,28 @@ async fn get_agent_memories(
 ) -> Result<Json<Vec<MemoryResponse>>, ApiError> {
     info!("Getting memories for agent: {}", agent_id);
 
-    let memories = state.engine.get_agent_memories(agent_id, pagination.limit).await;
+    let memories = state
+        .engine
+        .get_agent_memories(agent_id, pagination.limit)
+        .await;
 
-    let response: Vec<MemoryResponse> = memories.into_iter().map(|m| MemoryResponse {
-        id: m.id,
-        agent_id: m.agent_id,
-        session_id: m.session_id,
-        strength: m.strength,
-        relevance_score: m.relevance_score,
-        access_count: m.access_count,
-        formed_at: m.formed_at,
-        last_accessed: m.last_accessed,
-        context_hash: m.context.fingerprint,
-        context: m.context.clone(),
-        outcome: format!("{:?}", m.outcome),
-        memory_type: memory_type_label(&m.memory_type),
-    }).collect();
+    let response: Vec<MemoryResponse> = memories
+        .into_iter()
+        .map(|m| MemoryResponse {
+            id: m.id,
+            agent_id: m.agent_id,
+            session_id: m.session_id,
+            strength: m.strength,
+            relevance_score: m.relevance_score,
+            access_count: m.access_count,
+            formed_at: m.formed_at,
+            last_accessed: m.last_accessed,
+            context_hash: m.context.fingerprint,
+            context: m.context.clone(),
+            outcome: format!("{:?}", m.outcome),
+            memory_type: memory_type_label(&m.memory_type),
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -451,7 +464,10 @@ async fn get_memories_by_context(
     State(state): State<AppState>,
     Json(payload): Json<ContextMemoriesRequest>,
 ) -> Result<Json<Vec<MemoryResponse>>, ApiError> {
-    info!("Getting memories for context hash: {}", payload.context.fingerprint);
+    info!(
+        "Getting memories for context hash: {}",
+        payload.context.fingerprint
+    );
 
     let min_similarity = payload.min_similarity.unwrap_or(0.6);
     let memories = state
@@ -465,20 +481,23 @@ async fn get_memories_by_context(
         )
         .await;
 
-    let response: Vec<MemoryResponse> = memories.into_iter().map(|m| MemoryResponse {
-        id: m.id,
-        agent_id: m.agent_id,
-        session_id: m.session_id,
-        strength: m.strength,
-        relevance_score: m.relevance_score,
-        access_count: m.access_count,
-        formed_at: m.formed_at,
-        last_accessed: m.last_accessed,
-        context_hash: m.context.fingerprint,
-        context: m.context.clone(),
-        outcome: format!("{:?}", m.outcome),
-        memory_type: memory_type_label(&m.memory_type),
-    }).collect();
+    let response: Vec<MemoryResponse> = memories
+        .into_iter()
+        .map(|m| MemoryResponse {
+            id: m.id,
+            agent_id: m.agent_id,
+            session_id: m.session_id,
+            strength: m.strength,
+            relevance_score: m.relevance_score,
+            access_count: m.access_count,
+            formed_at: m.formed_at,
+            last_accessed: m.last_accessed,
+            context_hash: m.context.fingerprint,
+            context: m.context.clone(),
+            outcome: format!("{:?}", m.outcome),
+            memory_type: memory_type_label(&m.memory_type),
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -491,30 +510,40 @@ async fn get_agent_strategies(
 ) -> Result<Json<Vec<StrategyResponse>>, ApiError> {
     info!("Getting strategies for agent: {}", agent_id);
 
-    let strategies = state.engine.get_agent_strategies(agent_id, pagination.limit).await;
+    let strategies = state
+        .engine
+        .get_agent_strategies(agent_id, pagination.limit)
+        .await;
 
-    let response: Vec<StrategyResponse> = strategies.into_iter().map(|s| StrategyResponse {
-        id: s.id,
-        name: s.name.clone(),
-        agent_id: s.agent_id,
-        quality_score: s.quality_score,
-        success_count: s.success_count,
-        failure_count: s.failure_count,
-        reasoning_steps: s.reasoning_steps.iter().map(|step| ReasoningStepResponse {
-            description: step.description.clone(),
-            sequence_order: step.sequence_order,
-        }).collect(),
-        strategy_type: format!("{:?}", s.strategy_type),
-        support_count: s.support_count,
-        expected_success: s.expected_success,
-        expected_cost: s.expected_cost,
-        expected_value: s.expected_value,
-        confidence: s.confidence,
-        goal_bucket_id: s.goal_bucket_id,
-        behavior_signature: s.behavior_signature.clone(),
-        precondition: s.precondition.clone(),
-        action_hint: s.action_hint.clone(),
-    }).collect();
+    let response: Vec<StrategyResponse> = strategies
+        .into_iter()
+        .map(|s| StrategyResponse {
+            id: s.id,
+            name: s.name.clone(),
+            agent_id: s.agent_id,
+            quality_score: s.quality_score,
+            success_count: s.success_count,
+            failure_count: s.failure_count,
+            reasoning_steps: s
+                .reasoning_steps
+                .iter()
+                .map(|step| ReasoningStepResponse {
+                    description: step.description.clone(),
+                    sequence_order: step.sequence_order,
+                })
+                .collect(),
+            strategy_type: format!("{:?}", s.strategy_type),
+            support_count: s.support_count,
+            expected_success: s.expected_success,
+            expected_cost: s.expected_cost,
+            expected_value: s.expected_value,
+            confidence: s.confidence,
+            goal_bucket_id: s.goal_bucket_id,
+            behavior_signature: s.behavior_signature.clone(),
+            precondition: s.precondition.clone(),
+            action_hint: s.action_hint.clone(),
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -537,8 +566,9 @@ async fn get_similar_strategies(
 
     let strategies = state.engine.get_similar_strategies(query).await;
 
-    let response: Vec<SimilarStrategyResponse> = strategies.into_iter().map(|(s, score)| {
-        SimilarStrategyResponse {
+    let response: Vec<SimilarStrategyResponse> = strategies
+        .into_iter()
+        .map(|(s, score)| SimilarStrategyResponse {
             score,
             id: s.id,
             name: s.name.clone(),
@@ -546,10 +576,14 @@ async fn get_similar_strategies(
             quality_score: s.quality_score,
             success_count: s.success_count,
             failure_count: s.failure_count,
-            reasoning_steps: s.reasoning_steps.iter().map(|step| ReasoningStepResponse {
-                description: step.description.clone(),
-                sequence_order: step.sequence_order,
-            }).collect(),
+            reasoning_steps: s
+                .reasoning_steps
+                .iter()
+                .map(|step| ReasoningStepResponse {
+                    description: step.description.clone(),
+                    sequence_order: step.sequence_order,
+                })
+                .collect(),
             strategy_type: format!("{:?}", s.strategy_type),
             support_count: s.support_count,
             expected_success: s.expected_success,
@@ -560,8 +594,8 @@ async fn get_similar_strategies(
             behavior_signature: s.behavior_signature.clone(),
             precondition: s.precondition.clone(),
             action_hint: s.action_hint.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -571,20 +605,26 @@ async fn get_action_suggestions(
     State(state): State<AppState>,
     Query(query): Query<ActionSuggestionsQuery>,
 ) -> Result<Json<Vec<ActionSuggestionResponse>>, ApiError> {
-    info!("Getting action suggestions for context: {}", query.context_hash);
+    info!(
+        "Getting action suggestions for context: {}",
+        query.context_hash
+    );
 
-    let suggestions = state.engine.get_next_action_suggestions(
-        query.context_hash,
-        query.last_action_node,
-        query.limit
-    ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let suggestions = state
+        .engine
+        .get_next_action_suggestions(query.context_hash, query.last_action_node, query.limit)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let response: Vec<ActionSuggestionResponse> = suggestions.into_iter().map(|s| ActionSuggestionResponse {
-        action_name: s.action_name,
-        success_probability: s.success_probability,
-        evidence_count: s.evidence_count,
-        reasoning: s.reasoning,
-    }).collect();
+    let response: Vec<ActionSuggestionResponse> = suggestions
+        .into_iter()
+        .map(|s| ActionSuggestionResponse {
+            action_name: s.action_name,
+            success_probability: s.success_probability,
+            evidence_count: s.evidence_count,
+            reasoning: s.reasoning,
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -598,7 +638,8 @@ async fn get_episodes(
 
     let episodes = state.engine.get_completed_episodes().await;
 
-    let response: Vec<EpisodeResponse> = episodes.into_iter()
+    let response: Vec<EpisodeResponse> = episodes
+        .into_iter()
         .take(pagination.limit)
         .map(|e| EpisodeResponse {
             id: e.id,
@@ -606,7 +647,8 @@ async fn get_episodes(
             event_count: e.events.len(),
             significance: e.significance,
             outcome: e.outcome.map(|o| format!("{:?}", o)),
-        }).collect();
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -622,9 +664,7 @@ async fn get_events(
 }
 
 // GET /api/stats - Get system statistics
-async fn get_stats(
-    State(state): State<AppState>,
-) -> Result<Json<StatsResponse>, ApiError> {
+async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsResponse>, ApiError> {
     info!("Getting system statistics");
 
     let stats = state.engine.get_engine_stats().await;
@@ -652,22 +692,30 @@ async fn get_graph(
         .get_graph_structure(query.limit, query.session_id, query.agent_type)
         .await;
 
-    let nodes: Vec<GraphNodeResponse> = graph_data.nodes.into_iter().map(|n| GraphNodeResponse {
-        id: n.id,
-        label: n.label.unwrap_or_else(|| format!("Node {}", n.id)),
-        node_type: n.node_type,
-        created_at: n.created_at,
-        properties: n.properties,
-    }).collect();
+    let nodes: Vec<GraphNodeResponse> = graph_data
+        .nodes
+        .into_iter()
+        .map(|n| GraphNodeResponse {
+            id: n.id,
+            label: n.label.unwrap_or_else(|| format!("Node {}", n.id)),
+            node_type: n.node_type,
+            created_at: n.created_at,
+            properties: n.properties,
+        })
+        .collect();
 
-    let edges: Vec<GraphEdgeResponse> = graph_data.edges.into_iter().map(|e| GraphEdgeResponse {
-        id: e.id,
-        from: e.from,
-        to: e.to,
-        edge_type: e.edge_type,
-        weight: e.weight,
-        confidence: e.confidence,
-    }).collect();
+    let edges: Vec<GraphEdgeResponse> = graph_data
+        .edges
+        .into_iter()
+        .map(|e| GraphEdgeResponse {
+            id: e.id,
+            from: e.from,
+            to: e.to,
+            edge_type: e.edge_type,
+            weight: e.weight,
+            confidence: e.confidence,
+        })
+        .collect();
 
     Ok(Json(GraphResponse { nodes, edges }))
 }
@@ -677,7 +725,10 @@ async fn get_graph_for_context(
     State(state): State<AppState>,
     Query(query): Query<GraphContextQuery>,
 ) -> Result<Json<GraphResponse>, ApiError> {
-    info!("Getting graph structure for context: {}", query.context_hash);
+    info!(
+        "Getting graph structure for context: {}",
+        query.context_hash
+    );
 
     let graph_data = state
         .engine
@@ -689,34 +740,44 @@ async fn get_graph_for_context(
         )
         .await;
 
-    let nodes: Vec<GraphNodeResponse> = graph_data.nodes.into_iter().map(|n| GraphNodeResponse {
-        id: n.id,
-        label: n.label.unwrap_or_else(|| format!("Node {}", n.id)),
-        node_type: n.node_type,
-        created_at: n.created_at,
-        properties: n.properties,
-    }).collect();
+    let nodes: Vec<GraphNodeResponse> = graph_data
+        .nodes
+        .into_iter()
+        .map(|n| GraphNodeResponse {
+            id: n.id,
+            label: n.label.unwrap_or_else(|| format!("Node {}", n.id)),
+            node_type: n.node_type,
+            created_at: n.created_at,
+            properties: n.properties,
+        })
+        .collect();
 
-    let edges: Vec<GraphEdgeResponse> = graph_data.edges.into_iter().map(|e| GraphEdgeResponse {
-        id: e.id,
-        from: e.from,
-        to: e.to,
-        edge_type: e.edge_type,
-        weight: e.weight,
-        confidence: e.confidence,
-    }).collect();
+    let edges: Vec<GraphEdgeResponse> = graph_data
+        .edges
+        .into_iter()
+        .map(|e| GraphEdgeResponse {
+            id: e.id,
+            from: e.from,
+            to: e.to,
+            edge_type: e.edge_type,
+            weight: e.weight,
+            confidence: e.confidence,
+        })
+        .collect();
 
     Ok(Json(GraphResponse { nodes, edges }))
 }
 
 // GET /api/health - Health check endpoint
-async fn health_check(
-    State(state): State<AppState>,
-) -> Result<Json<HealthResponse>, ApiError> {
+async fn health_check(State(state): State<AppState>) -> Result<Json<HealthResponse>, ApiError> {
     let health = state.engine.get_health_metrics().await;
 
     Ok(Json(HealthResponse {
-        status: if health.is_healthy { "healthy".to_string() } else { "degraded".to_string() },
+        status: if health.is_healthy {
+            "healthy".to_string()
+        } else {
+            "degraded".to_string()
+        },
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: 0, // TODO: track uptime
         is_healthy: health.is_healthy,
@@ -760,10 +821,11 @@ async fn docs() -> &'static str {
 // ============================================================================
 
 // GET /api/analytics - Get comprehensive graph analytics
-async fn get_analytics(
-    State(state): State<AppState>,
-) -> Result<Json<AnalyticsResponse>, ApiError> {
-    let metrics = state.engine.get_analytics().await
+async fn get_analytics(State(state): State<AppState>) -> Result<Json<AnalyticsResponse>, ApiError> {
+    let metrics = state
+        .engine
+        .get_analytics()
+        .await
         .map_err(|e| ApiError::Internal(format!("Failed to get analytics: {}", e)))?;
 
     Ok(Json(AnalyticsResponse {
@@ -794,16 +856,17 @@ async fn get_indexes(
 ) -> Result<Json<Vec<IndexStatsResponse>>, ApiError> {
     let index_stats = state.engine.get_index_stats().await;
 
-    let response: Vec<IndexStatsResponse> = index_stats.into_iter().map(|stats| {
-        IndexStatsResponse {
+    let response: Vec<IndexStatsResponse> = index_stats
+        .into_iter()
+        .map(|stats| IndexStatsResponse {
             insert_count: stats.insert_count,
             query_count: stats.query_count,
             range_query_count: stats.range_query_count,
             hit_count: stats.hit_count,
             miss_count: stats.miss_count,
             last_accessed: stats.last_accessed,
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok(Json(response))
 }
@@ -812,16 +875,21 @@ async fn get_indexes(
 async fn get_communities(
     State(state): State<AppState>,
 ) -> Result<Json<CommunitiesResponse>, ApiError> {
-    let result = state.engine.detect_communities().await
+    let result = state
+        .engine
+        .detect_communities()
+        .await
         .map_err(|e| ApiError::Internal(format!("Failed to detect communities: {}", e)))?;
 
-    let communities: Vec<CommunityResponse> = result.communities.into_iter().map(|(id, nodes)| {
-        CommunityResponse {
+    let communities: Vec<CommunityResponse> = result
+        .communities
+        .into_iter()
+        .map(|(id, nodes)| CommunityResponse {
             community_id: id,
             size: nodes.len(),
             node_ids: nodes,
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok(Json(CommunitiesResponse {
         communities,
@@ -835,28 +903,58 @@ async fn get_communities(
 async fn get_centrality(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CentralityScoresResponse>>, ApiError> {
-    let all_centralities = state.engine.get_all_centrality_scores().await
+    let all_centralities = state
+        .engine
+        .get_all_centrality_scores()
+        .await
         .map_err(|e| ApiError::Internal(format!("Failed to calculate centrality: {}", e)))?;
 
     // Get all node IDs from one of the centrality maps
     let node_ids: Vec<u64> = all_centralities.degree.keys().copied().collect();
 
-    let mut scores: Vec<CentralityScoresResponse> = node_ids.into_iter().map(|node_id| {
-        let combined = all_centralities.combined_score(node_id);
+    let mut scores: Vec<CentralityScoresResponse> = node_ids
+        .into_iter()
+        .map(|node_id| {
+            let combined = all_centralities.combined_score(node_id);
 
-        CentralityScoresResponse {
-            node_id,
-            degree: all_centralities.degree.get(&node_id).copied().unwrap_or(0.0),
-            betweenness: all_centralities.betweenness.get(&node_id).copied().unwrap_or(0.0),
-            closeness: all_centralities.closeness.get(&node_id).copied().unwrap_or(0.0),
-            eigenvector: all_centralities.eigenvector.get(&node_id).copied().unwrap_or(0.0),
-            pagerank: all_centralities.pagerank.get(&node_id).copied().unwrap_or(0.0),
-            combined,
-        }
-    }).collect();
+            CentralityScoresResponse {
+                node_id,
+                degree: all_centralities
+                    .degree
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(0.0),
+                betweenness: all_centralities
+                    .betweenness
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(0.0),
+                closeness: all_centralities
+                    .closeness
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(0.0),
+                eigenvector: all_centralities
+                    .eigenvector
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(0.0),
+                pagerank: all_centralities
+                    .pagerank
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or(0.0),
+                combined,
+            }
+        })
+        .collect();
 
     // Sort by combined score descending
-    scores.sort_by(|a, b| b.combined.partial_cmp(&a.combined).unwrap_or(std::cmp::Ordering::Equal));
+    scores.sort_by(|a, b| {
+        b.combined
+            .partial_cmp(&a.combined)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(Json(scores))
 }
@@ -882,9 +980,9 @@ async fn main() -> anyhow::Result<()> {
     // Configure persistent storage backend
     config.storage_backend = StorageBackend::Persistent;
     config.redb_path = PathBuf::from("./data/eventgraph.redb");
-    config.redb_cache_size_mb = 128;      // 128MB redb cache
-    config.memory_cache_size = 10_000;    // 10K memories in RAM (~20MB)
-    config.strategy_cache_size = 5_000;   // 5K strategies in RAM (~15MB)
+    config.redb_cache_size_mb = 128; // 128MB redb cache
+    config.memory_cache_size = 10_000; // 10K memories in RAM (~20MB)
+    config.strategy_cache_size = 5_000; // 5K strategies in RAM (~15MB)
 
     // Create data directory if it doesn't exist
     if let Some(parent) = config.redb_path.parent() {

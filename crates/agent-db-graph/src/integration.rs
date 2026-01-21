@@ -10,32 +10,34 @@
 //! - Reinforcement learning from outcomes
 //! - Policy guide queries for action suggestions
 
-use crate::{GraphResult, GraphError};
-use crate::structures::{
-    Graph, GraphNode, GraphEdge, NodeId, GraphStats, NodeType, EdgeType, EdgeWeight, GoalStatus,
-};
-use crate::inference::{GraphInference, InferenceConfig, EpisodeMetrics};
-use crate::traversal::{GraphTraversal, GraphQuery, QueryResult, ActionSuggestion};
-use crate::event_ordering::{EventOrderingEngine, OrderingConfig};
-use crate::episodes::{EpisodeDetector, EpisodeDetectorConfig, Episode, EpisodeOutcome};
-use crate::memory::{MemoryFormationConfig, Memory, MemoryStats};
-use crate::strategies::{
-    StrategyExtractionConfig, Strategy, StrategyId, StrategyStats, StrategySimilarityQuery,
-};
-use crate::stores::{InMemoryMemoryStore, InMemoryStrategyStore, MemoryStore, StrategyStore,
-    RedbMemoryStore, RedbStrategyStore};
-use crate::transitions::{TransitionModel, TransitionModelConfig};
-use crate::indexing::{IndexManager, IndexType};
-use crate::algorithms::{LouvainAlgorithm, CentralityMeasures};
+use crate::algorithms::{CentralityMeasures, LouvainAlgorithm};
 use crate::analytics::GraphAnalytics;
-use agent_db_events::{Event, EventType};
-use agent_db_events::core::LearningEvent;
-use serde_json::json;
-use agent_db_storage::{StorageEngine, RedbBackend, RedbConfig};
+use crate::episodes::{Episode, EpisodeDetector, EpisodeDetectorConfig, EpisodeOutcome};
+use crate::event_ordering::{EventOrderingEngine, OrderingConfig};
+use crate::indexing::{IndexManager, IndexType};
+use crate::inference::{EpisodeMetrics, GraphInference, InferenceConfig};
+use crate::memory::{Memory, MemoryFormationConfig, MemoryStats};
+use crate::stores::{
+    InMemoryMemoryStore, InMemoryStrategyStore, MemoryStore, RedbMemoryStore, RedbStrategyStore,
+    StrategyStore,
+};
+use crate::strategies::{
+    Strategy, StrategyExtractionConfig, StrategyId, StrategySimilarityQuery, StrategyStats,
+};
+use crate::structures::{
+    EdgeType, EdgeWeight, GoalStatus, Graph, GraphEdge, GraphNode, GraphStats, NodeId, NodeType,
+};
+use crate::transitions::{TransitionModel, TransitionModelConfig};
+use crate::traversal::{ActionSuggestion, GraphQuery, GraphTraversal, QueryResult};
+use crate::{GraphError, GraphResult};
 use agent_db_core::types::{AgentId, AgentType, ContextHash, EventId, SessionId};
+use agent_db_events::core::LearningEvent;
+use agent_db_events::{Event, EventType};
+use agent_db_storage::{RedbBackend, RedbConfig, StorageEngine};
+use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
@@ -100,7 +102,6 @@ pub struct GraphEngineConfig {
     pub enable_query_cache: bool,
 
     // ========== Persistent Storage Configuration ==========
-
     /// Storage backend type (InMemory or Persistent)
     pub storage_backend: StorageBackend,
 
@@ -197,7 +198,6 @@ pub struct GraphEngine {
     last_persistence: Arc<RwLock<u64>>,
 
     // ========== NEW: Advanced Graph Features ==========
-
     /// Index manager for fast property queries
     index_manager: Arc<RwLock<IndexManager>>,
 
@@ -249,8 +249,8 @@ impl Default for GraphEngineConfig {
             // Storage configuration defaults
             storage_backend: StorageBackend::InMemory,
             redb_path: PathBuf::from("./agent_db_data/graph.redb"),
-            redb_cache_size_mb: 128, // 128MB cache by default
-            memory_cache_size: 10_000, // Keep 10K memories in RAM
+            redb_cache_size_mb: 128,    // 128MB cache by default
+            memory_cache_size: 10_000,  // Keep 10K memories in RAM
             strategy_cache_size: 5_000, // Keep 5K strategies in RAM
         }
     }
@@ -261,46 +261,53 @@ impl GraphEngine {
     pub async fn new() -> GraphResult<Self> {
         Self::with_config(GraphEngineConfig::default()).await
     }
-    
+
     /// Create a graph engine with custom configuration
     pub async fn with_config(config: GraphEngineConfig) -> GraphResult<Self> {
-        let inference = Arc::new(RwLock::new(
-            GraphInference::with_config(config.inference_config.clone())
-        ));
+        let inference = Arc::new(RwLock::new(GraphInference::with_config(
+            config.inference_config.clone(),
+        )));
 
         let traversal = Arc::new(RwLock::new(GraphTraversal::new()));
 
         let event_ordering = Arc::new(EventOrderingEngine::new(config.ordering_config.clone()));
 
         let scoped_inference = Arc::new(
-            crate::scoped_inference::ScopedInferenceEngine::new(config.scoped_inference_config.clone()).await?
+            crate::scoped_inference::ScopedInferenceEngine::new(
+                config.scoped_inference_config.clone(),
+            )
+            .await?,
         );
 
         // Initialize self-evolution components
         // Note: EpisodeDetector requires an Arc<Graph> but doesn't actually use it for detection
         // It uses event-based heuristics instead. We provide an empty graph for API compatibility.
         let graph_for_episodes = Arc::new(Graph::new());
-        let episode_detector = Arc::new(RwLock::new(
-            EpisodeDetector::new(graph_for_episodes, config.episode_config.clone())
-        ));
+        let episode_detector = Arc::new(RwLock::new(EpisodeDetector::new(
+            graph_for_episodes,
+            config.episode_config.clone(),
+        )));
 
         // Initialize stores based on storage backend configuration
         let (memory_store, strategy_store): (
             Arc<RwLock<Box<dyn MemoryStore>>>,
-            Arc<RwLock<Box<dyn StrategyStore>>>
+            Arc<RwLock<Box<dyn StrategyStore>>>,
         ) = match config.storage_backend {
             StorageBackend::InMemory => {
                 tracing::info!("Initializing with InMemory storage backend");
-                let mem = Arc::new(RwLock::new(
-                    Box::new(InMemoryMemoryStore::new(config.memory_config.clone())) as Box<dyn MemoryStore>
-                ));
-                let strat = Arc::new(RwLock::new(
-                    Box::new(InMemoryStrategyStore::new(config.strategy_config.clone())) as Box<dyn StrategyStore>
-                ));
+                let mem = Arc::new(RwLock::new(Box::new(InMemoryMemoryStore::new(
+                    config.memory_config.clone(),
+                )) as Box<dyn MemoryStore>));
+                let strat = Arc::new(RwLock::new(Box::new(InMemoryStrategyStore::new(
+                    config.strategy_config.clone(),
+                )) as Box<dyn StrategyStore>));
                 (mem, strat)
-            }
+            },
             StorageBackend::Persistent => {
-                tracing::info!("Initializing with Persistent storage backend (redb) at {:?}", config.redb_path);
+                tracing::info!(
+                    "Initializing with Persistent storage backend (redb) at {:?}",
+                    config.redb_path
+                );
 
                 // Initialize redb backend
                 let redb_config = RedbConfig {
@@ -308,8 +315,9 @@ impl GraphEngine {
                     cache_size_bytes: config.redb_cache_size_mb * 1024 * 1024,
                     repair_on_open: false,
                 };
-                let backend = Arc::new(RedbBackend::open(redb_config)
-                    .map_err(|e| GraphError::OperationError(format!("Failed to open redb: {:?}", e)))?);
+                let backend = Arc::new(RedbBackend::open(redb_config).map_err(|e| {
+                    GraphError::OperationError(format!("Failed to open redb: {:?}", e))
+                })?);
 
                 // Create memory store with LRU cache
                 let mut mem_store = RedbMemoryStore::new(
@@ -317,8 +325,12 @@ impl GraphEngine {
                     config.memory_config.clone(),
                     config.memory_cache_size.max(1000), // Minimum 1000 entries
                 );
-                mem_store.initialize()
-                    .map_err(|e| GraphError::OperationError(format!("Failed to initialize memory store: {:?}", e)))?;
+                mem_store.initialize().map_err(|e| {
+                    GraphError::OperationError(format!(
+                        "Failed to initialize memory store: {:?}",
+                        e
+                    ))
+                })?;
 
                 // Create strategy store with LRU cache
                 let mut strat_store = RedbStrategyStore::new(
@@ -326,15 +338,15 @@ impl GraphEngine {
                     config.strategy_config.clone(),
                     config.strategy_cache_size.max(500), // Minimum 500 entries
                 );
-                strat_store.initialize()
-                    .map_err(|e| GraphError::OperationError(format!("Failed to initialize strategy store: {:?}", e)))?;
+                strat_store.initialize().map_err(|e| {
+                    GraphError::OperationError(format!(
+                        "Failed to initialize strategy store: {:?}",
+                        e
+                    ))
+                })?;
 
-                let mem = Arc::new(RwLock::new(
-                    Box::new(mem_store) as Box<dyn MemoryStore>
-                ));
-                let strat = Arc::new(RwLock::new(
-                    Box::new(strat_store) as Box<dyn StrategyStore>
-                ));
+                let mem = Arc::new(RwLock::new(Box::new(mem_store) as Box<dyn MemoryStore>));
+                let strat = Arc::new(RwLock::new(Box::new(strat_store) as Box<dyn StrategyStore>));
 
                 tracing::info!(
                     "Persistent storage initialized: memory_cache={}, strategy_cache={}",
@@ -343,12 +355,12 @@ impl GraphEngine {
                 );
 
                 (mem, strat)
-            }
+            },
         };
 
-        let transition_model = Arc::new(RwLock::new(
-            TransitionModel::new(TransitionModelConfig::default())
-        ));
+        let transition_model = Arc::new(RwLock::new(TransitionModel::new(
+            TransitionModelConfig::default(),
+        )));
 
         // Initialize advanced graph features
         let index_manager = Arc::new(RwLock::new(IndexManager::new()));
@@ -410,17 +422,17 @@ impl GraphEngine {
             centrality,
         })
     }
-    
+
     /// Create a graph engine with storage integration
     pub async fn with_storage(
         config: GraphEngineConfig,
-        storage: Arc<StorageEngine>
+        storage: Arc<StorageEngine>,
     ) -> GraphResult<Self> {
         let mut engine = Self::with_config(config).await?;
         engine.storage = Some(storage);
         Ok(engine)
     }
-    
+
     /// Process a single event and update the graph
     ///
     /// **Automatic Self-Evolution Pipeline:**
@@ -471,7 +483,10 @@ impl GraphEngine {
 
             // Process through inference engine
             tracing::info!("Inference processing event {}", ready_event.id);
-            tracing::info!("Acquiring inference write lock for event {}", ready_event.id);
+            tracing::info!(
+                "Acquiring inference write lock for event {}",
+                ready_event.id
+            );
             let nodes_result = {
                 let mut inference = self.inference.write().await;
                 inference.process_event(ready_event.clone())
@@ -481,13 +496,17 @@ impl GraphEngine {
                     result.nodes_created.extend(nodes.clone());
 
                     // Auto-index newly created nodes
-                    tracing::info!("Auto-index start event_id={} nodes={}", ready_event.id, nodes.len());
+                    tracing::info!(
+                        "Auto-index start event_id={} nodes={}",
+                        ready_event.id,
+                        nodes.len()
+                    );
                     self.auto_index_nodes(&nodes).await?;
                     tracing::info!("Auto-index done event_id={}", ready_event.id);
-                }
+                },
                 Err(e) => {
                     result.errors.push(e);
-                }
+                },
             }
 
             // Process through scoped inference engine (session + agent_type isolation)
@@ -503,7 +522,11 @@ impl GraphEngine {
                 },
             };
             tracing::info!("Scoped inference processing event {}", ready_event.id);
-            if let Err(e) = self.scoped_inference.process_scoped_event(scoped_event).await {
+            if let Err(e) = self
+                .scoped_inference
+                .process_scoped_event(scoped_event)
+                .await
+            {
                 result.errors.push(e);
             }
 
@@ -515,7 +538,10 @@ impl GraphEngine {
             if self.config.auto_episode_detection {
                 // Check for completed episodes (must drop write lock before acquiring read lock)
                 let episode_update = {
-                    self.episode_detector.write().await.process_event(&ready_event)
+                    self.episode_detector
+                        .write()
+                        .await
+                        .process_event(&ready_event)
                 };
 
                 if let Some(episode_update) = episode_update {
@@ -525,11 +551,20 @@ impl GraphEngine {
                     };
                     result.patterns_detected.push(format!(
                         "{}_{}",
-                        if is_correction { "episode_corrected" } else { "episode_completed" },
+                        if is_correction {
+                            "episode_corrected"
+                        } else {
+                            "episode_completed"
+                        },
                         episode_id
                     ));
 
-                    let episodes: Vec<Episode> = self.episode_detector.read().await.get_completed_episodes().to_vec();
+                    let episodes: Vec<Episode> = self
+                        .episode_detector
+                        .read()
+                        .await
+                        .get_completed_episodes()
+                        .to_vec();
                     if let Some(episode) = episodes.iter().find(|e| e.id == episode_id) {
                         if !is_correction {
                             self.stats.write().await.total_episodes_detected += 1;
@@ -557,7 +592,9 @@ impl GraphEngine {
 
         // Update ordering statistics
         if ordering_result.reordering_occurred {
-            result.patterns_detected.push("event_reordering_occurred".to_string());
+            result
+                .patterns_detected
+                .push("event_reordering_occurred".to_string());
         }
 
         // Update statistics
@@ -569,8 +606,9 @@ impl GraphEngine {
 
             // Update average processing time
             let processing_time = start_time.elapsed().as_millis() as f64;
-            stats.average_processing_time_ms =
-                (stats.average_processing_time_ms * (stats.total_events_processed as f64 - 1.0) + processing_time)
+            stats.average_processing_time_ms = (stats.average_processing_time_ms
+                * (stats.total_events_processed as f64 - 1.0)
+                + processing_time)
                 / stats.total_events_processed as f64;
 
             // Run Louvain community detection periodically (every 1000 events)
@@ -579,7 +617,9 @@ impl GraphEngine {
                 if let Err(e) = self.run_community_detection().await {
                     result.errors.push(e);
                 } else {
-                    result.patterns_detected.push("louvain_communities_updated".to_string());
+                    result
+                        .patterns_detected
+                        .push("louvain_communities_updated".to_string());
                 }
             }
         }
@@ -628,13 +668,19 @@ impl GraphEngine {
     }
 
     async fn handle_learning_event(&self, event: &Event) -> GraphResult<()> {
-        let EventType::Learning { event: learning_event } = &event.event_type else {
+        let EventType::Learning {
+            event: learning_event,
+        } = &event.event_type
+        else {
             return Ok(());
         };
 
         let now = std::time::Instant::now();
         match learning_event {
-            LearningEvent::MemoryRetrieved { query_id, memory_ids } => {
+            LearningEvent::MemoryRetrieved {
+                query_id,
+                memory_ids,
+            } => {
                 let mut traces = self.decision_traces.write().await;
                 let trace = traces.entry(query_id.clone()).or_insert(DecisionTrace {
                     memory_ids: Vec::new(),
@@ -650,8 +696,11 @@ impl GraphEngine {
                     query_id,
                     memory_ids.len()
                 );
-            }
-            LearningEvent::MemoryUsed { query_id, memory_id } => {
+            },
+            LearningEvent::MemoryUsed {
+                query_id,
+                memory_id,
+            } => {
                 let mut traces = self.decision_traces.write().await;
                 let trace = traces.entry(query_id.clone()).or_insert(DecisionTrace {
                     memory_ids: Vec::new(),
@@ -669,8 +718,11 @@ impl GraphEngine {
                     query_id,
                     memory_id
                 );
-            }
-            LearningEvent::StrategyServed { query_id, strategy_ids } => {
+            },
+            LearningEvent::StrategyServed {
+                query_id,
+                strategy_ids,
+            } => {
                 let mut traces = self.decision_traces.write().await;
                 let trace = traces.entry(query_id.clone()).or_insert(DecisionTrace {
                     memory_ids: Vec::new(),
@@ -686,8 +738,11 @@ impl GraphEngine {
                     query_id,
                     strategy_ids.len()
                 );
-            }
-            LearningEvent::StrategyUsed { query_id, strategy_id } => {
+            },
+            LearningEvent::StrategyUsed {
+                query_id,
+                strategy_id,
+            } => {
                 let mut traces = self.decision_traces.write().await;
                 let trace = traces.entry(query_id.clone()).or_insert(DecisionTrace {
                     memory_ids: Vec::new(),
@@ -705,7 +760,7 @@ impl GraphEngine {
                     query_id,
                     strategy_id
                 );
-            }
+            },
             LearningEvent::Outcome { query_id, success } => {
                 tracing::info!(
                     "Learning telemetry outcome query_id={} success={}",
@@ -713,7 +768,7 @@ impl GraphEngine {
                     success
                 );
                 self.apply_learning_outcome(query_id, *success).await?;
-            }
+            },
         }
 
         Ok(())
@@ -757,7 +812,7 @@ impl GraphEngine {
 
         Ok(())
     }
-    
+
     /// Process multiple events in batch
     pub async fn process_events(&self, events: Vec<Event>) -> GraphResult<GraphOperationResult> {
         let start_time = std::time::Instant::now();
@@ -768,13 +823,13 @@ impl GraphEngine {
             processing_time_ms: 0,
             errors: Vec::new(),
         };
-        
+
         // Add all events to buffer
         {
             let mut buffer = self.event_buffer.write().await;
             buffer.extend(events.clone());
         }
-        
+
         // Process through inference engine
         match self.inference.write().await.process_events(events) {
             Ok(inference_results) => {
@@ -783,12 +838,12 @@ impl GraphEngine {
                     .map(|i| format!("pattern_{}", i))
                     .collect();
                 combined_result.relationships_discovered = inference_results.events_processed;
-            }
+            },
             Err(e) => {
                 combined_result.errors.push(e);
-            }
+            },
         }
-        
+
         // Update statistics
         {
             let mut stats = self.stats.write().await;
@@ -797,46 +852,46 @@ impl GraphEngine {
             stats.total_patterns_detected += combined_result.patterns_detected.len() as u64;
             stats.last_operation_time = std::time::Instant::now();
         }
-        
+
         combined_result.processing_time_ms = start_time.elapsed().as_millis() as u64;
         Ok(combined_result)
     }
-    
+
     /// Execute a graph query
     pub async fn execute_query(&self, query: GraphQuery) -> GraphResult<QueryResult> {
         let start_time = std::time::Instant::now();
-        
+
         // Get read access to the graph through inference engine
         let _graph = {
             let _inference = self.inference.read().await;
             // We need a way to get a reference to the graph
             // For now, we'll execute queries directly through traversal
         };
-        
+
         let result = {
             let inference = self.inference.read().await;
             let mut traversal = self.traversal.write().await;
             traversal.execute_query(inference.graph(), query)?
         };
-        
+
         // Update query statistics
         {
             let mut stats = self.stats.write().await;
             stats.total_queries_executed += 1;
-            
+
             let _query_time = start_time.elapsed().as_millis() as f64;
             // Would update query timing statistics here
         }
-        
+
         Ok(result)
     }
-    
+
     /// Get current graph statistics
     pub async fn get_graph_stats(&self) -> GraphStats {
         let inference = self.inference.read().await;
         inference.graph().stats().clone()
     }
-    
+
     /// Get engine statistics
     pub async fn get_engine_stats(&self) -> GraphEngineStats {
         let stats = self.stats.read().await;
@@ -855,38 +910,39 @@ impl GraphEngine {
             total_reinforcements_applied: stats.total_reinforcements_applied,
         }
     }
-    
+
     /// Get detected patterns
     pub async fn get_patterns(&self) -> Vec<String> {
         let inference = self.inference.read().await;
-        inference.get_temporal_patterns()
+        inference
+            .get_temporal_patterns()
             .iter()
             .map(|p| p.pattern_name.clone())
             .collect()
     }
-    
+
     /// Force pattern detection on current data
     pub async fn detect_patterns(&self) -> GraphResult<Vec<String>> {
         // Process any buffered events first
         self.process_batch().await?;
-        
+
         // Get patterns
         let patterns = self.get_patterns().await;
-        
+
         // Update statistics
         {
             let mut stats = self.stats.write().await;
             stats.total_patterns_detected += patterns.len() as u64;
         }
-        
+
         Ok(patterns)
     }
-    
+
     /// Get graph size and health metrics
     pub async fn get_health_metrics(&self) -> GraphHealthMetrics {
         let graph_stats = self.get_graph_stats().await;
         let engine_stats = self.get_engine_stats().await;
-        
+
         GraphHealthMetrics {
             node_count: graph_stats.node_count,
             edge_count: graph_stats.edge_count,
@@ -899,25 +955,25 @@ impl GraphEngine {
                 0.0
             },
             memory_usage_estimate: graph_stats.node_count * 1000 + graph_stats.edge_count * 500, // Rough estimate
-            is_healthy: graph_stats.node_count < self.config.max_graph_size 
+            is_healthy: graph_stats.node_count < self.config.max_graph_size
                 && engine_stats.average_processing_time_ms < 100.0,
         }
     }
-    
+
     /// Clean up old data and optimize graph
     pub async fn cleanup(&self) -> GraphResult<()> {
         // Clean up old associations
         // This would involve removing old temporal patterns and low-confidence relationships
-        
+
         // Clean up query cache
         {
             let mut traversal = self.traversal.write().await;
             traversal.cleanup_cache();
         }
-        
+
         Ok(())
     }
-    
+
     /// Persist current graph state to storage
     async fn persist_graph_state(&self) -> GraphResult<()> {
         if let Some(ref _storage) = self.storage {
@@ -928,7 +984,7 @@ impl GraphEngine {
         }
         Ok(())
     }
-    
+
     /// Process buffered events in batch
     async fn process_batch(&self) -> GraphResult<()> {
         let events = {
@@ -937,29 +993,29 @@ impl GraphEngine {
             buffer.clear();
             events
         };
-        
+
         if !events.is_empty() {
             tracing::info!("Acquiring inference write lock for batch processing");
             let mut inference = self.inference.write().await;
             let _results = inference.process_events(events)?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Flush all buffered events (useful for shutdown or testing)
     pub async fn flush_all_buffers(&self) -> GraphResult<()> {
         // Flush the event ordering buffers
         let buffered_events = self.event_ordering.flush_all_buffers().await?;
-        
+
         // Process any remaining buffered events
         for event in buffered_events {
             let _ = self.process_event(event).await; // Ignore errors during shutdown
         }
-        
+
         Ok(())
     }
-    
+
     /// Get scoped inference statistics
     pub async fn get_scoped_inference_stats(&self) -> crate::scoped_inference::ScopeStatistics {
         self.scoped_inference.get_scope_statistics().await
@@ -969,13 +1025,15 @@ impl GraphEngine {
     pub async fn query_events_in_scope(
         &self,
         scope: &crate::scoped_inference::InferenceScope,
-        query: crate::scoped_inference::ScopeQuery
+        query: crate::scoped_inference::ScopeQuery,
     ) -> GraphResult<crate::scoped_inference::ScopeQueryResult> {
         self.scoped_inference.query_scope(scope, query).await
     }
 
     /// Get cross-scope relationships
-    pub async fn get_cross_scope_relationships(&self) -> crate::scoped_inference::CrossScopeInsights {
+    pub async fn get_cross_scope_relationships(
+        &self,
+    ) -> crate::scoped_inference::CrossScopeInsights {
         self.scoped_inference.get_cross_scope_insights().await
     }
 
@@ -1043,7 +1101,9 @@ impl GraphEngine {
         // Get events for this episode
         let events: Vec<Event> = {
             let store = self.event_store.read().await;
-            episode.events.iter()
+            episode
+                .events
+                .iter()
                 .filter_map(|event_id| store.get(event_id).cloned())
                 .collect()
         };
@@ -1102,10 +1162,9 @@ impl GraphEngine {
         // Calculate duration from events
         let duration_seconds = {
             let store = self.event_store.read().await;
-            if let (Some(start_event), Some(end_event_id)) = (
-                store.get(&episode.start_event),
-                episode.end_event,
-            ) {
+            if let (Some(start_event), Some(end_event_id)) =
+                (store.get(&episode.start_event), episode.end_event)
+            {
                 if let Some(end_event) = store.get(&end_event_id) {
                     let duration_ns = end_event.timestamp.saturating_sub(start_event.timestamp);
                     (duration_ns as f32) / 1_000_000_000.0
@@ -1127,7 +1186,9 @@ impl GraphEngine {
 
         // Apply reinforcement
         let mut inference = self.inference.write().await;
-        let _result = inference.reinforce_patterns(episode, success, Some(metrics)).await?;
+        let _result = inference
+            .reinforce_patterns(episode, success, Some(metrics))
+            .await?;
 
         self.update_transition_model(episode).await?;
 
@@ -1195,7 +1256,12 @@ impl GraphEngine {
         let graph = inference.graph();
         let traversal = self.traversal.read().await;
 
-        let mut suggestions = traversal.get_next_step_suggestions(graph, context_hash, last_action_node, limit * 2)?;
+        let mut suggestions = traversal.get_next_step_suggestions(
+            graph,
+            context_hash,
+            last_action_node,
+            limit * 2,
+        )?;
 
         // Calculate centrality scores for ranking
         let centrality_scores = self.centrality.all_centralities(graph)?;
@@ -1222,7 +1288,9 @@ impl GraphEngine {
 
     /// Get all memories for an agent
     pub async fn get_agent_memories(&self, agent_id: AgentId, limit: usize) -> Vec<Memory> {
-        self.memory_store.read().await
+        self.memory_store
+            .read()
+            .await
             .get_agent_memories(agent_id, limit)
     }
 
@@ -1232,7 +1300,10 @@ impl GraphEngine {
         context: &agent_db_events::core::EventContext,
         limit: usize,
     ) -> Vec<Memory> {
-        self.memory_store.write().await.retrieve_by_context(context, limit)
+        self.memory_store
+            .write()
+            .await
+            .retrieve_by_context(context, limit)
     }
 
     /// Retrieve memories by context similarity with optional filtering
@@ -1244,10 +1315,13 @@ impl GraphEngine {
         agent_id: Option<AgentId>,
         session_id: Option<SessionId>,
     ) -> Vec<Memory> {
-        self.memory_store
-            .write()
-            .await
-            .retrieve_by_context_similar(context, limit, min_similarity, agent_id, session_id)
+        self.memory_store.write().await.retrieve_by_context_similar(
+            context,
+            limit,
+            min_similarity,
+            agent_id,
+            session_id,
+        )
     }
 
     /// Get all strategies for an agent
@@ -1277,7 +1351,11 @@ impl GraphEngine {
 
     /// Get all completed episodes
     pub async fn get_completed_episodes(&self) -> Vec<Episode> {
-        self.episode_detector.read().await.get_completed_episodes().to_vec()
+        self.episode_detector
+            .read()
+            .await
+            .get_completed_episodes()
+            .to_vec()
     }
 
     /// Get memory statistics
@@ -1301,7 +1379,10 @@ impl GraphEngine {
         strategy_id: StrategyId,
         success: bool,
     ) -> GraphResult<()> {
-        self.strategy_store.write().await.update_strategy_outcome(strategy_id, success)
+        self.strategy_store
+            .write()
+            .await
+            .update_strategy_outcome(strategy_id, success)
     }
 
     /// Force memory decay (for testing or periodic cleanup)
@@ -1315,7 +1396,10 @@ impl GraphEngine {
 
     /// Auto-index newly created nodes
     async fn auto_index_nodes(&self, node_ids: &[NodeId]) -> GraphResult<()> {
-        tracing::info!("auto_index_nodes acquiring inference read lock (nodes={})", node_ids.len());
+        tracing::info!(
+            "auto_index_nodes acquiring inference read lock (nodes={})",
+            node_ids.len()
+        );
         let inference = match timeout(Duration::from_secs(2), self.inference.read()).await {
             Ok(lock) => lock,
             Err(_) => {
@@ -1323,7 +1407,7 @@ impl GraphEngine {
                 return Err(GraphError::OperationError(
                     "auto_index_nodes timeout acquiring inference read lock".to_string(),
                 ));
-            }
+            },
         };
         tracing::info!("auto_index_nodes acquired inference read lock");
         let graph = inference.graph();
@@ -1369,7 +1453,8 @@ impl GraphEngine {
 
         for (node_id, community_id) in communities.node_communities {
             if let Some(node) = graph.get_node_mut(node_id) {
-                node.properties.insert("community_id".to_string(), json!(community_id));
+                node.properties
+                    .insert("community_id".to_string(), json!(community_id));
                 node.touch();
             }
         }
@@ -1393,7 +1478,9 @@ impl GraphEngine {
     }
 
     /// Manually trigger community detection
-    pub async fn detect_communities(&self) -> GraphResult<crate::algorithms::CommunityDetectionResult> {
+    pub async fn detect_communities(
+        &self,
+    ) -> GraphResult<crate::algorithms::CommunityDetectionResult> {
         let inference = self.inference.read().await;
         let graph = inference.graph();
 
@@ -1401,7 +1488,9 @@ impl GraphEngine {
     }
 
     /// Get centrality scores for all nodes
-    pub async fn get_all_centrality_scores(&self) -> GraphResult<crate::algorithms::AllCentralities> {
+    pub async fn get_all_centrality_scores(
+        &self,
+    ) -> GraphResult<crate::algorithms::AllCentralities> {
         let inference = self.inference.read().await;
         let graph = inference.graph();
 
@@ -1437,9 +1526,9 @@ impl GraphEngine {
                     let graph = inference.graph();
                     return Self::build_graph_structure_from_events(
                         graph,
-                        event_store
-                            .iter()
-                            .filter(|(_, event)| event.session_id == session_id && event.agent_type == agent_type),
+                        event_store.iter().filter(|(_, event)| {
+                            event.session_id == session_id && event.agent_type == agent_type
+                        }),
                         limit,
                     );
                 }
@@ -1455,7 +1544,9 @@ impl GraphEngine {
             let graph = inference.graph();
             return Self::build_graph_structure_from_events(
                 graph,
-                event_store.iter().filter(|(_, event)| event.session_id == session_id),
+                event_store
+                    .iter()
+                    .filter(|(_, event)| event.session_id == session_id),
                 limit,
             );
         }
@@ -1496,9 +1587,9 @@ impl GraphEngine {
                     return Self::build_context_graph_structure(
                         graph,
                         context_hash,
-                        event_store
-                            .iter()
-                            .filter(|(_, event)| event.session_id == session_id && event.agent_type == agent_type),
+                        event_store.iter().filter(|(_, event)| {
+                            event.session_id == session_id && event.agent_type == agent_type
+                        }),
                         limit,
                     );
                 }
@@ -1514,7 +1605,9 @@ impl GraphEngine {
             return Self::build_context_graph_structure(
                 graph,
                 context_hash,
-                event_store.iter().filter(|(_, event)| event.session_id == session_id),
+                event_store
+                    .iter()
+                    .filter(|(_, event)| event.session_id == session_id),
                 limit,
             );
         }
@@ -1539,16 +1632,15 @@ impl GraphEngine {
             if let Some(node) = graph.get_event_node(*event_id) {
                 let label = match &event.event_type {
                     EventType::Action { action_name, .. } => action_name.clone(),
-                    EventType::Observation { observation_type, .. } => observation_type.clone(),
+                    EventType::Observation {
+                        observation_type, ..
+                    } => observation_type.clone(),
                     EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
                     EventType::Learning { .. } => "Learning".to_string(),
                     _ => format!("Event {}", event.id),
                 };
 
-                nodes.insert(
-                    node.id,
-                    Self::build_graph_node_data(node, Some(label)),
-                );
+                nodes.insert(node.id, Self::build_graph_node_data(node, Some(label)));
 
                 // Get edges from this node
                 let outgoing_edges = graph.get_edges_from(node.id);
@@ -1573,7 +1665,8 @@ impl GraphEngine {
                     });
 
                     if let Some(target_node) = graph.get_node(edge.target) {
-                        nodes.entry(target_node.id)
+                        nodes
+                            .entry(target_node.id)
                             .or_insert_with(|| Self::build_graph_node_data(target_node, None));
                     }
                 }
@@ -1588,16 +1681,25 @@ impl GraphEngine {
 
     fn build_graph_node_data(node: &GraphNode, label_override: Option<String>) -> GraphNodeData {
         let (node_type, label) = match &node.node_type {
-            NodeType::Event { event_type, .. } => (format!("Event::{}", event_type), label_override),
+            NodeType::Event { event_type, .. } => {
+                (format!("Event::{}", event_type), label_override)
+            },
             NodeType::Context { .. } => ("Context".to_string(), label_override),
             NodeType::Agent { .. } => ("Agent".to_string(), label_override),
             NodeType::Goal { description, .. } => ("Goal".to_string(), Some(description.clone())),
-            NodeType::Episode { episode_id, .. } => ("Episode".to_string(), Some(format!("Episode {}", episode_id))),
-            NodeType::Memory { memory_id, .. } => ("Memory".to_string(), Some(format!("Memory {}", memory_id))),
+            NodeType::Episode { episode_id, .. } => (
+                "Episode".to_string(),
+                Some(format!("Episode {}", episode_id)),
+            ),
+            NodeType::Memory { memory_id, .. } => {
+                ("Memory".to_string(), Some(format!("Memory {}", memory_id)))
+            },
             NodeType::Strategy { name, .. } => ("Strategy".to_string(), Some(name.clone())),
             NodeType::Tool { tool_name, .. } => ("Tool".to_string(), Some(tool_name.clone())),
             NodeType::Result { summary, .. } => ("Result".to_string(), Some(summary.clone())),
-            NodeType::Concept { concept_name, .. } => ("Concept".to_string(), Some(concept_name.clone())),
+            NodeType::Concept { concept_name, .. } => {
+                ("Concept".to_string(), Some(concept_name.clone()))
+            },
         };
 
         GraphNodeData {
@@ -1623,7 +1725,9 @@ impl GraphEngine {
         for (event_id, event) in events.take(limit) {
             let label = match &event.event_type {
                 EventType::Action { action_name, .. } => action_name.clone(),
-                EventType::Observation { observation_type, .. } => observation_type.clone(),
+                EventType::Observation {
+                    observation_type, ..
+                } => observation_type.clone(),
                 EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
                 EventType::Learning { .. } => "Learning".to_string(),
                 _ => format!("Event {}", event.id),
@@ -1638,7 +1742,7 @@ impl GraphEngine {
                     nodes: Vec::new(),
                     edges: Vec::new(),
                 }
-            }
+            },
         };
 
         let mut nodes: HashMap<NodeId, GraphNodeData> = HashMap::new();
@@ -1767,7 +1871,11 @@ impl GraphEngine {
         Ok(())
     }
 
-    async fn attach_strategy_to_graph(&self, episode: &Episode, strategy: &Strategy) -> GraphResult<()> {
+    async fn attach_strategy_to_graph(
+        &self,
+        episode: &Episode,
+        strategy: &Strategy,
+    ) -> GraphResult<()> {
         let mut inference = self.inference.write().await;
         let graph = inference.graph_mut();
 
@@ -1826,7 +1934,8 @@ impl GraphEngine {
             .unwrap_or_default();
         for result_type in result_types {
             let result_key = format!("strategy:{}:{}", strategy.id, result_type);
-            let result_node_id = Self::ensure_result_node(graph, &result_key, &result_type, &result_type);
+            let result_node_id =
+                Self::ensure_result_node(graph, &result_key, &result_type, &result_type);
             Self::add_or_strengthen_association(
                 graph,
                 strategy_node_id,
@@ -1846,21 +1955,25 @@ impl GraphEngine {
         if let Some(node) = graph.get_episode_node(episode.id) {
             node.id
         } else {
-        let outcome = episode
-            .outcome
-            .as_ref()
-            .map(|value| format!("{:?}", value))
-            .unwrap_or_else(|| "Unknown".to_string());
+            let outcome = episode
+                .outcome
+                .as_ref()
+                .map(|value| format!("{:?}", value))
+                .unwrap_or_else(|| "Unknown".to_string());
             let mut node = GraphNode::new(NodeType::Episode {
                 episode_id: episode.id,
                 agent_id: episode.agent_id,
                 session_id: episode.session_id,
                 outcome: outcome.clone(),
             });
-            node.properties.insert("outcome".to_string(), json!(outcome));
-            node.properties.insert("event_count".to_string(), json!(episode.events.len()));
-            node.properties.insert("significance".to_string(), json!(episode.significance));
-            node.properties.insert("salience_score".to_string(), json!(episode.salience_score));
+            node.properties
+                .insert("outcome".to_string(), json!(outcome));
+            node.properties
+                .insert("event_count".to_string(), json!(episode.events.len()));
+            node.properties
+                .insert("significance".to_string(), json!(episode.significance));
+            node.properties
+                .insert("salience_score".to_string(), json!(episode.salience_score));
             graph.add_node(node)
         }
     }
@@ -1874,11 +1987,20 @@ impl GraphEngine {
                 agent_id: memory.agent_id,
                 session_id: memory.session_id,
             });
-            node.properties.insert("strength".to_string(), json!(memory.strength));
-            node.properties.insert("relevance_score".to_string(), json!(memory.relevance_score));
-            node.properties.insert("context_hash".to_string(), json!(memory.context.fingerprint));
-            node.properties.insert("formed_at".to_string(), json!(memory.formed_at));
-            node.properties.insert("memory_type".to_string(), json!(format!("{:?}", memory.memory_type)));
+            node.properties
+                .insert("strength".to_string(), json!(memory.strength));
+            node.properties
+                .insert("relevance_score".to_string(), json!(memory.relevance_score));
+            node.properties.insert(
+                "context_hash".to_string(),
+                json!(memory.context.fingerprint),
+            );
+            node.properties
+                .insert("formed_at".to_string(), json!(memory.formed_at));
+            node.properties.insert(
+                "memory_type".to_string(),
+                json!(format!("{:?}", memory.memory_type)),
+            );
             graph.add_node(node)
         }
     }
@@ -1892,20 +2014,40 @@ impl GraphEngine {
                 agent_id: strategy.agent_id,
                 name: strategy.name.clone(),
             });
-            node.properties.insert("quality_score".to_string(), json!(strategy.quality_score));
-            node.properties.insert("success_count".to_string(), json!(strategy.success_count));
-            node.properties.insert("failure_count".to_string(), json!(strategy.failure_count));
-            node.properties.insert("version".to_string(), json!(strategy.version));
-            node.properties.insert("strategy_type".to_string(), json!(format!("{:?}", strategy.strategy_type)));
-            node.properties.insert("support_count".to_string(), json!(strategy.support_count));
-            node.properties.insert("expected_success".to_string(), json!(strategy.expected_success));
-            node.properties.insert("expected_cost".to_string(), json!(strategy.expected_cost));
-            node.properties.insert("expected_value".to_string(), json!(strategy.expected_value));
-            node.properties.insert("confidence".to_string(), json!(strategy.confidence));
-            node.properties.insert("goal_bucket_id".to_string(), json!(strategy.goal_bucket_id));
-            node.properties.insert("behavior_signature".to_string(), json!(strategy.behavior_signature));
-            node.properties.insert("precondition".to_string(), json!(strategy.precondition));
-            node.properties.insert("action_hint".to_string(), json!(strategy.action_hint));
+            node.properties
+                .insert("quality_score".to_string(), json!(strategy.quality_score));
+            node.properties
+                .insert("success_count".to_string(), json!(strategy.success_count));
+            node.properties
+                .insert("failure_count".to_string(), json!(strategy.failure_count));
+            node.properties
+                .insert("version".to_string(), json!(strategy.version));
+            node.properties.insert(
+                "strategy_type".to_string(),
+                json!(format!("{:?}", strategy.strategy_type)),
+            );
+            node.properties
+                .insert("support_count".to_string(), json!(strategy.support_count));
+            node.properties.insert(
+                "expected_success".to_string(),
+                json!(strategy.expected_success),
+            );
+            node.properties
+                .insert("expected_cost".to_string(), json!(strategy.expected_cost));
+            node.properties
+                .insert("expected_value".to_string(), json!(strategy.expected_value));
+            node.properties
+                .insert("confidence".to_string(), json!(strategy.confidence));
+            node.properties
+                .insert("goal_bucket_id".to_string(), json!(strategy.goal_bucket_id));
+            node.properties.insert(
+                "behavior_signature".to_string(),
+                json!(strategy.behavior_signature),
+            );
+            node.properties
+                .insert("precondition".to_string(), json!(strategy.precondition));
+            node.properties
+                .insert("action_hint".to_string(), json!(strategy.action_hint));
             graph.add_node(node)
         }
     }
@@ -1925,9 +2067,11 @@ impl GraphEngine {
                 priority: goal.priority,
                 status,
             });
-            node.properties.insert("progress".to_string(), json!(goal.progress));
+            node.properties
+                .insert("progress".to_string(), json!(goal.progress));
             if let Some(deadline) = goal.deadline {
-                node.properties.insert("deadline".to_string(), json!(deadline));
+                node.properties
+                    .insert("deadline".to_string(), json!(deadline));
             }
             graph.add_node(node)
         }
@@ -1946,7 +2090,12 @@ impl GraphEngine {
         }
     }
 
-    fn ensure_result_node(graph: &mut Graph, result_key: &str, result_type: &str, summary: &str) -> NodeId {
+    fn ensure_result_node(
+        graph: &mut Graph,
+        result_key: &str,
+        result_type: &str,
+        summary: &str,
+    ) -> NodeId {
         if let Some(node) = graph.get_result_node(result_key) {
             node.id
         } else {
@@ -1955,7 +2104,8 @@ impl GraphEngine {
                 result_type: result_type.to_string(),
                 summary: summary.to_string(),
             });
-            node.properties.insert("summary".to_string(), json!(summary));
+            node.properties
+                .insert("summary".to_string(), json!(summary));
             graph.add_node(node)
         }
     }
@@ -2029,7 +2179,7 @@ pub struct GraphHealthMetrics {
     pub average_degree: f32,
     pub largest_component_size: usize,
     pub events_processed: u64,
-    pub processing_rate: f64, // events per second
+    pub processing_rate: f64,         // events per second
     pub memory_usage_estimate: usize, // bytes
     pub is_healthy: bool,
 }

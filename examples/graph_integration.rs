@@ -1,18 +1,17 @@
 //! Graph Integration Example
-//! 
+//!
 //! Demonstrates the complete graph system in action:
 //! - Event processing and node creation
 //! - Automatic relationship inference
 //! - Graph queries and traversal
 //! - Pattern detection
 
-use agent_db_core::types::{AgentId, SessionId, generate_event_id, current_timestamp, Timestamp};
-use agent_db_events::{Event, EventContext, EventType, ActionOutcome, EnvironmentState, TemporalContext, ResourceState, ComputationalResources};
-use agent_db_graph::{
-    GraphEngine, GraphEngineConfig, 
-    NodeType, EdgeType,
-    GraphQuery, QueryResult
+use agent_db_core::types::{current_timestamp, generate_event_id, AgentId, SessionId};
+use agent_db_events::{
+    ActionOutcome, ComputationalResources, EnvironmentState, Event, EventContext, EventType,
+    ResourceState, TemporalContext,
 };
+use agent_db_graph::{GraphEngine, GraphEngineConfig, GraphQuery, QueryResult};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent1_id: AgentId = 1;
     let agent2_id: AgentId = 2;
     let session_id: SessionId = 100;
-    
+
     // Create a simple context for all events
     let context = EventContext {
         environment: EnvironmentState {
@@ -43,9 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         resources: ResourceState {
             computational: ComputationalResources {
                 cpu_percent: 20.0,
-                memory_bytes: 1024 * 1024 * 1024, // 1GB
+                memory_bytes: 1024 * 1024 * 1024,       // 1GB
                 storage_bytes: 10 * 1024 * 1024 * 1024, // 10GB
-                network_bandwidth: 1000 * 1000, // 1Mbps in bytes/sec
+                network_bandwidth: 1000 * 1000,         // 1Mbps in bytes/sec
             },
             external: std::collections::HashMap::new(),
         },
@@ -100,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             action_name: "file_access".to_string(),
             parameters: serde_json::json!({"filename": "document.txt", "mode": "read"}),
             outcome: ActionOutcome::Success {
-                result: serde_json::json!("File read successfully")
+                result: serde_json::json!("File read successfully"),
             },
             duration_ns: 1_000_000, // 1ms
         },
@@ -110,18 +109,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("📝 Processing events through graph engine...");
-    
+
     // Process events one by one to see inference in action
     let result1 = engine.process_event(event1).await?;
-    println!("   Event 1 processed: {} nodes created", result1.nodes_created.len());
-    
+    println!(
+        "   Event 1 processed: {} nodes created",
+        result1.nodes_created.len()
+    );
+
     let result2 = engine.process_event(event2).await?;
-    println!("   Event 2 processed: {} nodes created, {} relationships discovered", 
-             result2.nodes_created.len(), result2.relationships_discovered);
-    
+    println!(
+        "   Event 2 processed: {} nodes created, {} relationships discovered",
+        result2.nodes_created.len(),
+        result2.relationships_discovered
+    );
+
     let result3 = engine.process_event(event3).await?;
-    println!("   Event 3 processed: {} nodes created, {} relationships discovered", 
-             result3.nodes_created.len(), result3.relationships_discovered);
+    println!(
+        "   Event 3 processed: {} nodes created, {} relationships discovered",
+        result3.nodes_created.len(),
+        result3.relationships_discovered
+    );
 
     // Get graph statistics
     let stats = engine.get_graph_stats().await;
@@ -134,20 +142,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get engine statistics
     let engine_stats = engine.get_engine_stats().await;
     println!("\n⚙️  Engine Statistics:");
-    println!("   Events processed: {}", engine_stats.total_events_processed);
-    println!("   Relationships created: {}", engine_stats.total_relationships_created);
-    println!("   Average processing time: {:.2}ms", engine_stats.average_processing_time_ms);
+    println!(
+        "   Events processed: {}",
+        engine_stats.total_events_processed
+    );
+    println!(
+        "   Relationships created: {}",
+        engine_stats.total_relationships_created
+    );
+    println!(
+        "   Average processing time: {:.2}ms",
+        engine_stats.average_processing_time_ms
+    );
 
     // Demonstrate query capabilities
     println!("\n🔍 Executing graph queries...");
-    
+
     // Query for agent nodes
     let agent_query = GraphQuery::NodesByType("Agent".to_string());
     let agent_results = engine.execute_query(agent_query).await?;
     match agent_results {
         QueryResult::Nodes(nodes) => {
             println!("   Found {} agent nodes", nodes.len());
-        }
+        },
         _ => println!("   Unexpected query result format"),
     }
 
@@ -157,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match event_results {
         QueryResult::Nodes(nodes) => {
             println!("   Found {} event nodes", nodes.len());
-        }
+        },
         _ => println!("   Unexpected query result format"),
     }
 
@@ -167,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match context_results {
         QueryResult::Nodes(nodes) => {
             println!("   Found {} context nodes", nodes.len());
-        }
+        },
         _ => println!("   Unexpected query result format"),
     }
 
@@ -182,11 +199,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Health metrics
     let health = engine.get_health_metrics().await;
     println!("\n🏥 Health Metrics:");
-    println!("   Processing rate: {:.2} events/sec", health.processing_rate);
+    println!(
+        "   Processing rate: {:.2} events/sec",
+        health.processing_rate
+    );
     println!("   Memory estimate: {} bytes", health.memory_usage_estimate);
-    println!("   System health: {}", if health.is_healthy { "✅ Healthy" } else { "⚠️  Needs attention" });
+    println!(
+        "   System health: {}",
+        if health.is_healthy {
+            "✅ Healthy"
+        } else {
+            "⚠️  Needs attention"
+        }
+    );
 
     println!("\n✅ Graph integration demo completed successfully!");
     Ok(())
 }
-

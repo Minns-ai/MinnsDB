@@ -3,7 +3,7 @@
 // Provides trait-based abstraction for storing graph nodes and edges in persistent storage.
 // Implementation uses goal-bucket partitioning for semantic sharding and efficient memory management.
 
-use crate::structures::{NodeId, GoalBucketId};
+use crate::structures::{GoalBucketId, NodeId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -45,12 +45,12 @@ pub struct GraphEdge {
 /// Types of edges in the event graph
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum GraphEdgeType {
-    Causality,       // A caused B
-    Temporal,        // A happened before B
-    Similarity,      // A is similar to B
-    Containment,     // A contains B (episode contains events)
-    Reference,       // A references B (context reference)
-    Transition,      // State transition A → B
+    Causality,   // A caused B
+    Temporal,    // A happened before B
+    Similarity,  // A is similar to B
+    Containment, // A contains B (episode contains events)
+    Reference,   // A references B (context reference)
+    Transition,  // State transition A → B
 }
 
 /// Path through the graph
@@ -98,10 +98,15 @@ pub trait GraphStore: Send + Sync {
     fn add_node(&mut self, bucket: GoalBucketId, node: GraphNode) -> Result<(), GraphStoreError>;
 
     /// Get a node by ID
-    fn get_node(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Option<GraphNode>, GraphStoreError>;
+    fn get_node(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Option<GraphNode>, GraphStoreError>;
 
     /// Delete a node (and all its edges)
-    fn delete_node(&mut self, bucket: GoalBucketId, node_id: NodeId) -> Result<(), GraphStoreError>;
+    fn delete_node(&mut self, bucket: GoalBucketId, node_id: NodeId)
+        -> Result<(), GraphStoreError>;
 
     /// Check if a node exists
     fn has_node(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<bool, GraphStoreError>;
@@ -117,22 +122,48 @@ pub trait GraphStore: Send + Sync {
     fn add_edge(&mut self, bucket: GoalBucketId, edge: GraphEdge) -> Result<(), GraphStoreError>;
 
     /// Get edge metadata
-    fn get_edge(&self, bucket: GoalBucketId, from: NodeId, to: NodeId) -> Result<Option<GraphEdge>, GraphStoreError>;
+    fn get_edge(
+        &self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<Option<GraphEdge>, GraphStoreError>;
 
     /// Delete an edge
-    fn delete_edge(&mut self, bucket: GoalBucketId, from: NodeId, to: NodeId) -> Result<(), GraphStoreError>;
+    fn delete_edge(
+        &mut self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<(), GraphStoreError>;
 
     /// Get all outgoing neighbors (forward adjacency)
-    fn get_neighbors(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<NodeId>, GraphStoreError>;
+    fn get_neighbors(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<NodeId>, GraphStoreError>;
 
     /// Get all incoming neighbors (reverse adjacency / backlinks)
-    fn get_predecessors(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<NodeId>, GraphStoreError>;
+    fn get_predecessors(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<NodeId>, GraphStoreError>;
 
     /// Get all edges from a node
-    fn get_outgoing_edges(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<GraphEdge>, GraphStoreError>;
+    fn get_outgoing_edges(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError>;
 
     /// Get all edges to a node
-    fn get_incoming_edges(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<GraphEdge>, GraphStoreError>;
+    fn get_incoming_edges(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError>;
 
     // ============================================================================
     // Partition Operations
@@ -195,7 +226,11 @@ pub trait GraphStore: Send + Sync {
     // ============================================================================
 
     /// Add multiple nodes at once (more efficient)
-    fn add_nodes(&mut self, bucket: GoalBucketId, nodes: Vec<GraphNode>) -> Result<(), GraphStoreError> {
+    fn add_nodes(
+        &mut self,
+        bucket: GoalBucketId,
+        nodes: Vec<GraphNode>,
+    ) -> Result<(), GraphStoreError> {
         for node in nodes {
             self.add_node(bucket, node)?;
         }
@@ -203,7 +238,11 @@ pub trait GraphStore: Send + Sync {
     }
 
     /// Add multiple edges at once (more efficient)
-    fn add_edges(&mut self, bucket: GoalBucketId, edges: Vec<GraphEdge>) -> Result<(), GraphStoreError> {
+    fn add_edges(
+        &mut self,
+        bucket: GoalBucketId,
+        edges: Vec<GraphEdge>,
+    ) -> Result<(), GraphStoreError> {
         for edge in edges {
             self.add_edge(bucket, edge)?;
         }
@@ -275,11 +314,19 @@ impl GraphStore for InMemoryGraphStore {
         Ok(())
     }
 
-    fn get_node(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Option<GraphNode>, GraphStoreError> {
+    fn get_node(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Option<GraphNode>, GraphStoreError> {
         Ok(self.nodes.get(&(bucket, node_id)).cloned())
     }
 
-    fn delete_node(&mut self, bucket: GoalBucketId, node_id: NodeId) -> Result<(), GraphStoreError> {
+    fn delete_node(
+        &mut self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<(), GraphStoreError> {
         self.nodes.remove(&(bucket, node_id));
         self.forward_edges.remove(&(bucket, node_id));
         self.reverse_edges.remove(&(bucket, node_id));
@@ -291,7 +338,9 @@ impl GraphStore for InMemoryGraphStore {
     }
 
     fn get_all_nodes(&self, bucket: GoalBucketId) -> Result<Vec<GraphNode>, GraphStoreError> {
-        Ok(self.nodes.iter()
+        Ok(self
+            .nodes
+            .iter()
             .filter(|((b, _), _)| *b == bucket)
             .map(|(_, node)| node.clone())
             .collect())
@@ -299,26 +348,39 @@ impl GraphStore for InMemoryGraphStore {
 
     fn add_edge(&mut self, bucket: GoalBucketId, edge: GraphEdge) -> Result<(), GraphStoreError> {
         // Add to forward adjacency
-        self.forward_edges.entry((bucket, edge.from))
+        self.forward_edges
+            .entry((bucket, edge.from))
             .or_insert_with(Vec::new)
             .push(edge.to);
 
         // Add to reverse adjacency
-        self.reverse_edges.entry((bucket, edge.to))
+        self.reverse_edges
+            .entry((bucket, edge.to))
             .or_insert_with(Vec::new)
             .push(edge.from);
 
         // Store edge metadata
-        self.edge_metadata.insert((bucket, edge.from, edge.to), edge);
+        self.edge_metadata
+            .insert((bucket, edge.from, edge.to), edge);
 
         Ok(())
     }
 
-    fn get_edge(&self, bucket: GoalBucketId, from: NodeId, to: NodeId) -> Result<Option<GraphEdge>, GraphStoreError> {
+    fn get_edge(
+        &self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<Option<GraphEdge>, GraphStoreError> {
         Ok(self.edge_metadata.get(&(bucket, from, to)).cloned())
     }
 
-    fn delete_edge(&mut self, bucket: GoalBucketId, from: NodeId, to: NodeId) -> Result<(), GraphStoreError> {
+    fn delete_edge(
+        &mut self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<(), GraphStoreError> {
         // Remove from forward adjacency
         if let Some(neighbors) = self.forward_edges.get_mut(&(bucket, from)) {
             neighbors.retain(|&n| n != to);
@@ -335,28 +397,50 @@ impl GraphStore for InMemoryGraphStore {
         Ok(())
     }
 
-    fn get_neighbors(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<NodeId>, GraphStoreError> {
-        Ok(self.forward_edges.get(&(bucket, node_id))
+    fn get_neighbors(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
+        Ok(self
+            .forward_edges
+            .get(&(bucket, node_id))
             .cloned()
             .unwrap_or_default())
     }
 
-    fn get_predecessors(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<NodeId>, GraphStoreError> {
-        Ok(self.reverse_edges.get(&(bucket, node_id))
+    fn get_predecessors(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
+        Ok(self
+            .reverse_edges
+            .get(&(bucket, node_id))
             .cloned()
             .unwrap_or_default())
     }
 
-    fn get_outgoing_edges(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<GraphEdge>, GraphStoreError> {
+    fn get_outgoing_edges(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError> {
         let neighbors = self.get_neighbors(bucket, node_id)?;
-        Ok(neighbors.iter()
+        Ok(neighbors
+            .iter()
             .filter_map(|&to| self.edge_metadata.get(&(bucket, node_id, to)).cloned())
             .collect())
     }
 
-    fn get_incoming_edges(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<GraphEdge>, GraphStoreError> {
+    fn get_incoming_edges(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError> {
         let preds = self.get_predecessors(bucket, node_id)?;
-        Ok(preds.iter()
+        Ok(preds
+            .iter()
             .filter_map(|&from| self.edge_metadata.get(&(bucket, from, node_id)).cloned())
             .collect())
     }
@@ -380,7 +464,11 @@ impl GraphStore for InMemoryGraphStore {
 
     fn get_partition_stats(&self, bucket: GoalBucketId) -> Result<BucketInfo, GraphStoreError> {
         let node_count = self.nodes.keys().filter(|(b, _)| *b == bucket).count() as u64;
-        let edge_count = self.edge_metadata.keys().filter(|(b, _, _)| *b == bucket).count() as u64;
+        let edge_count = self
+            .edge_metadata
+            .keys()
+            .filter(|(b, _, _)| *b == bucket)
+            .count() as u64;
 
         Ok(BucketInfo {
             bucket_id: bucket,
@@ -392,7 +480,9 @@ impl GraphStore for InMemoryGraphStore {
     }
 
     fn get_all_buckets(&self) -> Result<Vec<GoalBucketId>, GraphStoreError> {
-        let mut buckets: Vec<_> = self.nodes.keys()
+        let mut buckets: Vec<_> = self
+            .nodes
+            .keys()
             .map(|(b, _)| *b)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -401,7 +491,12 @@ impl GraphStore for InMemoryGraphStore {
         Ok(buckets)
     }
 
-    fn traverse_bfs(&self, bucket: GoalBucketId, start: NodeId, max_depth: u32) -> Result<Vec<NodeId>, GraphStoreError> {
+    fn traverse_bfs(
+        &self,
+        bucket: GoalBucketId,
+        start: NodeId,
+        max_depth: u32,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
         let mut visited = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         let mut result = Vec::new();
@@ -429,7 +524,12 @@ impl GraphStore for InMemoryGraphStore {
         Ok(result)
     }
 
-    fn traverse_dfs(&self, bucket: GoalBucketId, start: NodeId, max_depth: u32) -> Result<Vec<NodeId>, GraphStoreError> {
+    fn traverse_dfs(
+        &self,
+        bucket: GoalBucketId,
+        start: NodeId,
+        max_depth: u32,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
         let mut visited = std::collections::HashSet::new();
         let mut result = Vec::new();
 
@@ -451,7 +551,15 @@ impl GraphStore for InMemoryGraphStore {
 
             if depth < max_depth {
                 for neighbor in store.get_neighbors(bucket, node)? {
-                    dfs_helper(store, bucket, neighbor, depth + 1, max_depth, visited, result)?;
+                    dfs_helper(
+                        store,
+                        bucket,
+                        neighbor,
+                        depth + 1,
+                        max_depth,
+                        visited,
+                        result,
+                    )?;
                 }
             }
 
@@ -462,7 +570,13 @@ impl GraphStore for InMemoryGraphStore {
         Ok(result)
     }
 
-    fn find_paths(&self, bucket: GoalBucketId, from: NodeId, to: NodeId, max_depth: u32) -> Result<Vec<GraphPath>, GraphStoreError> {
+    fn find_paths(
+        &self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+        max_depth: u32,
+    ) -> Result<Vec<GraphPath>, GraphStoreError> {
         let mut paths = Vec::new();
         let mut current_path = Vec::new();
         let mut visited = std::collections::HashSet::new();
@@ -506,7 +620,17 @@ impl GraphStore for InMemoryGraphStore {
             } else if depth < max_depth {
                 for neighbor in store.get_neighbors(bucket, current)? {
                     if !visited.contains(&neighbor) {
-                        find_paths_helper(store, bucket, neighbor, target, depth + 1, max_depth, current_path, visited, paths)?;
+                        find_paths_helper(
+                            store,
+                            bucket,
+                            neighbor,
+                            target,
+                            depth + 1,
+                            max_depth,
+                            current_path,
+                            visited,
+                            paths,
+                        )?;
                     }
                 }
             }
@@ -517,11 +641,26 @@ impl GraphStore for InMemoryGraphStore {
             Ok(())
         }
 
-        find_paths_helper(self, bucket, from, to, 0, max_depth, &mut current_path, &mut visited, &mut paths)?;
+        find_paths_helper(
+            self,
+            bucket,
+            from,
+            to,
+            0,
+            max_depth,
+            &mut current_path,
+            &mut visited,
+            &mut paths,
+        )?;
         Ok(paths)
     }
 
-    fn get_subgraph(&self, bucket: GoalBucketId, center: NodeId, radius: u32) -> Result<Subgraph, GraphStoreError> {
+    fn get_subgraph(
+        &self,
+        bucket: GoalBucketId,
+        center: NodeId,
+        radius: u32,
+    ) -> Result<Subgraph, GraphStoreError> {
         let node_ids = self.traverse_bfs(bucket, center, radius)?;
 
         let mut nodes = Vec::new();
@@ -626,33 +765,62 @@ mod tests {
         //                           ↓
         //                           4
         for i in 1..=4 {
-            store.add_node(42, GraphNode {
-                id: i,
-                node_type: GraphNodeType::Event,
-                label: format!("node{}", i),
-                context_hash: i,
-                created_at: i * 1000,
-                properties: serde_json::json!({}),
-            }).unwrap();
+            store
+                .add_node(
+                    42,
+                    GraphNode {
+                        id: i,
+                        node_type: GraphNodeType::Event,
+                        label: format!("node{}", i),
+                        context_hash: i,
+                        created_at: i * 1000,
+                        properties: serde_json::json!({}),
+                    },
+                )
+                .unwrap();
         }
 
-        store.add_edge(42, GraphEdge {
-            from: 1, to: 2,
-            edge_type: GraphEdgeType::Causality,
-            weight: 1.0, confidence: 1.0, created_at: 1000,
-        }).unwrap();
+        store
+            .add_edge(
+                42,
+                GraphEdge {
+                    from: 1,
+                    to: 2,
+                    edge_type: GraphEdgeType::Causality,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    created_at: 1000,
+                },
+            )
+            .unwrap();
 
-        store.add_edge(42, GraphEdge {
-            from: 2, to: 3,
-            edge_type: GraphEdgeType::Causality,
-            weight: 1.0, confidence: 1.0, created_at: 2000,
-        }).unwrap();
+        store
+            .add_edge(
+                42,
+                GraphEdge {
+                    from: 2,
+                    to: 3,
+                    edge_type: GraphEdgeType::Causality,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    created_at: 2000,
+                },
+            )
+            .unwrap();
 
-        store.add_edge(42, GraphEdge {
-            from: 2, to: 4,
-            edge_type: GraphEdgeType::Causality,
-            weight: 1.0, confidence: 1.0, created_at: 2500,
-        }).unwrap();
+        store
+            .add_edge(
+                42,
+                GraphEdge {
+                    from: 2,
+                    to: 4,
+                    edge_type: GraphEdgeType::Causality,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    created_at: 2500,
+                },
+            )
+            .unwrap();
 
         let visited = store.traverse_bfs(42, 1, 2).unwrap();
         assert_eq!(visited.len(), 4); // Should visit all nodes within depth 2

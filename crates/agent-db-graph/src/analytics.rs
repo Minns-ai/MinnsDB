@@ -6,11 +6,10 @@
 //! - Strategy success trends
 //! - Agent improvement over time
 
+use crate::algorithms::{CentralityMeasures, LouvainAlgorithm};
 use crate::structures::{Graph, NodeId};
-use crate::algorithms::{LouvainAlgorithm, CentralityMeasures};
-use crate::{GraphResult};
-use std::collections::{HashSet};
-
+use crate::GraphResult;
+use std::collections::HashSet;
 
 /// Comprehensive graph analytics
 pub struct GraphAnalytics<'a> {
@@ -149,7 +148,7 @@ impl<'a> GraphAnalytics<'a> {
         let mut path_count = 0;
 
         for i in 0..sample_size.min(nodes.len()) {
-            for j in i+1..sample_size.min(nodes.len()) {
+            for j in i + 1..sample_size.min(nodes.len()) {
                 if let Some(path) = self.graph.shortest_path(nodes[i], nodes[j]) {
                     total_distance += (path.len() - 1) as f32;
                     path_count += 1;
@@ -173,7 +172,7 @@ impl<'a> GraphAnalytics<'a> {
         let sample_size = if nodes.len() > 50 { 50 } else { nodes.len() };
 
         for i in 0..sample_size {
-            for j in i+1..sample_size {
+            for j in i + 1..sample_size {
                 if let Some(path) = self.graph.shortest_path(nodes[i], nodes[j]) {
                     let distance = (path.len() - 1) as u32;
                     max_distance = max_distance.max(distance);
@@ -195,7 +194,7 @@ impl<'a> GraphAnalytics<'a> {
 
             // Count triangles (3-cliques)
             for i in 0..neighbors.len() {
-                for j in i+1..neighbors.len() {
+                for j in i + 1..neighbors.len() {
                     triplets += 1;
                     if self.graph.has_edge(neighbors[i], neighbors[j]) {
                         triangles += 1;
@@ -241,7 +240,7 @@ impl<'a> GraphAnalytics<'a> {
         let mut edges_between_neighbors = 0;
 
         for i in 0..neighbors.len() {
-            for j in i+1..neighbors.len() {
+            for j in i + 1..neighbors.len() {
                 if self.graph.has_edge(neighbors[i], neighbors[j]) {
                     edges_between_neighbors += 1;
                 }
@@ -298,7 +297,8 @@ impl<'a> GraphAnalytics<'a> {
         };
 
         // Estimate memory formation rate (contexts with high connection count)
-        let strong_memories = context_nodes.iter()
+        let strong_memories = context_nodes
+            .iter()
             .filter(|node| node.degree > 5) // Arbitrary threshold
             .count();
 
@@ -396,7 +396,7 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structures::{GraphNode, GraphEdge, EdgeType};
+    use crate::structures::{EdgeType, GraphEdge, GraphNode};
     use crate::NodeType;
 
     #[test]
@@ -427,16 +427,26 @@ mod tests {
         }));
 
         // Component 1: n1-n2
-        graph.add_edge(GraphEdge::new(n1, n2, EdgeType::Temporal {
-            average_interval_ms: 100,
-            sequence_confidence: 0.9,
-        }, 0.9));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n2,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.9,
+        ));
 
         // Component 2: n3-n4
-        graph.add_edge(GraphEdge::new(n3, n4, EdgeType::Temporal {
-            average_interval_ms: 100,
-            sequence_confidence: 0.9,
-        }, 0.9));
+        graph.add_edge(GraphEdge::new(
+            n3,
+            n4,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.9,
+        ));
 
         let analytics = GraphAnalytics::new(&graph);
         let components = analytics.count_components().unwrap();

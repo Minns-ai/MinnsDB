@@ -1,5 +1,5 @@
 //! Storage engine for agent database events
-//! 
+//!
 //! This crate provides the storage layer for the agent database,
 //! handling persistence, compression, and retrieval of events.
 
@@ -31,12 +31,12 @@ pub mod error {
     pub type StorageResult<T> = Result<T, StorageError>;
 }
 
-pub mod wal;
 pub mod engine;
 pub mod redb_backend;
+pub mod wal;
 
 // Re-export commonly used items
+pub use engine::{CompressionType, StorageConfig, StorageEngine, StorageStats};
 pub use error::{StorageError, StorageResult};
-pub use engine::{StorageEngine, StorageConfig, StorageStats, CompressionType};
-pub use wal::{WriteAheadLog, WalConfig, WalStats, SyncPolicy};
-pub use redb_backend::{RedbBackend, RedbConfig, BatchOperation, table_names};
+pub use redb_backend::{table_names, BatchOperation, RedbBackend, RedbConfig};
+pub use wal::{SyncPolicy, WalConfig, WalStats, WriteAheadLog};

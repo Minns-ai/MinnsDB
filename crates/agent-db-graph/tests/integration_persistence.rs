@@ -6,27 +6,30 @@
 //! 3. Learning substrate recovers from disk
 //! 4. Full pipeline: Events → Episodes → Memories → Strategies
 
-use agent_db_graph::{
-    GraphEngine, GraphEngineConfig,
-    Episode, EpisodeOutcome,
-    MemoryFormationConfig, StrategyExtractionConfig,
-    RedbEpisodeCatalog, EpisodeCatalog, EpisodeRecord,
-    RedbMemoryStore, MemoryStore,
-    RedbStrategyStore, StrategyStore,
-    RedbLearningStatsStore, LearningStatsStore, TransitionStats, MotifStats,
-    RedbDecisionTraceStore, DecisionTraceStore, OutcomeSignal,
+use agent_db_core::types::{current_timestamp, AgentId, EventId, SessionId};
+use agent_db_events::{ActionOutcome, CognitiveType, Event, EventType};
+use agent_db_events::{
+    ComputationalResources, EnvironmentState, EventContext, ResourceState, TemporalContext,
 };
 use agent_db_graph::integration::StorageBackend;
+use agent_db_graph::{
+    DecisionTraceStore, Episode, EpisodeCatalog, EpisodeOutcome, EpisodeRecord, GraphEngine,
+    GraphEngineConfig, LearningStatsStore, MemoryFormationConfig, MemoryStore, MotifStats,
+    OutcomeSignal, RedbDecisionTraceStore, RedbEpisodeCatalog, RedbLearningStatsStore,
+    RedbMemoryStore, RedbStrategyStore, StrategyExtractionConfig, StrategyStore, TransitionStats,
+};
 use agent_db_storage::{RedbBackend, RedbConfig};
-use agent_db_events::{Event, EventType, CognitiveType, ActionOutcome};
-use agent_db_events::{EventContext, EnvironmentState, TemporalContext, ResourceState, ComputationalResources};
-use agent_db_core::types::{current_timestamp, AgentId, SessionId, EventId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Create a test event
-fn create_test_event(id: EventId, agent_id: AgentId, session_id: SessionId, event_type: EventType) -> Event {
+fn create_test_event(
+    id: EventId,
+    agent_id: AgentId,
+    session_id: SessionId,
+    event_type: EventType,
+) -> Event {
     Event {
         id,
         timestamp: current_timestamp(),
@@ -70,7 +73,9 @@ fn create_test_episode(id: u64, agent_id: AgentId, outcome: EpisodeOutcome) -> E
         agent_id,
         start_event: 1u128,
         end_event: Some(10u128),
-        events: vec![1u128, 2u128, 3u128, 4u128, 5u128, 6u128, 7u128, 8u128, 9u128, 10u128],
+        events: vec![
+            1u128, 2u128, 3u128, 4u128, 5u128, 6u128, 7u128, 8u128, 9u128, 10u128,
+        ],
         session_id: 1,
         context_signature: 12345,
         context: EventContext {
@@ -265,11 +270,7 @@ fn test_memory_store_persistence_across_restart() {
             repair_on_open: false,
         };
         let backend = Arc::new(RedbBackend::open(config).unwrap());
-        let mut store = RedbMemoryStore::new(
-            backend,
-            MemoryFormationConfig::default(),
-            1000,
-        );
+        let mut store = RedbMemoryStore::new(backend, MemoryFormationConfig::default(), 1000);
         store.initialize().unwrap();
 
         // Store 3 memories
@@ -287,11 +288,7 @@ fn test_memory_store_persistence_across_restart() {
             repair_on_open: false,
         };
         let backend = Arc::new(RedbBackend::open(config).unwrap());
-        let mut store = RedbMemoryStore::new(
-            backend,
-            MemoryFormationConfig::default(),
-            1000,
-        );
+        let mut store = RedbMemoryStore::new(backend, MemoryFormationConfig::default(), 1000);
         store.initialize().unwrap();
 
         // Verify all 3 memories exist
@@ -322,28 +319,36 @@ fn test_strategy_store_persistence() {
             repair_on_open: false,
         };
         let backend = Arc::new(RedbBackend::open(config).unwrap());
-        let mut store = RedbStrategyStore::new(
-            backend,
-            StrategyExtractionConfig::default(),
-            500,
-        );
+        let mut store = RedbStrategyStore::new(backend, StrategyExtractionConfig::default(), 500);
         store.initialize().unwrap();
 
         // Create test episodes and events
         let episode1 = create_test_episode(1, 100, EpisodeOutcome::Success);
         let events: Vec<Event> = vec![
-            create_test_event(1, 100, 1, EventType::Cognitive {
-                process_type: CognitiveType::GoalFormation,
-                input: serde_json::json!({}),
-                output: serde_json::json!({}),
-                reasoning_trace: vec![],
-            }),
-            create_test_event(2, 100, 1, EventType::Action {
-                action_name: "test_action".to_string(),
-                parameters: serde_json::json!({}),
-                outcome: ActionOutcome::Success { result: serde_json::json!({}) },
-                duration_ns: 1000,
-            }),
+            create_test_event(
+                1,
+                100,
+                1,
+                EventType::Cognitive {
+                    process_type: CognitiveType::GoalFormation,
+                    input: serde_json::json!({}),
+                    output: serde_json::json!({}),
+                    reasoning_trace: vec![],
+                },
+            ),
+            create_test_event(
+                2,
+                100,
+                1,
+                EventType::Action {
+                    action_name: "test_action".to_string(),
+                    parameters: serde_json::json!({}),
+                    outcome: ActionOutcome::Success {
+                        result: serde_json::json!({}),
+                    },
+                    duration_ns: 1000,
+                },
+            ),
         ];
 
         // Extract strategy
@@ -364,11 +369,7 @@ fn test_strategy_store_persistence() {
             repair_on_open: false,
         };
         let backend = Arc::new(RedbBackend::open(config).unwrap());
-        let mut store = RedbStrategyStore::new(
-            backend,
-            StrategyExtractionConfig::default(),
-            500,
-        );
+        let mut store = RedbStrategyStore::new(backend, StrategyExtractionConfig::default(), 500);
         store.initialize().unwrap();
 
         // Verify strategies persist
@@ -401,13 +402,15 @@ fn test_learning_stats_store_persistence() {
             posterior_beta: 3.0,
             last_updated: current_timestamp(),
         };
-        store.put_transition(
-            1,
-            "state_a".to_string(),
-            "action_1".to_string(),
-            "state_b".to_string(),
-            transition,
-        ).unwrap();
+        store
+            .put_transition(
+                1,
+                "state_a".to_string(),
+                "action_1".to_string(),
+                "state_b".to_string(),
+                transition,
+            )
+            .unwrap();
 
         // Store motif stats
         let motif = MotifStats {
@@ -431,12 +434,14 @@ fn test_learning_stats_store_persistence() {
         let store = RedbLearningStatsStore::new(backend);
 
         // Verify transition persists
-        let transition = store.get_transition(
-            1,
-            "state_a".to_string(),
-            "action_1".to_string(),
-            "state_b".to_string(),
-        ).unwrap();
+        let transition = store
+            .get_transition(
+                1,
+                "state_a".to_string(),
+                "action_1".to_string(),
+                "state_b".to_string(),
+            )
+            .unwrap();
         assert!(transition.is_some());
         let t = transition.unwrap();
         assert_eq!(t.count, 10);
@@ -467,13 +472,9 @@ fn test_decision_trace_store_persistence() {
         let mut store = RedbDecisionTraceStore::new(backend);
 
         // Start trace
-        store.start(
-            "query_1".to_string(),
-            100,
-            1,
-            vec![1, 2, 3],
-            vec![10, 20],
-        ).unwrap();
+        store
+            .start("query_1".to_string(), 100, 1, vec![1, 2, 3], vec![10, 20])
+            .unwrap();
 
         // Mark memory used
         store.mark_memory_used("query_1".to_string(), 2).unwrap();
@@ -526,18 +527,30 @@ async fn test_graph_engine_with_persistent_storage() {
 
     // Process events to create episodes and memories
     let events = vec![
-        create_test_event(1, 100, 1, EventType::Cognitive {
-            process_type: CognitiveType::GoalFormation,
-            input: serde_json::json!({}),
-            output: serde_json::json!({}),
-            reasoning_trace: vec![],
-        }),
-        create_test_event(2, 100, 1, EventType::Action {
-            action_name: "test_action".to_string(),
-            parameters: serde_json::json!({}),
-            outcome: ActionOutcome::Success { result: serde_json::json!({}) },
-            duration_ns: 1000,
-        }),
+        create_test_event(
+            1,
+            100,
+            1,
+            EventType::Cognitive {
+                process_type: CognitiveType::GoalFormation,
+                input: serde_json::json!({}),
+                output: serde_json::json!({}),
+                reasoning_trace: vec![],
+            },
+        ),
+        create_test_event(
+            2,
+            100,
+            1,
+            EventType::Action {
+                action_name: "test_action".to_string(),
+                parameters: serde_json::json!({}),
+                outcome: ActionOutcome::Success {
+                    result: serde_json::json!({}),
+                },
+                duration_ns: 1000,
+            },
+        ),
     ];
 
     for event in events {
@@ -589,11 +602,8 @@ fn test_full_pipeline_persistence() {
         }
 
         // 2. Store memories
-        let mut mem_store = RedbMemoryStore::new(
-            backend.clone(),
-            MemoryFormationConfig::default(),
-            1000,
-        );
+        let mut mem_store =
+            RedbMemoryStore::new(backend.clone(), MemoryFormationConfig::default(), 1000);
         // Skip initialize on fresh database - it's empty
         for i in 1..=3 {
             let episode = create_test_episode(i, 100, EpisodeOutcome::Success);
@@ -610,13 +620,15 @@ fn test_full_pipeline_persistence() {
             posterior_beta: 2.0,
             last_updated: current_timestamp(),
         };
-        learning_store.put_transition(
-            1,
-            "state_1".to_string(),
-            "action_1".to_string(),
-            "state_2".to_string(),
-            transition,
-        ).unwrap();
+        learning_store
+            .put_transition(
+                1,
+                "state_1".to_string(),
+                "action_1".to_string(),
+                "state_2".to_string(),
+                transition,
+            )
+            .unwrap();
     }
 
     // Phase 2: Restart, verify all data persists
@@ -636,11 +648,8 @@ fn test_full_pipeline_persistence() {
         }
 
         // Verify memories (may fail during initialize if data is corrupted, but that's ok for this test)
-        let mut mem_store = RedbMemoryStore::new(
-            backend.clone(),
-            MemoryFormationConfig::default(),
-            1000,
-        );
+        let mut mem_store =
+            RedbMemoryStore::new(backend.clone(), MemoryFormationConfig::default(), 1000);
         if mem_store.initialize().is_ok() {
             let stats = mem_store.get_stats();
             // Should have 3 memories if initialization succeeded
@@ -655,12 +664,14 @@ fn test_full_pipeline_persistence() {
 
         // Verify learning stats
         let learning_store = RedbLearningStatsStore::new(backend.clone());
-        let transition = learning_store.get_transition(
-            1,
-            "state_1".to_string(),
-            "action_1".to_string(),
-            "state_2".to_string(),
-        ).unwrap();
+        let transition = learning_store
+            .get_transition(
+                1,
+                "state_1".to_string(),
+                "action_1".to_string(),
+                "state_2".to_string(),
+            )
+            .unwrap();
         assert!(transition.is_some());
         assert_eq!(transition.unwrap().count, 5);
     }

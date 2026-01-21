@@ -8,19 +8,21 @@
 //! - Concurrent event handling
 //! - Pattern detection and analytics
 
-use agent_db_core::types::{AgentId, SessionId, AgentType, generate_event_id, current_timestamp};
-use agent_db_events::{Event, EventContext, EventType, ActionOutcome, CognitiveType, EnvironmentState, TemporalContext, ResourceState, ComputationalResources, Goal, TimeOfDay};
-use agent_db_storage::{StorageEngine, StorageConfig, CompressionType};
-use agent_db_graph::{
-    GraphEngine, GraphEngineConfig, 
-    event_ordering::OrderingConfig,
-    scoped_inference::{ScopedInferenceConfig, InferenceScope},
-    GraphQuery, QueryResult
+use agent_db_core::types::{current_timestamp, generate_event_id, AgentId, AgentType, SessionId};
+use agent_db_events::{
+    ActionOutcome, CognitiveType, ComputationalResources, EnvironmentState, Event, EventContext,
+    EventType, Goal, ResourceState, TemporalContext, TimeOfDay,
 };
+use agent_db_graph::{
+    event_ordering::OrderingConfig,
+    scoped_inference::{InferenceScope, ScopedInferenceConfig},
+    GraphEngine, GraphEngineConfig, GraphQuery, QueryResult,
+};
+use agent_db_storage::{CompressionType, StorageConfig, StorageEngine};
+use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
-use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,13 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   ✅ Graph engine initialized with scoped inference");
 
     println!("\n🎭 Setting up multi-agent scenario...");
-    
+
     // Define agent types and sessions
     let coding_assistant: AgentType = "coding-assistant".to_string();
     let data_analyst: AgentType = "data-analyst".to_string();
     let system_monitor: AgentType = "system-monitor".to_string();
     let task_manager: AgentType = "task-manager".to_string();
-    
+
     let session_a: SessionId = 1001; // Development session
     let session_b: SessionId = 1002; // Analysis session
     let session_c: SessionId = 1003; // Monitoring session
@@ -82,92 +84,96 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 1: Development Session Events
     println!("\n📊 Phase 1: Development Session Events");
     let base_time = current_timestamp();
-    
-    let dev_events = create_development_events(
-        coding_assistant.clone(), 
-        session_a, 
-        &dev_context, 
-        base_time
-    );
+
+    let dev_events =
+        create_development_events(coding_assistant.clone(), session_a, &dev_context, base_time);
 
     for (i, event) in dev_events.iter().enumerate() {
         let result = graph.process_event(event.clone()).await?;
         storage.store_event(event.clone()).await?;
-        
-        println!("   Event {}: {} ({}ms) - {} nodes, {} relationships",
-                 i + 1,
-                 get_event_description(&event.event_type),
-                 (event.timestamp - base_time) / 1_000_000,
-                 result.nodes_created.len(),
-                 result.relationships_discovered);
-        
+
+        println!(
+            "   Event {}: {} ({}ms) - {} nodes, {} relationships",
+            i + 1,
+            get_event_description(&event.event_type),
+            (event.timestamp - base_time) / 1_000_000,
+            result.nodes_created.len(),
+            result.relationships_discovered
+        );
+
         sleep(Duration::from_millis(100)).await; // Simulate processing delay
     }
 
     // Phase 2: Analysis Session Events (concurrent with some development)
     println!("\n📈 Phase 2: Analysis Session Events");
-    
+
     let analysis_events = create_analysis_events(
         data_analyst.clone(),
         session_b,
         &analysis_context,
-        base_time + 1_000_000_000 // Start 1 second after dev session
+        base_time + 1_000_000_000, // Start 1 second after dev session
     );
 
     for (i, event) in analysis_events.iter().enumerate() {
         let result = graph.process_event(event.clone()).await?;
         storage.store_event(event.clone()).await?;
-        
-        println!("   Event {}: {} ({}ms) - {} nodes, {} relationships",
-                 i + 1,
-                 get_event_description(&event.event_type),
-                 (event.timestamp - base_time) / 1_000_000,
-                 result.nodes_created.len(),
-                 result.relationships_discovered);
+
+        println!(
+            "   Event {}: {} ({}ms) - {} nodes, {} relationships",
+            i + 1,
+            get_event_description(&event.event_type),
+            (event.timestamp - base_time) / 1_000_000,
+            result.nodes_created.len(),
+            result.relationships_discovered
+        );
     }
 
     // Phase 3: System Monitoring Events (concurrent)
     println!("\n📡 Phase 3: System Monitoring Events");
-    
+
     let monitoring_events = create_monitoring_events(
         system_monitor.clone(),
         session_c,
         &monitoring_context,
-        base_time + 2_000_000_000 // Start 2 seconds after dev session
+        base_time + 2_000_000_000, // Start 2 seconds after dev session
     );
 
     for (i, event) in monitoring_events.iter().enumerate() {
         let result = graph.process_event(event.clone()).await?;
         storage.store_event(event.clone()).await?;
-        
-        println!("   Event {}: {} ({}ms) - {} nodes, {} relationships",
-                 i + 1,
-                 get_event_description(&event.event_type),
-                 (event.timestamp - base_time) / 1_000_000,
-                 result.nodes_created.len(),
-                 result.relationships_discovered);
+
+        println!(
+            "   Event {}: {} ({}ms) - {} nodes, {} relationships",
+            i + 1,
+            get_event_description(&event.event_type),
+            (event.timestamp - base_time) / 1_000_000,
+            result.nodes_created.len(),
+            result.relationships_discovered
+        );
     }
 
     // Phase 4: Task Management Events (cross-session coordination)
     println!("\n🎯 Phase 4: Task Management Events (cross-session)");
-    
+
     let task_events = create_task_management_events(
         task_manager.clone(),
         session_a, // Same session as development for coordination
         &dev_context,
-        base_time + 3_000_000_000 // Start 3 seconds after dev session
+        base_time + 3_000_000_000, // Start 3 seconds after dev session
     );
 
     for (i, event) in task_events.iter().enumerate() {
         let result = graph.process_event(event.clone()).await?;
         storage.store_event(event.clone()).await?;
-        
-        println!("   Event {}: {} ({}ms) - {} nodes, {} relationships",
-                 i + 1,
-                 get_event_description(&event.event_type),
-                 (event.timestamp - base_time) / 1_000_000,
-                 result.nodes_created.len(),
-                 result.relationships_discovered);
+
+        println!(
+            "   Event {}: {} ({}ms) - {} nodes, {} relationships",
+            i + 1,
+            get_event_description(&event.event_type),
+            (event.timestamp - base_time) / 1_000_000,
+            result.nodes_created.len(),
+            result.relationships_discovered
+        );
     }
 
     // Flush any remaining buffered events
@@ -178,8 +184,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n💾 Storage Analytics:");
     let storage_stats = storage.get_storage_stats().await;
     println!("   Total events stored: {}", storage_stats.total_events);
-    println!("   Storage size: {:.2} MB", storage_stats.total_size_bytes as f64 / (1024.0 * 1024.0));
-    println!("   Compression ratio: {:.2}x", storage_stats.compression_ratio);
+    println!(
+        "   Storage size: {:.2} MB",
+        storage_stats.total_size_bytes as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "   Compression ratio: {:.2}x",
+        storage_stats.compression_ratio
+    );
 
     // Graph analytics
     println!("\n🕸️  Graph Analytics:");
@@ -187,14 +199,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Total nodes: {}", graph_stats.node_count);
     println!("   Total edges: {}", graph_stats.edge_count);
     println!("   Average degree: {:.2}", graph_stats.avg_degree);
-    println!("   Largest component: {}", graph_stats.largest_component_size);
+    println!(
+        "   Largest component: {}",
+        graph_stats.largest_component_size
+    );
 
     // Engine performance metrics
     let engine_stats = graph.get_engine_stats().await;
     println!("\n⚡ Engine Performance:");
-    println!("   Events processed: {}", engine_stats.total_events_processed);
-    println!("   Relationships discovered: {}", engine_stats.total_relationships_created);
-    println!("   Avg processing time: {:.2}ms", engine_stats.average_processing_time_ms);
+    println!(
+        "   Events processed: {}",
+        engine_stats.total_events_processed
+    );
+    println!(
+        "   Relationships discovered: {}",
+        engine_stats.total_relationships_created
+    );
+    println!(
+        "   Avg processing time: {:.2}ms",
+        engine_stats.average_processing_time_ms
+    );
 
     // Scoped inference statistics
     println!("\n🎯 Scoped Inference Results:");
@@ -202,7 +226,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Active scopes: {}", scope_stats.total_scopes);
     println!("   Total sessions: {}", scope_stats.total_sessions);
     println!("   Total agents: {}", scope_stats.total_agents);
-    println!("   Most active agent type: {:?}", scope_stats.most_active_agent_type);
+    println!(
+        "   Most active agent type: {:?}",
+        scope_stats.most_active_agent_type
+    );
 
     // Pattern detection
     println!("\n🔮 Pattern Detection:");
@@ -214,17 +241,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate queries across different scopes
     println!("\n🔍 Cross-Scope Query Examples:");
-    
+
     // Query for coding events
     let coding_scope = InferenceScope {
         agent_type: coding_assistant.clone(),
         session_id: session_a,
     };
     let coding_events = graph
-        .query_events_in_scope(&coding_scope, agent_db_graph::scoped_inference::ScopeQuery::SessionMetrics)
+        .query_events_in_scope(
+            &coding_scope,
+            agent_db_graph::scoped_inference::ScopeQuery::SessionMetrics,
+        )
         .await?;
-    if let agent_db_graph::scoped_inference::ScopeQueryResult::SessionMetrics(metrics) = coding_events {
-        println!("   Coding events in session {}: {}", session_a, metrics.total_events);
+    if let agent_db_graph::scoped_inference::ScopeQueryResult::SessionMetrics(metrics) =
+        coding_events
+    {
+        println!(
+            "   Coding events in session {}: {}",
+            session_a, metrics.total_events
+        );
     }
 
     // Query for analysis events
@@ -233,27 +268,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_id: session_b,
     };
     let analysis_events = graph
-        .query_events_in_scope(&analysis_scope, agent_db_graph::scoped_inference::ScopeQuery::SessionMetrics)
+        .query_events_in_scope(
+            &analysis_scope,
+            agent_db_graph::scoped_inference::ScopeQuery::SessionMetrics,
+        )
         .await?;
-    if let agent_db_graph::scoped_inference::ScopeQueryResult::SessionMetrics(metrics) = analysis_events {
-        println!("   Analysis events in session {}: {}", session_b, metrics.total_events);
+    if let agent_db_graph::scoped_inference::ScopeQueryResult::SessionMetrics(metrics) =
+        analysis_events
+    {
+        println!(
+            "   Analysis events in session {}: {}",
+            session_b, metrics.total_events
+        );
     }
 
     // Cross-scope relationship analysis
     let cross_relationships = graph.get_cross_scope_relationships().await;
-    println!("   Cross-scope workflows found: {}", cross_relationships.global_workflows.len());
+    println!(
+        "   Cross-scope workflows found: {}",
+        cross_relationships.global_workflows.len()
+    );
 
     // Health check
     println!("\n🏥 System Health Check:");
     let health = graph.get_health_metrics().await;
-    println!("   Processing rate: {:.2} events/sec", health.processing_rate);
-    println!("   Memory usage: {:.2} MB", health.memory_usage_estimate as f64 / (1024.0 * 1024.0));
-    println!("   System status: {}", if health.is_healthy { "✅ Healthy" } else { "⚠️  Needs attention" });
+    println!(
+        "   Processing rate: {:.2} events/sec",
+        health.processing_rate
+    );
+    println!(
+        "   Memory usage: {:.2} MB",
+        health.memory_usage_estimate as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "   System status: {}",
+        if health.is_healthy {
+            "✅ Healthy"
+        } else {
+            "⚠️  Needs attention"
+        }
+    );
 
     // Final synchronization
     println!("\n💫 Synchronizing storage...");
     storage.sync().await?;
-    
+
     println!("\n🎉 End-to-End Demo Completed Successfully!");
     println!("   The Agentic Database successfully processed events from multiple");
     println!("   agent types across different sessions, automatically inferring");
@@ -304,9 +363,9 @@ fn create_development_context() -> EventContext {
         resources: ResourceState {
             computational: ComputationalResources {
                 cpu_percent: 45.0,
-                memory_bytes: 4 * 1024 * 1024 * 1024, // 4GB
+                memory_bytes: 4 * 1024 * 1024 * 1024,    // 4GB
                 storage_bytes: 100 * 1024 * 1024 * 1024, // 100GB
-                network_bandwidth: 1000 * 1000 * 10, // 10Mbps
+                network_bandwidth: 1000 * 1000 * 10,     // 10Mbps
             },
             external: HashMap::new(),
         },
@@ -336,22 +395,20 @@ fn create_analysis_context() -> EventContext {
                 patterns: Vec::new(),
             },
         },
-        active_goals: vec![
-            Goal {
-                id: 10,
-                description: "Analyze system performance patterns".to_string(),
-                priority: 0.7,
-                deadline: None,
-                progress: 0.3,
-                subgoals: Vec::new(),
-            },
-        ],
+        active_goals: vec![Goal {
+            id: 10,
+            description: "Analyze system performance patterns".to_string(),
+            priority: 0.7,
+            deadline: None,
+            progress: 0.3,
+            subgoals: Vec::new(),
+        }],
         resources: ResourceState {
             computational: ComputationalResources {
                 cpu_percent: 75.0,
-                memory_bytes: 8 * 1024 * 1024 * 1024, // 8GB
+                memory_bytes: 8 * 1024 * 1024 * 1024,    // 8GB
                 storage_bytes: 500 * 1024 * 1024 * 1024, // 500GB
-                network_bandwidth: 1000 * 1000 * 100, // 100Mbps
+                network_bandwidth: 1000 * 1000 * 100,    // 100Mbps
             },
             external: HashMap::new(),
         },
@@ -381,22 +438,20 @@ fn create_monitoring_context() -> EventContext {
                 patterns: Vec::new(),
             },
         },
-        active_goals: vec![
-            Goal {
-                id: 20,
-                description: "Monitor system health".to_string(),
-                priority: 0.95,
-                deadline: None,
-                progress: 1.0,
-                subgoals: Vec::new(),
-            },
-        ],
+        active_goals: vec![Goal {
+            id: 20,
+            description: "Monitor system health".to_string(),
+            priority: 0.95,
+            deadline: None,
+            progress: 1.0,
+            subgoals: Vec::new(),
+        }],
         resources: ResourceState {
             computational: ComputationalResources {
                 cpu_percent: 25.0,
-                memory_bytes: 2 * 1024 * 1024 * 1024, // 2GB
+                memory_bytes: 2 * 1024 * 1024 * 1024,   // 2GB
                 storage_bytes: 50 * 1024 * 1024 * 1024, // 50GB
-                network_bandwidth: 1000 * 1000 * 50, // 50Mbps
+                network_bandwidth: 1000 * 1000 * 50,    // 50Mbps
             },
             external: HashMap::new(),
         },
@@ -405,7 +460,12 @@ fn create_monitoring_context() -> EventContext {
     }
 }
 
-fn create_development_events(agent_type: AgentType, session_id: SessionId, context: &EventContext, base_time: u64) -> Vec<Event> {
+fn create_development_events(
+    agent_type: AgentType,
+    session_id: SessionId,
+    context: &EventContext,
+    base_time: u64,
+) -> Vec<Event> {
     vec![
         Event {
             id: generate_event_id(),
@@ -436,7 +496,9 @@ fn create_development_events(agent_type: AgentType, session_id: SessionId, conte
             event_type: EventType::Action {
                 action_name: "create_module".to_string(),
                 parameters: json!({"module": "graph/structures.rs", "lines": 350}),
-                outcome: ActionOutcome::Success { result: json!("Module created successfully") },
+                outcome: ActionOutcome::Success {
+                    result: json!("Module created successfully"),
+                },
                 duration_ns: 45_000_000_000, // 45 seconds
             },
             causality_chain: Vec::new(),
@@ -452,7 +514,9 @@ fn create_development_events(agent_type: AgentType, session_id: SessionId, conte
             event_type: EventType::Action {
                 action_name: "run_tests".to_string(),
                 parameters: json!({"test_suite": "graph_structures", "coverage": true}),
-                outcome: ActionOutcome::Success { result: json!({"tests_passed": 23, "coverage": 92.5}) },
+                outcome: ActionOutcome::Success {
+                    result: json!({"tests_passed": 23, "coverage": 92.5}),
+                },
                 duration_ns: 8_000_000_000, // 8 seconds
             },
             causality_chain: Vec::new(),
@@ -462,7 +526,12 @@ fn create_development_events(agent_type: AgentType, session_id: SessionId, conte
     ]
 }
 
-fn create_analysis_events(agent_type: AgentType, session_id: SessionId, context: &EventContext, base_time: u64) -> Vec<Event> {
+fn create_analysis_events(
+    agent_type: AgentType,
+    session_id: SessionId,
+    context: &EventContext,
+    base_time: u64,
+) -> Vec<Event> {
     vec![
         Event {
             id: generate_event_id(),
@@ -473,7 +542,9 @@ fn create_analysis_events(agent_type: AgentType, session_id: SessionId, context:
             event_type: EventType::Action {
                 action_name: "load_dataset".to_string(),
                 parameters: json!({"dataset": "user_events_q4.parquet", "rows": 1_250_000}),
-                outcome: ActionOutcome::Success { result: json!("Dataset loaded") },
+                outcome: ActionOutcome::Success {
+                    result: json!("Dataset loaded"),
+                },
                 duration_ns: 12_000_000_000, // 12 seconds
             },
             causality_chain: Vec::new(),
@@ -503,7 +574,12 @@ fn create_analysis_events(agent_type: AgentType, session_id: SessionId, context:
     ]
 }
 
-fn create_monitoring_events(agent_type: AgentType, session_id: SessionId, context: &EventContext, base_time: u64) -> Vec<Event> {
+fn create_monitoring_events(
+    agent_type: AgentType,
+    session_id: SessionId,
+    context: &EventContext,
+    base_time: u64,
+) -> Vec<Event> {
     vec![
         Event {
             id: generate_event_id(),
@@ -530,7 +606,9 @@ fn create_monitoring_events(agent_type: AgentType, session_id: SessionId, contex
             event_type: EventType::Action {
                 action_name: "check_alert_thresholds".to_string(),
                 parameters: json!({"thresholds": {"cpu": 80.0, "memory": 85.0, "disk_io": 200.0}}),
-                outcome: ActionOutcome::Success { result: json!({"alerts": 0, "status": "normal"}) },
+                outcome: ActionOutcome::Success {
+                    result: json!({"alerts": 0, "status": "normal"}),
+                },
                 duration_ns: 150_000_000, // 150ms
             },
             causality_chain: Vec::new(),
@@ -540,7 +618,12 @@ fn create_monitoring_events(agent_type: AgentType, session_id: SessionId, contex
     ]
 }
 
-fn create_task_management_events(agent_type: AgentType, session_id: SessionId, context: &EventContext, base_time: u64) -> Vec<Event> {
+fn create_task_management_events(
+    agent_type: AgentType,
+    session_id: SessionId,
+    context: &EventContext,
+    base_time: u64,
+) -> Vec<Event> {
     vec![
         Event {
             id: generate_event_id(),
@@ -589,7 +672,9 @@ fn create_task_management_events(agent_type: AgentType, session_id: SessionId, c
 fn get_event_description(event_type: &EventType) -> &str {
     match event_type {
         EventType::Action { action_name, .. } => action_name,
-        EventType::Observation { observation_type, .. } => observation_type,
+        EventType::Observation {
+            observation_type, ..
+        } => observation_type,
         EventType::Communication { message_type, .. } => message_type,
         EventType::Cognitive { process_type, .. } => match process_type {
             CognitiveType::Planning => "planning",

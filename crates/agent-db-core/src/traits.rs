@@ -9,17 +9,17 @@ use async_trait::async_trait;
 pub trait Database: Send + Sync {
     /// Ingest a single event
     async fn ingest_event(&mut self, event: Event) -> DatabaseResult<EventId>;
-    
+
     /// Ingest multiple events atomically
     async fn ingest_events(&mut self, events: Vec<Event>) -> DatabaseResult<Vec<EventId>>;
-    
+
     /// Retrieve events within a time range
     async fn get_events_in_range(
         &self,
         start: Timestamp,
         end: Timestamp,
     ) -> DatabaseResult<Vec<Event>>;
-    
+
     /// Get events for a specific agent
     async fn get_agent_events(
         &self,
@@ -33,13 +33,13 @@ pub trait Database: Send + Sync {
 pub trait Storage: Send + Sync {
     /// Write events to storage
     async fn write_events(&mut self, events: &[Event]) -> DatabaseResult<()>;
-    
+
     /// Read events from storage
     async fn read_events(&self, partition: PartitionId) -> DatabaseResult<Vec<Event>>;
-    
+
     /// Get available partitions
     async fn list_partitions(&self) -> DatabaseResult<Vec<PartitionId>>;
-    
+
     /// Compact storage (remove deleted events, optimize layout)
     async fn compact(&mut self) -> DatabaseResult<()>;
 }
@@ -49,16 +49,16 @@ pub trait Storage: Send + Sync {
 pub trait GraphEngine: Send + Sync {
     /// Add node to the graph
     async fn add_node(&mut self, node: Node) -> DatabaseResult<NodeId>;
-    
+
     /// Add edge between nodes
     async fn add_edge(&mut self, edge: Edge) -> DatabaseResult<()>;
-    
+
     /// Get node by ID
     async fn get_node(&self, id: NodeId) -> DatabaseResult<Option<Node>>;
-    
+
     /// Get edges from a node
     async fn get_edges_from(&self, node_id: NodeId) -> DatabaseResult<Vec<Edge>>;
-    
+
     /// Perform graph traversal
     async fn traverse(
         &self,
@@ -73,14 +73,14 @@ pub trait GraphEngine: Send + Sync {
 pub trait MemoryEngine: Send + Sync {
     /// Form new memory from events
     async fn form_memory(&mut self, events: &[Event]) -> DatabaseResult<MemoryId>;
-    
+
     /// Retrieve memories relevant to context
     async fn retrieve_memories(
         &self,
         context: &EventContext,
         limit: usize,
     ) -> DatabaseResult<Vec<Memory>>;
-    
+
     /// Update memory strength based on access
     async fn access_memory(&mut self, memory_id: MemoryId) -> DatabaseResult<()>;
 }
@@ -89,10 +89,10 @@ pub trait MemoryEngine: Send + Sync {
 pub trait EventValidator: Send + Sync {
     /// Validate event structure and content
     fn validate_event(&self, event: &Event) -> DatabaseResult<()>;
-    
+
     /// Validate causality chain
     fn validate_causality(&self, chain: &[EventId]) -> DatabaseResult<()>;
-    
+
     /// Validate event context
     fn validate_context(&self, context: &EventContext) -> DatabaseResult<()>;
 }

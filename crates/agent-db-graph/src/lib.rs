@@ -38,26 +38,26 @@ pub mod error {
     pub type GraphResult<T> = Result<T, GraphError>;
 }
 
-pub mod structures;
-pub mod inference;
-pub mod traversal;
-pub mod integration;
-pub mod event_ordering;
-pub mod scoped_inference;
-pub mod episodes;
-pub mod memory;
-pub mod strategies;
-pub mod contracts;
-pub mod stores;
-pub mod transitions;
 pub mod catalog;
-pub mod learning;
+pub mod contracts;
 pub mod decision_trace;
+pub mod episodes;
+pub mod event_ordering;
+pub mod inference;
+pub mod integration;
+pub mod learning;
+pub mod memory;
+pub mod scoped_inference;
+pub mod stores;
+pub mod strategies;
+pub mod structures;
+pub mod transitions;
+pub mod traversal;
 
 // New advanced graph features (2026-01-15)
-pub mod indexing;
 pub mod algorithms;
 pub mod analytics;
+pub mod indexing;
 
 // Phase 5B: Graph Persistence (2026-01-20)
 pub mod compression;
@@ -65,69 +65,51 @@ pub mod graph_store;
 pub mod redb_graph_store;
 
 // Re-export commonly used items
+pub use catalog::{EpisodeCatalog, EpisodeRecord, RedbEpisodeCatalog};
+pub use decision_trace::{
+    DecisionTrace, DecisionTraceStore, OutcomeSignal, RedbDecisionTraceStore,
+};
+pub use episodes::{Episode, EpisodeDetector, EpisodeDetectorConfig, EpisodeId, EpisodeOutcome};
 pub use error::{GraphError, GraphResult};
-pub use structures::{
-    Graph, GraphNode, GraphEdge, NodeType, EdgeType, NodeId, EdgeId, EdgeWeight,
-    ConceptType, GoalStatus, InteractionType, GoalRelationType, GraphStats,
-};
 pub use inference::{
-    GraphInference, InferenceConfig, InferenceStats, InferenceResults,
-    TemporalPattern, ContextualAssociation, EntityReference,
-    EpisodeMetrics, ReinforcementResult, ReinforcementStats,
+    ContextualAssociation, EntityReference, EpisodeMetrics, GraphInference, InferenceConfig,
+    InferenceResults, InferenceStats, ReinforcementResult, ReinforcementStats, TemporalPattern,
 };
-pub use traversal::{
-    GraphTraversal, GraphQuery, QueryResult, QueryStats,
-    PathConstraint, CommunityAlgorithm, ActionSuggestion,
-};
-pub use integration::{
-    GraphEngine, GraphEngineConfig, GraphOperationResult,
-};
-pub use episodes::{
-    Episode, EpisodeId, EpisodeOutcome, EpisodeDetector, EpisodeDetectorConfig,
-};
+pub use integration::{GraphEngine, GraphEngineConfig, GraphOperationResult};
+pub use learning::{LearningStatsStore, MotifStats, RedbLearningStatsStore, TransitionStats};
 pub use memory::{
-    Memory, MemoryId, MemoryType, MemoryFormation, MemoryFormationConfig, MemoryStats,
-};
-pub use strategies::{
-    Strategy, StrategyId, ReasoningStep, ContextPattern,
-    StrategyExtractor, StrategyExtractionConfig, StrategyStats,
+    Memory, MemoryFormation, MemoryFormationConfig, MemoryId, MemoryStats, MemoryType,
 };
 pub use stores::{
-    MemoryStore, StrategyStore, InMemoryMemoryStore, InMemoryStrategyStore,
-    RedbMemoryStore, RedbStrategyStore,
+    InMemoryMemoryStore, InMemoryStrategyStore, MemoryStore, RedbMemoryStore, RedbStrategyStore,
+    StrategyStore,
 };
-pub use catalog::{
-    EpisodeCatalog, EpisodeRecord, RedbEpisodeCatalog,
+pub use strategies::{
+    ContextPattern, ReasoningStep, Strategy, StrategyExtractionConfig, StrategyExtractor,
+    StrategyId, StrategyStats,
 };
-pub use learning::{
-    LearningStatsStore, TransitionStats, MotifStats, RedbLearningStatsStore,
+pub use structures::{
+    ConceptType, EdgeId, EdgeType, EdgeWeight, GoalRelationType, GoalStatus, Graph, GraphEdge,
+    GraphNode, GraphStats, InteractionType, NodeId, NodeType,
 };
-pub use decision_trace::{
-    DecisionTraceStore, DecisionTrace, OutcomeSignal, RedbDecisionTraceStore,
+pub use traversal::{
+    ActionSuggestion, CommunityAlgorithm, GraphQuery, GraphTraversal, PathConstraint, QueryResult,
+    QueryStats,
 };
 
 // New advanced graph features
-pub use indexing::{
-    PropertyIndex, IndexManager, IndexType, IndexStats,
-};
 pub use algorithms::{
-    LouvainAlgorithm, LouvainConfig, CommunityDetectionResult,
-    CentralityMeasures, AllCentralities,
-    ParallelGraphAlgorithms, ProcessResult, CommunityPrepData,
+    AllCentralities, CentralityMeasures, CommunityDetectionResult, CommunityPrepData,
+    LouvainAlgorithm, LouvainConfig, ParallelGraphAlgorithms, ProcessResult,
 };
-pub use analytics::{
-    GraphAnalytics, GraphMetrics, LearningMetrics,
-};
+pub use analytics::{GraphAnalytics, GraphMetrics, LearningMetrics};
+pub use indexing::{IndexManager, IndexStats, IndexType, PropertyIndex};
 
 // Phase 5B: Graph Persistence
-pub use compression::{
-    CompressedAdjacencyList, CompressionStats,
-};
+pub use compression::{CompressedAdjacencyList, CompressionStats};
 pub use graph_store::{
-    GraphStore, GraphStoreError,
-    GraphNode as PersistentGraphNode, GraphEdge as PersistentGraphEdge,
-    GraphNodeType as PersistentGraphNodeType, GraphEdgeType as PersistentGraphEdgeType,
-    GraphPath, Subgraph, BucketInfo,
-    InMemoryGraphStore,
+    BucketInfo, GraphEdge as PersistentGraphEdge, GraphEdgeType as PersistentGraphEdgeType,
+    GraphNode as PersistentGraphNode, GraphNodeType as PersistentGraphNodeType, GraphPath,
+    GraphStore, GraphStoreError, InMemoryGraphStore, Subgraph,
 };
 pub use redb_graph_store::RedbGraphStore;

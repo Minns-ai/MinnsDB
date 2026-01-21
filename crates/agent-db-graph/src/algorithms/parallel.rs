@@ -7,10 +7,9 @@
 //! Target: 4-8x speedup on multi-core CPUs when enabled
 
 use crate::structures::{Graph, NodeId};
-use crate::{GraphResult};
+use crate::GraphResult;
 // use rayon::prelude::*;  // Requires Rust 1.80+
 use std::collections::{HashMap, HashSet, VecDeque};
-
 
 /// Parallel graph algorithm implementations
 pub struct ParallelGraphAlgorithms;
@@ -63,7 +62,8 @@ impl ParallelGraphAlgorithms {
         let mut merged: HashMap<NodeId, u32> = HashMap::new();
         for result in results {
             for (node, dist) in result {
-                merged.entry(node)
+                merged
+                    .entry(node)
                     .and_modify(|d| *d = (*d).min(dist))
                     .or_insert(dist);
             }
@@ -89,10 +89,7 @@ impl ParallelGraphAlgorithms {
         }
 
         // Initialize with uniform distribution
-        let mut pagerank: HashMap<NodeId, f32> = nodes
-            .iter()
-            .map(|&id| (id, 1.0 / n))
-            .collect();
+        let mut pagerank: HashMap<NodeId, f32> = nodes.iter().map(|&id| (id, 1.0 / n)).collect();
 
         for _ in 0..iterations {
             // Parallel update of all nodes
@@ -225,7 +222,10 @@ impl ParallelGraphAlgorithms {
 
     /// Parallel connected components detection
     /// Uses Union-Find with parallel initialization
-    pub fn parallel_connected_components(&self, graph: &Graph) -> GraphResult<HashMap<NodeId, u64>> {
+    pub fn parallel_connected_components(
+        &self,
+        graph: &Graph,
+    ) -> GraphResult<HashMap<NodeId, u64>> {
         let nodes = graph.get_all_node_ids();
 
         // Initialize: each node in its own component
@@ -323,10 +323,7 @@ impl ParallelGraphAlgorithms {
             .collect();
 
         // Parallel edge weight sum
-        let total_weight: f32 = graph.get_all_edges()
-            .iter()
-            .map(|edge| edge.weight)
-            .sum();
+        let total_weight: f32 = graph.get_all_edges().iter().map(|edge| edge.weight).sum();
 
         Ok(CommunityPrepData {
             node_degrees: degrees,
@@ -363,7 +360,7 @@ pub struct CommunityPrepData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structures::{GraphNode, GraphEdge, NodeType, EdgeType};
+    use crate::structures::{EdgeType, GraphEdge, GraphNode, NodeType};
 
     #[test]
     fn test_parallel_pagerank() {
@@ -386,17 +383,29 @@ mod tests {
             significance: 0.5,
         }));
 
-        graph.add_edge(GraphEdge::new(n1, n2, EdgeType::Causality {
-            strength: 0.9,
-            lag_ms: 100,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n2, n3, EdgeType::Causality {
-            strength: 0.9,
-            lag_ms: 100,
-        }, 0.9));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n2,
+            EdgeType::Causality {
+                strength: 0.9,
+                lag_ms: 100,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n2,
+            n3,
+            EdgeType::Causality {
+                strength: 0.9,
+                lag_ms: 100,
+            },
+            0.9,
+        ));
 
         let parallel_alg = ParallelGraphAlgorithms::new();
-        let pagerank = parallel_alg.parallel_pagerank(&graph, 0.85, 50, 0.001).unwrap();
+        let pagerank = parallel_alg
+            .parallel_pagerank(&graph, 0.85, 50, 0.001)
+            .unwrap();
 
         // Check that all nodes have PageRank
         assert!(pagerank.contains_key(&n1));
@@ -429,14 +438,24 @@ mod tests {
         }));
 
         // n1 connected to both n2 and n3
-        graph.add_edge(GraphEdge::new(n1, n2, EdgeType::Temporal {
-            average_interval_ms: 100,
-            sequence_confidence: 0.9,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n1, n3, EdgeType::Temporal {
-            average_interval_ms: 100,
-            sequence_confidence: 0.9,
-        }, 0.9));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n2,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n3,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.9,
+        ));
 
         let parallel_alg = ParallelGraphAlgorithms::new();
         let centrality = parallel_alg.parallel_degree_centrality(&graph).unwrap();
@@ -471,21 +490,38 @@ mod tests {
             significance: 0.5,
         }));
 
-        graph.add_edge(GraphEdge::new(n1, n2, EdgeType::Temporal {
-            average_interval_ms: 100,
-            sequence_confidence: 0.9,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n2, n3, EdgeType::Temporal {
-            average_interval_ms: 100,
-            sequence_confidence: 0.9,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n3, n4, EdgeType::Temporal {
-            average_interval_ms: 100,
-            sequence_confidence: 0.9,
-        }, 0.9));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n2,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n2,
+            n3,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n3,
+            n4,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.9,
+        ));
 
         let parallel_alg = ParallelGraphAlgorithms::new();
-        let distances = parallel_alg.parallel_multi_source_bfs(&graph, vec![n1], 10).unwrap();
+        let distances = parallel_alg
+            .parallel_multi_source_bfs(&graph, vec![n1], 10)
+            .unwrap();
 
         // Check distances from n1
         assert_eq!(distances[&n1], 0);

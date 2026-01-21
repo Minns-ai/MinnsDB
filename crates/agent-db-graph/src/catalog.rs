@@ -4,9 +4,9 @@
 //! The catalog is the foundational data structure that enables persistent joins between
 //! events, episodes, and learning artifacts (memories/strategies).
 
-use agent_db_core::types::{AgentId, EventId, SessionId, Timestamp, ContextHash};
-use agent_db_storage::{RedbBackend, StorageResult, StorageError};
-use serde::{Serialize, Deserialize};
+use agent_db_core::types::{AgentId, ContextHash, EventId, SessionId, Timestamp};
+use agent_db_storage::{RedbBackend, StorageError, StorageResult};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::episodes::{EpisodeId, EpisodeOutcome};
@@ -75,10 +75,7 @@ pub trait EpisodeCatalog: Send + Sync {
     ) -> StorageResult<Option<EpisodeRecord>>;
 
     /// Get episode that contains a specific event (for join queries)
-    fn get_episode_by_event(
-        &self,
-        event_id: EventId,
-    ) -> StorageResult<Option<EpisodeRecord>>;
+    fn get_episode_by_event(&self, event_id: EventId) -> StorageResult<Option<EpisodeRecord>>;
 
     /// List recent episodes for an agent (for debugging + API)
     fn list_recent(
@@ -115,9 +112,10 @@ impl RedbEpisodeCatalog {
     /// Decode episode key: bytes → (episode_id, version)
     fn decode_episode_key(key: &[u8]) -> StorageResult<(EpisodeId, u32)> {
         if key.len() != 12 {
-            return Err(StorageError::DatabaseError(
-                format!("Invalid episode key length: {}", key.len())
-            ));
+            return Err(StorageError::DatabaseError(format!(
+                "Invalid episode key length: {}",
+                key.len()
+            )));
         }
 
         let episode_id = u64::from_be_bytes(key[0..8].try_into().unwrap());
@@ -148,7 +146,7 @@ impl EpisodeCatalog for RedbEpisodeCatalog {
         // Update reverse index: event_id → episode_id
         for &event_id in &record.event_ids {
             self.backend.put(
-                "partition_map",  // Reusing partition_map as event→episode index
+                "partition_map", // Reusing partition_map as event→episode index
                 event_id.to_be_bytes().to_vec(),
                 &episode_id,
             )?;
@@ -158,7 +156,7 @@ impl EpisodeCatalog for RedbEpisodeCatalog {
         if let Some(end_ts) = record.end_timestamp {
             let agent_key = Self::encode_agent_key(record.agent_id, end_ts);
             self.backend.put(
-                "memory_records",  // Reusing memory_records for agent→episode index
+                "memory_records", // Reusing memory_records for agent→episode index
                 agent_key,
                 &episode_id,
             )?;
@@ -177,7 +175,7 @@ impl EpisodeCatalog for RedbEpisodeCatalog {
                 // Get specific version
                 let key = Self::encode_episode_key(episode_id, v);
                 self.backend.get("episode_catalog", key)
-            }
+            },
             None => {
                 // Get latest version by scanning all versions of this episode
                 let prefix = episode_id.to_be_bytes().to_vec();
@@ -195,24 +193,20 @@ impl EpisodeCatalog for RedbEpisodeCatalog {
                     match latest {
                         None => latest = Some((ver, record)),
                         Some((max_ver, _)) if ver > max_ver => latest = Some((ver, record)),
-                        _ => {}
+                        _ => {},
                     }
                 }
 
                 Ok(latest.map(|(_, record)| record))
-            }
+            },
         }
     }
 
-    fn get_episode_by_event(
-        &self,
-        event_id: EventId,
-    ) -> StorageResult<Option<EpisodeRecord>> {
+    fn get_episode_by_event(&self, event_id: EventId) -> StorageResult<Option<EpisodeRecord>> {
         // Look up episode_id from reverse index
-        let episode_id: Option<EpisodeId> = self.backend.get(
-            "partition_map",
-            event_id.to_be_bytes().to_vec(),
-        )?;
+        let episode_id: Option<EpisodeId> = self
+            .backend
+            .get("partition_map", event_id.to_be_bytes().to_vec())?;
 
         match episode_id {
             Some(ep_id) => self.get_episode(ep_id, None),

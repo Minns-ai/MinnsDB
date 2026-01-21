@@ -6,7 +6,7 @@
 //! Reference: Blondel et al., "Fast unfolding of communities in large networks" (2008)
 
 use crate::structures::{Graph, NodeId};
-use crate::{GraphResult};
+use crate::GraphResult;
 use std::collections::{HashMap, HashSet};
 
 /// Configuration for Louvain algorithm
@@ -149,7 +149,8 @@ impl LouvainAlgorithm {
             let current_community = *node_communities.get(&node_id).unwrap();
 
             // Get neighboring communities
-            let neighbor_communities = self.get_neighbor_communities(graph, node_id, node_communities);
+            let neighbor_communities =
+                self.get_neighbor_communities(graph, node_id, node_communities);
 
             if neighbor_communities.is_empty() {
                 continue;
@@ -230,7 +231,8 @@ impl LouvainAlgorithm {
         let two_m = 2.0 * m;
 
         // Calculate edges from node to each community
-        let edges_to_from = self.edges_to_community(graph, node_id, from_community, node_communities);
+        let edges_to_from =
+            self.edges_to_community(graph, node_id, from_community, node_communities);
         let edges_to_to = self.edges_to_community(graph, node_id, to_community, node_communities);
 
         // Calculate node degree
@@ -356,10 +358,7 @@ impl Default for LouvainAlgorithm {
 impl Graph {
     /// Get total edge weight in graph
     pub fn total_edge_weight(&self) -> f32 {
-        self.get_all_edges()
-            .iter()
-            .map(|edge| edge.weight)
-            .sum()
+        self.get_all_edges().iter().map(|edge| edge.weight).sum()
     }
 
     /// Get node degree (sum of edge weights)
@@ -395,7 +394,7 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structures::{GraphNode, GraphEdge, NodeType, EdgeType};
+    use crate::structures::{EdgeType, GraphEdge, GraphNode, NodeType};
 
     #[test]
     fn test_louvain_simple_graph() {
@@ -437,44 +436,79 @@ mod tests {
         }));
 
         // Add edges within communities (strong connections)
-        graph.add_edge(GraphEdge::new(n1, n2, EdgeType::Association {
-            association_type: "test".to_string(),
-            evidence_count: 1,
-            statistical_significance: 0.9,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n2, n3, EdgeType::Association {
-            association_type: "test".to_string(),
-            evidence_count: 1,
-            statistical_significance: 0.9,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n1, n3, EdgeType::Association {
-            association_type: "test".to_string(),
-            evidence_count: 1,
-            statistical_significance: 0.9,
-        }, 0.9));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n2,
+            EdgeType::Association {
+                association_type: "test".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.9,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n2,
+            n3,
+            EdgeType::Association {
+                association_type: "test".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.9,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n3,
+            EdgeType::Association {
+                association_type: "test".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.9,
+            },
+            0.9,
+        ));
 
-        graph.add_edge(GraphEdge::new(n4, n5, EdgeType::Association {
-            association_type: "test".to_string(),
-            evidence_count: 1,
-            statistical_significance: 0.9,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n5, n6, EdgeType::Association {
-            association_type: "test".to_string(),
-            evidence_count: 1,
-            statistical_significance: 0.9,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n4, n6, EdgeType::Association {
-            association_type: "test".to_string(),
-            evidence_count: 1,
-            statistical_significance: 0.9,
-        }, 0.9));
+        graph.add_edge(GraphEdge::new(
+            n4,
+            n5,
+            EdgeType::Association {
+                association_type: "test".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.9,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n5,
+            n6,
+            EdgeType::Association {
+                association_type: "test".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.9,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n4,
+            n6,
+            EdgeType::Association {
+                association_type: "test".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.9,
+            },
+            0.9,
+        ));
 
         // Add weak edge between communities
-        graph.add_edge(GraphEdge::new(n3, n4, EdgeType::Association {
-            association_type: "test".to_string(),
-            evidence_count: 1,
-            statistical_significance: 0.1,
-        }, 0.1));
+        graph.add_edge(GraphEdge::new(
+            n3,
+            n4,
+            EdgeType::Association {
+                association_type: "test".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.1,
+            },
+            0.1,
+        ));
 
         // Run Louvain
         let louvain = LouvainAlgorithm::new();

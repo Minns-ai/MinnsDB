@@ -77,7 +77,10 @@ pub fn build_episode_record(episode: &Episode, events: &[Event]) -> EpisodeRecor
         context_signature: episode.context_signature,
         goal_bucket_id,
         behavior_signature,
-        outcome: episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted),
+        outcome: episode
+            .outcome
+            .clone()
+            .unwrap_or(EpisodeOutcome::Interrupted),
         significance: episode.significance,
         salience_score: episode.salience_score,
     }
@@ -87,7 +90,10 @@ pub fn build_learning_outputs(episode: &Episode, events: &[Event]) -> LearningOu
     let episode_record = build_episode_record(episode, events);
     let abstract_trace = build_abstract_trace(events);
     let context_features = build_context_features(episode);
-    let outcome = episode.outcome.clone().unwrap_or(EpisodeOutcome::Interrupted);
+    let outcome = episode
+        .outcome
+        .clone()
+        .unwrap_or(EpisodeOutcome::Interrupted);
     let outcome_signals = vec![OutcomeSignal {
         episode_id: episode.id,
         episode_version: 1,
@@ -106,8 +112,19 @@ pub fn build_learning_outputs(episode: &Episode, events: &[Event]) -> LearningOu
 }
 
 fn build_context_features(episode: &Episode) -> ContextFeatures {
-    let goal_ids = episode.context.active_goals.iter().map(|g| g.id).collect::<Vec<_>>();
-    let env_keys = episode.context.environment.variables.keys().cloned().collect::<Vec<_>>();
+    let goal_ids = episode
+        .context
+        .active_goals
+        .iter()
+        .map(|g| g.id)
+        .collect::<Vec<_>>();
+    let env_keys = episode
+        .context
+        .environment
+        .variables
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
     let mut sorted_goals = goal_ids.clone();
     sorted_goals.sort();
     let goal_bucket_id = sorted_goals.first().copied().unwrap_or(0);
@@ -144,10 +161,10 @@ fn build_behavior_skeleton(events: &[Event]) -> Vec<String> {
             EventType::Observation { .. } => skeleton.push("Observe".to_string()),
             EventType::Cognitive { process_type, .. } => {
                 skeleton.push(format!("Think:{:?}", process_type));
-            }
+            },
             EventType::Action { action_name, .. } => {
                 skeleton.push(format!("Act:{}", action_name));
-            }
+            },
             EventType::Communication { .. } => skeleton.push("Communicate".to_string()),
             EventType::Learning { .. } => skeleton.push("Learn".to_string()),
         }
@@ -193,7 +210,9 @@ fn action_from_event(event: &Event) -> String {
     match &event.event_type {
         EventType::Action { action_name, .. } => action_name.clone(),
         EventType::Cognitive { process_type, .. } => format!("Think:{:?}", process_type),
-        EventType::Observation { observation_type, .. } => format!("Observe:{observation_type}"),
+        EventType::Observation {
+            observation_type, ..
+        } => format!("Observe:{observation_type}"),
         EventType::Communication { message_type, .. } => format!("Comm:{message_type}"),
         EventType::Learning { .. } => "Learn".to_string(),
     }

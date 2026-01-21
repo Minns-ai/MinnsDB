@@ -6,7 +6,7 @@
 //! - High centrality events = key decision points
 
 use crate::structures::{Graph, NodeId};
-use crate::{GraphResult};
+use crate::GraphResult;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Centrality algorithm implementations
@@ -55,7 +55,7 @@ impl CentralityMeasures {
 
         // For each pair of nodes, find all shortest paths
         for (i, &source) in nodes.iter().enumerate() {
-            for &target in &nodes[i+1..] {
+            for &target in &nodes[i + 1..] {
                 if source == target {
                     continue;
                 }
@@ -153,10 +153,8 @@ impl CentralityMeasures {
         }
 
         // Initialize with uniform values
-        let mut centrality: HashMap<NodeId, f32> = nodes
-            .iter()
-            .map(|&id| (id, 1.0 / n as f32))
-            .collect();
+        let mut centrality: HashMap<NodeId, f32> =
+            nodes.iter().map(|&id| (id, 1.0 / n as f32)).collect();
 
         for _ in 0..max_iterations {
             let mut new_centrality = HashMap::new();
@@ -212,10 +210,7 @@ impl CentralityMeasures {
         }
 
         // Initialize with uniform distribution
-        let mut pagerank: HashMap<NodeId, f32> = nodes
-            .iter()
-            .map(|&id| (id, 1.0 / n))
-            .collect();
+        let mut pagerank: HashMap<NodeId, f32> = nodes.iter().map(|&id| (id, 1.0 / n)).collect();
 
         for _ in 0..max_iterations {
             let mut new_pagerank = HashMap::new();
@@ -251,7 +246,12 @@ impl CentralityMeasures {
     }
 
     /// Find shortest distance between two nodes (BFS)
-    fn shortest_distance(&self, graph: &Graph, start: NodeId, end: NodeId) -> GraphResult<Option<f32>> {
+    fn shortest_distance(
+        &self,
+        graph: &Graph,
+        start: NodeId,
+        end: NodeId,
+    ) -> GraphResult<Option<f32>> {
         if start == end {
             return Ok(Some(0.0));
         }
@@ -284,7 +284,12 @@ impl CentralityMeasures {
     }
 
     /// Find all shortest paths between two nodes
-    fn all_shortest_paths(&self, graph: &Graph, start: NodeId, end: NodeId) -> GraphResult<Vec<Vec<NodeId>>> {
+    fn all_shortest_paths(
+        &self,
+        graph: &Graph,
+        start: NodeId,
+        end: NodeId,
+    ) -> GraphResult<Vec<Vec<NodeId>>> {
         if start == end {
             return Ok(vec![vec![start]]);
         }
@@ -404,7 +409,9 @@ impl AllCentralities {
         let mut combined: HashMap<NodeId, f32> = HashMap::new();
 
         // Collect all node IDs
-        let all_nodes: HashSet<NodeId> = self.degree.keys()
+        let all_nodes: HashSet<NodeId> = self
+            .degree
+            .keys()
             .chain(self.betweenness.keys())
             .chain(self.closeness.keys())
             .chain(self.eigenvector.keys())
@@ -424,7 +431,7 @@ impl AllCentralities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structures::{GraphNode, GraphEdge, NodeType, EdgeType};
+    use crate::structures::{EdgeType, GraphEdge, GraphNode, NodeType};
 
     #[test]
     fn test_degree_centrality() {
@@ -446,10 +453,15 @@ mod tests {
             }));
             other_nodes.push(node);
 
-            graph.add_edge(GraphEdge::new(n1, node, EdgeType::Temporal {
-                average_interval_ms: 100,
-                sequence_confidence: 0.9,
-            }, 0.9));
+            graph.add_edge(GraphEdge::new(
+                n1,
+                node,
+                EdgeType::Temporal {
+                    average_interval_ms: 100,
+                    sequence_confidence: 0.9,
+                },
+                0.9,
+            ));
         }
 
         let centrality_calc = CentralityMeasures::new();
@@ -482,18 +494,33 @@ mod tests {
 
         // n1 -> n2, n1 -> n3, n2 -> n3
         // n3 should have highest PageRank (receives links from both)
-        graph.add_edge(GraphEdge::new(n1, n2, EdgeType::Causality {
-            strength: 0.9,
-            lag_ms: 100,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n1, n3, EdgeType::Causality {
-            strength: 0.9,
-            lag_ms: 100,
-        }, 0.9));
-        graph.add_edge(GraphEdge::new(n2, n3, EdgeType::Causality {
-            strength: 0.9,
-            lag_ms: 100,
-        }, 0.9));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n2,
+            EdgeType::Causality {
+                strength: 0.9,
+                lag_ms: 100,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n3,
+            EdgeType::Causality {
+                strength: 0.9,
+                lag_ms: 100,
+            },
+            0.9,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n2,
+            n3,
+            EdgeType::Causality {
+                strength: 0.9,
+                lag_ms: 100,
+            },
+            0.9,
+        ));
 
         let centrality_calc = CentralityMeasures::new();
         let pagerank = centrality_calc.pagerank(&graph, 0.85, 100, 0.0001).unwrap();

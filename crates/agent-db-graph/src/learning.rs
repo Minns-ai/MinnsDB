@@ -5,7 +5,7 @@
 
 use agent_db_core::types::Timestamp;
 use agent_db_storage::{RedbBackend, StorageResult};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Transition statistics for state-action-state transitions
@@ -98,19 +98,13 @@ pub trait LearningStatsStore: Send + Sync {
     ) -> StorageResult<()>;
 
     /// Get motif statistics
-    fn get_motif(
-        &self,
-        goal_bucket_id: u64,
-        motif_id: String,
-    ) -> StorageResult<Option<MotifStats>>;
+    fn get_motif(&self, goal_bucket_id: u64, motif_id: String)
+        -> StorageResult<Option<MotifStats>>;
 
     /// Get all motifs for a goal bucket
     ///
     /// Returns: (motif_id, stats) tuples
-    fn get_motifs(
-        &self,
-        goal_bucket_id: u64,
-    ) -> StorageResult<Vec<(String, MotifStats)>>;
+    fn get_motifs(&self, goal_bucket_id: u64) -> StorageResult<Vec<(String, MotifStats)>>;
 }
 
 /// Redb-backed learning statistics store
@@ -160,16 +154,15 @@ impl RedbLearningStatsStore {
     fn decode_transition_key(key: &[u8]) -> StorageResult<(u64, String, String, String)> {
         let parts: Vec<&[u8]> = key.split(|&b| b == 0xFF).collect();
         if parts.len() != 4 {
-            return Err(agent_db_storage::StorageError::DatabaseError(
-                format!("Invalid transition key format: expected 4 parts, got {}", parts.len())
-            ));
+            return Err(agent_db_storage::StorageError::DatabaseError(format!(
+                "Invalid transition key format: expected 4 parts, got {}",
+                parts.len()
+            )));
         }
 
-        let goal_bucket_id = u64::from_be_bytes(
-            parts[0].try_into().map_err(|_| {
-                agent_db_storage::StorageError::DatabaseError("Invalid goal_bucket_id".to_string())
-            })?
-        );
+        let goal_bucket_id = u64::from_be_bytes(parts[0].try_into().map_err(|_| {
+            agent_db_storage::StorageError::DatabaseError("Invalid goal_bucket_id".to_string())
+        })?);
         let state = String::from_utf8_lossy(parts[1]).to_string();
         let action = String::from_utf8_lossy(parts[2]).to_string();
         let next_state = String::from_utf8_lossy(parts[3]).to_string();
@@ -198,16 +191,15 @@ impl RedbLearningStatsStore {
     fn decode_motif_key(key: &[u8]) -> StorageResult<(u64, String)> {
         let parts: Vec<&[u8]> = key.split(|&b| b == 0xFF).collect();
         if parts.len() != 2 {
-            return Err(agent_db_storage::StorageError::DatabaseError(
-                format!("Invalid motif key format: expected 2 parts, got {}", parts.len())
-            ));
+            return Err(agent_db_storage::StorageError::DatabaseError(format!(
+                "Invalid motif key format: expected 2 parts, got {}",
+                parts.len()
+            )));
         }
 
-        let goal_bucket_id = u64::from_be_bytes(
-            parts[0].try_into().map_err(|_| {
-                agent_db_storage::StorageError::DatabaseError("Invalid goal_bucket_id".to_string())
-            })?
-        );
+        let goal_bucket_id = u64::from_be_bytes(parts[0].try_into().map_err(|_| {
+            agent_db_storage::StorageError::DatabaseError("Invalid goal_bucket_id".to_string())
+        })?);
         let motif_id = String::from_utf8_lossy(parts[1]).to_string();
 
         Ok((goal_bucket_id, motif_id))
@@ -276,10 +268,7 @@ impl LearningStatsStore for RedbLearningStatsStore {
         self.backend.get("motif_stats", key)
     }
 
-    fn get_motifs(
-        &self,
-        goal_bucket_id: u64,
-    ) -> StorageResult<Vec<(String, MotifStats)>> {
+    fn get_motifs(&self, goal_bucket_id: u64) -> StorageResult<Vec<(String, MotifStats)>> {
         let prefix = Self::encode_motif_prefix(goal_bucket_id);
         let results: Vec<(Vec<u8>, MotifStats)> =
             self.backend.scan_prefix("motif_stats", prefix)?;
@@ -339,20 +328,24 @@ mod tests {
         let mut store = RedbLearningStatsStore::new(backend);
 
         let stats = create_test_transition_stats();
-        store.put_transition(
-            1,
-            "state_a".to_string(),
-            "action_1".to_string(),
-            "state_b".to_string(),
-            stats.clone(),
-        ).unwrap();
+        store
+            .put_transition(
+                1,
+                "state_a".to_string(),
+                "action_1".to_string(),
+                "state_b".to_string(),
+                stats.clone(),
+            )
+            .unwrap();
 
-        let retrieved = store.get_transition(
-            1,
-            "state_a".to_string(),
-            "action_1".to_string(),
-            "state_b".to_string(),
-        ).unwrap();
+        let retrieved = store
+            .get_transition(
+                1,
+                "state_a".to_string(),
+                "action_1".to_string(),
+                "state_b".to_string(),
+            )
+            .unwrap();
 
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
@@ -367,26 +360,32 @@ mod tests {
 
         // Store multiple transitions from the same state
         let stats1 = create_test_transition_stats();
-        store.put_transition(
-            1,
-            "state_a".to_string(),
-            "action_1".to_string(),
-            "state_b".to_string(),
-            stats1,
-        ).unwrap();
+        store
+            .put_transition(
+                1,
+                "state_a".to_string(),
+                "action_1".to_string(),
+                "state_b".to_string(),
+                stats1,
+            )
+            .unwrap();
 
         let mut stats2 = create_test_transition_stats();
         stats2.count = 5;
-        store.put_transition(
-            1,
-            "state_a".to_string(),
-            "action_2".to_string(),
-            "state_c".to_string(),
-            stats2,
-        ).unwrap();
+        store
+            .put_transition(
+                1,
+                "state_a".to_string(),
+                "action_2".to_string(),
+                "state_c".to_string(),
+                stats2,
+            )
+            .unwrap();
 
         // Retrieve all transitions from state_a
-        let transitions = store.get_transitions_from_state(1, "state_a".to_string()).unwrap();
+        let transitions = store
+            .get_transitions_from_state(1, "state_a".to_string())
+            .unwrap();
         assert_eq!(transitions.len(), 2);
     }
 
@@ -396,7 +395,9 @@ mod tests {
         let mut store = RedbLearningStatsStore::new(backend);
 
         let stats = create_test_motif_stats();
-        store.put_motif(1, "motif_1".to_string(), stats.clone()).unwrap();
+        store
+            .put_motif(1, "motif_1".to_string(), stats.clone())
+            .unwrap();
 
         let retrieved = store.get_motif(1, "motif_1".to_string()).unwrap();
         assert!(retrieved.is_some());

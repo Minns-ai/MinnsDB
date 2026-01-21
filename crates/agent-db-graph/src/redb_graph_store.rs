@@ -8,14 +8,13 @@
 
 use crate::compression::CompressedAdjacencyList;
 use crate::graph_store::{
-    GraphStore, GraphStoreError, GraphNode, GraphEdge,
-    GraphPath, Subgraph, BucketInfo,
+    BucketInfo, GraphEdge, GraphNode, GraphPath, GraphStore, GraphStoreError, Subgraph,
 };
-use crate::structures::{NodeId, GoalBucketId};
+use crate::structures::{GoalBucketId, NodeId};
 use agent_db_storage::RedbBackend;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // Table names for redb
@@ -32,11 +31,11 @@ const TABLE_GRAPH_BUCKETS: &str = "graph_buckets";
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 enum KeyType {
-    NodeMeta = 0x01,           // Node metadata
-    AdjacencyForward = 0x02,   // Forward edges (A → [B, C, D])
-    AdjacencyReverse = 0x03,   // Reverse edges (backlinks)
-    EdgeMeta = 0x04,           // Edge metadata
-    BucketCatalog = 0x05,      // Partition statistics
+    NodeMeta = 0x01,         // Node metadata
+    AdjacencyForward = 0x02, // Forward edges (A → [B, C, D])
+    AdjacencyReverse = 0x03, // Reverse edges (backlinks)
+    EdgeMeta = 0x04,         // Edge metadata
+    BucketCatalog = 0x05,    // Partition statistics
 }
 
 /// Build hierarchical key: [TypeByte][GoalBucket(8)][NodeID(8)]
@@ -96,7 +95,7 @@ struct PartitionCache {
     forward_edges: HashMap<NodeId, Vec<NodeId>>,
     reverse_edges: HashMap<NodeId, Vec<NodeId>>,
     edge_metadata: HashMap<(NodeId, NodeId), GraphEdge>,
-    last_accessed_ms: AtomicU64,  // Timestamp in milliseconds for LRU (thread-safe)
+    last_accessed_ms: AtomicU64, // Timestamp in milliseconds for LRU (thread-safe)
 }
 
 impl PartitionCache {
@@ -112,7 +111,8 @@ impl PartitionCache {
     }
 
     fn touch(&self) {
-        self.last_accessed_ms.store(get_timestamp_ms(), Ordering::Relaxed);
+        self.last_accessed_ms
+            .store(get_timestamp_ms(), Ordering::Relaxed);
     }
 
     fn last_accessed(&self) -> u64 {
@@ -154,9 +154,10 @@ impl RedbGraphStore {
         K: AsRef<[u8]>,
         V: serde::Serialize,
     {
-        let json_bytes = serde_json::to_vec(value)
-            .map_err(|e| GraphStoreError::Serialization(e.to_string()))?;
-        self.backend.put_raw(table, key, &json_bytes)
+        let json_bytes =
+            serde_json::to_vec(value).map_err(|e| GraphStoreError::Serialization(e.to_string()))?;
+        self.backend
+            .put_raw(table, key, &json_bytes)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))
     }
 
@@ -166,24 +167,33 @@ impl RedbGraphStore {
         K: AsRef<[u8]>,
         V: serde::de::DeserializeOwned,
     {
-        match self.backend.get_raw(table, key)
-            .map_err(|e| GraphStoreError::Storage(e.to_string()))? {
+        match self
+            .backend
+            .get_raw(table, key)
+            .map_err(|e| GraphStoreError::Storage(e.to_string()))?
+        {
             Some(bytes) => {
                 let value = serde_json::from_slice(&bytes)
                     .map_err(|e| GraphStoreError::Serialization(e.to_string()))?;
                 Ok(Some(value))
-            }
+            },
             None => Ok(None),
         }
     }
 
     /// Helper: scan prefix with JSON deserialization
-    fn scan_prefix_json<K, V>(&self, table: &str, prefix: K) -> Result<Vec<(Vec<u8>, V)>, GraphStoreError>
+    fn scan_prefix_json<K, V>(
+        &self,
+        table: &str,
+        prefix: K,
+    ) -> Result<Vec<(Vec<u8>, V)>, GraphStoreError>
     where
         K: AsRef<[u8]>,
         V: serde::de::DeserializeOwned,
     {
-        let raw_results = self.backend.scan_prefix_raw(table, prefix)
+        let raw_results = self
+            .backend
+            .scan_prefix_raw(table, prefix)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
 
         let mut results = Vec::new();
@@ -228,7 +238,9 @@ impl RedbGraphStore {
             p
         };
 
-        for (_, node) in self.scan_prefix_json::<Vec<u8>, GraphNode>(TABLE_GRAPH_NODES, node_prefix)? {
+        for (_, node) in
+            self.scan_prefix_json::<Vec<u8>, GraphNode>(TABLE_GRAPH_NODES, node_prefix)?
+        {
             partition.nodes.insert(node.id, node);
         }
 
@@ -239,15 +251,21 @@ impl RedbGraphStore {
             p
         };
 
-        for (key, compressed) in self.backend.scan_prefix::<Vec<u8>, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, fwd_prefix)
-            .map_err(|e| GraphStoreError::Storage(e.to_string()))? {
+        for (key, compressed) in self
+            .backend
+            .scan_prefix::<Vec<u8>, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, fwd_prefix)
+            .map_err(|e| GraphStoreError::Storage(e.to_string()))?
+        {
             // Extract node_id from key (NodeId is u64 = 8 bytes at offset 9)
             let node_id = u64::from_be_bytes(
-                key[9..17].try_into()
-                    .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?
+                key[9..17]
+                    .try_into()
+                    .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?,
             );
 
-            partition.forward_edges.insert(node_id, compressed.decompress());
+            partition
+                .forward_edges
+                .insert(node_id, compressed.decompress());
         }
 
         // Load reverse adjacency lists
@@ -257,14 +275,20 @@ impl RedbGraphStore {
             p
         };
 
-        for (key, compressed) in self.backend.scan_prefix::<Vec<u8>, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, rev_prefix)
-            .map_err(|e| GraphStoreError::Storage(e.to_string()))? {
+        for (key, compressed) in self
+            .backend
+            .scan_prefix::<Vec<u8>, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, rev_prefix)
+            .map_err(|e| GraphStoreError::Storage(e.to_string()))?
+        {
             let node_id = u64::from_be_bytes(
-                key[9..17].try_into()
-                    .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?
+                key[9..17]
+                    .try_into()
+                    .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?,
             );
 
-            partition.reverse_edges.insert(node_id, compressed.decompress());
+            partition
+                .reverse_edges
+                .insert(node_id, compressed.decompress());
         }
 
         // Load edge metadata
@@ -274,15 +298,19 @@ impl RedbGraphStore {
             p
         };
 
-        for (key, edge) in self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, edge_prefix)? {
+        for (key, edge) in
+            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, edge_prefix)?
+        {
             // Extract from (offset 9-17), to (offset 17-25)
             let from = u64::from_be_bytes(
-                key[9..17].try_into()
-                    .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?
+                key[9..17]
+                    .try_into()
+                    .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?,
             );
             let to = u64::from_be_bytes(
-                key[17..25].try_into()
-                    .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?
+                key[17..25]
+                    .try_into()
+                    .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?,
             );
 
             partition.edge_metadata.insert((from, to), edge);
@@ -306,7 +334,9 @@ impl RedbGraphStore {
             return Ok(());
         }
 
-        let lru_bucket = self.loaded_partitions.iter()
+        let lru_bucket = self
+            .loaded_partitions
+            .iter()
             .min_by_key(|(_, partition)| partition.last_accessed())
             .map(|(bucket_id, _)| *bucket_id)
             .ok_or_else(|| GraphStoreError::Storage("No partitions to evict".to_string()))?;
@@ -337,10 +367,14 @@ impl GraphStore for RedbGraphStore {
         Ok(())
     }
 
-    fn get_node(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Option<GraphNode>, GraphStoreError> {
+    fn get_node(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Option<GraphNode>, GraphStoreError> {
         // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
-            partition.touch();  // Update LRU timestamp
+            partition.touch(); // Update LRU timestamp
             return Ok(partition.nodes.get(&node_id).cloned());
         }
 
@@ -349,9 +383,14 @@ impl GraphStore for RedbGraphStore {
         self.get_json(TABLE_GRAPH_NODES, &key)
     }
 
-    fn delete_node(&mut self, bucket: GoalBucketId, node_id: NodeId) -> Result<(), GraphStoreError> {
+    fn delete_node(
+        &mut self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<(), GraphStoreError> {
         let key = make_node_key(bucket, node_id);
-        self.backend.delete(TABLE_GRAPH_NODES, &key)
+        self.backend
+            .delete(TABLE_GRAPH_NODES, &key)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
 
         // Delete adjacency lists
@@ -403,7 +442,11 @@ impl GraphStore for RedbGraphStore {
 
         // 1. Add to forward adjacency
         let mut neighbors = if let Some(partition) = self.loaded_partitions.get(&bucket) {
-            partition.forward_edges.get(&edge.from).cloned().unwrap_or_default()
+            partition
+                .forward_edges
+                .get(&edge.from)
+                .cloned()
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -415,12 +458,17 @@ impl GraphStore for RedbGraphStore {
 
         let compressed = CompressedAdjacencyList::compress(&neighbors);
         let fwd_key = make_adjacency_forward_key(bucket, edge.from);
-        self.backend.put(TABLE_GRAPH_ADJACENCY, &fwd_key, &compressed)
+        self.backend
+            .put(TABLE_GRAPH_ADJACENCY, &fwd_key, &compressed)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
 
         // 2. Add to reverse adjacency (backlinks)
         let mut preds = if let Some(partition) = self.loaded_partitions.get(&bucket) {
-            partition.reverse_edges.get(&edge.to).cloned().unwrap_or_default()
+            partition
+                .reverse_edges
+                .get(&edge.to)
+                .cloned()
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -432,7 +480,8 @@ impl GraphStore for RedbGraphStore {
 
         let compressed_preds = CompressedAdjacencyList::compress(&preds);
         let rev_key = make_adjacency_reverse_key(bucket, edge.to);
-        self.backend.put(TABLE_GRAPH_ADJACENCY, &rev_key, &compressed_preds)
+        self.backend
+            .put(TABLE_GRAPH_ADJACENCY, &rev_key, &compressed_preds)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
 
         // 3. Store edge metadata
@@ -450,7 +499,12 @@ impl GraphStore for RedbGraphStore {
         Ok(())
     }
 
-    fn get_edge(&self, bucket: GoalBucketId, from: NodeId, to: NodeId) -> Result<Option<GraphEdge>, GraphStoreError> {
+    fn get_edge(
+        &self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<Option<GraphEdge>, GraphStoreError> {
         // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
             return Ok(partition.edge_metadata.get(&(from, to)).cloned());
@@ -461,7 +515,12 @@ impl GraphStore for RedbGraphStore {
         self.get_json(TABLE_GRAPH_EDGES, &key)
     }
 
-    fn delete_edge(&mut self, bucket: GoalBucketId, from: NodeId, to: NodeId) -> Result<(), GraphStoreError> {
+    fn delete_edge(
+        &mut self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<(), GraphStoreError> {
         self.ensure_partition_loaded(bucket)?;
 
         // Update forward adjacency
@@ -471,7 +530,8 @@ impl GraphStore for RedbGraphStore {
 
                 let compressed = CompressedAdjacencyList::compress(neighbors);
                 let fwd_key = make_adjacency_forward_key(bucket, from);
-                self.backend.put(TABLE_GRAPH_ADJACENCY, &fwd_key, &compressed)
+                self.backend
+                    .put(TABLE_GRAPH_ADJACENCY, &fwd_key, &compressed)
                     .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
             }
 
@@ -481,7 +541,8 @@ impl GraphStore for RedbGraphStore {
 
                 let compressed = CompressedAdjacencyList::compress(preds);
                 let rev_key = make_adjacency_reverse_key(bucket, to);
-                self.backend.put(TABLE_GRAPH_ADJACENCY, &rev_key, &compressed)
+                self.backend
+                    .put(TABLE_GRAPH_ADJACENCY, &rev_key, &compressed)
                     .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
             }
 
@@ -491,43 +552,70 @@ impl GraphStore for RedbGraphStore {
 
         // Delete edge metadata
         let edge_key = make_edge_key(bucket, from, to);
-        self.backend.delete(TABLE_GRAPH_EDGES, &edge_key)
+        self.backend
+            .delete(TABLE_GRAPH_EDGES, &edge_key)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
 
         Ok(())
     }
 
-    fn get_neighbors(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<NodeId>, GraphStoreError> {
+    fn get_neighbors(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
         // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
-            return Ok(partition.forward_edges.get(&node_id).cloned().unwrap_or_default());
+            return Ok(partition
+                .forward_edges
+                .get(&node_id)
+                .cloned()
+                .unwrap_or_default());
         }
 
         // Load from disk
         let key = make_adjacency_forward_key(bucket, node_id);
-        match self.backend.get::<_, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, &key)
-            .map_err(|e| GraphStoreError::Storage(e.to_string()))? {
+        match self
+            .backend
+            .get::<_, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, &key)
+            .map_err(|e| GraphStoreError::Storage(e.to_string()))?
+        {
             Some(compressed) => Ok(compressed.decompress()),
             None => Ok(Vec::new()),
         }
     }
 
-    fn get_predecessors(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<NodeId>, GraphStoreError> {
+    fn get_predecessors(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
         // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
-            return Ok(partition.reverse_edges.get(&node_id).cloned().unwrap_or_default());
+            return Ok(partition
+                .reverse_edges
+                .get(&node_id)
+                .cloned()
+                .unwrap_or_default());
         }
 
         // Load from disk
         let key = make_adjacency_reverse_key(bucket, node_id);
-        match self.backend.get::<_, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, &key)
-            .map_err(|e| GraphStoreError::Storage(e.to_string()))? {
+        match self
+            .backend
+            .get::<_, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, &key)
+            .map_err(|e| GraphStoreError::Storage(e.to_string()))?
+        {
             Some(compressed) => Ok(compressed.decompress()),
             None => Ok(Vec::new()),
         }
     }
 
-    fn get_outgoing_edges(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<GraphEdge>, GraphStoreError> {
+    fn get_outgoing_edges(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError> {
         let neighbors = self.get_neighbors(bucket, node_id)?;
         let mut edges = Vec::new();
 
@@ -540,7 +628,11 @@ impl GraphStore for RedbGraphStore {
         Ok(edges)
     }
 
-    fn get_incoming_edges(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<Vec<GraphEdge>, GraphStoreError> {
+    fn get_incoming_edges(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError> {
         let preds = self.get_predecessors(bucket, node_id)?;
         let mut edges = Vec::new();
 
@@ -594,7 +686,8 @@ impl GraphStore for RedbGraphStore {
             p
         };
 
-        let node_count = self.scan_prefix_json::<Vec<u8>, GraphNode>(TABLE_GRAPH_NODES, node_prefix)?
+        let node_count = self
+            .scan_prefix_json::<Vec<u8>, GraphNode>(TABLE_GRAPH_NODES, node_prefix)?
             .len() as u64;
 
         let edge_prefix = {
@@ -603,7 +696,8 @@ impl GraphStore for RedbGraphStore {
             p
         };
 
-        let edge_count = self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, edge_prefix)?
+        let edge_count = self
+            .scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, edge_prefix)?
             .len() as u64;
 
         Ok(BucketInfo {
@@ -622,8 +716,9 @@ impl GraphStore for RedbGraphStore {
         for (key, _) in self.scan_prefix_json::<Vec<u8>, GraphNode>(TABLE_GRAPH_NODES, prefix)? {
             if key.len() >= 9 {
                 let bucket = u64::from_be_bytes(
-                    key[1..9].try_into()
-                        .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?
+                    key[1..9]
+                        .try_into()
+                        .map_err(|_| GraphStoreError::Storage("Invalid key format".to_string()))?,
                 );
                 buckets.insert(bucket);
             }
@@ -638,7 +733,12 @@ impl GraphStore for RedbGraphStore {
     // Traversal Operations
     // ========================================================================
 
-    fn traverse_bfs(&self, bucket: GoalBucketId, start: NodeId, max_depth: u32) -> Result<Vec<NodeId>, GraphStoreError> {
+    fn traverse_bfs(
+        &self,
+        bucket: GoalBucketId,
+        start: NodeId,
+        max_depth: u32,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
         let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
         let mut result = Vec::new();
@@ -666,7 +766,12 @@ impl GraphStore for RedbGraphStore {
         Ok(result)
     }
 
-    fn traverse_dfs(&self, bucket: GoalBucketId, start: NodeId, max_depth: u32) -> Result<Vec<NodeId>, GraphStoreError> {
+    fn traverse_dfs(
+        &self,
+        bucket: GoalBucketId,
+        start: NodeId,
+        max_depth: u32,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
         let mut visited = HashSet::new();
         let mut result = Vec::new();
 
@@ -688,7 +793,15 @@ impl GraphStore for RedbGraphStore {
 
             if depth < max_depth {
                 for neighbor in store.get_neighbors(bucket, node)? {
-                    dfs_helper(store, bucket, neighbor, depth + 1, max_depth, visited, result)?;
+                    dfs_helper(
+                        store,
+                        bucket,
+                        neighbor,
+                        depth + 1,
+                        max_depth,
+                        visited,
+                        result,
+                    )?;
                 }
             }
 
@@ -699,12 +812,23 @@ impl GraphStore for RedbGraphStore {
         Ok(result)
     }
 
-    fn find_paths(&self, _bucket: GoalBucketId, _from: NodeId, _to: NodeId, _max_depth: u32) -> Result<Vec<GraphPath>, GraphStoreError> {
+    fn find_paths(
+        &self,
+        _bucket: GoalBucketId,
+        _from: NodeId,
+        _to: NodeId,
+        _max_depth: u32,
+    ) -> Result<Vec<GraphPath>, GraphStoreError> {
         // TODO: Implement path finding algorithm
         Ok(Vec::new())
     }
 
-    fn get_subgraph(&self, bucket: GoalBucketId, center: NodeId, radius: u32) -> Result<Subgraph, GraphStoreError> {
+    fn get_subgraph(
+        &self,
+        bucket: GoalBucketId,
+        center: NodeId,
+        radius: u32,
+    ) -> Result<Subgraph, GraphStoreError> {
         let node_ids = self.traverse_bfs(bucket, center, radius)?;
 
         let mut nodes = Vec::new();
@@ -734,7 +858,7 @@ impl GraphStore for RedbGraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_store::{GraphNode, GraphEdge, GraphNodeType, GraphEdgeType};
+    use crate::graph_store::{GraphEdge, GraphEdgeType, GraphNode, GraphNodeType};
     use agent_db_storage::{RedbBackend, RedbConfig};
     use tempfile::TempDir;
 
@@ -794,7 +918,10 @@ mod tests {
         store.add_node(bucket, updated_node.clone()).unwrap();
 
         let retrieved = store.get_node(bucket, 100).unwrap();
-        assert_eq!(retrieved.unwrap().properties, serde_json::json!({"test": "updated"}));
+        assert_eq!(
+            retrieved.unwrap().properties,
+            serde_json::json!({"test": "updated"})
+        );
 
         // Delete
         store.delete_node(bucket, 100).unwrap();
@@ -814,7 +941,9 @@ mod tests {
 
         // Add edges: 100 -> 101 -> 102 -> 103 -> 104
         for i in 100..104 {
-            store.add_edge(bucket, create_test_edge(i, i + 1, bucket)).unwrap();
+            store
+                .add_edge(bucket, create_test_edge(i, i + 1, bucket))
+                .unwrap();
         }
 
         // Test forward adjacency
@@ -848,7 +977,9 @@ mod tests {
         for bucket in 1..=3 {
             for i in 0..5 {
                 let node_id = (bucket * 100) + i;
-                store.add_node(bucket, create_test_node(node_id, bucket)).unwrap();
+                store
+                    .add_node(bucket, create_test_node(node_id, bucket))
+                    .unwrap();
             }
         }
 
@@ -878,7 +1009,9 @@ mod tests {
         for bucket in 1..=4 {
             for i in 0..3 {
                 let node_id = (bucket * 100) + i;
-                store.add_node(bucket, create_test_node(node_id, bucket)).unwrap();
+                store
+                    .add_node(bucket, create_test_node(node_id, bucket))
+                    .unwrap();
             }
         }
 
@@ -916,7 +1049,9 @@ mod tests {
             }
 
             for i in 100..104 {
-                store.add_edge(bucket, create_test_edge(i, i + 1, bucket)).unwrap();
+                store
+                    .add_edge(bucket, create_test_edge(i, i + 1, bucket))
+                    .unwrap();
             }
 
             // Unload partition to force flush to disk
@@ -963,10 +1098,18 @@ mod tests {
             store.add_node(bucket, create_test_node(i, bucket)).unwrap();
         }
 
-        store.add_edge(bucket, create_test_edge(100, 101, bucket)).unwrap();
-        store.add_edge(bucket, create_test_edge(100, 102, bucket)).unwrap();
-        store.add_edge(bucket, create_test_edge(101, 103, bucket)).unwrap();
-        store.add_edge(bucket, create_test_edge(102, 104, bucket)).unwrap();
+        store
+            .add_edge(bucket, create_test_edge(100, 101, bucket))
+            .unwrap();
+        store
+            .add_edge(bucket, create_test_edge(100, 102, bucket))
+            .unwrap();
+        store
+            .add_edge(bucket, create_test_edge(101, 103, bucket))
+            .unwrap();
+        store
+            .add_edge(bucket, create_test_edge(102, 104, bucket))
+            .unwrap();
 
         // BFS from root with max depth 1
         let result = store.traverse_bfs(bucket, 100, 1).unwrap();
@@ -996,7 +1139,9 @@ mod tests {
         }
 
         for i in 100..103 {
-            store.add_edge(bucket, create_test_edge(i, i + 1, bucket)).unwrap();
+            store
+                .add_edge(bucket, create_test_edge(i, i + 1, bucket))
+                .unwrap();
         }
 
         // DFS with max depth 1
@@ -1016,10 +1161,14 @@ mod tests {
         let bucket = 1;
 
         // Create a star graph with center 100
-        store.add_node(bucket, create_test_node(100, bucket)).unwrap();
+        store
+            .add_node(bucket, create_test_node(100, bucket))
+            .unwrap();
         for i in 101..105 {
             store.add_node(bucket, create_test_node(i, bucket)).unwrap();
-            store.add_edge(bucket, create_test_edge(100, i, bucket)).unwrap();
+            store
+                .add_edge(bucket, create_test_edge(100, i, bucket))
+                .unwrap();
         }
 
         // Extract subgraph with radius 1
@@ -1043,7 +1192,9 @@ mod tests {
         for bucket in 1..=3 {
             for i in 0..5 {
                 let node_id = (bucket * 100) + i;
-                store.add_node(bucket, create_test_node(node_id, bucket)).unwrap();
+                store
+                    .add_node(bucket, create_test_node(node_id, bucket))
+                    .unwrap();
             }
         }
 
@@ -1052,7 +1203,12 @@ mod tests {
             for i in 0..5 {
                 let node_id = (bucket * 100) + i;
                 let node = store.get_node(bucket, node_id).unwrap();
-                assert!(node.is_some(), "Node {} in bucket {} should exist", node_id, bucket);
+                assert!(
+                    node.is_some(),
+                    "Node {} in bucket {} should exist",
+                    node_id,
+                    bucket
+                );
             }
         }
 
@@ -1102,10 +1258,14 @@ mod tests {
         let bucket = 1;
 
         // Create a node with many sequential neighbors (good compression case)
-        store.add_node(bucket, create_test_node(100, bucket)).unwrap();
+        store
+            .add_node(bucket, create_test_node(100, bucket))
+            .unwrap();
         for i in 200..300 {
             store.add_node(bucket, create_test_node(i, bucket)).unwrap();
-            store.add_edge(bucket, create_test_edge(100, i, bucket)).unwrap();
+            store
+                .add_edge(bucket, create_test_edge(100, i, bucket))
+                .unwrap();
         }
 
         // Get neighbors (should be decompressed from delta encoding)
