@@ -15,12 +15,13 @@ use agent_db_storage::RedbBackend;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // Table names for redb
 const TABLE_GRAPH_NODES: &str = "graph_nodes";
 const TABLE_GRAPH_ADJACENCY: &str = "graph_adjacency";
 const TABLE_GRAPH_EDGES: &str = "graph_edges";
+#[allow(dead_code)]
 const TABLE_GRAPH_BUCKETS: &str = "graph_buckets";
 
 // ============================================================================
@@ -35,6 +36,7 @@ enum KeyType {
     AdjacencyForward = 0x02, // Forward edges (A → [B, C, D])
     AdjacencyReverse = 0x03, // Reverse edges (backlinks)
     EdgeMeta = 0x04,         // Edge metadata
+    #[allow(dead_code)]
     BucketCatalog = 0x05,    // Partition statistics
 }
 
@@ -90,7 +92,6 @@ fn get_timestamp_ms() -> u64 {
 /// Cached partition data (loaded into memory)
 #[derive(Debug)]
 struct PartitionCache {
-    bucket_id: GoalBucketId,
     nodes: HashMap<NodeId, GraphNode>,
     forward_edges: HashMap<NodeId, Vec<NodeId>>,
     reverse_edges: HashMap<NodeId, Vec<NodeId>>,
@@ -99,9 +100,8 @@ struct PartitionCache {
 }
 
 impl PartitionCache {
-    fn new(bucket_id: GoalBucketId) -> Self {
+    fn new(_bucket_id: GoalBucketId) -> Self {
         Self {
-            bucket_id,
             nodes: HashMap::new(),
             forward_edges: HashMap::new(),
             reverse_edges: HashMap::new(),
