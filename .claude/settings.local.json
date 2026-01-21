@@ -9,7 +9,9 @@
       "Bash(netstat:*)",
       "Bash(findstr:*)",
       "Bash(xargs:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(cargo run:*)",
+      "Bash(ls:*)"
     ]
   }
 }

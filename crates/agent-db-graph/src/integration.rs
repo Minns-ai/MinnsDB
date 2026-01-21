@@ -22,7 +22,8 @@ use crate::memory::{MemoryFormationConfig, Memory, MemoryStats};
 use crate::strategies::{
     StrategyExtractionConfig, Strategy, StrategyId, StrategyStats, StrategySimilarityQuery,
 };
-use crate::stores::{InMemoryMemoryStore, InMemoryStrategyStore, MemoryStore, StrategyStore};
+use crate::stores::{InMemoryMemoryStore, InMemoryStrategyStore, MemoryStore, StrategyStore,
+    RedbMemoryStore, RedbStrategyStore};
 use crate::transitions::{TransitionModel, TransitionModelConfig};
 use crate::indexing::{IndexManager, IndexType};
 use crate::algorithms::{LouvainAlgorithm, CentralityMeasures};
@@ -30,12 +31,22 @@ use crate::analytics::GraphAnalytics;
 use agent_db_events::{Event, EventType};
 use agent_db_events::core::LearningEvent;
 use serde_json::json;
-use agent_db_storage::{StorageEngine};
+use agent_db_storage::{StorageEngine, RedbBackend, RedbConfig};
 use agent_db_core::types::{AgentId, AgentType, ContextHash, EventId, SessionId};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::path::PathBuf;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
+
+/// Storage backend type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBackend {
+    /// In-memory only (fast, no persistence)
+    InMemory,
+    /// Persistent with redb (LRU cache + durable storage)
+    Persistent,
+}
 
 /// Configuration for the integrated graph engine
 #[derive(Debug, Clone)]
@@ -87,6 +98,23 @@ pub struct GraphEngineConfig {
 
     /// Enable query caching
     pub enable_query_cache: bool,
+
+    // ========== Persistent Storage Configuration ==========
+
+    /// Storage backend type (InMemory or Persistent)
+    pub storage_backend: StorageBackend,
+
+    /// Path to redb database file (only used when storage_backend = Persistent)
+    pub redb_path: PathBuf,
+
+    /// Cache size for redb backend (MB of RAM for hot data)
+    pub redb_cache_size_mb: usize,
+
+    /// Maximum memories to keep in LRU cache (0 = unlimited)
+    pub memory_cache_size: usize,
+
+    /// Maximum strategies to keep in LRU cache (0 = unlimited)
+    pub strategy_cache_size: usize,
 }
 
 /// Results from graph operations
@@ -138,11 +166,11 @@ pub struct GraphEngine {
     /// Episode detector - automatically detects episode boundaries
     episode_detector: Arc<RwLock<EpisodeDetector>>,
 
-    /// Memory store - retrieval substrate
-    memory_store: Arc<RwLock<InMemoryMemoryStore>>,
+    /// Memory store - retrieval substrate (trait object for flexibility)
+    memory_store: Arc<RwLock<Box<dyn MemoryStore>>>,
 
-    /// Strategy store - policy substrate
-    strategy_store: Arc<RwLock<InMemoryStrategyStore>>,
+    /// Strategy store - policy substrate (trait object for flexibility)
+    strategy_store: Arc<RwLock<Box<dyn StrategyStore>>>,
 
     /// Transition model - procedural memory spine
     transition_model: Arc<RwLock<TransitionModel>>,
@@ -218,6 +246,12 @@ impl Default for GraphEngineConfig {
             persistence_interval: 1000,
             max_graph_size: 1_000_000,
             enable_query_cache: true,
+            // Storage configuration defaults
+            storage_backend: StorageBackend::InMemory,
+            redb_path: PathBuf::from("./agent_db_data/graph.redb"),
+            redb_cache_size_mb: 128, // 128MB cache by default
+            memory_cache_size: 10_000, // Keep 10K memories in RAM
+            strategy_cache_size: 5_000, // Keep 5K strategies in RAM
         }
     }
 }
@@ -250,13 +284,67 @@ impl GraphEngine {
             EpisodeDetector::new(graph_for_episodes, config.episode_config.clone())
         ));
 
-        let memory_store = Arc::new(RwLock::new(
-            InMemoryMemoryStore::new(config.memory_config.clone())
-        ));
+        // Initialize stores based on storage backend configuration
+        let (memory_store, strategy_store): (
+            Arc<RwLock<Box<dyn MemoryStore>>>,
+            Arc<RwLock<Box<dyn StrategyStore>>>
+        ) = match config.storage_backend {
+            StorageBackend::InMemory => {
+                tracing::info!("Initializing with InMemory storage backend");
+                let mem = Arc::new(RwLock::new(
+                    Box::new(InMemoryMemoryStore::new(config.memory_config.clone())) as Box<dyn MemoryStore>
+                ));
+                let strat = Arc::new(RwLock::new(
+                    Box::new(InMemoryStrategyStore::new(config.strategy_config.clone())) as Box<dyn StrategyStore>
+                ));
+                (mem, strat)
+            }
+            StorageBackend::Persistent => {
+                tracing::info!("Initializing with Persistent storage backend (redb) at {:?}", config.redb_path);
 
-        let strategy_store = Arc::new(RwLock::new(
-            InMemoryStrategyStore::new(config.strategy_config.clone())
-        ));
+                // Initialize redb backend
+                let redb_config = RedbConfig {
+                    data_path: config.redb_path.clone(),
+                    cache_size_bytes: config.redb_cache_size_mb * 1024 * 1024,
+                    repair_on_open: false,
+                };
+                let backend = Arc::new(RedbBackend::open(redb_config)
+                    .map_err(|e| GraphError::OperationError(format!("Failed to open redb: {:?}", e)))?);
+
+                // Create memory store with LRU cache
+                let mut mem_store = RedbMemoryStore::new(
+                    backend.clone(),
+                    config.memory_config.clone(),
+                    config.memory_cache_size.max(1000), // Minimum 1000 entries
+                );
+                mem_store.initialize()
+                    .map_err(|e| GraphError::OperationError(format!("Failed to initialize memory store: {:?}", e)))?;
+
+                // Create strategy store with LRU cache
+                let mut strat_store = RedbStrategyStore::new(
+                    backend.clone(),
+                    config.strategy_config.clone(),
+                    config.strategy_cache_size.max(500), // Minimum 500 entries
+                );
+                strat_store.initialize()
+                    .map_err(|e| GraphError::OperationError(format!("Failed to initialize strategy store: {:?}", e)))?;
+
+                let mem = Arc::new(RwLock::new(
+                    Box::new(mem_store) as Box<dyn MemoryStore>
+                ));
+                let strat = Arc::new(RwLock::new(
+                    Box::new(strat_store) as Box<dyn StrategyStore>
+                ));
+
+                tracing::info!(
+                    "Persistent storage initialized: memory_cache={}, strategy_cache={}",
+                    config.memory_cache_size,
+                    config.strategy_cache_size
+                );
+
+                (mem, strat)
+            }
+        };
 
         let transition_model = Arc::new(RwLock::new(
             TransitionModel::new(TransitionModelConfig::default())

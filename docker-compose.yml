@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  eventgraphdb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eventgraphdb
+    image: eventgraphdb:latest
+
+    ports:
+      - "8080:8080"  # HTTP/WebSocket API
+      - "9090:9090"  # Metrics endpoint
+
+    environment:
+      - RUST_LOG=info
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - STORAGE_BACKEND=persistent
+      - REDB_PATH=/data/eventgraph.redb
+      - REDB_CACHE_SIZE_MB=256
+      - MEMORY_CACHE_SIZE=10000
+      - STRATEGY_CACHE_SIZE=5000
+
+    volumes:
+      - eventgraph-data:/data
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    networks:
+      - eventgraph-network
+
+  # Optional: Prometheus for monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - eventgraph-network
+    profiles:
+      - monitoring
+
+  # Optional: Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - eventgraph-network
+    profiles:
+      - monitoring
+    depends_on:
+      - prometheus
+
+volumes:
+  eventgraph-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+networks:
+  eventgraph-network:
+    driver: bridge

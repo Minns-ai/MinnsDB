@@ -10,12 +10,14 @@ use axum::{
     Router,
 };
 use agent_db_graph::{GraphEngine, GraphEngineConfig};
+use agent_db_graph::integration::StorageBackend;
 use agent_db_events::Event;
 use agent_db_events::core::EventType;
 use agent_db_core::types::{AgentId, AgentType, ContextHash, SessionId};
 use agent_db_events::core::EventContext;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::path::PathBuf;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -873,11 +875,27 @@ async fn main() -> anyhow::Result<()> {
 
     info!("🚀 Starting EventGraphDB REST API Server");
 
-    // Initialize GraphEngine
-    info!("Initializing GraphEngine with automatic self-evolution...");
-    let config = GraphEngineConfig::default();
+    // Initialize GraphEngine with persistent storage
+    info!("Initializing GraphEngine with persistent storage...");
+    let mut config = GraphEngineConfig::default();
+
+    // Configure persistent storage backend
+    config.storage_backend = StorageBackend::Persistent;
+    config.redb_path = PathBuf::from("./data/eventgraph.redb");
+    config.redb_cache_size_mb = 128;      // 128MB redb cache
+    config.memory_cache_size = 10_000;    // 10K memories in RAM (~20MB)
+    config.strategy_cache_size = 5_000;   // 5K strategies in RAM (~15MB)
+
+    // Create data directory if it doesn't exist
+    if let Some(parent) = config.redb_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     let engine = GraphEngine::with_config(config).await?;
-    info!("✓ GraphEngine initialized");
+    info!("✓ GraphEngine initialized with persistent storage at ./data/eventgraph.redb");
+    info!("  Memory cache: 10,000 items (~20MB)");
+    info!("  Strategy cache: 5,000 items (~15MB)");
+    info!("  Redb cache: 128MB");
 
     // Create application state
     let state = AppState {

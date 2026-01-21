@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -57,6 +58,12 @@ pub struct StorageConfig {
     
     /// Background flush interval
     pub flush_interval: std::time::Duration,
+
+    /// Segment compaction interval (0 disables compaction)
+    pub compaction_interval: std::time::Duration,
+
+    /// Minimum number of segments before compaction runs
+    pub compaction_min_segments: u32,
 }
 
 /// Storage engine statistics
@@ -114,6 +121,7 @@ pub struct StorageEngine {
     cache: Arc<AsyncMutex<HashMap<EventId, CacheEntry>>>,
     current_segment: Arc<AsyncMutex<Option<DataSegment>>>,
     flush_sender: Sender<FlushRequest>,
+    counters: Arc<StorageCounters>,
 }
 
 /// Data segment for storing events
@@ -128,10 +136,28 @@ struct DataSegment {
 /// Request for background flush
 #[derive(Debug)]
 enum FlushRequest {
-    Event { event: Event, compressed_data: Vec<u8> },
+    Event { event: Event, compressed_data: Vec<u8>, is_compressed: bool },
     Sync,
     #[allow(dead_code)]
     Shutdown,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionStats {
+    pub original_segments: u32,
+    pub compacted_segments: u32,
+    pub events_copied: u64,
+    pub bytes_written: u64,
+}
+
+#[derive(Debug, Default)]
+struct StorageCounters {
+    total_events_written: AtomicU64,
+    total_raw_bytes: AtomicU64,
+    total_stored_bytes: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    segments_created: AtomicU64,
 }
 
 impl StorageConfig {
@@ -149,6 +175,8 @@ impl StorageConfig {
             enable_checksums: true,
             sync_interval_secs: 30,
             flush_interval: std::time::Duration::from_millis(100),
+            compaction_interval: std::time::Duration::from_secs(1800),
+            compaction_min_segments: 3,
         }
     }
     
@@ -196,6 +224,7 @@ impl StorageEngine {
             cache,
             current_segment: Arc::new(AsyncMutex::new(None)),
             flush_sender,
+            counters: Arc::new(StorageCounters::default()),
         };
         
         // Start background flush task
@@ -203,6 +232,13 @@ impl StorageEngine {
         tokio::spawn(async move {
             flush_engine.background_flush_task(flush_receiver).await;
         });
+
+        if !engine.config.compaction_interval.is_zero() {
+            let compaction_engine = engine.clone_for_flush();
+            tokio::task::spawn_blocking(move || {
+                compaction_engine.background_compaction_task_blocking();
+            });
+        }
         
         // Recover from WAL if needed
         engine.recover().await?;
@@ -216,7 +252,8 @@ impl StorageEngine {
         let serialized = bincode::serialize(&event)
             .map_err(StorageError::Serialization)?;
             
-        let (data, _compressed) = match self.config.compression {
+        let raw_len = serialized.len();
+        let (data, is_compressed) = match self.config.compression {
             CompressionType::Lz4 => {
                 match compress(&serialized, None, true) {
                     Ok(compressed_data) => (compressed_data, true),
@@ -229,6 +266,10 @@ impl StorageEngine {
             },
             CompressionType::None => (serialized, false),
         };
+
+        self.counters.total_events_written.fetch_add(1, Ordering::Relaxed);
+        self.counters.total_raw_bytes.fetch_add(raw_len as u64, Ordering::Relaxed);
+        self.counters.total_stored_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
         
         // Log to WAL first (durability)
         self.wal.log_store_event(&event, data.clone()).await?;
@@ -240,6 +281,7 @@ impl StorageEngine {
         self.flush_sender.send(FlushRequest::Event {
             event: event.clone(),
             compressed_data: data,
+            is_compressed,
         }).map_err(|_| StorageError::Io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             "Background flush channel closed"
@@ -254,6 +296,8 @@ impl StorageEngine {
         if let Some(event) = self.get_from_cache(event_id).await {
             return Ok(Some(event));
         }
+
+        self.counters.cache_misses.fetch_add(1, Ordering::Relaxed);
         
         // Check index for disk location
         let index_entry = {
@@ -296,14 +340,33 @@ impl StorageEngine {
     /// Get storage statistics
     pub async fn stats(&self) -> StorageStats {
         let index_size = self.index.read().unwrap().len();
-        let _cache_size = self.cache.lock().await.len();
+        let cache = self.cache.lock().await;
+        let _cache_size = cache.len();
+        drop(cache);
+
+        let (segment_count, total_size_bytes) = self.scan_segment_usage();
+        let raw_bytes = self.counters.total_raw_bytes.load(Ordering::Relaxed);
+        let stored_bytes = self.counters.total_stored_bytes.load(Ordering::Relaxed);
+        let cache_hits = self.counters.cache_hits.load(Ordering::Relaxed);
+        let cache_misses = self.counters.cache_misses.load(Ordering::Relaxed);
+        let cache_total = cache_hits + cache_misses;
+        let cache_hit_rate = if cache_total > 0 {
+            cache_hits as f64 / cache_total as f64
+        } else {
+            0.0
+        };
+        let compression_ratio = if stored_bytes > 0 {
+            raw_bytes as f64 / stored_bytes as f64
+        } else {
+            0.0
+        };
 
         StorageStats {
             total_events: index_size as u64,
-            total_size_bytes: index_size as u64 * 1024, // Rough estimate
-            compression_ratio: 2.0, // Placeholder estimate
-            segment_count: 1, // Placeholder
-            cache_hit_rate: 0.85, // Placeholder
+            total_size_bytes,
+            compression_ratio,
+            segment_count,
+            cache_hit_rate,
         }
     }
     
@@ -316,6 +379,147 @@ impl StorageEngine {
             )))?;
         Ok(())
     }
+
+    /// Compact all segments by rewriting only live events into new segments.
+    ///
+    /// NOTE: This blocks segment writes while compaction runs.
+    pub async fn compact_segments(&self) -> StorageResult<CompactionStats> {
+        let engine = self.clone_for_flush();
+        tokio::task::spawn_blocking(move || engine.compact_segments_blocking())
+            .await
+            .map_err(|err| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, err)))?
+    }
+
+    fn compact_segments_blocking(&self) -> StorageResult<CompactionStats> {
+        // Block background flush writes while we compact.
+        let _segment_guard = self.current_segment.blocking_lock();
+
+        let entries: Vec<(EventId, IndexEntry)> = {
+            let index = self.index.read().unwrap();
+            index.iter().map(|(id, entry)| (*id, entry.clone())).collect()
+        };
+
+        let segments_dir = self.config.data_directory.join("segments");
+        let original_segments = self.scan_segment_usage().0;
+
+        let temp_dir = self.config.data_directory.join(format!(
+            "segments_compact_{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        ));
+        std::fs::create_dir_all(&temp_dir).map_err(StorageError::Io)?;
+
+        struct CompactionSegment {
+            id: u32,
+            _file: File,
+            mmap: MmapMut,
+            current_offset: u64,
+        }
+
+        let mut current_segment: Option<CompactionSegment> = None;
+        let mut new_index: HashMap<EventId, IndexEntry> = HashMap::new();
+        let mut bytes_written = 0u64;
+        let mut raw_bytes = 0u64;
+        let mut compacted_segments = 0u32;
+
+        for (event_id, entry) in entries {
+            let Some(event) = self.read_from_segment_sync(&entry)? else {
+                continue;
+            };
+
+            let serialized = bincode::serialize(&event)
+                .map_err(StorageError::Serialization)?;
+            let raw_len = serialized.len();
+            let (data, is_compressed) = match self.config.compression {
+                CompressionType::Lz4 => {
+                    match compress(&serialized, None, true) {
+                        Ok(compressed_data) => (compressed_data, true),
+                        Err(_) => (serialized, false),
+                    }
+                }
+                CompressionType::Gzip => (serialized, false),
+                CompressionType::None => (serialized, false),
+            };
+
+            raw_bytes = raw_bytes.saturating_add(raw_len as u64);
+
+            if current_segment.is_none()
+                || current_segment.as_ref().unwrap().current_offset + data.len() as u64 > self.config.segment_size
+            {
+                let segment_id = (SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as u32)
+                    .wrapping_add(compacted_segments);
+                let segment_path = temp_dir.join(format!("segment_{:08}.dat", segment_id));
+                let file = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(&segment_path)
+                    .map_err(StorageError::Io)?;
+                file.set_len(self.config.segment_size).map_err(StorageError::Io)?;
+                let mmap = unsafe { memmap2::MmapMut::map_mut(&file).map_err(StorageError::Io)? };
+                current_segment = Some(CompactionSegment {
+                    id: segment_id,
+                    _file: file,
+                    mmap,
+                    current_offset: 0,
+                });
+                compacted_segments = compacted_segments.saturating_add(1);
+            }
+
+            let segment = current_segment.as_mut().unwrap();
+            let offset = segment.current_offset;
+            let data_len = data.len();
+
+            segment.mmap[offset as usize..(offset as usize + data_len)].copy_from_slice(&data);
+            segment.current_offset += data_len as u64;
+
+            new_index.insert(event_id, IndexEntry {
+                segment_id: segment.id,
+                offset,
+                size: data_len as u32,
+                timestamp: event.timestamp,
+                compressed: is_compressed,
+            });
+
+            bytes_written = bytes_written.saturating_add(data_len as u64);
+        }
+
+        if let Some(segment) = current_segment {
+            segment.mmap.flush().map_err(StorageError::Io)?;
+            drop(segment);
+        }
+
+        let old_dir = self.config.data_directory.join(format!(
+            "segments_old_{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        ));
+        if segments_dir.exists() {
+            std::fs::rename(&segments_dir, &old_dir).map_err(StorageError::Io)?;
+        }
+        std::fs::rename(&temp_dir, &segments_dir).map_err(StorageError::Io)?;
+        if old_dir.exists() {
+            let _ = std::fs::remove_dir_all(&old_dir);
+        }
+
+        {
+            let mut index = self.index.write().unwrap();
+            *index = new_index;
+        }
+
+        self.counters.total_events_written.store(self.index.read().unwrap().len() as u64, Ordering::Relaxed);
+        self.counters.total_raw_bytes.store(raw_bytes, Ordering::Relaxed);
+        self.counters.total_stored_bytes.store(bytes_written, Ordering::Relaxed);
+        self.counters.segments_created.store(compacted_segments as u64, Ordering::Relaxed);
+
+        Ok(CompactionStats {
+            original_segments,
+            compacted_segments,
+            events_copied: self.index.read().unwrap().len() as u64,
+            bytes_written,
+        })
+    }
     
     // Private helper methods
     
@@ -327,14 +531,15 @@ impl StorageEngine {
             cache: self.cache.clone(),
             current_segment: self.current_segment.clone(),
             flush_sender: self.flush_sender.clone(),
+            counters: self.counters.clone(),
         }
     }
     
     async fn background_flush_task(&self, receiver: Receiver<FlushRequest>) {
         while let Ok(request) = receiver.recv() {
             match request {
-                FlushRequest::Event { event, compressed_data } => {
-                    if let Err(e) = self.write_event_to_segment(&event, compressed_data).await {
+                FlushRequest::Event { event, compressed_data, is_compressed } => {
+                    if let Err(e) = self.write_event_to_segment(&event, compressed_data, is_compressed).await {
                         eprintln!("Background flush error: {}", e);
                     }
                 }
@@ -347,8 +552,22 @@ impl StorageEngine {
             }
         }
     }
+
+    fn background_compaction_task_blocking(&self) {
+        let interval = self.config.compaction_interval;
+        loop {
+            std::thread::sleep(interval);
+            let (segment_count, _) = self.scan_segment_usage();
+            if segment_count < self.config.compaction_min_segments {
+                continue;
+            }
+            if let Err(err) = self.compact_segments_blocking() {
+                eprintln!("Background compaction error: {}", err);
+            }
+        }
+    }
     
-    async fn write_event_to_segment(&self, event: &Event, data: Vec<u8>) -> StorageResult<()> {
+    async fn write_event_to_segment(&self, event: &Event, data: Vec<u8>, is_compressed: bool) -> StorageResult<()> {
         let mut current_segment = self.current_segment.lock().await;
         
         // Create new segment if needed
@@ -389,7 +608,7 @@ impl StorageEngine {
                     offset,
                     size: data_len as u32,
                     timestamp: event.timestamp,
-                    compressed: self.config.enable_compression,
+                    compressed: is_compressed,
                 });
             }
         }
@@ -417,6 +636,8 @@ impl StorageEngine {
             memmap2::MmapMut::map_mut(&file)
                 .map_err(StorageError::Io)?
         };
+
+        self.counters.segments_created.fetch_add(1, Ordering::Relaxed);
         
         Ok(DataSegment {
             id: segment_id,
@@ -427,6 +648,10 @@ impl StorageEngine {
     }
     
     async fn read_from_segment(&self, entry: &IndexEntry) -> StorageResult<Option<Event>> {
+        self.read_from_segment_sync(entry)
+    }
+
+    fn read_from_segment_sync(&self, entry: &IndexEntry) -> StorageResult<Option<Event>> {
         let segment_path = self.config.data_directory
             .join("segments")
             .join(format!("segment_{:08}.dat", entry.segment_id));
@@ -496,6 +721,7 @@ impl StorageEngine {
                 .unwrap()
                 .as_nanos() as u64;
             entry.access_count += 1;
+            self.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
             Some(entry.event.clone())
         } else {
             None
@@ -518,29 +744,34 @@ impl StorageEngine {
     }
     
     async fn recover(&self) -> StorageResult<()> {
+        let mut recovered_entries = Vec::new();
         let recovered_count = self.wal.recover(|entry| {
+            recovered_entries.push(entry.clone());
+            Ok(())
+        }).await?;
+
+        if recovered_count == 0 {
+            return Ok(());
+        }
+
+        for entry in recovered_entries {
             match entry {
-                WalEntry::StoreEvent { event_id, .. } => {
-                    // TODO: Apply recovered store operation
-                    println!("Recovering store operation for event {}", event_id);
-                    Ok(())
+                WalEntry::StoreEvent { data, .. } => {
+                    let (event, is_compressed) = self.decode_wal_event(&data)?;
+                    self.write_event_to_segment(&event, data.clone(), is_compressed).await?;
+                    self.update_recovery_counters(&event, &data);
                 }
                 WalEntry::DeleteEvent { event_id, .. } => {
-                    // TODO: Apply recovered delete operation
-                    println!("Recovering delete operation for event {}", event_id);
-                    Ok(())
+                    self.cache.lock().await.remove(&event_id);
+                    {
+                        let mut index = self.index.write().unwrap();
+                        index.remove(&event_id);
+                    }
                 }
-                WalEntry::Checkpoint { .. } => {
-                    println!("Checkpoint marker during recovery");
-                    Ok(())
-                }
+                WalEntry::Checkpoint { .. } => {}
             }
-        }).await?;
-        
-        if recovered_count > 0 {
-            println!("Recovered {} operations from WAL", recovered_count);
         }
-        
+
         Ok(())
     }
     
@@ -575,15 +806,45 @@ impl StorageEngine {
     
     /// Get storage statistics
     pub async fn get_storage_stats(&self) -> StorageStats {
-        let _cache = self.cache.lock().await;
-        let index = self.index.read().unwrap();
+        self.stats().await
+    }
 
-        StorageStats {
-            total_events: index.len() as u64,
-            total_size_bytes: index.len() as u64 * 1024, // Rough estimate
-            compression_ratio: 2.0, // Placeholder estimate
-            segment_count: 1, // Placeholder
-            cache_hit_rate: 0.85, // Placeholder
+    fn scan_segment_usage(&self) -> (u32, u64) {
+        let segments_dir = self.config.data_directory.join("segments");
+        let mut total_size = 0u64;
+        let mut count = 0u32;
+
+        if let Ok(entries) = std::fs::read_dir(segments_dir) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        total_size = total_size.saturating_add(metadata.len());
+                        count = count.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        (count, total_size)
+    }
+
+    fn decode_wal_event(&self, data: &[u8]) -> StorageResult<(Event, bool)> {
+        if let Ok(decompressed) = decompress(data, None) {
+            if let Ok(event) = bincode::deserialize::<Event>(&decompressed) {
+                return Ok((event, true));
+            }
+        }
+
+        let event = bincode::deserialize::<Event>(data)
+            .map_err(StorageError::Serialization)?;
+        Ok((event, false))
+    }
+
+    fn update_recovery_counters(&self, event: &Event, stored_bytes: &[u8]) {
+        if let Ok(serialized) = bincode::serialize(event) {
+            self.counters.total_events_written.fetch_add(1, Ordering::Relaxed);
+            self.counters.total_raw_bytes.fetch_add(serialized.len() as u64, Ordering::Relaxed);
+            self.counters.total_stored_bytes.fetch_add(stored_bytes.len() as u64, Ordering::Relaxed);
         }
     }
 }

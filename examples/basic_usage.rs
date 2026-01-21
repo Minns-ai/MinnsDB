@@ -54,6 +54,7 @@ async fn simulate_learning_agent() -> Result<(), Box<dyn std::error::Error>> {
     
     let agent_id = 1;
     let session_id = 100;
+    let agent_type = "warehouse-robot".to_string();
     
     // Create initial context (robot in warehouse)
     let initial_context = create_warehouse_context("warehouse_a", (0.0, 0.0), 85.0);
@@ -66,6 +67,7 @@ async fn simulate_learning_agent() -> Result<(), Box<dyn std::error::Error>> {
         // Goal formation
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Cognitive {
                 process_type: CognitiveType::GoalFormation,
@@ -83,6 +85,7 @@ async fn simulate_learning_agent() -> Result<(), Box<dyn std::error::Error>> {
         // Planning phase
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Cognitive {
                 process_type: CognitiveType::Planning,
@@ -100,6 +103,7 @@ async fn simulate_learning_agent() -> Result<(), Box<dyn std::error::Error>> {
         // Execute movements
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Action {
                 action_name: "move_forward".to_string(),
@@ -114,6 +118,7 @@ async fn simulate_learning_agent() -> Result<(), Box<dyn std::error::Error>> {
         
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Action {
                 action_name: "turn_right".to_string(),
@@ -128,6 +133,7 @@ async fn simulate_learning_agent() -> Result<(), Box<dyn std::error::Error>> {
         
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Action {
                 action_name: "move_forward".to_string(),
@@ -192,6 +198,7 @@ async fn simulate_task_automation() -> Result<(), Box<dyn std::error::Error>> {
         // Observation: New email received
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Observation {
                 observation_type: "email_received".to_string(),
@@ -209,6 +216,7 @@ async fn simulate_task_automation() -> Result<(), Box<dyn std::error::Error>> {
         // Cognitive: Process and categorize
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Cognitive {
                 process_type: CognitiveType::Reasoning,
@@ -226,6 +234,7 @@ async fn simulate_task_automation() -> Result<(), Box<dyn std::error::Error>> {
         // Action: Generate report
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Action {
                 action_name: "generate_monthly_report".to_string(),
@@ -245,6 +254,7 @@ async fn simulate_task_automation() -> Result<(), Box<dyn std::error::Error>> {
         // Action: Send email response
         Event::new(
             agent_id,
+            agent_type.clone(),
             session_id,
             EventType::Action {
                 action_name: "send_email".to_string(),

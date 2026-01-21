@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'eventgraphdb'
+    static_configs:
+      - targets: ['eventgraphdb:9090']
+    metrics_path: '/metrics'

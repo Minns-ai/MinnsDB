@@ -29,13 +29,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize storage engine
     println!("📁 Initializing storage layer...");
-    let storage_config = StorageConfig {
-        data_dir: "./demo_data".to_string(),
-        compression: CompressionType::Lz4,
-        max_file_size_mb: 100,
-        enable_checksums: true,
-        sync_interval_secs: 30,
-    };
+    let mut storage_config = StorageConfig::with_directory("./demo_data");
+    storage_config.compression = CompressionType::Lz4;
+    storage_config.max_file_size_mb = 100;
+    storage_config.enable_checksums = true;
+    storage_config.sync_interval_secs = 30;
     let storage = StorageEngine::new(storage_config).await?;
     println!("   ✅ Storage engine initialized");
 
@@ -46,14 +44,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             reorder_window_ms: 3000,
             max_buffer_size: 200,
             flush_interval_ms: 1000,
+            watermark_window_ms: 3000,
             strict_causality: true,
             max_clock_skew_ms: 10000,
         },
         scoped_inference_config: ScopedInferenceConfig {
-            enable_cross_scope_inference: true,
-            scope_similarity_threshold: 0.7,
-            max_cross_scope_edges: 50,
-            temporal_scope_window_ms: 5000,
+            enable_cross_scope_patterns: true,
+            max_scopes: 500,
+            enable_agent_type_clustering: true,
+            session_timeout_hours: 12,
+            ..ScopedInferenceConfig::default()
         },
         ..GraphEngineConfig::default()
     };
@@ -199,9 +199,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Scoped inference statistics
     println!("\n🎯 Scoped Inference Results:");
     let scope_stats = graph.get_scoped_inference_stats().await;
-    println!("   Active scopes: {}", scope_stats.scope_count);
-    println!("   Cross-scope relationships: {}", scope_stats.cross_scope_edges);
-    println!("   Most active scope: {:?}", scope_stats.most_active_scope);
+    println!("   Active scopes: {}", scope_stats.total_scopes);
+    println!("   Total sessions: {}", scope_stats.total_sessions);
+    println!("   Total agents: {}", scope_stats.total_agents);
+    println!("   Most active agent type: {:?}", scope_stats.most_active_agent_type);
 
     // Pattern detection
     println!("\n🔮 Pattern Detection:");
@@ -219,20 +220,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_type: coding_assistant.clone(),
         session_id: session_a,
     };
-    let coding_events = graph.query_events_in_scope(&coding_scope).await?;
-    println!("   Coding events in session {}: {}", session_a, coding_events.len());
+    let coding_events = graph
+        .query_events_in_scope(&coding_scope, agent_db_graph::scoped_inference::ScopeQuery::SessionMetrics)
+        .await?;
+    if let agent_db_graph::scoped_inference::ScopeQueryResult::SessionMetrics(metrics) = coding_events {
+        println!("   Coding events in session {}: {}", session_a, metrics.total_events);
+    }
 
     // Query for analysis events
     let analysis_scope = InferenceScope {
         agent_type: data_analyst.clone(),
         session_id: session_b,
     };
-    let analysis_events = graph.query_events_in_scope(&analysis_scope).await?;
-    println!("   Analysis events in session {}: {}", session_b, analysis_events.len());
+    let analysis_events = graph
+        .query_events_in_scope(&analysis_scope, agent_db_graph::scoped_inference::ScopeQuery::SessionMetrics)
+        .await?;
+    if let agent_db_graph::scoped_inference::ScopeQueryResult::SessionMetrics(metrics) = analysis_events {
+        println!("   Analysis events in session {}: {}", session_b, metrics.total_events);
+    }
 
     // Cross-scope relationship analysis
-    let cross_relationships = graph.get_cross_scope_relationships().await?;
-    println!("   Cross-scope relationships found: {}", cross_relationships.len());
+    let cross_relationships = graph.get_cross_scope_relationships().await;
+    println!("   Cross-scope workflows found: {}", cross_relationships.global_workflows.len());
 
     // Health check
     println!("\n🏥 System Health Check:");
@@ -589,5 +598,6 @@ fn get_event_description(event_type: &EventType) -> &str {
             CognitiveType::MemoryRetrieval => "memory_retrieval",
             CognitiveType::LearningUpdate => "learning_update",
         },
+        EventType::Learning { .. } => "learning",
     }
 }

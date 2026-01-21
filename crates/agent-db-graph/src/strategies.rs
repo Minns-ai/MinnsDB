@@ -22,7 +22,7 @@ pub struct StrategyUpsert {
 }
 
 /// Type of strategy (positive or constraint)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum StrategyType {
     /// Success-correlated strategy (do this)
     Positive,
@@ -50,7 +50,7 @@ struct EpisodeMotifRecord {
 }
 
 /// A generalizable strategy extracted from successful experiences
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Strategy {
     /// Unique strategy identifier
     pub id: StrategyId,
@@ -116,6 +116,8 @@ pub struct Strategy {
     pub behavior_signature: String,
 
     /// Source episodes this was extracted from
+    /// Note: Not persisted to storage (episodes stored separately in EpisodeCatalog)
+    #[serde(skip)]
     pub source_episodes: Vec<Episode>,
 
     /// When this strategy was created
@@ -144,7 +146,7 @@ pub struct Strategy {
 }
 
 /// A single reasoning step in a strategy
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReasoningStep {
     /// Step description
     pub description: String,
@@ -160,7 +162,7 @@ pub struct ReasoningStep {
 }
 
 /// Pattern describing when a strategy is applicable
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContextPattern {
     /// Environment characteristics
     pub environment_type: Option<String>,
@@ -1718,6 +1720,45 @@ impl StrategyExtractor {
                 0.0
             },
         }
+    }
+
+    /// Insert a strategy loaded from persistent storage
+    ///
+    /// This is used to restore strategies from disk without going through
+    /// the extraction process. Used during initialization.
+    pub fn insert_loaded_strategy(&mut self, strategy: Strategy) -> Result<(), crate::GraphError> {
+        let strategy_id = strategy.id;
+        let agent_id = strategy.agent_id;
+        let goal_bucket_id = strategy.goal_bucket_id;
+        let behavior_signature = strategy.behavior_signature.clone();
+
+        // Update next_strategy_id if needed
+        if strategy_id >= self.next_strategy_id {
+            self.next_strategy_id = strategy_id + 1;
+        }
+
+        // Store strategy
+        self.strategies.insert(strategy_id, strategy);
+
+        // Index by agent
+        self.agent_strategies
+            .entry(agent_id)
+            .or_insert_with(Vec::new)
+            .push(strategy_id);
+
+        // Index by goal bucket
+        self.goal_bucket_index
+            .entry(goal_bucket_id)
+            .or_insert_with(Vec::new)
+            .push(strategy_id);
+
+        // Index by behavior signature
+        self.behavior_index
+            .entry(behavior_signature)
+            .or_insert_with(Vec::new)
+            .push(strategy_id);
+
+        Ok(())
     }
 }
 

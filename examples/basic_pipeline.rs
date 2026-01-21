@@ -95,6 +95,7 @@ fn main() {
 fn create_test_event(sequence: u64) -> Event {
     Event::new(
         42 + (sequence % 10), // agent_id with some variation
+        "pipeline-agent".to_string(),
         100, // session_id
         EventType::Action {
             action_name: format!("test_action_{}", sequence % 5),

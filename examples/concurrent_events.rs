@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             reorder_window_ms: 2000,  // 2 second reorder window
             max_buffer_size: 100,
             flush_interval_ms: 500,
+            watermark_window_ms: 2000,
             strict_causality: true,
             max_clock_skew_ms: 5000,
         },
@@ -269,5 +270,6 @@ fn get_event_name(event_type: &EventType) -> &str {
             agent_db_events::CognitiveType::MemoryRetrieval => "memory_retrieval",
             agent_db_events::CognitiveType::LearningUpdate => "learning_update",
         },
+        EventType::Learning { .. } => "learning",
     }
 }

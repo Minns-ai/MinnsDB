@@ -1,0 +1,67 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+target/
+dist/
+*.exe
+*.pdb
+
+# Node.js (visualizer - not included in Docker)
+client/
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Documentation (not needed in image)
+*.md
+!README.md
+docs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test-*.js
+test-*.json
+test-*.mjs
+*.test.ts
+*.spec.ts
+
+# Data files (should be mounted as volumes)
+data/
+*.redb
+*.wal
+*.log
+
+# Claude
+.claude/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Environment files (use Docker secrets instead)
+.env
+.env.*
+!.env.example
+
+# Scripts (not needed in runtime)
+scripts/
+*.sh
+*.bat
+
+# Visualizer files
+visualizer/
+start-visualizer.bat
+start-server.bat

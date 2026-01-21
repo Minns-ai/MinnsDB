@@ -21,7 +21,7 @@ pub struct MemoryUpsert {
 }
 
 /// Memory represents a consolidated experience that can be retrieved and applied
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Memory {
     /// Unique memory identifier
     pub id: MemoryId,
@@ -67,7 +67,7 @@ pub struct Memory {
 }
 
 /// Type of memory
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MemoryType {
     /// Episodic memory - specific experience
     Episodic {
@@ -689,6 +689,42 @@ impl MemoryFormation {
             agents_with_memories: self.agent_memories.len(),
             unique_contexts: self.context_index.len(),
         }
+    }
+
+    /// Insert a memory loaded from persistent storage
+    ///
+    /// This is used to restore memories from disk without going through
+    /// the episode formation process. Used during initialization.
+    pub fn insert_loaded_memory(&mut self, memory: Memory) -> Result<(), String> {
+        let memory_id = memory.id;
+        let agent_id = memory.agent_id;
+        let episode_id = memory.episode_id;
+        let context_hash = memory.context.fingerprint;
+
+        // Update next_memory_id if needed
+        if memory_id >= self.next_memory_id {
+            self.next_memory_id = memory_id + 1;
+        }
+
+        // Store memory
+        self.memories.insert(memory_id, memory);
+
+        // Index by agent
+        self.agent_memories
+            .entry(agent_id)
+            .or_insert_with(Vec::new)
+            .push(memory_id);
+
+        // Index by context
+        self.context_index
+            .entry(context_hash)
+            .or_insert_with(Vec::new)
+            .push(memory_id);
+
+        // Index by episode
+        self.episode_index.insert(episode_id, memory_id);
+
+        Ok(())
     }
 }
 

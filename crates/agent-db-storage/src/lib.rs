@@ -6,29 +6,37 @@
 pub mod error {
     //! Storage-specific error types
     use thiserror::Error;
-    
+
     #[derive(Error, Debug)]
     pub enum StorageError {
         #[error("IO error: {0}")]
         Io(#[from] std::io::Error),
-        
+
         #[error("Serialization error: {0}")]
         Serialization(#[from] bincode::Error),
-        
+
+        #[error("Deserialization error: {0}")]
+        Deserialization(bincode::Error),
+
         #[error("Compression error: {0}")]
         Compression(String),
-        
+
         #[error("WAL error: {0}")]
         Wal(String),
+
+        #[error("Database error: {0}")]
+        DatabaseError(String),
     }
-    
+
     pub type StorageResult<T> = Result<T, StorageError>;
 }
 
 pub mod wal;
 pub mod engine;
+pub mod redb_backend;
 
 // Re-export commonly used items
 pub use error::{StorageError, StorageResult};
 pub use engine::{StorageEngine, StorageConfig, StorageStats, CompressionType};
 pub use wal::{WriteAheadLog, WalConfig, WalStats, SyncPolicy};
+pub use redb_backend::{RedbBackend, RedbConfig, BatchOperation, table_names};

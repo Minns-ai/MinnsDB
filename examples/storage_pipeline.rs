@@ -87,9 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = storage.stats().await;
     println!("\n📊 Storage Statistics:");
     println!("  Total events in storage: {}", stats.total_events);
-    println!("  Cached events: {}", stats.cached_events);
-    println!("  WAL entries: {}", stats.wal_entries);
-    println!("  Pending WAL entries: {}", stats.wal_pending);
+    println!("  Total size (bytes): {}", stats.total_size_bytes);
+    println!("  Compression ratio: {:.2}", stats.compression_ratio);
+    println!("  Segment count: {}", stats.segment_count);
+    println!("  Cache hit rate: {:.1}%", stats.cache_hit_rate * 100.0);
     
     // Test event retrieval
     println!("\n🔍 Testing Event Retrieval");
@@ -176,8 +177,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let final_stats = storage.stats().await;
     println!("\n📊 Final Storage Statistics:");
     println!("  Total events: {}", final_stats.total_events);
-    println!("  Cached events: {}", final_stats.cached_events);
-    println!("  WAL entries: {}", final_stats.wal_entries);
+    println!("  Total size (bytes): {}", final_stats.total_size_bytes);
+    println!("  Compression ratio: {:.2}", final_stats.compression_ratio);
+    println!("  Segment count: {}", final_stats.segment_count);
     println!("  Cache hit ratio: {:.1}%", 
              (cache_hits as f64 / retrieved_count as f64) * 100.0);
     
@@ -208,6 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn create_test_event(sequence: u64) -> Event {
     Event::new(
         42 + (sequence % 10), // agent_id with variation
+        "storage-pipeline".to_string(),
         100, // session_id
         EventType::Action {
             action_name: format!("storage_test_action_{}", sequence % 3),
@@ -244,6 +247,7 @@ fn create_test_event(sequence: u64) -> Event {
 fn create_large_event() -> Event {
     Event::new(
         999,
+        "storage-pipeline".to_string(),
         999,
         EventType::Action {
             action_name: "large_compression_test".to_string(),

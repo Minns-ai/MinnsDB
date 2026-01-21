@@ -73,7 +73,7 @@ pub struct Episode {
 }
 
 /// Outcome of an episode
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum EpisodeOutcome {
     /// Goal was achieved successfully
     Success,
