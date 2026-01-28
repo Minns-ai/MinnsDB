@@ -107,6 +107,18 @@ impl BasicEventValidator {
             EventType::Learning { .. } => {
                 // Learning telemetry is validated by schema; no extra constraints.
             },
+            EventType::Context {
+                text,
+                context_type,
+                ..
+            } => {
+                if text.is_empty() {
+                    return Err(DatabaseError::validation("Context text cannot be empty"));
+                }
+                if context_type.is_empty() {
+                    return Err(DatabaseError::validation("Context type cannot be empty"));
+                }
+            },
         }
 
         Ok(())

@@ -8,7 +8,7 @@
 //! - Concurrent event handling
 //! - Pattern detection and analytics
 
-use agent_db_core::types::{current_timestamp, generate_event_id, AgentId, AgentType, SessionId};
+use agent_db_core::types::{current_timestamp, generate_event_id, AgentType, SessionId};
 use agent_db_events::{
     ActionOutcome, CognitiveType, ComputationalResources, EnvironmentState, Event, EventContext,
     EventType, Goal, ResourceState, TemporalContext, TimeOfDay,
@@ -16,7 +16,7 @@ use agent_db_events::{
 use agent_db_graph::{
     event_ordering::OrderingConfig,
     scoped_inference::{InferenceScope, ScopedInferenceConfig},
-    GraphEngine, GraphEngineConfig, GraphQuery, QueryResult,
+    GraphEngine, GraphEngineConfig,
 };
 use agent_db_storage::{CompressionType, StorageConfig, StorageEngine};
 use serde_json::json;
@@ -486,6 +486,8 @@ fn create_development_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         Event {
             id: generate_event_id(),
@@ -504,6 +506,8 @@ fn create_development_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         Event {
             id: generate_event_id(),
@@ -522,6 +526,8 @@ fn create_development_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
     ]
 }
@@ -550,6 +556,8 @@ fn create_analysis_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         Event {
             id: generate_event_id(),
@@ -570,6 +578,8 @@ fn create_analysis_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
     ]
 }
@@ -596,6 +606,8 @@ fn create_monitoring_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         Event {
             id: generate_event_id(),
@@ -614,6 +626,8 @@ fn create_monitoring_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
     ]
 }
@@ -644,6 +658,8 @@ fn create_task_management_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         Event {
             id: generate_event_id(),
@@ -665,6 +681,8 @@ fn create_task_management_events(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
     ]
 }
@@ -684,5 +702,6 @@ fn get_event_description(event_type: &EventType) -> &str {
             CognitiveType::LearningUpdate => "learning_update",
         },
         EventType::Learning { .. } => "learning",
+        EventType::Context { .. } => "Context",
     }
 }

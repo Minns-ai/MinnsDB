@@ -5,6 +5,7 @@ members = [
     "crates/agent-db-events",
     "crates/agent-db-storage",
     "crates/agent-db-graph",
+    "crates/agent-db-ner",
     "examples",
     "server",
 ]

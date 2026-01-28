@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📡 Processing events as they arrive (out of order):");
 
     // Reorder events to simulate real network conditions
-    let mut shuffled_events = events.clone();
+    let shuffled_events = events.clone();
 
     // Agent A: Events 1,3 arrive first
     let result_1 = engine.process_event(shuffled_events[0].clone()).await?;
@@ -86,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Agent A: Event 3 arrives before Event 2
-    let result_3 = engine.process_event(shuffled_events[2].clone()).await?; // Agent A Event 3
+    let _result_3 = engine.process_event(shuffled_events[2].clone()).await?; // Agent A Event 3
     println!("  ⏸️  Agent A Event 3 buffered (waiting for Event 2)");
 
     // Agent C: Events arrive
@@ -154,6 +154,8 @@ async fn create_event_scenario(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         Event {
             id: generate_event_id(),
@@ -172,6 +174,8 @@ async fn create_event_scenario(
             causality_chain: Vec::new(), // Will be linked by inference
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         Event {
             id: generate_event_id(),
@@ -190,6 +194,8 @@ async fn create_event_scenario(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         // Agent B sequence: start_analysis → generate_report
         Event {
@@ -209,6 +215,8 @@ async fn create_event_scenario(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         // Agent C sequence: monitor_system → alert_threshold
         Event {
@@ -226,6 +234,8 @@ async fn create_event_scenario(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         // Agent B Event 2
         Event {
@@ -245,6 +255,8 @@ async fn create_event_scenario(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         // Agent C Event 2
         Event {
@@ -264,6 +276,8 @@ async fn create_event_scenario(
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
     ]
 }
@@ -309,5 +323,6 @@ fn get_event_name(event_type: &EventType) -> &str {
             agent_db_events::CognitiveType::LearningUpdate => "learning_update",
         },
         EventType::Learning { .. } => "learning",
+        EventType::Context { .. } => "Context",
     }
 }

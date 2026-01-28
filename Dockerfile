@@ -81,6 +81,12 @@ ENV REDB_PATH=/data/eventgraph.redb
 ENV REDB_CACHE_SIZE_MB=256
 ENV MEMORY_CACHE_SIZE=10000
 ENV STRATEGY_CACHE_SIZE=5000
+ARG SERVICE_PROFILE=normal
+ENV SERVICE_PROFILE=${SERVICE_PROFILE}
+
+# NER Service Configuration (override at runtime)
+ENV NER_SERVICE_URL=http://localhost:8081/ner
+ENV NER_REQUEST_TIMEOUT_MS=5000
 
 # Volume for persistent data
 VOLUME ["/data"]

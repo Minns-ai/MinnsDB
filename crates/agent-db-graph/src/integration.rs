@@ -98,6 +98,12 @@ pub struct GraphEngineConfig {
     /// Maximum graph size before cleanup
     pub max_graph_size: usize,
 
+    /// Enable Louvain community detection
+    pub enable_louvain: bool,
+
+    /// Interval for running community detection (in events processed)
+    pub louvain_interval: u64,
+
     /// Enable query caching
     pub enable_query_cache: bool,
 
@@ -116,6 +122,52 @@ pub struct GraphEngineConfig {
 
     /// Maximum strategies to keep in LRU cache (0 = unlimited)
     pub strategy_cache_size: usize,
+
+    // ========== Semantic Memory Configuration ==========
+    /// Enable semantic memory with claim extraction
+    pub enable_semantic_memory: bool,
+
+    /// Number of NER worker threads
+    pub ner_workers: usize,
+
+    /// External NER service URL
+    pub ner_service_url: String,
+
+    /// NER service request timeout (milliseconds)
+    pub ner_request_timeout_ms: u64,
+
+    /// Optional NER model name to request
+    pub ner_model: Option<String>,
+
+    /// Path to NER feature storage (redb)
+    pub ner_storage_path: Option<PathBuf>,
+
+    /// Context size threshold for automatic NER extraction (bytes)
+    pub ner_promotion_threshold: usize,
+
+    /// Number of claim extraction worker threads
+    pub claim_workers: usize,
+
+    /// Path to claim storage (redb)
+    pub claim_storage_path: Option<PathBuf>,
+
+    /// OpenAI API key for claim extraction
+    pub openai_api_key: Option<String>,
+
+    /// LLM model for claim extraction
+    pub llm_model: String,
+
+    /// Minimum confidence threshold for accepting claims
+    pub claim_min_confidence: f32,
+
+    /// Maximum claims to extract per context
+    pub claim_max_per_input: usize,
+
+    /// Number of embedding generation worker threads
+    pub embedding_workers: usize,
+
+    /// Enable automatic embedding generation for claims
+    pub enable_embedding_generation: bool,
 }
 
 /// Results from graph operations
@@ -129,7 +181,7 @@ pub struct GraphOperationResult {
 }
 
 #[derive(Debug, Clone)]
-struct DecisionTrace {
+pub(crate) struct DecisionTrace {
     memory_ids: Vec<u64>,
     memory_used: Vec<u64>,
     strategy_ids: Vec<u64>,
@@ -153,59 +205,82 @@ struct DecisionTrace {
 /// - Graph analytics for learning metrics
 pub struct GraphEngine {
     /// Core inference engine
-    inference: Arc<RwLock<GraphInference>>,
+    pub(crate) inference: Arc<RwLock<GraphInference>>,
 
     /// Graph traversal engine
-    traversal: Arc<RwLock<GraphTraversal>>,
+    pub(crate) traversal: Arc<RwLock<GraphTraversal>>,
 
     /// Event ordering engine for handling concurrent events
-    event_ordering: Arc<EventOrderingEngine>,
+    pub(crate) event_ordering: Arc<EventOrderingEngine>,
 
     /// Scoped inference engine
-    scoped_inference: Arc<crate::scoped_inference::ScopedInferenceEngine>,
+    pub(crate) scoped_inference: Arc<crate::scoped_inference::ScopedInferenceEngine>,
 
     /// Episode detector - automatically detects episode boundaries
-    episode_detector: Arc<RwLock<EpisodeDetector>>,
+    pub(crate) episode_detector: Arc<RwLock<EpisodeDetector>>,
 
     /// Memory store - retrieval substrate (trait object for flexibility)
-    memory_store: Arc<RwLock<Box<dyn MemoryStore>>>,
+    pub(crate) memory_store: Arc<RwLock<Box<dyn MemoryStore>>>,
 
     /// Strategy store - policy substrate (trait object for flexibility)
-    strategy_store: Arc<RwLock<Box<dyn StrategyStore>>>,
+    pub(crate) strategy_store: Arc<RwLock<Box<dyn StrategyStore>>>,
 
     /// Transition model - procedural memory spine
-    transition_model: Arc<RwLock<TransitionModel>>,
+    pub(crate) transition_model: Arc<RwLock<TransitionModel>>,
 
     /// Event storage for episode processing
-    event_store: Arc<RwLock<HashMap<agent_db_core::types::EventId, Event>>>,
+    pub(crate) event_store: Arc<RwLock<HashMap<agent_db_core::types::EventId, Event>>>,
 
     /// Learning decision traces keyed by query_id
-    decision_traces: Arc<RwLock<HashMap<String, DecisionTrace>>>,
+    pub(crate) decision_traces: Arc<RwLock<HashMap<String, DecisionTrace>>>,
 
     /// Optional storage engine for persistence
-    storage: Option<Arc<StorageEngine>>,
+    pub(crate) storage: Option<Arc<StorageEngine>>,
 
     /// Configuration
-    config: GraphEngineConfig,
+    pub(crate) config: GraphEngineConfig,
 
     /// Operation statistics
-    stats: Arc<RwLock<GraphEngineStats>>,
+    pub(crate) stats: Arc<RwLock<GraphEngineStats>>,
 
     /// Event processing buffer
-    event_buffer: Arc<RwLock<Vec<Event>>>,
+    pub(crate) event_buffer: Arc<RwLock<Vec<Event>>>,
 
     /// Last persistence checkpoint
-    last_persistence: Arc<RwLock<u64>>,
+    pub(crate) last_persistence: Arc<RwLock<u64>>,
 
     // ========== NEW: Advanced Graph Features ==========
     /// Index manager for fast property queries
-    index_manager: Arc<RwLock<IndexManager>>,
+    pub(crate) index_manager: Arc<RwLock<IndexManager>>,
 
     /// Louvain algorithm for community detection
-    louvain: Arc<LouvainAlgorithm>,
+    pub(crate) louvain: Arc<LouvainAlgorithm>,
 
     /// Centrality measures for importance ranking
-    centrality: Arc<CentralityMeasures>,
+    pub(crate) centrality: Arc<CentralityMeasures>,
+
+    // ========== Semantic Memory (Optional) ==========
+    /// NER extraction queue (optional, when semantic memory is enabled)
+    pub(crate) ner_queue: Option<Arc<agent_db_ner::NerExtractionQueue>>,
+
+    /// NER feature storage (optional, when semantic memory is enabled)
+    pub(crate) ner_store: Option<Arc<agent_db_ner::NerFeatureStore>>,
+
+    /// Claim extraction queue (optional, when semantic memory is enabled)
+    pub(crate) claim_queue: Option<Arc<crate::claims::ClaimExtractionQueue>>,
+
+    /// Claim storage (optional, when semantic memory is enabled)
+    pub(crate) claim_store: Option<Arc<crate::claims::ClaimStore>>,
+
+    /// LLM client for claim extraction (optional, when semantic memory is enabled)
+    #[allow(dead_code)]
+    pub(crate) llm_client: Option<Arc<dyn crate::claims::LlmClient>>,
+
+    /// Embedding queue for semantic search (optional, when semantic memory is enabled)
+    pub(crate) embedding_queue: Option<Arc<crate::claims::EmbeddingQueue>>,
+
+    /// Embedding client (optional, when semantic memory is enabled)
+    pub(crate) embedding_client: Option<Arc<dyn crate::claims::EmbeddingClient>>,
 }
 
 /// Statistics for the graph engine
@@ -245,6 +320,8 @@ impl Default for GraphEngineConfig {
             enable_persistence: true,
             persistence_interval: 1000,
             max_graph_size: 1_000_000,
+            enable_louvain: true,
+            louvain_interval: 1000,
             enable_query_cache: true,
             // Storage configuration defaults
             storage_backend: StorageBackend::InMemory,
@@ -252,6 +329,22 @@ impl Default for GraphEngineConfig {
             redb_cache_size_mb: 128,    // 128MB cache by default
             memory_cache_size: 10_000,  // Keep 10K memories in RAM
             strategy_cache_size: 5_000, // Keep 5K strategies in RAM
+            // Semantic memory defaults (disabled by default)
+            enable_semantic_memory: false,
+            ner_workers: 2,
+            ner_service_url: "http://localhost:8081/ner".to_string(),
+            ner_request_timeout_ms: 5_000,
+            ner_model: None,
+            ner_storage_path: Some(PathBuf::from("./agent_db_data/ner_features.redb")),
+            ner_promotion_threshold: 1024, // 1KB threshold
+            claim_workers: 4,
+            claim_storage_path: Some(PathBuf::from("./agent_db_data/claims.redb")),
+            openai_api_key: None,
+            llm_model: "gpt-4o-mini".to_string(),
+            claim_min_confidence: 0.7,
+            claim_max_per_input: 10,
+            embedding_workers: 2,
+            enable_embedding_generation: true,
         }
     }
 }
@@ -264,6 +357,22 @@ impl GraphEngine {
 
     /// Create a graph engine with custom configuration
     pub async fn with_config(config: GraphEngineConfig) -> GraphResult<Self> {
+        // Apply Free Tier overrides if requested via environment
+        let config = if std::env::var("SERVICE_PROFILE").unwrap_or_default() == "free" {
+            tracing::info!("Applying Free Tier resource limits (0.25 CPU, 768MB RAM cap, No NER)");
+            let mut free_config = config;
+            free_config.enable_louvain = false;
+            free_config.redb_cache_size_mb = 64;
+            free_config.memory_cache_size = 1000;
+            free_config.strategy_cache_size = 500;
+            free_config.ner_workers = 0; // Disable NER workers for free tier
+            free_config.claim_workers = 1;
+            free_config.embedding_workers = 1;
+            free_config
+        } else {
+            config
+        };
+
         let inference = Arc::new(RwLock::new(GraphInference::with_config(
             config.inference_config.clone(),
         )));
@@ -401,6 +510,128 @@ impl GraphEngine {
         let louvain = Arc::new(LouvainAlgorithm::new());
         let centrality = Arc::new(CentralityMeasures::new());
 
+        // Initialize semantic memory components if enabled
+        let (ner_queue, ner_store) = if config.enable_semantic_memory {
+            tracing::info!("Initializing semantic memory with NER extraction");
+
+            // Create NER extractor (external service)
+            let extractor = Arc::new(
+                agent_db_ner::NerServiceExtractor::new(agent_db_ner::NerServiceConfig {
+                    base_url: config.ner_service_url.clone(),
+                    request_timeout_ms: config.ner_request_timeout_ms,
+                    model: config.ner_model.clone(),
+                    max_retries: 3,
+                    retry_delay_ms: 100,
+                })
+                .map_err(|e| {
+                    GraphError::OperationError(format!("Failed to initialize NER client: {}", e))
+                })?,
+            );
+
+            // Create NER extraction queue
+            let queue = Arc::new(agent_db_ner::NerExtractionQueue::new(extractor, config.ner_workers));
+
+            // Create NER storage
+            let store = if let Some(path) = &config.ner_storage_path {
+                let store = agent_db_ner::NerFeatureStore::new(path)
+                    .map_err(|e| GraphError::OperationError(format!("Failed to initialize NER storage: {}", e)))?;
+                Some(Arc::new(store))
+            } else {
+                None
+            };
+
+            tracing::info!("Semantic memory initialized with {} NER workers", config.ner_workers);
+            (Some(queue), store)
+        } else {
+            (None, None)
+        };
+
+        // Initialize claim extraction components if semantic memory is enabled
+        let (claim_queue, claim_store, llm_client, embedding_client) = if config.enable_semantic_memory {
+            tracing::info!("Initializing claim extraction pipeline");
+
+            // Create claim store
+            let store = if let Some(path) = &config.claim_storage_path {
+                let store = crate::claims::ClaimStore::new(path)
+                    .map_err(|e| GraphError::OperationError(format!("Failed to initialize claim storage: {}", e)))?;
+                Some(Arc::new(store))
+            } else {
+                None
+            };
+
+            // Create LLM client
+            let client: Arc<dyn crate::claims::LlmClient> = if let Some(key) = &config.openai_api_key {
+                Arc::new(crate::claims::OpenAiClient::new(key.clone(), config.llm_model.clone()))
+            } else {
+                Arc::new(crate::claims::MockClient::new())
+            };
+
+            // Create embedding client
+            let embedding_client: Arc<dyn crate::claims::EmbeddingClient> = if let Some(key) = &config.openai_api_key {
+                Arc::new(crate::claims::OpenAiEmbeddingClient::new(key.clone(), "text-embedding-3-small".to_string()))
+            } else {
+                Arc::new(crate::claims::MockEmbeddingClient::new(384))
+            };
+
+            // Create claim extraction queue
+            let queue = if let Some(ref store) = store {
+                let extraction_config = crate::claims::ClaimExtractionConfig {
+                    max_claims_per_input: config.claim_max_per_input,
+                    min_confidence: config.claim_min_confidence,
+                    min_evidence_length: 10,
+                };
+
+                let queue = Arc::new(crate::claims::ClaimExtractionQueue::new(
+                    client.clone(),
+                    embedding_client.clone(),
+                    store.clone(),
+                    config.claim_workers,
+                    extraction_config,
+                ));
+                Some(queue)
+            } else {
+                None
+            };
+
+            tracing::info!("Claim extraction initialized with {} workers", config.claim_workers);
+            (queue, store, Some(client), Some(embedding_client))
+        } else {
+            (None, None, None, None)
+        };
+
+        // Initialize embedding generation components if semantic memory is enabled
+        let (embedding_queue, embedding_client) = if config.enable_semantic_memory && config.enable_embedding_generation {
+            tracing::info!("Initializing embedding generation pipeline");
+
+            // Use the client created above if available, otherwise create a new one
+            let client: Arc<dyn crate::claims::EmbeddingClient> = if let Some(ref client) = embedding_client {
+                client.clone()
+            } else {
+                if let Some(key) = &config.openai_api_key {
+                    Arc::new(crate::claims::OpenAiEmbeddingClient::new(key.clone(), "text-embedding-3-small".to_string()))
+                } else {
+                    Arc::new(crate::claims::MockEmbeddingClient::new(384))
+                }
+            };
+
+            // Create embedding queue if claim store is available
+            let queue = if let Some(ref store) = claim_store {
+                let queue = Arc::new(crate::claims::EmbeddingQueue::new(
+                    client.clone(),
+                    store.clone(),
+                    config.embedding_workers,
+                ));
+                Some(queue)
+            } else {
+                None
+            };
+
+            tracing::info!("Embedding generation initialized with {} workers", config.embedding_workers);
+            (queue, Some(client))
+        } else {
+            (None, embedding_client)
+        };
+
         Ok(Self {
             inference,
             traversal,
@@ -420,6 +651,13 @@ impl GraphEngine {
             index_manager,
             louvain,
             centrality,
+            ner_queue,
+            ner_store,
+            claim_queue,
+            claim_store,
+            llm_client,
+            embedding_queue,
+            embedding_client,
         })
     }
 
@@ -433,6 +671,11 @@ impl GraphEngine {
         Ok(engine)
     }
 
+    /// Get reference to claim store (if semantic memory is enabled)
+    pub fn claim_store(&self) -> Option<&Arc<crate::claims::ClaimStore>> {
+        self.claim_store.as_ref()
+    }
+
     /// Process a single event and update the graph
     ///
     /// **Automatic Self-Evolution Pipeline:**
@@ -441,7 +684,16 @@ impl GraphEngine {
     /// 3. Memory formation from significant episodes
     /// 4. Strategy extraction from successful episodes
     /// 5. Reinforcement learning from outcomes
-    pub async fn process_event(&self, event: Event) -> GraphResult<GraphOperationResult> {
+    ///
+    /// **Semantic Memory Control:**
+    /// - If `enable_semantic` is Some(true), semantic memory will be processed for this event
+    /// - If `enable_semantic` is Some(false), semantic memory will be skipped for this event
+    /// - If `enable_semantic` is None, falls back to `config.enable_semantic_memory`
+    pub async fn process_event_with_options(
+        &self,
+        event: Event,
+        enable_semantic: Option<bool>,
+    ) -> GraphResult<GraphOperationResult> {
         let start_time = std::time::Instant::now();
         tracing::info!(
             "GraphEngine process_event start id={} agent_id={} session_id={} type={}",
@@ -462,6 +714,16 @@ impl GraphEngine {
         {
             let mut store = self.event_store.write().await;
             store.insert(event.id, event.clone());
+        }
+
+        // Extract NER features if semantic memory is enabled
+        // Check per-request override first, then fall back to config
+        let should_extract_semantic = enable_semantic.unwrap_or(self.config.enable_semantic_memory);
+
+        if should_extract_semantic {
+            self.extract_ner_async(&event).await;
+            // Extract claims after NER (claims benefit from entity recognition)
+            self.extract_claims_async(&event).await;
         }
 
         // Step 1: Order the event (handles out-of-order arrival)
@@ -611,8 +873,8 @@ impl GraphEngine {
                 + processing_time)
                 / stats.total_events_processed as f64;
 
-            // Run Louvain community detection periodically (every 1000 events)
-            if stats.total_events_processed % 1000 == 0 {
+            // Run Louvain community detection periodically
+            if self.config.enable_louvain && stats.total_events_processed % self.config.louvain_interval == 0 {
                 drop(stats); // Release stats lock before async operation
                 if let Err(e) = self.run_community_detection().await {
                     result.errors.push(e);
@@ -621,6 +883,8 @@ impl GraphEngine {
                         .patterns_detected
                         .push("louvain_communities_updated".to_string());
                 }
+            } else {
+                drop(stats); // Always release the lock
             }
         }
 
@@ -664,6 +928,7 @@ impl GraphEngine {
             EventType::Cognitive { .. } => "Cognitive",
             EventType::Communication { .. } => "Communication",
             EventType::Learning { .. } => "Learning",
+            EventType::Context { .. } => "Context",
         }
     }
 
@@ -811,6 +1076,11 @@ impl GraphEngine {
         }
 
         Ok(())
+    }
+
+    /// Process a single event (convenience wrapper that uses config default for semantic memory)
+    pub async fn process_event(&self, event: Event) -> GraphResult<GraphOperationResult> {
+        self.process_event_with_options(event, None).await
     }
 
     /// Process multiple events in batch
@@ -1653,6 +1923,9 @@ impl GraphEngine {
                         EdgeType::Association { .. } => "Association",
                         EdgeType::GoalRelation { .. } => "GoalRelation",
                         EdgeType::Communication { .. } => "Communication",
+                        EdgeType::DerivedFrom { .. } => "DerivedFrom",
+                        EdgeType::SupportedBy { .. } => "SupportedBy",
+                        EdgeType::About { .. } => "About",
                     };
 
                     edges.push(GraphEdgeData {
@@ -1699,6 +1972,9 @@ impl GraphEngine {
             NodeType::Result { summary, .. } => ("Result".to_string(), Some(summary.clone())),
             NodeType::Concept { concept_name, .. } => {
                 ("Concept".to_string(), Some(concept_name.clone()))
+            },
+            NodeType::Claim { claim_text, .. } => {
+                ("Claim".to_string(), Some(claim_text.clone()))
             },
         };
 
@@ -1771,6 +2047,9 @@ impl GraphEngine {
                 EdgeType::Association { .. } => "Association",
                 EdgeType::GoalRelation { .. } => "GoalRelation",
                 EdgeType::Communication { .. } => "Communication",
+                EdgeType::DerivedFrom { .. } => "DerivedFrom",
+                EdgeType::SupportedBy { .. } => "SupportedBy",
+                EdgeType::About { .. } => "About",
             };
 
             edges.push(GraphEdgeData {

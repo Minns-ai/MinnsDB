@@ -45,6 +45,8 @@ pub mod episodes;
 pub mod event_ordering;
 pub mod inference;
 pub mod integration;
+pub mod integration_ner;
+pub mod integration_claims;
 pub mod learning;
 pub mod memory;
 pub mod scoped_inference;
@@ -63,6 +65,9 @@ pub mod indexing;
 pub mod compression;
 pub mod graph_store;
 pub mod redb_graph_store;
+
+// Semantic Memory (2026-01-22)
+pub mod claims;
 
 // Re-export commonly used items
 pub use catalog::{EpisodeCatalog, EpisodeRecord, RedbEpisodeCatalog};
@@ -113,3 +118,9 @@ pub use graph_store::{
     GraphStore, GraphStoreError, InMemoryGraphStore, Subgraph,
 };
 pub use redb_graph_store::RedbGraphStore;
+
+// Semantic Memory
+pub use claims::{
+    ClaimExtractionRequest, ClaimExtractionResult, ClaimId, ClaimStatus, DerivedClaim,
+    EvidenceSpan, RejectedClaim, RejectionReason, ThreadId,
+};

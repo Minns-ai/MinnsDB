@@ -677,6 +677,7 @@ impl EpisodeDetector {
                 observation_type, ..
             } => format!("Observation:{}", observation_type),
             EventType::Learning { .. } => "Learning".to_string(),
+            EventType::Context { context_type, .. } => format!("Context:{}", context_type),
         };
 
         match self.seen_event_types.get(&event_type_name) {
@@ -733,6 +734,7 @@ impl EpisodeDetector {
                 observation_type, ..
             } => format!("Observation:{}", observation_type),
             EventType::Learning { .. } => "Learning".to_string(),
+            EventType::Context { context_type, .. } => format!("Context:{}", context_type),
         };
         *self.seen_event_types.entry(event_type_name).or_insert(0) += 1;
     }

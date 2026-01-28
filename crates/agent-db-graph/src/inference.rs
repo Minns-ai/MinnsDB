@@ -281,6 +281,7 @@ impl GraphInference {
                 EventType::Communication { .. } => "communicator_agent",
                 EventType::Cognitive { .. } => "cognitive_agent",
                 EventType::Learning { .. } => "learning_agent",
+                EventType::Context { .. } => "context_agent",
             };
 
             let node = GraphNode::new(NodeType::Agent {
@@ -305,6 +306,7 @@ impl GraphInference {
             EventType::Communication { message_type, .. } => message_type.clone(),
             EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
             EventType::Learning { .. } => "LearningTelemetry".to_string(),
+            EventType::Context { context_type, .. } => format!("Context:{}", context_type),
         };
 
         let significance = self.calculate_event_significance(event);
@@ -386,6 +388,7 @@ impl GraphInference {
             EventType::Communication { .. } => InteractionType::Communication,
             EventType::Cognitive { .. } => InteractionType::Coordination,
             EventType::Learning { .. } => InteractionType::Coordination,
+            EventType::Context { .. } => InteractionType::InformationExchange,
         };
 
         let edge = GraphEdge::new(
@@ -725,6 +728,10 @@ impl GraphInference {
                 "learning_telemetry".to_string(),
                 self.format_json_summary(&serde_json::json!(event)),
             )),
+            EventType::Context { text, .. } => Some((
+                "context".to_string(),
+                self.truncate_summary(text),
+            )),
         }
     }
 
@@ -748,6 +755,7 @@ impl GraphInference {
             EventType::Communication { .. } => "Communication".to_string(),
             EventType::Cognitive { .. } => "Cognitive".to_string(),
             EventType::Learning { .. } => "Learning".to_string(),
+            EventType::Context { .. } => "Context".to_string(),
         }
     }
 
@@ -855,52 +863,58 @@ impl GraphInference {
 
     /// Detect temporal patterns in event sequences
     fn detect_temporal_patterns(&mut self) -> GraphResult<()> {
-        if self.temporal_buffer.len() < 3 {
-            return Ok(()); // Need at least 3 events for pattern
+        if self.temporal_buffer.len() < 2 {
+            return Ok(()); // Need at least 2 events for pattern
         }
 
-        // Look for repeating sequences of event types
         let events: Vec<_> = self.temporal_buffer.iter().collect();
-        let sequence_length = 3; // Start with 3-event patterns
-
-        for window in events.windows(sequence_length) {
-            let event_types: Vec<String> = window
-                .iter()
-                .map(|e| match &e.event_type {
-                    EventType::Action { action_name, .. } => action_name.clone(),
-                    EventType::Observation {
-                        observation_type, ..
-                    } => observation_type.clone(),
-                    EventType::Communication { message_type, .. } => message_type.clone(),
-                    EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
-                    EventType::Learning { .. } => "LearningTelemetry".to_string(),
-                })
-                .collect();
-
-            // Calculate average interval
-            let mut total_interval = 0u64;
-            for i in 1..window.len() {
-                total_interval += window[i].timestamp.saturating_sub(window[i - 1].timestamp);
+        
+        // Look for repeating sequences of event types with variable lengths (2 to 4)
+        for sequence_length in 2..=4 {
+            if events.len() < sequence_length {
+                continue;
             }
-            let avg_interval = total_interval / (window.len() - 1) as u64;
 
-            // Check if this pattern already exists or create new one
-            let pattern_name = event_types.join("->");
-            if let Some(existing) = self
-                .temporal_patterns
-                .iter_mut()
-                .find(|p| p.pattern_name == pattern_name)
-            {
-                existing.occurrence_count += 1;
-                existing.confidence = (existing.confidence * 0.9 + 0.1).min(1.0);
-            } else {
-                self.temporal_patterns.push(TemporalPattern {
-                    pattern_name,
-                    event_sequence: event_types,
-                    average_interval: avg_interval,
-                    confidence: 0.3,
-                    occurrence_count: 1,
-                });
+            for window in events.windows(sequence_length) {
+                let event_types: Vec<String> = window
+                    .iter()
+                    .map(|e| match &e.event_type {
+                        EventType::Action { action_name, .. } => action_name.clone(),
+                        EventType::Observation {
+                            observation_type, ..
+                        } => observation_type.clone(),
+                        EventType::Communication { message_type, .. } => message_type.clone(),
+                        EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
+                        EventType::Learning { .. } => "LearningTelemetry".to_string(),
+                        EventType::Context { context_type, .. } => format!("Context:{}", context_type),
+                    })
+                    .collect();
+
+                // Calculate average interval
+                let mut total_interval = 0u64;
+                for i in 1..window.len() {
+                    total_interval += window[i].timestamp.saturating_sub(window[i - 1].timestamp);
+                }
+                let avg_interval = total_interval / (window.len() - 1) as u64;
+
+                // Check if this pattern already exists or create new one
+                let pattern_name = event_types.join("->");
+                if let Some(existing) = self
+                    .temporal_patterns
+                    .iter_mut()
+                    .find(|p| p.pattern_name == pattern_name)
+                {
+                    existing.occurrence_count += 1;
+                    existing.confidence = (existing.confidence * 0.95 + 0.05).min(1.0);
+                } else {
+                    self.temporal_patterns.push(TemporalPattern {
+                        pattern_name,
+                        event_sequence: event_types,
+                        average_interval: avg_interval,
+                        confidence: 0.2, // Lower initial confidence for new patterns
+                        occurrence_count: 1,
+                    });
+                }
             }
         }
 
@@ -966,6 +980,7 @@ impl GraphInference {
             EventType::Cognitive { .. } => 0.1,
             EventType::Observation { .. } => 0.1,
             EventType::Learning { .. } => 0.05,
+            EventType::Context { .. } => 0.15,
         };
 
         // Factor in causality chain length
@@ -992,6 +1007,11 @@ impl GraphInference {
     /// Calculate causal strength between two events
     fn calculate_causal_strength(&mut self, prev_event: &Event, curr_event: &Event) -> f32 {
         let mut strength = 0.0;
+
+        // Explicit causality chain is the strongest evidence
+        if curr_event.causality_chain.contains(&prev_event.id) {
+            return 1.0;
+        }
 
         // Same agent increases causal likelihood
         if prev_event.agent_id == curr_event.agent_id {
@@ -1309,24 +1329,47 @@ impl GraphInference {
     /// Update confidence scores for patterns involving these events
     async fn update_pattern_confidence(
         &mut self,
-        _event_ids: &[EventId],
+        event_ids: &[EventId],
         success: bool,
     ) -> GraphResult<usize> {
         let mut updated_count = 0;
         let confidence_delta = if success { 0.05 } else { -0.05 };
 
-        // Update temporal patterns
-        // Note: Simplified version without matching check to avoid borrow issues
-        for pattern in &mut self.temporal_patterns {
-            // In production, would check if pattern matches event_ids
-            // For MVP, update all patterns
-            pattern.confidence = (pattern.confidence + confidence_delta).clamp(0.0, 1.0);
+        // Get event types for the events in this episode to match patterns
+        let mut episode_event_types = Vec::new();
+        for id in event_ids {
+            if let Some(node) = self.graph.get_event_node(*id) {
+                if let NodeType::Event { event_type, .. } = &node.node_type {
+                    episode_event_types.push(event_type.clone());
+                }
+            }
+        }
 
-            if success {
-                pattern.occurrence_count += 1;
+        if episode_event_types.is_empty() {
+            return Ok(0);
+        }
+
+        // Update temporal patterns that match subsequences of the episode
+        for pattern in &mut self.temporal_patterns {
+            let mut matches = false;
+            
+            // A pattern matches if its event_sequence is a subsequence of the episode
+            if pattern.event_sequence.len() <= episode_event_types.len() {
+                for window in episode_event_types.windows(pattern.event_sequence.len()) {
+                    if window == pattern.event_sequence {
+                        matches = true;
+                        break;
+                    }
+                }
             }
 
-            updated_count += 1;
+            if matches {
+                pattern.confidence = (pattern.confidence + confidence_delta).clamp(0.0, 1.0);
+                if success {
+                    pattern.occurrence_count += 1;
+                }
+                updated_count += 1;
+            }
         }
 
         Ok(updated_count)

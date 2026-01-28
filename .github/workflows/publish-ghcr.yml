@@ -12,6 +12,10 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [normal, free]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,12 +34,19 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/eventgraphdb
+          images: |
+            ghcr.io/${{ github.repository_owner }}/eventgraphdb${{ matrix.profile == 'free' && '-free' || '' }}
+          tags: |
+            type=raw,value=latest,enable=true
+            type=semver,pattern={{version}}
+            type=sha
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          build-args: |
+            SERVICE_PROFILE=${{ matrix.profile }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

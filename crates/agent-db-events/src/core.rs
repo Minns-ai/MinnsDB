@@ -34,6 +34,15 @@ pub struct Event {
 
     /// Additional metadata
     pub metadata: HashMap<String, MetadataValue>,
+
+    /// Size of context in bytes (for semantic memory promotion threshold)
+    #[serde(default)]
+    pub context_size_bytes: usize,
+
+    /// Pointer to segment storage for large contexts
+    /// Format: "segment://{bucket}/{key}" or None for inline storage
+    #[serde(default)]
+    pub segment_pointer: Option<String>,
 }
 
 /// Different types of events the system can handle
@@ -73,6 +82,16 @@ pub enum EventType {
 
     /// Learning telemetry events (retrieved/used/outcome)
     Learning { event: LearningEvent },
+
+    /// Explicit context event for semantic distillation
+    Context {
+        /// Raw text content (use segment_pointer in Event for large content)
+        text: String,
+        /// Type: "conversation", "document", "transcript", etc.
+        context_type: String,
+        /// Optional: language hint for NER ("en", "es", etc.)
+        language: Option<String>,
+    },
 }
 
 /// Explicit learning telemetry events (no inference)
@@ -285,6 +304,8 @@ impl Event {
             causality_chain: Vec::new(),
             context,
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         }
     }
 

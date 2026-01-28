@@ -167,6 +167,9 @@ fn build_behavior_skeleton(events: &[Event]) -> Vec<String> {
             },
             EventType::Communication { .. } => skeleton.push("Communicate".to_string()),
             EventType::Learning { .. } => skeleton.push("Learn".to_string()),
+            EventType::Context { context_type, .. } => {
+                skeleton.push(format!("Context:{}", context_type));
+            },
         }
     }
     skeleton
@@ -203,6 +206,7 @@ fn state_from_event(event: &Event) -> String {
         EventType::Action { .. } => "Act".to_string(),
         EventType::Communication { .. } => "Communicate".to_string(),
         EventType::Learning { .. } => "Learn".to_string(),
+        EventType::Context { context_type, .. } => format!("Context:{}", context_type),
     }
 }
 
@@ -215,6 +219,7 @@ fn action_from_event(event: &Event) -> String {
         } => format!("Observe:{observation_type}"),
         EventType::Communication { message_type, .. } => format!("Comm:{message_type}"),
         EventType::Learning { .. } => "Learn".to_string(),
+        EventType::Context { context_type, .. } => format!("Context:{}", context_type),
     }
 }
 

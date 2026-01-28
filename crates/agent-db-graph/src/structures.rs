@@ -114,6 +114,14 @@ pub enum NodeType {
         result_type: String,
         summary: String,
     },
+
+    /// Claim node representing semantic memory (derived atomic facts)
+    Claim {
+        claim_id: u64,
+        claim_text: String,
+        confidence: f32,
+        source_event_id: EventId,
+    },
 }
 
 /// Types of abstract concepts
@@ -221,6 +229,24 @@ pub enum EdgeType {
         reliability: f32, // Communication success rate
         protocol: String, // Communication method
     },
+
+    /// Claim derivation (claim derived from source event/context)
+    DerivedFrom {
+        extraction_confidence: f32,
+        extraction_timestamp: u64,
+    },
+
+    /// Evidence support (claim supported by text span/entity)
+    SupportedBy {
+        evidence_strength: f32,
+        span_offset: (usize, usize), // start, end byte offsets
+    },
+
+    /// Semantic relationship (claim is about an entity/concept)
+    About {
+        relevance_score: f32,
+        mention_count: u32,
+    },
 }
 
 /// Types of agent interactions
@@ -289,6 +315,12 @@ pub struct Graph {
     /// Result index for result-node mapping
     pub(crate) result_index: HashMap<String, NodeId>,
 
+    /// Claim index for claim-node mapping
+    pub(crate) claim_index: HashMap<u64, NodeId>,
+
+    /// Concept index for concept-node mapping (by name)
+    pub(crate) concept_index: HashMap<String, NodeId>,
+
     /// Next available IDs
     pub(crate) next_node_id: NodeId,
     pub(crate) next_edge_id: EdgeId,
@@ -341,6 +373,7 @@ impl GraphNode {
             NodeType::Strategy { .. } => "Strategy".to_string(),
             NodeType::Tool { .. } => "Tool".to_string(),
             NodeType::Result { .. } => "Result".to_string(),
+            NodeType::Claim { .. } => "Claim".to_string(),
         }
     }
 
@@ -511,6 +544,8 @@ impl Graph {
             strategy_index: HashMap::new(),
             tool_index: HashMap::new(),
             result_index: HashMap::new(),
+            claim_index: HashMap::new(),
+            concept_index: HashMap::new(),
             next_node_id: 1,
             next_edge_id: 1,
             stats: GraphStats::default(),
@@ -560,7 +595,12 @@ impl Graph {
             NodeType::Result { result_key, .. } => {
                 self.result_index.insert(result_key.clone(), node_id);
             },
-            _ => {},
+            NodeType::Claim { claim_id, .. } => {
+                self.claim_index.insert(*claim_id, node_id);
+            },
+            NodeType::Concept { concept_name, .. } => {
+                self.concept_index.insert(concept_name.clone(), node_id);
+            },
         }
 
         // Initialize adjacency lists
@@ -837,5 +877,19 @@ impl Graph {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Get node by claim ID
+    pub fn get_claim_node(&self, claim_id: u64) -> Option<&GraphNode> {
+        self.claim_index
+            .get(&claim_id)
+            .and_then(|&node_id| self.nodes.get(&node_id))
+    }
+
+    /// Get node by concept name
+    pub fn get_concept_node(&self, concept_name: &str) -> Option<&GraphNode> {
+        self.concept_index
+            .get(concept_name)
+            .and_then(|&node_id| self.nodes.get(&node_id))
     }
 }

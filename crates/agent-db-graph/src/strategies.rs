@@ -968,6 +968,9 @@ impl StrategyExtractor {
                 EventType::Learning { .. } => {
                     types.insert("learning_telemetry".to_string());
                 },
+                EventType::Context { .. } => {
+                    types.insert("context".to_string());
+                },
             }
         }
 
@@ -1203,6 +1206,9 @@ impl StrategyExtractor {
                 },
                 EventType::Communication { .. } => skeleton.push("Communicate".to_string()),
                 EventType::Learning { .. } => skeleton.push("Learn".to_string()),
+                EventType::Context { context_type, .. } => {
+                    skeleton.push(format!("Context:{}", context_type));
+                },
             }
         }
         skeleton

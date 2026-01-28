@@ -3,7 +3,7 @@
 //! Demonstrates how agent_type + session_id scoping enables
 //! better relationship inference and pattern detection.
 
-use agent_db_core::types::{current_timestamp, generate_event_id, AgentId, AgentType, SessionId};
+use agent_db_core::types::{current_timestamp, generate_event_id};
 use agent_db_events::{
     ActionOutcome, ComputationalResources, EnvironmentState, Event, EventContext, EventType,
     ResourceState, TemporalContext,
@@ -179,6 +179,8 @@ async fn create_coding_session_events(context: &EventContext) -> Vec<ScopedEvent
                 causality_chain: Vec::new(),
                 context: context.clone(),
                 metadata: std::collections::HashMap::new(),
+                context_size_bytes: 0,
+                segment_pointer: None,
             },
             agent_type: "coding-assistant".to_string(),
             priority: 1.0,
@@ -208,6 +210,8 @@ async fn create_coding_session_events(context: &EventContext) -> Vec<ScopedEvent
                 causality_chain: Vec::new(),
                 context: context.clone(),
                 metadata: std::collections::HashMap::new(),
+                context_size_bytes: 0,
+                segment_pointer: None,
             },
             agent_type: "coding-assistant".to_string(),
             priority: 0.8,
@@ -237,6 +241,8 @@ async fn create_coding_session_events(context: &EventContext) -> Vec<ScopedEvent
                 causality_chain: Vec::new(),
                 context: context.clone(),
                 metadata: std::collections::HashMap::new(),
+                context_size_bytes: 0,
+                segment_pointer: None,
             },
             agent_type: "coding-assistant".to_string(),
             priority: 1.0,
@@ -273,6 +279,8 @@ async fn create_data_analysis_events(context: &EventContext) -> Vec<ScopedEvent>
                 causality_chain: Vec::new(),
                 context: context.clone(),
                 metadata: std::collections::HashMap::new(),
+                context_size_bytes: 0,
+                segment_pointer: None,
             },
             agent_type: "data-analyst".to_string(),
             priority: 1.0,
@@ -301,6 +309,8 @@ async fn create_data_analysis_events(context: &EventContext) -> Vec<ScopedEvent>
                 causality_chain: Vec::new(),
                 context: context.clone(),
                 metadata: std::collections::HashMap::new(),
+                context_size_bytes: 0,
+                segment_pointer: None,
             },
             agent_type: "data-analyst".to_string(),
             priority: 0.9,
@@ -336,6 +346,8 @@ async fn create_task_management_events(context: &EventContext) -> Vec<ScopedEven
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         agent_type: "task-manager".to_string(),
         priority: 1.0,
@@ -370,6 +382,8 @@ async fn create_bug_fix_events(context: &EventContext) -> Vec<ScopedEvent> {
             causality_chain: Vec::new(),
             context: context.clone(),
             metadata: std::collections::HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         },
         agent_type: "coding-assistant".to_string(),
         priority: 1.0,

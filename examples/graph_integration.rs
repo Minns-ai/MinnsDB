@@ -68,6 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         causality_chain: Vec::new(),
         context: context.clone(),
         metadata: std::collections::HashMap::new(),
+        context_size_bytes: 0,
+        segment_pointer: None,
     };
 
     // Event 2: Agent 2 responds (with slight delay)
@@ -86,6 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         causality_chain: vec![event1.id],
         context: context.clone(),
         metadata: std::collections::HashMap::new(),
+        context_size_bytes: 0,
+        segment_pointer: None,
     };
 
     // Event 3: Agent 1 performs an action
@@ -106,6 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         causality_chain: vec![event2.id],
         context: context.clone(),
         metadata: std::collections::HashMap::new(),
+        context_size_bytes: 0,
+        segment_pointer: None,
     };
 
     println!("📝 Processing events through graph engine...");
