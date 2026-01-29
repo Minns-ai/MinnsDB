@@ -37,7 +37,11 @@ impl NerExtractionQueue {
     /// * `extractor` - The NER extractor implementation
     /// * `workers` - Number of worker threads
     /// * `queue_size` - Maximum number of jobs that can be queued
-    pub fn with_capacity(extractor: Arc<dyn NerExtractor>, workers: usize, queue_size: usize) -> Self {
+    pub fn with_capacity(
+        extractor: Arc<dyn NerExtractor>,
+        workers: usize,
+        queue_size: usize,
+    ) -> Self {
         // Use bounded channel for backpressure
         let (tx, rx) = mpsc::channel(queue_size);
 
@@ -72,11 +76,11 @@ impl NerExtractionQueue {
                             if let Err(e) = Self::process_job(job, &*extractor).await {
                                 error!("Worker {} failed to process job: {}", worker_id, e);
                             }
-                        }
+                        },
                         None => {
                             info!("NER worker {} channel closed, stopping", worker_id);
                             break;
-                        }
+                        },
                     }
                 }
 
@@ -140,11 +144,7 @@ impl NerExtractionQueue {
     /// Submit text for NER extraction
     ///
     /// This method will block if the queue is full until space is available.
-    pub async fn extract(
-        &self,
-        event_id: EventId,
-        text: String,
-    ) -> Result<ExtractedFeatures> {
+    pub async fn extract(&self, event_id: EventId, text: String) -> Result<ExtractedFeatures> {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         self.sender
@@ -179,7 +179,7 @@ impl NerExtractionQueue {
             Err(e) => {
                 warn!("Failed to send NER job (queue full or closed): {}", e);
                 None
-            }
+            },
         }
     }
 
@@ -194,16 +194,20 @@ impl NerExtractionQueue {
     ) -> Option<tokio::sync::oneshot::Receiver<Result<ExtractedFeatures>>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        match self.sender.send(NerJob {
-            event_id,
-            text,
-            result_tx: tx,
-        }).await {
+        match self
+            .sender
+            .send(NerJob {
+                event_id,
+                text,
+                result_tx: tx,
+            })
+            .await
+        {
             Ok(_) => Some(rx),
             Err(e) => {
                 warn!("Failed to send async NER job: {}", e);
                 None
-            }
+            },
         }
     }
 }

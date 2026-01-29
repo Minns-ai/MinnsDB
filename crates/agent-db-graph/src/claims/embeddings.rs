@@ -75,7 +75,10 @@ impl OpenAiEmbeddingClient {
 #[async_trait]
 impl EmbeddingClient for OpenAiEmbeddingClient {
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        debug!("Generating OpenAI embedding for text: {} chars", request.text.len());
+        debug!(
+            "Generating OpenAI embedding for text: {} chars",
+            request.text.len()
+        );
 
         let input_text = if let Some(context) = request.context {
             format!("{}\n\n{}", context, request.text)
@@ -104,16 +107,16 @@ impl EmbeddingClient for OpenAiEmbeddingClient {
         let json: serde_json::Value = response.json().await?;
 
         // Extract embedding
-        let embedding: Vec<f32> = serde_json::from_value(
-            json["data"][0]["embedding"].clone()
-        )?;
+        let embedding: Vec<f32> = serde_json::from_value(json["data"][0]["embedding"].clone())?;
 
         // Extract token usage
-        let tokens_used = json["usage"]["total_tokens"]
-            .as_u64()
-            .unwrap_or(0);
+        let tokens_used = json["usage"]["total_tokens"].as_u64().unwrap_or(0);
 
-        info!("Generated embedding with {} dimensions, {} tokens", embedding.len(), tokens_used);
+        info!(
+            "Generated embedding with {} dimensions, {} tokens",
+            embedding.len(),
+            tokens_used
+        );
 
         Ok(EmbeddingResponse {
             embedding,
@@ -281,11 +284,7 @@ impl VectorSimilarity {
     /// Find top-k most similar vectors to query using brute-force search
     ///
     /// Returns indices and similarity scores sorted by descending similarity
-    pub fn top_k_similar(
-        query: &[f32],
-        vectors: &[Vec<f32>],
-        k: usize,
-    ) -> Vec<(usize, f32)> {
+    pub fn top_k_similar(query: &[f32], vectors: &[Vec<f32>], k: usize) -> Vec<(usize, f32)> {
         let mut similarities: Vec<(usize, f32)> = vectors
             .iter()
             .enumerate()

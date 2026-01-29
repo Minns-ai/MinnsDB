@@ -20,9 +20,12 @@ impl GraphEngine {
         let queue: Arc<agent_db_ner::NerExtractionQueue> = match &self.ner_queue {
             Some(q) => q.clone(),
             None => {
-                debug!("NER queue not initialized, skipping extraction for event {}", event.id);
+                debug!(
+                    "NER queue not initialized, skipping extraction for event {}",
+                    event.id
+                );
                 return;
-            }
+            },
         };
 
         // Determine if event qualifies for NER extraction
@@ -55,10 +58,10 @@ impl GraphEngine {
                                 warn!("Failed to store NER features for event {}: {}", event_id, e);
                             }
                         }
-                    }
+                    },
                     Err(e) => {
                         warn!("NER extraction failed for event {}: {}", event_id, e);
-                    }
+                    },
                 }
             });
         }
@@ -78,7 +81,7 @@ impl GraphEngine {
                 } else {
                     Some(text.clone())
                 }
-            }
+            },
             // Other events: check context size threshold
             _ => {
                 if event.context_size_bytes >= self.config.ner_promotion_threshold {
@@ -94,7 +97,7 @@ impl GraphEngine {
                 } else {
                     None
                 }
-            }
+            },
         }
     }
 }

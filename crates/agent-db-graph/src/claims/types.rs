@@ -3,7 +3,7 @@
 use agent_db_core::types::EventId;
 use agent_db_events::ExtractedFeatures;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 
 use crate::episodes::EpisodeId;

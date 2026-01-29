@@ -413,7 +413,31 @@ impl EpisodeDetector {
         let mut episode = self
             .active_episodes
             .remove(&agent_id)
-            .expect("Episode must exist");
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    "Episode not found for agent_id={} during complete_episode - creating emergency episode",
+                    agent_id
+                );
+                // Create emergency episode to avoid panic
+                Episode {
+                    id: self.next_episode_id,
+                    episode_version: 1,
+                    agent_id,
+                    session_id: end_event.session_id,
+                    start_event: end_event.id,
+                    end_event: None,
+                    events: vec![end_event.id],
+                    context_signature: end_event.context.fingerprint,
+                    start_timestamp: end_event.timestamp,
+                    end_timestamp: None,
+                    outcome: None,
+                    significance: 0.0,
+                    prediction_error: 0.0,
+                    self_judged_quality: None,
+                    salience_score: 0.0,
+                    context: end_event.context.clone(),
+                }
+            });
 
         episode.end_event = Some(end_event.id);
         episode.end_timestamp = Some(end_event.timestamp);
@@ -903,6 +927,8 @@ mod tests {
                 embeddings: None,
             },
             metadata: HashMap::new(),
+            context_size_bytes: 0,
+            segment_pointer: None,
         }
     }
 

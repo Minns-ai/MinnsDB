@@ -231,8 +231,8 @@ pub struct GraphEngine {
     /// Event storage for episode processing
     pub(crate) event_store: Arc<RwLock<HashMap<agent_db_core::types::EventId, Event>>>,
 
-    /// Learning decision traces keyed by query_id
-    pub(crate) decision_traces: Arc<RwLock<HashMap<String, DecisionTrace>>>,
+    /// Learning decision traces keyed by query_id (lock-free with DashMap for performance)
+    pub(crate) decision_traces: Arc<dashmap::DashMap<String, DecisionTrace>>,
 
     /// Optional storage engine for persistence
     pub(crate) storage: Option<Arc<StorageEngine>>,
@@ -529,49 +529,67 @@ impl GraphEngine {
             );
 
             // Create NER extraction queue
-            let queue = Arc::new(agent_db_ner::NerExtractionQueue::new(extractor, config.ner_workers));
+            let queue = Arc::new(agent_db_ner::NerExtractionQueue::new(
+                extractor,
+                config.ner_workers,
+            ));
 
             // Create NER storage
             let store = if let Some(path) = &config.ner_storage_path {
-                let store = agent_db_ner::NerFeatureStore::new(path)
-                    .map_err(|e| GraphError::OperationError(format!("Failed to initialize NER storage: {}", e)))?;
+                let store = agent_db_ner::NerFeatureStore::new(path).map_err(|e| {
+                    GraphError::OperationError(format!("Failed to initialize NER storage: {}", e))
+                })?;
                 Some(Arc::new(store))
             } else {
                 None
             };
 
-            tracing::info!("Semantic memory initialized with {} NER workers", config.ner_workers);
+            tracing::info!(
+                "Semantic memory initialized with {} NER workers",
+                config.ner_workers
+            );
             (Some(queue), store)
         } else {
             (None, None)
         };
 
         // Initialize claim extraction components if semantic memory is enabled
-        let (claim_queue, claim_store, llm_client, embedding_client) = if config.enable_semantic_memory {
+        let (claim_queue, claim_store, llm_client, embedding_client) = if config
+            .enable_semantic_memory
+        {
             tracing::info!("Initializing claim extraction pipeline");
 
             // Create claim store
             let store = if let Some(path) = &config.claim_storage_path {
-                let store = crate::claims::ClaimStore::new(path)
-                    .map_err(|e| GraphError::OperationError(format!("Failed to initialize claim storage: {}", e)))?;
+                let store = crate::claims::ClaimStore::new(path).map_err(|e| {
+                    GraphError::OperationError(format!("Failed to initialize claim storage: {}", e))
+                })?;
                 Some(Arc::new(store))
             } else {
                 None
             };
 
             // Create LLM client
-            let client: Arc<dyn crate::claims::LlmClient> = if let Some(key) = &config.openai_api_key {
-                Arc::new(crate::claims::OpenAiClient::new(key.clone(), config.llm_model.clone()))
-            } else {
-                Arc::new(crate::claims::MockClient::new())
-            };
+            let client: Arc<dyn crate::claims::LlmClient> =
+                if let Some(key) = &config.openai_api_key {
+                    Arc::new(crate::claims::OpenAiClient::new(
+                        key.clone(),
+                        config.llm_model.clone(),
+                    ))
+                } else {
+                    Arc::new(crate::claims::MockClient::new())
+                };
 
             // Create embedding client
-            let embedding_client: Arc<dyn crate::claims::EmbeddingClient> = if let Some(key) = &config.openai_api_key {
-                Arc::new(crate::claims::OpenAiEmbeddingClient::new(key.clone(), "text-embedding-3-small".to_string()))
-            } else {
-                Arc::new(crate::claims::MockEmbeddingClient::new(384))
-            };
+            let embedding_client: Arc<dyn crate::claims::EmbeddingClient> =
+                if let Some(key) = &config.openai_api_key {
+                    Arc::new(crate::claims::OpenAiEmbeddingClient::new(
+                        key.clone(),
+                        "text-embedding-3-small".to_string(),
+                    ))
+                } else {
+                    Arc::new(crate::claims::MockEmbeddingClient::new(384))
+                };
 
             // Create claim extraction queue
             let queue = if let Some(ref store) = store {
@@ -593,44 +611,55 @@ impl GraphEngine {
                 None
             };
 
-            tracing::info!("Claim extraction initialized with {} workers", config.claim_workers);
+            tracing::info!(
+                "Claim extraction initialized with {} workers",
+                config.claim_workers
+            );
             (queue, store, Some(client), Some(embedding_client))
         } else {
             (None, None, None, None)
         };
 
         // Initialize embedding generation components if semantic memory is enabled
-        let (embedding_queue, embedding_client) = if config.enable_semantic_memory && config.enable_embedding_generation {
-            tracing::info!("Initializing embedding generation pipeline");
+        let (embedding_queue, embedding_client) =
+            if config.enable_semantic_memory && config.enable_embedding_generation {
+                tracing::info!("Initializing embedding generation pipeline");
 
-            // Use the client created above if available, otherwise create a new one
-            let client: Arc<dyn crate::claims::EmbeddingClient> = if let Some(ref client) = embedding_client {
-                client.clone()
-            } else {
-                if let Some(key) = &config.openai_api_key {
-                    Arc::new(crate::claims::OpenAiEmbeddingClient::new(key.clone(), "text-embedding-3-small".to_string()))
+                // Use the client created above if available, otherwise create a new one
+                let client: Arc<dyn crate::claims::EmbeddingClient> =
+                    if let Some(ref client) = embedding_client {
+                        client.clone()
+                    } else {
+                        if let Some(key) = &config.openai_api_key {
+                            Arc::new(crate::claims::OpenAiEmbeddingClient::new(
+                                key.clone(),
+                                "text-embedding-3-small".to_string(),
+                            ))
+                        } else {
+                            Arc::new(crate::claims::MockEmbeddingClient::new(384))
+                        }
+                    };
+
+                // Create embedding queue if claim store is available
+                let queue = if let Some(ref store) = claim_store {
+                    let queue = Arc::new(crate::claims::EmbeddingQueue::new(
+                        client.clone(),
+                        store.clone(),
+                        config.embedding_workers,
+                    ));
+                    Some(queue)
                 } else {
-                    Arc::new(crate::claims::MockEmbeddingClient::new(384))
-                }
-            };
+                    None
+                };
 
-            // Create embedding queue if claim store is available
-            let queue = if let Some(ref store) = claim_store {
-                let queue = Arc::new(crate::claims::EmbeddingQueue::new(
-                    client.clone(),
-                    store.clone(),
-                    config.embedding_workers,
-                ));
-                Some(queue)
+                tracing::info!(
+                    "Embedding generation initialized with {} workers",
+                    config.embedding_workers
+                );
+                (queue, Some(client))
             } else {
-                None
+                (None, embedding_client)
             };
-
-            tracing::info!("Embedding generation initialized with {} workers", config.embedding_workers);
-            (queue, Some(client))
-        } else {
-            (None, embedding_client)
-        };
 
         Ok(Self {
             inference,
@@ -642,7 +671,7 @@ impl GraphEngine {
             strategy_store,
             transition_model,
             event_store: Arc::new(RwLock::new(HashMap::new())),
-            decision_traces: Arc::new(RwLock::new(HashMap::new())),
+            decision_traces: Arc::new(dashmap::DashMap::new()),
             storage: None,
             config,
             stats: Arc::new(RwLock::new(GraphEngineStats::default())),
@@ -874,7 +903,9 @@ impl GraphEngine {
                 / stats.total_events_processed as f64;
 
             // Run Louvain community detection periodically
-            if self.config.enable_louvain && stats.total_events_processed % self.config.louvain_interval == 0 {
+            if self.config.enable_louvain
+                && stats.total_events_processed % self.config.louvain_interval == 0
+            {
                 drop(stats); // Release stats lock before async operation
                 if let Err(e) = self.run_community_detection().await {
                     result.errors.push(e);
@@ -946,14 +977,16 @@ impl GraphEngine {
                 query_id,
                 memory_ids,
             } => {
-                let mut traces = self.decision_traces.write().await;
-                let trace = traces.entry(query_id.clone()).or_insert(DecisionTrace {
-                    memory_ids: Vec::new(),
-                    memory_used: Vec::new(),
-                    strategy_ids: Vec::new(),
-                    strategy_used: Vec::new(),
-                    last_updated: now,
-                });
+                // DashMap provides lock-free concurrent access
+                let mut trace = self.decision_traces
+                    .entry(query_id.clone())
+                    .or_insert(DecisionTrace {
+                        memory_ids: Vec::new(),
+                        memory_used: Vec::new(),
+                        strategy_ids: Vec::new(),
+                        strategy_used: Vec::new(),
+                        last_updated: now,
+                    });
                 trace.memory_ids = memory_ids.clone();
                 trace.last_updated = now;
                 tracing::info!(
@@ -966,14 +999,16 @@ impl GraphEngine {
                 query_id,
                 memory_id,
             } => {
-                let mut traces = self.decision_traces.write().await;
-                let trace = traces.entry(query_id.clone()).or_insert(DecisionTrace {
-                    memory_ids: Vec::new(),
-                    memory_used: Vec::new(),
-                    strategy_ids: Vec::new(),
-                    strategy_used: Vec::new(),
-                    last_updated: now,
-                });
+                // DashMap provides lock-free concurrent access
+                let mut trace = self.decision_traces
+                    .entry(query_id.clone())
+                    .or_insert(DecisionTrace {
+                        memory_ids: Vec::new(),
+                        memory_used: Vec::new(),
+                        strategy_ids: Vec::new(),
+                        strategy_used: Vec::new(),
+                        last_updated: now,
+                    });
                 if !trace.memory_used.contains(memory_id) {
                     trace.memory_used.push(*memory_id);
                 }
@@ -988,14 +1023,16 @@ impl GraphEngine {
                 query_id,
                 strategy_ids,
             } => {
-                let mut traces = self.decision_traces.write().await;
-                let trace = traces.entry(query_id.clone()).or_insert(DecisionTrace {
-                    memory_ids: Vec::new(),
-                    memory_used: Vec::new(),
-                    strategy_ids: Vec::new(),
-                    strategy_used: Vec::new(),
-                    last_updated: now,
-                });
+                // DashMap provides lock-free concurrent access
+                let mut trace = self.decision_traces
+                    .entry(query_id.clone())
+                    .or_insert(DecisionTrace {
+                        memory_ids: Vec::new(),
+                        memory_used: Vec::new(),
+                        strategy_ids: Vec::new(),
+                        strategy_used: Vec::new(),
+                        last_updated: now,
+                    });
                 trace.strategy_ids = strategy_ids.clone();
                 trace.last_updated = now;
                 tracing::info!(
@@ -1008,14 +1045,16 @@ impl GraphEngine {
                 query_id,
                 strategy_id,
             } => {
-                let mut traces = self.decision_traces.write().await;
-                let trace = traces.entry(query_id.clone()).or_insert(DecisionTrace {
-                    memory_ids: Vec::new(),
-                    memory_used: Vec::new(),
-                    strategy_ids: Vec::new(),
-                    strategy_used: Vec::new(),
-                    last_updated: now,
-                });
+                // DashMap provides lock-free concurrent access
+                let mut trace = self.decision_traces
+                    .entry(query_id.clone())
+                    .or_insert(DecisionTrace {
+                        memory_ids: Vec::new(),
+                        memory_used: Vec::new(),
+                        strategy_ids: Vec::new(),
+                        strategy_used: Vec::new(),
+                        last_updated: now,
+                    });
                 if !trace.strategy_used.contains(strategy_id) {
                     trace.strategy_used.push(*strategy_id);
                 }
@@ -1040,10 +1079,8 @@ impl GraphEngine {
     }
 
     async fn apply_learning_outcome(&self, query_id: &str, success: bool) -> GraphResult<()> {
-        let trace = {
-            let mut traces = self.decision_traces.write().await;
-            traces.remove(query_id)
-        };
+        // DashMap provides lock-free concurrent access
+        let trace = self.decision_traces.remove(query_id).map(|(_, v)| v);
 
         let Some(trace) = trace else {
             return Ok(());
@@ -1973,9 +2010,7 @@ impl GraphEngine {
             NodeType::Concept { concept_name, .. } => {
                 ("Concept".to_string(), Some(concept_name.clone()))
             },
-            NodeType::Claim { claim_text, .. } => {
-                ("Claim".to_string(), Some(claim_text.clone()))
-            },
+            NodeType::Claim { claim_text, .. } => ("Claim".to_string(), Some(claim_text.clone())),
         };
 
         GraphNodeData {

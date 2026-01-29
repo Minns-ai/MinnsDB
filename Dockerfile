@@ -72,21 +72,24 @@ EXPOSE 8080 9090
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/health || exit 1
 
-# Environment variables (can be overridden)
+# Service profile (normal or free)
+ARG SERVICE_PROFILE=normal
+ENV SERVICE_PROFILE=${SERVICE_PROFILE}
+
+# Environment variables (can be overridden at runtime)
 ENV RUST_LOG=info
 ENV SERVER_HOST=0.0.0.0
 ENV SERVER_PORT=8080
 ENV STORAGE_BACKEND=persistent
 ENV REDB_PATH=/data/eventgraph.redb
-ENV REDB_CACHE_SIZE_MB=256
-ENV MEMORY_CACHE_SIZE=10000
-ENV STRATEGY_CACHE_SIZE=5000
-ARG SERVICE_PROFILE=normal
-ENV SERVICE_PROFILE=${SERVICE_PROFILE}
 
 # NER Service Configuration (override at runtime)
 ENV NER_SERVICE_URL=http://localhost:8081/ner
 ENV NER_REQUEST_TIMEOUT_MS=5000
+
+# NOTE: Cache sizes and limits are set in server config based on SERVICE_PROFILE
+# FREE profile: 64MB cache, 1K memories, 500 strategies, 50K max nodes, no Louvain
+# NORMAL profile: 256MB cache, 10K memories, 5K strategies, 1M max nodes, Louvain enabled
 
 # Volume for persistent data
 VOLUME ["/data"]

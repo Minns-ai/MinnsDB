@@ -728,10 +728,9 @@ impl GraphInference {
                 "learning_telemetry".to_string(),
                 self.format_json_summary(&serde_json::json!(event)),
             )),
-            EventType::Context { text, .. } => Some((
-                "context".to_string(),
-                self.truncate_summary(text),
-            )),
+            EventType::Context { text, .. } => {
+                Some(("context".to_string(), self.truncate_summary(text)))
+            },
         }
     }
 
@@ -868,7 +867,7 @@ impl GraphInference {
         }
 
         let events: Vec<_> = self.temporal_buffer.iter().collect();
-        
+
         // Look for repeating sequences of event types with variable lengths (2 to 4)
         for sequence_length in 2..=4 {
             if events.len() < sequence_length {
@@ -886,7 +885,9 @@ impl GraphInference {
                         EventType::Communication { message_type, .. } => message_type.clone(),
                         EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
                         EventType::Learning { .. } => "LearningTelemetry".to_string(),
-                        EventType::Context { context_type, .. } => format!("Context:{}", context_type),
+                        EventType::Context { context_type, .. } => {
+                            format!("Context:{}", context_type)
+                        },
                     })
                     .collect();
 
@@ -1352,7 +1353,7 @@ impl GraphInference {
         // Update temporal patterns that match subsequences of the episode
         for pattern in &mut self.temporal_patterns {
             let mut matches = false;
-            
+
             // A pattern matches if its event_sequence is a subsequence of the episode
             if pattern.event_sequence.len() <= episode_event_types.len() {
                 for window in episode_event_types.windows(pattern.event_sequence.len()) {

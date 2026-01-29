@@ -53,7 +53,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/claims", get(handlers::list_claims))
         .route("/api/claims/:id", get(handlers::get_claim))
         .route("/api/claims/search", post(handlers::search_claims))
-        .route("/api/embeddings/process", post(handlers::process_embeddings))
+        .route(
+            "/api/embeddings/process",
+            post(handlers::process_embeddings),
+        )
         // Apply middleware
         .layer(CorsLayer::permissive())
         .with_state(state)

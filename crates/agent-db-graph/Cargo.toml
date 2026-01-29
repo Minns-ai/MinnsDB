@@ -19,6 +19,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 reqwest = { version = "0.11", features = ["json"] }
 redb = "2.1"
+dashmap = "5.5"  # Lock-free concurrent HashMap for better performance
 # rayon = "1.5"  # Requires Rust 1.80+, temporarily disabled for compatibility
 
 [features]

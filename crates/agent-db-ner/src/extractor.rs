@@ -106,7 +106,9 @@ fn split_sentences_helper(text: &str) -> Vec<(String, usize)> {
 /// Check if a period is likely a sentence end (not an abbreviation)
 fn is_likely_sentence_end(text: &str, period_idx: usize) -> bool {
     // Common abbreviations that should NOT end a sentence
-    const ABBREVS: &[&str] = &["Dr.", "Mr.", "Mrs.", "Ms.", "Jr.", "Sr.", "St.", "vs.", "etc.", "e.g.", "i.e."];
+    const ABBREVS: &[&str] = &[
+        "Dr.", "Mr.", "Mrs.", "Ms.", "Jr.", "Sr.", "St.", "vs.", "etc.", "e.g.", "i.e.",
+    ];
 
     // Check the text before the period for common abbreviations
     for abbrev in ABBREVS {
@@ -254,16 +256,14 @@ impl NerServiceExtractor {
         end_offset: usize,
         provided_text: Option<String>,
     ) -> Result<String> {
-        let extracted = source_text
-            .get(start_offset..end_offset)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Invalid UTF-8 byte offsets: {}..{} for text length {}",
-                    start_offset,
-                    end_offset,
-                    source_text.len()
-                )
-            })?;
+        let extracted = source_text.get(start_offset..end_offset).ok_or_else(|| {
+            anyhow!(
+                "Invalid UTF-8 byte offsets: {}..{} for text length {}",
+                start_offset,
+                end_offset,
+                source_text.len()
+            )
+        })?;
 
         match provided_text {
             Some(text) if text == extracted => Ok(text),
@@ -273,7 +273,7 @@ impl NerServiceExtractor {
                     text, extracted
                 );
                 Ok(extracted.to_string())
-            }
+            },
             None => Ok(extracted.to_string()),
         }
     }
@@ -287,7 +287,10 @@ impl NerExtractor for NerServiceExtractor {
             return Ok(Vec::new());
         }
 
-        debug!("Extracting entities from text (length: {} bytes)", text.len());
+        debug!(
+            "Extracting entities from text (length: {} bytes)",
+            text.len()
+        );
 
         let request = NerServiceRequest {
             text: text.to_string(),
@@ -298,7 +301,8 @@ impl NerExtractor for NerServiceExtractor {
         let mut last_error: Option<anyhow::Error> = None;
         for attempt in 0..=self.config.max_retries {
             if attempt > 0 {
-                let delay = Duration::from_millis(self.config.retry_delay_ms * 2_u64.pow(attempt - 1));
+                let delay =
+                    Duration::from_millis(self.config.retry_delay_ms * 2_u64.pow(attempt - 1));
                 debug!("Retry attempt {} after {:?}", attempt, delay);
                 tokio::time::sleep(delay).await;
             }
@@ -312,10 +316,14 @@ impl NerExtractor for NerServiceExtractor {
             {
                 Ok(resp) => resp,
                 Err(e) => {
-                    warn!("NER service request failed (attempt {}): {}", attempt + 1, e);
+                    warn!(
+                        "NER service request failed (attempt {}): {}",
+                        attempt + 1,
+                        e
+                    );
                     last_error = Some(e.into());
                     continue;
-                }
+                },
             };
 
             if !response.status().is_success() {
@@ -331,7 +339,12 @@ impl NerExtractor for NerServiceExtractor {
                     ));
                 }
 
-                warn!("NER service server error (status {}, attempt {}): {}", status, attempt + 1, body);
+                warn!(
+                    "NER service server error (status {}, attempt {}): {}",
+                    status,
+                    attempt + 1,
+                    body
+                );
                 last_error = Some(anyhow!("Server error (status {}): {}", status, body));
                 continue;
             }
@@ -339,10 +352,14 @@ impl NerExtractor for NerServiceExtractor {
             let response: NerServiceResponse = match response.json().await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    warn!("Failed to parse NER response (attempt {}): {}", attempt + 1, e);
+                    warn!(
+                        "Failed to parse NER response (attempt {}): {}",
+                        attempt + 1,
+                        e
+                    );
                     last_error = Some(e.into());
                     continue;
-                }
+                },
             };
 
             // Successfully received response, process entities
@@ -367,7 +384,7 @@ impl NerExtractor for NerServiceExtractor {
                     Err(e) => {
                         warn!("Skipping entity due to invalid offsets: {}", e);
                         continue;
-                    }
+                    },
                 };
 
                 let span = EntitySpan::new(
@@ -391,7 +408,12 @@ impl NerExtractor for NerServiceExtractor {
         }
 
         // All retries exhausted
-        Err(last_error.unwrap_or_else(|| anyhow!("NER service request failed after {} attempts", self.config.max_retries + 1)))
+        Err(last_error.unwrap_or_else(|| {
+            anyhow!(
+                "NER service request failed after {} attempts",
+                self.config.max_retries + 1
+            )
+        }))
     }
 
     fn model_name(&self) -> &str {

@@ -68,11 +68,14 @@ impl ClaimExtractionQueue {
                             if let Err(e) = &result {
                                 error!("Worker {} failed to process job: {}", worker_id, e);
                             }
-                        }
+                        },
                         None => {
-                            info!("Claim extraction worker {} channel closed, stopping", worker_id);
+                            info!(
+                                "Claim extraction worker {} channel closed, stopping",
+                                worker_id
+                            );
                             break;
-                        }
+                        },
                     }
                 }
 
@@ -159,23 +162,31 @@ impl ClaimExtractionQueue {
                 // fallback to top-k sentences by semantic similarity if none found
                 if candidate_sentences.is_empty() && !context_sentence_entities.is_empty() {
                     // Generate embedding for claim
-                    let claim_embedding = embedding_client.embed(EmbeddingRequest {
-                        text: llm_claim.claim_text.clone(),
-                        context: None,
-                    }).await?.embedding;
+                    let claim_embedding = embedding_client
+                        .embed(EmbeddingRequest {
+                            text: llm_claim.claim_text.clone(),
+                            context: None,
+                        })
+                        .await?
+                        .embedding;
 
                     let mut scored_sentences = Vec::new();
                     for (i, sent) in context_sentence_entities.iter().enumerate() {
-                        let sent_embedding = embedding_client.embed(EmbeddingRequest {
-                            text: sent.text.clone(),
-                            context: None,
-                        }).await?.embedding;
+                        let sent_embedding = embedding_client
+                            .embed(EmbeddingRequest {
+                                text: sent.text.clone(),
+                                context: None,
+                            })
+                            .await?
+                            .embedding;
 
-                        let sim = VectorSimilarity::cosine_similarity(&claim_embedding, &sent_embedding);
+                        let sim =
+                            VectorSimilarity::cosine_similarity(&claim_embedding, &sent_embedding);
                         scored_sentences.push((i, sent.clone(), sim));
                     }
 
-                    scored_sentences.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                    scored_sentences
+                        .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
                     candidate_sentences = scored_sentences.into_iter().take(3).collect();
                 }
 
@@ -188,22 +199,29 @@ impl ClaimExtractionQueue {
                 }
 
                 // 3.3 Compute geometric score over candidate sentences and take the best one
-                let claim_embedding = embedding_client.embed(EmbeddingRequest {
-                    text: llm_claim.claim_text.clone(),
-                    context: None,
-                }).await?.embedding;
+                let claim_embedding = embedding_client
+                    .embed(EmbeddingRequest {
+                        text: llm_claim.claim_text.clone(),
+                        context: None,
+                    })
+                    .await?
+                    .embedding;
 
                 let mut best_sentence = None;
                 let mut max_support_score = -1.0;
                 let mut best_diagnostics = None;
 
                 for (sent_idx, sent, _initial_sim) in candidate_sentences {
-                    let sent_embedding = embedding_client.embed(EmbeddingRequest {
-                        text: sent.text.clone(),
-                        context: None,
-                    }).await?.embedding;
+                    let sent_embedding = embedding_client
+                        .embed(EmbeddingRequest {
+                            text: sent.text.clone(),
+                            context: None,
+                        })
+                        .await?
+                        .embedding;
 
-                    let similarity = VectorSimilarity::cosine_similarity(&claim_embedding, &sent_embedding);
+                    let similarity =
+                        VectorSimilarity::cosine_similarity(&claim_embedding, &sent_embedding);
                     let _distance = 1.0 - similarity;
 
                     // overlap = |E_claim ∩ E_evidence| / max(1, |E_claim|)
@@ -221,7 +239,8 @@ impl ClaimExtractionQueue {
                             missing_entities.push(ent.clone());
                         }
                     }
-                    let exact_entity_presence = 1.0 - (missing_entities.len() as f32 / e_claim.len().max(1) as f32);
+                    let exact_entity_presence =
+                        1.0 - (missing_entities.len() as f32 / e_claim.len().max(1) as f32);
 
                     // support = w1 * (1 - distance) + w2 * overlap + w3 * exact_entity_presence
                     // Weights: similarity (0.5), NER overlap (0.3), Literal match (0.2)
@@ -275,11 +294,22 @@ impl ClaimExtractionQueue {
                 );
 
                 // Add diagnostics to metadata
-                claim.metadata.insert("similarity".to_string(), similarity.to_string());
-                claim.metadata.insert("overlap".to_string(), overlap.to_string());
-                claim.metadata.insert("found_entities".to_string(), e_claim.iter().cloned().collect::<Vec<_>>().join(", "));
-                claim.metadata.insert("missing_entities".to_string(), missing_entities.join(", "));
-                claim.metadata.insert("sentence_index".to_string(), best_sent_idx.to_string());
+                claim
+                    .metadata
+                    .insert("similarity".to_string(), similarity.to_string());
+                claim
+                    .metadata
+                    .insert("overlap".to_string(), overlap.to_string());
+                claim.metadata.insert(
+                    "found_entities".to_string(),
+                    e_claim.iter().cloned().collect::<Vec<_>>().join(", "),
+                );
+                claim
+                    .metadata
+                    .insert("missing_entities".to_string(), missing_entities.join(", "));
+                claim
+                    .metadata
+                    .insert("sentence_index".to_string(), best_sent_idx.to_string());
 
                 // Store claim
                 claim_store.store(&claim)?;

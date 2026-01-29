@@ -68,12 +68,12 @@ impl SentenceEntities {
             if c == '.' || c == '!' || c == '?' {
                 let end = i + 1;
                 let raw_sentence = &text[start..end];
-                
+
                 // Calculate absolute offset of the trimmed sentence
                 let trimmed = raw_sentence.trim_start();
                 let trim_offset = raw_sentence.len() - trimmed.len();
                 let final_sentence = trimmed.trim_end();
-                
+
                 if !final_sentence.is_empty() {
                     sentences.push(Self {
                         text: final_sentence.to_string(),
@@ -91,7 +91,7 @@ impl SentenceEntities {
             let trimmed = raw_sentence.trim_start();
             let trim_offset = raw_sentence.len() - trimmed.len();
             let final_sentence = trimmed.trim_end();
-            
+
             if !final_sentence.is_empty() {
                 sentences.push(Self {
                     text: final_sentence.to_string(),
@@ -186,13 +186,7 @@ mod tests {
     fn test_entity_span_validation() {
         let text = "John works at Google in California.";
 
-        let span = EntitySpan::new(
-            "PERSON".to_string(),
-            0,
-            4,
-            0.95,
-            "John".to_string(),
-        );
+        let span = EntitySpan::new("PERSON".to_string(), 0, 4, 0.95, "John".to_string());
 
         assert!(span.validate(text));
     }

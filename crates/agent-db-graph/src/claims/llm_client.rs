@@ -108,7 +108,10 @@ Output format: JSON with this structure:
             format!("\n\nEntities found: {}", entities.join(", "))
         };
 
-        format!("Text:\n\n{}{}\n\nExtract claims with evidence:", text, entity_hint)
+        format!(
+            "Text:\n\n{}{}\n\nExtract claims with evidence:",
+            text, entity_hint
+        )
     }
 }
 
@@ -143,11 +146,7 @@ impl LlmClient for OpenAiClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await?;
-            return Err(anyhow::anyhow!(
-                "OpenAI API error {}: {}",
-                status,
-                body
-            ));
+            return Err(anyhow::anyhow!("OpenAI API error {}: {}", status, body));
         }
 
         let json: serde_json::Value = response.json().await?;
@@ -159,14 +158,10 @@ impl LlmClient for OpenAiClient {
 
         // Parse claims
         let claims_json: serde_json::Value = serde_json::from_str(content)?;
-        let claims: Vec<LlmClaim> = serde_json::from_value(
-            claims_json["claims"].clone()
-        )?;
+        let claims: Vec<LlmClaim> = serde_json::from_value(claims_json["claims"].clone())?;
 
         // Extract token usage
-        let tokens_used = json["usage"]["total_tokens"]
-            .as_u64()
-            .unwrap_or(0);
+        let tokens_used = json["usage"]["total_tokens"].as_u64().unwrap_or(0);
 
         info!(
             "Extracted {} claims, used {} tokens",
@@ -235,11 +230,7 @@ impl LlmClient for AnthropicClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await?;
-            return Err(anyhow::anyhow!(
-                "Anthropic API error {}: {}",
-                status,
-                body
-            ));
+            return Err(anyhow::anyhow!("Anthropic API error {}: {}", status, body));
         }
 
         let json: serde_json::Value = response.json().await?;
@@ -251,9 +242,7 @@ impl LlmClient for AnthropicClient {
 
         // Parse claims (expect JSON in response)
         let claims_json: serde_json::Value = serde_json::from_str(content)?;
-        let claims: Vec<LlmClaim> = serde_json::from_value(
-            claims_json["claims"].clone()
-        )?;
+        let claims: Vec<LlmClaim> = serde_json::from_value(claims_json["claims"].clone())?;
 
         // Extract token usage
         let input_tokens = json["usage"]["input_tokens"].as_u64().unwrap_or(0);
@@ -298,7 +287,10 @@ impl Default for MockClient {
 
 #[async_trait]
 impl LlmClient for MockClient {
-    async fn extract_claims(&self, _request: LlmExtractionRequest) -> Result<LlmExtractionResponse> {
+    async fn extract_claims(
+        &self,
+        _request: LlmExtractionRequest,
+    ) -> Result<LlmExtractionResponse> {
         debug!("Mock client: returning no claims");
         Ok(LlmExtractionResponse {
             claims: vec![],

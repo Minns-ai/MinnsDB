@@ -340,7 +340,7 @@ impl GraphEngine {
                     event.id
                 );
                 return;
-            }
+            },
         };
 
         // Explicitly clone only the Arcs we need for the background task
@@ -357,7 +357,7 @@ impl GraphEngine {
                     return;
                 }
                 text.clone()
-            }
+            },
             _ => {
                 // Check promotion threshold
                 if event.context_size_bytes >= ner_promotion_threshold {
@@ -365,7 +365,7 @@ impl GraphEngine {
                     return;
                 }
                 return;
-            }
+            },
         };
 
         debug!(
@@ -385,19 +385,26 @@ impl GraphEngine {
                 debug!("Waiting for NER features for event {}...", event_id);
                 match queue.extract(event_id, canonical_text.clone()).await {
                     Ok(features) => {
-                        debug!("NER features ready for event {}: {} entities", event_id, features.entity_spans.len());
-                        
+                        debug!(
+                            "NER features ready for event {}: {} entities",
+                            event_id,
+                            features.entity_spans.len()
+                        );
+
                         // Store features if store is available
                         if let Some(ref store) = ner_store {
                             let _ = store.store(&features);
                         }
-                        
+
                         Some(features)
-                    }
+                    },
                     Err(e) => {
-                        warn!("NER extraction failed during claim pipeline for event {}: {}", event_id, e);
+                        warn!(
+                            "NER extraction failed during claim pipeline for event {}: {}",
+                            event_id, e
+                        );
                         None
-                    }
+                    },
                 }
             } else {
                 None
@@ -430,15 +437,18 @@ impl GraphEngine {
                         // We do the integration directly using the cloned inference Arc
                         let mut inference_lock = inference.write().await;
                         let graph = inference_lock.graph_mut();
-                        
+
                         if let Some(node_id) = graph.add_claim_node(&claim) {
-                            debug!("Integrated claim {} into graph as node {}", claim.id, node_id);
+                            debug!(
+                                "Integrated claim {} into graph as node {}",
+                                claim.id, node_id
+                            );
                         }
                     }
-                }
+                },
                 Err(e) => {
                     warn!("Claim extraction failed for event {}: {}", event_id, e);
-                }
+                },
             }
         });
     }
@@ -469,31 +479,36 @@ impl GraphEngine {
     /// Process pending embeddings for claims
     ///
     /// Generates embeddings for all claims that don't have them yet
-    pub async fn process_pending_embeddings(&self, batch_size: usize) -> Result<usize, crate::GraphError> {
+    pub async fn process_pending_embeddings(
+        &self,
+        batch_size: usize,
+    ) -> Result<usize, crate::GraphError> {
         use tracing::info;
 
         let embedding_queue = match &self.embedding_queue {
             Some(q) => q,
             None => {
                 return Err(crate::GraphError::InvalidOperation(
-                    "Embedding queue not initialized".to_string()
+                    "Embedding queue not initialized".to_string(),
                 ));
-            }
+            },
         };
 
         let claim_store = match &self.claim_store {
             Some(s) => s,
             None => {
                 return Err(crate::GraphError::InvalidOperation(
-                    "Claim store not initialized".to_string()
+                    "Claim store not initialized".to_string(),
                 ));
-            }
+            },
         };
 
         let count = embedding_queue
             .process_pending_embeddings(&claim_store, batch_size)
             .await
-            .map_err(|e| crate::GraphError::OperationError(format!("Failed to process embeddings: {}", e)))?;
+            .map_err(|e| {
+                crate::GraphError::OperationError(format!("Failed to process embeddings: {}", e))
+            })?;
 
         info!("Processed {} claims for embedding generation", count);
 
@@ -515,18 +530,18 @@ impl GraphEngine {
             Some(c) => c,
             None => {
                 return Err(crate::GraphError::InvalidOperation(
-                    "Embedding client not initialized".to_string()
+                    "Embedding client not initialized".to_string(),
                 ));
-            }
+            },
         };
 
         let claim_store = match &self.claim_store {
             Some(s) => s,
             None => {
                 return Err(crate::GraphError::InvalidOperation(
-                    "Claim store not initialized".to_string()
+                    "Claim store not initialized".to_string(),
                 ));
-            }
+            },
         };
 
         // Generate embedding for query
@@ -535,27 +550,30 @@ impl GraphEngine {
             context: None,
         };
 
-        let response = embedding_client
-            .embed(request)
-            .await
-            .map_err(|e| crate::GraphError::OperationError(format!("Failed to generate query embedding: {}", e)))?;
+        let response = embedding_client.embed(request).await.map_err(|e| {
+            crate::GraphError::OperationError(format!("Failed to generate query embedding: {}", e))
+        })?;
 
-        debug!("Generated query embedding ({} dimensions)", response.embedding.len());
+        debug!(
+            "Generated query embedding ({} dimensions)",
+            response.embedding.len()
+        );
 
         // Search for similar claims
         let similar_ids = claim_store
             .find_similar(&response.embedding, top_k, min_similarity)
-            .map_err(|e| crate::GraphError::OperationError(format!("Failed to search claims: {}", e)))?;
+            .map_err(|e| {
+                crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
+            })?;
 
         debug!("Found {} similar claims", similar_ids.len());
 
         // Retrieve full claims
         let mut results = Vec::new();
         for (claim_id, similarity) in similar_ids {
-            if let Some(claim) = claim_store
-                .get(claim_id)
-                .map_err(|e| crate::GraphError::OperationError(format!("Failed to retrieve claim: {}", e)))?
-            {
+            if let Some(claim) = claim_store.get(claim_id).map_err(|e| {
+                crate::GraphError::OperationError(format!("Failed to retrieve claim: {}", e))
+            })? {
                 results.push((claim, similarity));
             }
         }
@@ -563,4 +581,3 @@ impl GraphEngine {
         Ok(results)
     }
 }
-

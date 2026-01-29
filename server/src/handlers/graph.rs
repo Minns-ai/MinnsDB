@@ -6,7 +6,10 @@ use crate::models::{
     StatsResponse,
 };
 use crate::state::AppState;
-use axum::{extract::{Query, State}, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use tracing::info;
 
 // GET /api/graph - Get graph structure

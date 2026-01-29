@@ -73,7 +73,7 @@ impl CentralityMeasures {
                 for path in &paths {
                     for &node_id in path {
                         if node_id != source && node_id != target {
-                            *centrality.get_mut(&node_id).unwrap() += 1.0 / num_paths;
+                            *centrality.entry(node_id).or_insert(0.0) += 1.0 / num_paths;
                         }
                     }
                 }
@@ -313,7 +313,7 @@ impl CentralityMeasures {
                     queue.push_back(neighbor);
                 } else if distances[&neighbor] == current_dist + 1 {
                     // Same distance, another shortest path
-                    predecessors.get_mut(&neighbor).unwrap().push(current);
+                    predecessors.entry(neighbor).or_insert_with(Vec::new).push(current);
                 }
             }
         }

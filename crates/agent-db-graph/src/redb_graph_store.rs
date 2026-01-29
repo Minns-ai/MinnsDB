@@ -37,7 +37,7 @@ enum KeyType {
     AdjacencyReverse = 0x03, // Reverse edges (backlinks)
     EdgeMeta = 0x04,         // Edge metadata
     #[allow(dead_code)]
-    BucketCatalog = 0x05,    // Partition statistics
+    BucketCatalog = 0x05, // Partition statistics
 }
 
 /// Build hierarchical key: [TypeByte][GoalBucket(8)][NodeID(8)]

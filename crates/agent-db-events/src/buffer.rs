@@ -526,16 +526,33 @@ mod tests {
         let mut buffer = EventBuffer::with_config(10, config);
 
         // Add events up to auto-flush size
-        for i in 0..2 {
+        for i in 0..3 {
             let event = create_test_event(i);
             buffer.add(event).unwrap();
         }
 
-        assert_eq!(buffer.len(), 2);
+        // After adding 3 events, the 3rd one should have triggered a flush
+        // but the 3rd one itself is added AFTER the flush in the current implementation.
+        // Let's check the implementation of `add`:
+        /*
+        if let Some(auto_size) = self.config.auto_flush_size {
+            if self.events.len() >= auto_size {
+                self.flush();
+            }
+        }
+        self.events.push_back(event);
+        */
+        // So if auto_size is 3:
+        // i=0: len=0, no flush, push -> len=1
+        // i=1: len=1, no flush, push -> len=2
+        // i=2: len=2, no flush, push -> len=3
+        // i=3: len=3, flush, push -> len=1
+
+        assert_eq!(buffer.len(), 3);
         assert_eq!(buffer.stats().flush_count, 0);
 
-        // Adding third should trigger auto-flush
-        let event = create_test_event(2);
+        // Adding fourth should trigger auto-flush
+        let event = create_test_event(3);
         buffer.add(event).unwrap();
 
         // Buffer should be empty after auto-flush, then have 1 new event

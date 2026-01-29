@@ -29,7 +29,10 @@ impl EmbeddingQueue {
         let (tx, rx) = mpsc::unbounded_channel::<EmbeddingJob>();
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
-        info!("Starting embedding generation queue with {} workers", workers);
+        info!(
+            "Starting embedding generation queue with {} workers",
+            workers
+        );
 
         // Spawn worker pool
         for worker_id in 0..workers {
@@ -49,24 +52,24 @@ impl EmbeddingQueue {
 
                     match job {
                         Some(job) => {
-                            let result = Self::process_job(
-                                job.claim,
-                                &*embedding_client,
-                                &*claim_store,
-                            )
-                            .await;
+                            let result =
+                                Self::process_job(job.claim, &*embedding_client, &*claim_store)
+                                    .await;
 
                             // Send result if channel exists
                             if let Some(tx) = job.result_tx {
                                 let _ = tx.send(result);
                             } else if let Err(e) = &result {
-                                error!("Worker {} failed to process embedding job: {}", worker_id, e);
+                                error!(
+                                    "Worker {} failed to process embedding job: {}",
+                                    worker_id, e
+                                );
                             }
-                        }
+                        },
                         None => {
                             info!("Embedding worker {} channel closed, stopping", worker_id);
                             break;
-                        }
+                        },
                     }
                 }
 
@@ -132,7 +135,11 @@ impl EmbeddingQueue {
     }
 
     /// Process all claims that need embeddings
-    pub async fn process_pending_embeddings(&self, claim_store: &ClaimStore, batch_size: usize) -> Result<usize> {
+    pub async fn process_pending_embeddings(
+        &self,
+        claim_store: &ClaimStore,
+        batch_size: usize,
+    ) -> Result<usize> {
         debug!("Processing pending embeddings (batch_size={})", batch_size);
 
         let claims = claim_store.get_claims_needing_embeddings(batch_size)?;
@@ -157,6 +164,7 @@ impl EmbeddingQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ClaimId;
     use crate::claims::embeddings::MockEmbeddingClient;
     use crate::claims::types::EvidenceSpan;
     use tempfile::tempdir;

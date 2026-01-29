@@ -4,7 +4,10 @@ use crate::errors::ApiError;
 use crate::models::{PaginationQuery, ProcessEventRequest, ProcessEventResponse};
 use crate::state::AppState;
 use agent_db_events::{core::EventType, Event};
-use axum::{extract::{Query, State}, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use tracing::info;
 
 fn event_type_name(event_type: &EventType) -> &'static str {

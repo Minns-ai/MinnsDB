@@ -71,6 +71,8 @@ fn create_test_event(
         causality_chain: Vec::new(),
         context: context.clone(),
         metadata: HashMap::new(),
+        context_size_bytes: 0,
+        segment_pointer: None,
     }
 }
 
@@ -97,6 +99,8 @@ fn create_cognitive_event(
         causality_chain: Vec::new(),
         context: context.clone(),
         metadata: HashMap::new(),
+        context_size_bytes: 0,
+        segment_pointer: None,
     }
 }
 

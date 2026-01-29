@@ -2,7 +2,7 @@
 
 use super::types::*;
 use anyhow::Result;
-use redb::{Database, TableDefinition, ReadableTableMetadata, ReadableTable};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 use tracing::{debug, info};
 
@@ -100,7 +100,10 @@ impl ClaimStore {
                 claim.support_count += 1;
                 let serialized = bincode::serialize(&claim)?;
                 table.insert(claim_id, serialized.as_slice())?;
-                debug!("Added support to claim {} (now: {})", claim_id, claim.support_count);
+                debug!(
+                    "Added support to claim {} (now: {})",
+                    claim_id, claim.support_count
+                );
             }
         }
         write_txn.commit()?;
@@ -199,7 +202,12 @@ impl ClaimStore {
     /// Find similar claims using vector similarity search
     ///
     /// Returns (claim_id, similarity_score) pairs sorted by descending similarity
-    pub fn find_similar(&self, query_embedding: &[f32], top_k: usize, min_similarity: f32) -> Result<Vec<(ClaimId, f32)>> {
+    pub fn find_similar(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        min_similarity: f32,
+    ) -> Result<Vec<(ClaimId, f32)>> {
         use crate::claims::embeddings::VectorSimilarity;
 
         let read_txn = self.db.begin_read()?;
@@ -217,7 +225,8 @@ impl ClaimStore {
 
             // Only search active claims with embeddings
             if claim.status == ClaimStatus::Active && !claim.embedding.is_empty() {
-                let similarity = VectorSimilarity::cosine_similarity(query_embedding, &claim.embedding);
+                let similarity =
+                    VectorSimilarity::cosine_similarity(query_embedding, &claim.embedding);
 
                 if similarity >= min_similarity {
                     similarities.push((id, similarity));
@@ -231,7 +240,12 @@ impl ClaimStore {
         // Take top k
         similarities.truncate(top_k);
 
-        debug!("Found {} similar claims (top_k={}, min_similarity={})", similarities.len(), top_k, min_similarity);
+        debug!(
+            "Found {} similar claims (top_k={}, min_similarity={})",
+            similarities.len(),
+            top_k,
+            min_similarity
+        );
 
         Ok(similarities)
     }
@@ -252,7 +266,11 @@ impl ClaimStore {
                 claim.embedding = embedding;
                 let serialized = bincode::serialize(&claim)?;
                 table.insert(claim_id, serialized.as_slice())?;
-                debug!("Updated embedding for claim {} ({} dimensions)", claim_id, claim.embedding.len());
+                debug!(
+                    "Updated embedding for claim {} ({} dimensions)",
+                    claim_id,
+                    claim.embedding.len()
+                );
             }
         }
         write_txn.commit()?;

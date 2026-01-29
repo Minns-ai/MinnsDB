@@ -62,7 +62,10 @@ pub async fn process_embeddings(
     State(state): State<AppState>,
     Query(params): Query<PaginationQuery>,
 ) -> Result<Json<EmbeddingProcessResponse>, ApiError> {
-    info!("Processing pending embeddings (batch_size={})", params.limit);
+    info!(
+        "Processing pending embeddings (batch_size={})",
+        params.limit
+    );
 
     let count = state
         .engine

@@ -62,6 +62,8 @@ fn create_cognitive_event(agent_id: AgentId, timestamp: u64, reasoning: Vec<Stri
         causality_chain: Vec::new(),
         context: create_test_context(),
         metadata: HashMap::new(),
+        context_size_bytes: 0,
+        segment_pointer: None,
     }
 }
 
@@ -90,6 +92,8 @@ fn create_action_event(agent_id: AgentId, timestamp: u64, success: bool) -> Even
         causality_chain: Vec::new(),
         context: create_test_context(),
         metadata: HashMap::new(),
+        context_size_bytes: 0,
+        segment_pointer: None,
     }
 }
 

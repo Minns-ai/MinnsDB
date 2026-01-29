@@ -6,9 +6,7 @@ use crate::state::AppState;
 use axum::{extract::State, Json};
 
 // GET /api/health - Health check endpoint
-pub async fn health_check(
-    State(state): State<AppState>,
-) -> Result<Json<HealthResponse>, ApiError> {
+pub async fn health_check(State(state): State<AppState>) -> Result<Json<HealthResponse>, ApiError> {
     let health = state.engine.get_health_metrics().await;
 
     Ok(Json(HealthResponse {

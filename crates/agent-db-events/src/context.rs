@@ -522,7 +522,10 @@ mod tests {
     fn test_context_matcher() {
         let mut matcher = ContextMatcher::new();
         let context1 = create_test_context();
-        let context2 = create_test_context();
+        let mut context2 = create_test_context();
+        // Modify context2 slightly to ensure it has a different fingerprint
+        context2.environment.variables.insert("new_var".to_string(), json!(1));
+        context2.fingerprint = context2.compute_fingerprint();
 
         matcher.add_context(context1.clone());
         matcher.add_context(context2);

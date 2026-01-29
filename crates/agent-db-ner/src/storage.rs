@@ -3,7 +3,7 @@
 use agent_db_core::types::EventId;
 use agent_db_events::ExtractedFeatures;
 use anyhow::{anyhow, Result};
-use redb::{Database, TableDefinition, ReadableTableMetadata};
+use redb::{Database, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -63,7 +63,10 @@ impl NerFeatureStore {
         }
         write_txn.commit()?;
 
-        debug!("Successfully stored NER features for event {}", features.event_id);
+        debug!(
+            "Successfully stored NER features for event {}",
+            features.event_id
+        );
 
         Ok(())
     }
@@ -87,12 +90,15 @@ impl NerFeatureStore {
                         // Future: Handle migrations here if needed
                     }
                     versioned.features
-                }
+                },
                 Err(_) => {
                     // Try legacy format without version wrapper
-                    warn!("Loading legacy unversioned NER features for event {}", event_id);
+                    warn!(
+                        "Loading legacy unversioned NER features for event {}",
+                        event_id
+                    );
                     bincode::deserialize::<ExtractedFeatures>(bytes)?
-                }
+                },
             };
 
             debug!(
@@ -157,7 +163,13 @@ mod tests {
             "John".to_string(),
         )];
 
-        ExtractedFeatures::new(event_id, spans, "test-model".to_string(), "John works here", None)
+        ExtractedFeatures::new(
+            event_id,
+            spans,
+            "test-model".to_string(),
+            "John works here",
+            None,
+        )
     }
 
     #[test]
