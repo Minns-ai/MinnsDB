@@ -363,36 +363,89 @@ impl EventContext {
         context
     }
 
-    /// Compute context fingerprint for fast matching
-    /// Based on semantic context only (goals, environment) - NOT runtime stats
+    /// Compute deterministic context fingerprint for fast matching
+    ///
+    /// This fingerprint is **stable across processes and languages**.
+    /// Based on semantic context only (goals, environment) - NOT runtime stats.
+    ///
+    /// # Algorithm (for cross-language implementations)
+    ///
+    /// 1. **Canonicalization**: Sort all maps by key, order all arrays deterministically
+    /// 2. **Serialization**: Convert to bytes in stable order:
+    ///    - Environment variables: sorted by key, JSON canonical form
+    ///    - Goals: sorted by id, then serialize id + priority (f32 as bits)
+    ///    - External resources: sorted by name, serialize name + availability flag
+    /// 3. **Hashing**: BLAKE3 hash of concatenated bytes
+    /// 4. **Output**: First 8 bytes as u64 (little-endian)
+    ///
+    /// # Example (pseudocode for other languages)
+    /// ```text
+    /// context_bytes = []
+    ///
+    /// // Environment variables (sorted)
+    /// for key in sorted(environment.variables.keys()):
+    ///     context_bytes += key.as_bytes()
+    ///     context_bytes += canonical_json(environment.variables[key]).as_bytes()
+    ///
+    /// // Goals (sorted by id)
+    /// for goal in sorted(active_goals, key=lambda g: g.id):
+    ///     context_bytes += goal.id.to_bytes(8, 'little')
+    ///     context_bytes += float_to_bits(goal.priority).to_bytes(4, 'little')
+    ///
+    /// // External resources (sorted by name)
+    /// for name in sorted(resources.external.keys()):
+    ///     context_bytes += name.as_bytes()
+    ///     context_bytes += [1 if resources.external[name].available else 0]
+    ///
+    /// // Hash with BLAKE3
+    /// hash = blake3(context_bytes)
+    /// fingerprint = u64_from_le_bytes(hash[0..8])
+    /// ```
     pub fn compute_fingerprint(&self) -> ContextHash {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        let mut canonical_bytes = Vec::new();
 
-        let mut hasher = DefaultHasher::new();
-
-        // Hash environment variables (keys only - values are often dynamic)
-        for (key, _value) in &self.environment.variables {
-            key.hash(&mut hasher);
-            // Note: Could hash values too if needed for finer-grained matching
+        // 1. Environment variables (sorted by key for determinism)
+        let mut env_keys: Vec<&String> = self.environment.variables.keys().collect();
+        env_keys.sort();
+        for key in env_keys {
+            canonical_bytes.extend_from_slice(key.as_bytes());
+            // Use canonical JSON serialization for values
+            if let Some(value) = self.environment.variables.get(key) {
+                // Serialize value to canonical JSON (sorted keys, no whitespace)
+                let json_str = serde_json::to_string(value).unwrap_or_default();
+                canonical_bytes.extend_from_slice(json_str.as_bytes());
+            }
         }
 
-        // Hash active goals - this is the primary semantic context
-        for goal in &self.active_goals {
-            goal.id.hash(&mut hasher);
-            goal.priority.to_bits().hash(&mut hasher);
+        // 2. Active goals (sorted by ID for determinism)
+        let mut sorted_goals = self.active_goals.clone();
+        sorted_goals.sort_by_key(|g| g.id);
+        for goal in sorted_goals {
+            canonical_bytes.extend_from_slice(&goal.id.to_le_bytes());
+            // Use bits representation for stable f32 hashing
+            canonical_bytes.extend_from_slice(&goal.priority.to_bits().to_le_bytes());
         }
 
-        // Hash external resources (non-computational) for context matching
-        for (resource_name, availability) in &self.resources.external {
-            resource_name.hash(&mut hasher);
-            availability.available.hash(&mut hasher);
+        // 3. External resources (sorted by name for determinism)
+        let mut resource_names: Vec<&String> = self.resources.external.keys().collect();
+        resource_names.sort();
+        for name in resource_names {
+            canonical_bytes.extend_from_slice(name.as_bytes());
+            if let Some(availability) = self.resources.external.get(name) {
+                // Only include availability flag (primary semantic indicator)
+                canonical_bytes.push(if availability.available { 1 } else { 0 });
+            }
         }
 
-        // NOTE: Computational resources (CPU/memory) are NOT included
+        // NOTE: Computational resources (CPU/memory/storage/network) are NOT included
         // They are runtime stats, not semantic context for pattern matching
 
-        hasher.finish()
+        // 4. Hash with BLAKE3 (deterministic, fast, cross-platform)
+        let hash = blake3::hash(&canonical_bytes);
+
+        // 5. Take first 8 bytes as u64 (little-endian)
+        let bytes: [u8; 8] = hash.as_bytes()[0..8].try_into().unwrap();
+        u64::from_le_bytes(bytes)
     }
 
     /// Calculate similarity to another context (0.0 to 1.0)

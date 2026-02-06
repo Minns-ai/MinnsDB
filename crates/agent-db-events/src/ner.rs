@@ -2,8 +2,6 @@
 
 use agent_db_core::types::EventId;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Extracted NER features for an event
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,12 +104,18 @@ impl SentenceEntities {
 }
 
 impl ExtractedFeatures {
-    /// Compute fingerprint for deduplication and idempotency
+    /// Compute deterministic fingerprint for deduplication and idempotency
+    ///
+    /// Uses BLAKE3 for stable, cross-platform hashing.
+    /// Same text + model will always produce the same fingerprint.
     pub fn compute_fingerprint(text: &str, model: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        text.hash(&mut hasher);
-        model.hash(&mut hasher);
-        hasher.finish()
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(model.as_bytes());
+
+        let hash = blake3::hash(&bytes);
+        let hash_bytes: [u8; 8] = hash.as_bytes()[0..8].try_into().unwrap();
+        u64::from_le_bytes(hash_bytes)
     }
 
     /// Create new ExtractedFeatures with computed fingerprint

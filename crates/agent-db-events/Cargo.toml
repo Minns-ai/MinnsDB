@@ -14,6 +14,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 crossbeam = { workspace = true }
 indexmap = { workspace = true }
+blake3 = "1.5"
 
 [dev-dependencies]
 tokio-test = "0.4"
