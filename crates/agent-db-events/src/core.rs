@@ -2,16 +2,22 @@
 
 use agent_db_core::types::*;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
 use std::time::Duration;
 
 /// Complete event structure with all metadata
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
-    /// Unique event identifier
+    /// Unique event identifier (auto-generated if not provided)
+    #[serde(default = "generate_event_id")]
+    #[serde_as(as = "DisplayFromStr")]
     pub id: EventId,
 
-    /// High-precision timestamp
+    /// High-precision timestamp (auto-generated if not provided)
+    #[serde(default = "current_timestamp")]
+    #[serde_as(as = "DisplayFromStr")]
     pub timestamp: Timestamp,
 
     /// Agent that generated this event
@@ -26,13 +32,17 @@ pub struct Event {
     /// Type and payload of the event
     pub event_type: EventType,
 
-    /// Parent events in causality chain
+    /// Parent events in causality chain (optional - system may auto-populate)
+    #[serde(default)]
+    #[serde_as(as = "Vec<DisplayFromStr>")]
     pub causality_chain: Vec<EventId>,
 
-    /// Environmental context
+    /// Environmental context (optional - uses minimal defaults if not provided)
+    #[serde(default)]
     pub context: EventContext,
 
-    /// Additional metadata
+    /// Additional metadata (optional - system may auto-populate)
+    #[serde(default)]
     pub metadata: HashMap<String, MetadataValue>,
 
     /// Size of context in bytes (for semantic memory promotion threshold)
@@ -354,31 +364,33 @@ impl EventContext {
     }
 
     /// Compute context fingerprint for fast matching
+    /// Based on semantic context only (goals, environment) - NOT runtime stats
     pub fn compute_fingerprint(&self) -> ContextHash {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
 
-        // Hash environment variables (simplified)
+        // Hash environment variables (keys only - values are often dynamic)
         for (key, _value) in &self.environment.variables {
             key.hash(&mut hasher);
-            // Note: Would need to implement Hash for serde_json::Value or convert to string
+            // Note: Could hash values too if needed for finer-grained matching
         }
 
-        // Hash active goals
+        // Hash active goals - this is the primary semantic context
         for goal in &self.active_goals {
             goal.id.hash(&mut hasher);
             goal.priority.to_bits().hash(&mut hasher);
         }
 
-        // Hash resource state
-        self.resources
-            .computational
-            .cpu_percent
-            .to_bits()
-            .hash(&mut hasher);
-        self.resources.computational.memory_bytes.hash(&mut hasher);
+        // Hash external resources (non-computational) for context matching
+        for (resource_name, availability) in &self.resources.external {
+            resource_name.hash(&mut hasher);
+            availability.available.hash(&mut hasher);
+        }
+
+        // NOTE: Computational resources (CPU/memory) are NOT included
+        // They are runtime stats, not semantic context for pattern matching
 
         hasher.finish()
     }
@@ -771,6 +783,62 @@ impl ContextSimilarityWeights {
             self.temporal /= sum;
             self.spatial /= sum;
             self.embeddings /= sum;
+        }
+    }
+}
+
+// ============================================================================
+// Default Implementations for Simple Integration
+// ============================================================================
+
+impl Default for EventContext {
+    fn default() -> Self {
+        Self {
+            environment: EnvironmentState::default(),
+            active_goals: Vec::new(),
+            resources: ResourceState::default(),
+            fingerprint: 0, // Will be auto-computed when needed
+            embeddings: None,
+        }
+    }
+}
+
+impl Default for EnvironmentState {
+    fn default() -> Self {
+        Self {
+            variables: HashMap::new(),
+            spatial: None,
+            temporal: TemporalContext::default(),
+        }
+    }
+}
+
+impl Default for TemporalContext {
+    fn default() -> Self {
+        Self {
+            time_of_day: None,
+            deadlines: Vec::new(),
+            patterns: Vec::new(),
+        }
+    }
+}
+
+impl Default for ResourceState {
+    fn default() -> Self {
+        Self {
+            computational: ComputationalResources::default(),
+            external: HashMap::new(),
+        }
+    }
+}
+
+impl Default for ComputationalResources {
+    fn default() -> Self {
+        Self {
+            cpu_percent: 0.0,      // Unknown/not tracked
+            memory_bytes: 0,       // Unknown/not tracked
+            storage_bytes: 0,      // Unknown/not tracked
+            network_bandwidth: 0,  // Unknown/not tracked
         }
     }
 }

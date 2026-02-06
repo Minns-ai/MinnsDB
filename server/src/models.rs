@@ -1,9 +1,10 @@
 // Request and Response Models for EventGraphDB REST API
 
-use agent_db_core::types::{AgentId, AgentType, ContextHash, SessionId};
+use agent_db_core::types::{AgentId, AgentType, ContextHash, EventId, SessionId};
 use agent_db_events::core::EventContext;
 use agent_db_events::Event;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 
 // ============================================================================
 // Request Types
@@ -13,6 +14,28 @@ use serde::{Deserialize, Serialize};
 pub struct ProcessEventRequest {
     pub event: Event,
     /// Enable semantic memory processing (NER + claim extraction + embeddings)
+    #[serde(default)]
+    pub enable_semantic: bool,
+}
+
+/// Simplified event request for easy integration
+/// Only requires the absolute minimum fields
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SimpleEventRequest {
+    /// Agent identifier
+    pub agent_id: AgentId,
+    /// Agent type (e.g., "chatbot", "assistant")
+    pub agent_type: AgentType,
+    /// Session identifier
+    pub session_id: SessionId,
+    /// Action name or event type
+    pub action: String,
+    /// Event data/payload (can be any JSON)
+    pub data: serde_json::Value,
+    /// Optional: outcome status (defaults to Success)
+    #[serde(default)]
+    pub success: Option<bool>,
+    /// Optional: enable semantic processing
     #[serde(default)]
     pub enable_semantic: bool,
 }
@@ -93,11 +116,13 @@ pub struct ClaimSearchRequest {
     pub min_similarity: f32,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize)]
 pub struct ClaimListQuery {
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
     pub event_id: Option<u128>,
 }
 
@@ -105,14 +130,18 @@ pub struct ClaimListQuery {
 // Response Types
 // ============================================================================
 
+#[serde_as]
 #[derive(Debug, Serialize)]
 pub struct ProcessEventResponse {
     pub success: bool,
+    #[serde_as(as = "DisplayFromStr")]
+    pub event_id: EventId,
     pub nodes_created: usize,
     pub patterns_detected: usize,
     pub processing_time_ms: u64,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize)]
 pub struct MemoryResponse {
     pub id: u64,
@@ -121,7 +150,9 @@ pub struct MemoryResponse {
     pub strength: f32,
     pub relevance_score: f32,
     pub access_count: u32,
+    #[serde_as(as = "DisplayFromStr")]
     pub formed_at: u64,
+    #[serde_as(as = "DisplayFromStr")]
     pub last_accessed: u64,
     pub context_hash: ContextHash,
     pub context: EventContext,
@@ -212,11 +243,13 @@ pub struct GraphResponse {
     pub edges: Vec<GraphEdgeResponse>,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize)]
 pub struct GraphNodeResponse {
     pub id: u64,
     pub label: String,
     pub node_type: String,
+    #[serde_as(as = "DisplayFromStr")]
     pub created_at: u64,
     pub properties: serde_json::Value,
 }
@@ -267,6 +300,7 @@ pub struct LearningMetricsResponse {
     pub average_edge_weight: f32,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize)]
 pub struct IndexStatsResponse {
     pub insert_count: u64,
@@ -274,6 +308,7 @@ pub struct IndexStatsResponse {
     pub range_query_count: u64,
     pub hit_count: u64,
     pub miss_count: u64,
+    #[serde_as(as = "DisplayFromStr")]
     pub last_accessed: u64,
 }
 
@@ -303,17 +338,21 @@ pub struct CentralityScoresResponse {
     pub combined: f32,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize)]
 pub struct ClaimResponse {
     pub claim_id: u64,
     pub claim_text: String,
     pub confidence: f32,
+    #[serde_as(as = "DisplayFromStr")]
     pub source_event_id: u128,
     pub similarity: Option<f32>,
     pub evidence_spans: Vec<EvidenceSpanResponse>,
     pub support_count: u32,
     pub status: String,
+    #[serde_as(as = "DisplayFromStr")]
     pub created_at: u64,
+    #[serde_as(as = "DisplayFromStr")]
     pub last_accessed: u64,
 }
 

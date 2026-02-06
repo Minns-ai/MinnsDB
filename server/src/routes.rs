@@ -20,6 +20,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/events",
             post(handlers::process_event).get(handlers::get_events),
         )
+        .route("/api/events/simple", post(handlers::process_simple_event))
         .route("/api/episodes", get(handlers::get_episodes))
         // Memories
         .route(

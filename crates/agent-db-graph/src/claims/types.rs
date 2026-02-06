@@ -3,6 +3,7 @@
 use agent_db_core::types::EventId;
 use agent_db_events::ExtractedFeatures;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 
@@ -25,6 +26,7 @@ pub enum ClaimStatus {
 }
 
 /// A derived claim extracted from context
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivedClaim {
     /// Unique claim ID
@@ -43,6 +45,7 @@ pub struct DerivedClaim {
     pub embedding: Vec<f32>,
 
     /// Source event this was derived from
+    #[serde_as(as = "DisplayFromStr")]
     pub source_event_id: EventId,
 
     /// Episode ID if part of an episode
