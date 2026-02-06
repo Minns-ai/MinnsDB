@@ -156,7 +156,7 @@ pub enum CognitiveType {
 }
 
 /// Environmental context at the time of event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventContext {
     /// Environment state snapshot
     pub environment: EnvironmentState,
@@ -182,7 +182,7 @@ fn default_fingerprint() -> ContextHash {
 }
 
 /// Environment state variables
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnvironmentState {
     /// Key-value environment variables
     pub variables: HashMap<String, serde_json::Value>,
@@ -206,7 +206,7 @@ pub struct Goal {
 }
 
 /// Resource availability state
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResourceState {
     /// Available computational resources
     pub computational: ComputationalResources,
@@ -231,7 +231,7 @@ pub struct BoundingBox {
 }
 
 /// Temporal context information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TemporalContext {
     /// Time of day effects
     pub time_of_day: Option<TimeOfDay>,
@@ -662,10 +662,8 @@ impl EventContext {
             0.5
         } else {
             // Simple: compare count and urgency
-            let count_sim = 1.0
-                - ((temp1.deadlines.len() as f32 - other.deadlines.len() as f32).abs() / 10.0)
-                    .min(1.0);
-            count_sim
+            1.0 - ((temp1.deadlines.len() as f32 - other.deadlines.len() as f32).abs() / 10.0)
+                .min(1.0)
         };
 
         // Time-of-day similarity
@@ -843,47 +841,6 @@ impl ContextSimilarityWeights {
 // ============================================================================
 // Default Implementations for Simple Integration
 // ============================================================================
-
-impl Default for EventContext {
-    fn default() -> Self {
-        Self {
-            environment: EnvironmentState::default(),
-            active_goals: Vec::new(),
-            resources: ResourceState::default(),
-            fingerprint: 0, // Will be auto-computed when needed
-            embeddings: None,
-        }
-    }
-}
-
-impl Default for EnvironmentState {
-    fn default() -> Self {
-        Self {
-            variables: HashMap::new(),
-            spatial: None,
-            temporal: TemporalContext::default(),
-        }
-    }
-}
-
-impl Default for TemporalContext {
-    fn default() -> Self {
-        Self {
-            time_of_day: None,
-            deadlines: Vec::new(),
-            patterns: Vec::new(),
-        }
-    }
-}
-
-impl Default for ResourceState {
-    fn default() -> Self {
-        Self {
-            computational: ComputationalResources::default(),
-            external: HashMap::new(),
-        }
-    }
-}
 
 impl Default for ComputationalResources {
     fn default() -> Self {

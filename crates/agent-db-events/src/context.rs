@@ -395,7 +395,7 @@ impl ContextClassification {
         let mut score: f32 = 0.0;
 
         // High CPU usage
-        if features.resource_features.len() > 0 && features.resource_features[0] > 0.8 {
+        if !features.resource_features.is_empty() && features.resource_features[0] > 0.8 {
             score += 0.4;
         }
 
@@ -430,7 +430,7 @@ impl ContextClassification {
         let mut score: f32 = 0.0;
 
         // Very high resource usage
-        if features.resource_features.len() > 0 && features.resource_features[0] > 0.95 {
+        if !features.resource_features.is_empty() && features.resource_features[0] > 0.95 {
             score += 0.5;
         }
 

@@ -347,7 +347,7 @@ impl RingEventBuffer {
         self.read_pos = (self.read_pos + 1) % self.capacity;
         self.count -= 1;
 
-        if let Some(_) = &event {
+        if event.is_some() {
             self.stats.total_flushed += 1;
         }
 
