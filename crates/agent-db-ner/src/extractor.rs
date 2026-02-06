@@ -53,30 +53,31 @@ fn split_sentences_helper(text: &str) -> Vec<(String, usize)> {
 
     let mut chars = text.char_indices().peekable();
 
-    while let Some((byte_idx, c)) = chars.next() {
+    for (byte_idx, c) in chars {
         if c == '.' || c == '!' || c == '?' {
             // Check if this is likely a sentence boundary
             if c == '.' && !is_likely_sentence_end(text, byte_idx) {
                 continue;
             }
-
+    
             // Include the punctuation in the sentence
             let end_byte = byte_idx + c.len_utf8();
-
+    
             // Extract and trim the sentence
             if let Some(raw_sentence) = text.get(current_start..end_byte) {
                 let trimmed = raw_sentence.trim_start();
                 let start_trim_bytes = raw_sentence.len() - trimmed.len();
                 let final_sentence = trimmed.trim_end();
-
+    
                 if !final_sentence.is_empty() {
                     sentences.push((final_sentence.to_string(), current_start + start_trim_bytes));
                 }
             }
-
+    
             current_start = end_byte;
         }
     }
+    
 
     // Add remaining text if any
     if current_start < text.len() {
