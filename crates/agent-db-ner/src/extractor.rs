@@ -51,7 +51,7 @@ fn split_sentences_helper(text: &str) -> Vec<(String, usize)> {
     let mut sentences = Vec::new();
     let mut current_start = 0;
 
-    let mut chars = text.char_indices().peekable();
+    let chars = text.char_indices();
 
     for (byte_idx, c) in chars {
         if c == '.' || c == '!' || c == '?' {
