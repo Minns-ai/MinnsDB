@@ -146,14 +146,12 @@ impl LouvainAlgorithm {
 
         // Try moving each node to neighboring communities
         for &node_id in &nodes {
-            let current_community = *node_communities
-                .get(&node_id)
-                .ok_or_else(|| {
-                    crate::GraphError::NodeNotFound(format!(
-                        "Node {} not found in community map",
-                        node_id
-                    ))
-                })?;
+            let current_community = *node_communities.get(&node_id).ok_or_else(|| {
+                crate::GraphError::NodeNotFound(format!(
+                    "Node {} not found in community map",
+                    node_id
+                ))
+            })?;
 
             // Get neighboring communities
             let neighbor_communities =

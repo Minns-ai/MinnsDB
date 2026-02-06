@@ -835,10 +835,10 @@ impl Default for ResourceState {
 impl Default for ComputationalResources {
     fn default() -> Self {
         Self {
-            cpu_percent: 0.0,      // Unknown/not tracked
-            memory_bytes: 0,       // Unknown/not tracked
-            storage_bytes: 0,      // Unknown/not tracked
-            network_bandwidth: 0,  // Unknown/not tracked
+            cpu_percent: 0.0,     // Unknown/not tracked
+            memory_bytes: 0,      // Unknown/not tracked
+            storage_bytes: 0,     // Unknown/not tracked
+            network_bandwidth: 0, // Unknown/not tracked
         }
     }
 }

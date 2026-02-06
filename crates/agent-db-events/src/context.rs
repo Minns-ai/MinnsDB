@@ -524,7 +524,10 @@ mod tests {
         let context1 = create_test_context();
         let mut context2 = create_test_context();
         // Modify context2 slightly to ensure it has a different fingerprint
-        context2.environment.variables.insert("new_var".to_string(), json!(1));
+        context2
+            .environment
+            .variables
+            .insert("new_var".to_string(), json!(1));
         context2.fingerprint = context2.compute_fingerprint();
 
         matcher.add_context(context1.clone());

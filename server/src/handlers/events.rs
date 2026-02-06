@@ -1,9 +1,14 @@
 // Event processing handlers
 
 use crate::errors::ApiError;
-use crate::models::{PaginationQuery, ProcessEventRequest, ProcessEventResponse, SimpleEventRequest};
+use crate::models::{
+    PaginationQuery, ProcessEventRequest, ProcessEventResponse, SimpleEventRequest,
+};
 use crate::state::AppState;
-use agent_db_events::{core::{ActionOutcome, EventType}, Event};
+use agent_db_events::{
+    core::{ActionOutcome, EventType},
+    Event,
+};
 use axum::{
     extract::{Query, State},
     Json,
@@ -82,7 +87,7 @@ pub async fn process_simple_event(
 
     // Convert simple request to full Event with defaults
     let event = Event {
-        id: Default::default(), // Will be auto-generated
+        id: Default::default(),        // Will be auto-generated
         timestamp: Default::default(), // Will be auto-generated
         agent_id: payload.agent_id,
         agent_type: payload.agent_type,

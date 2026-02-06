@@ -164,9 +164,9 @@ impl EmbeddingQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ClaimId;
     use crate::claims::embeddings::MockEmbeddingClient;
     use crate::claims::types::EvidenceSpan;
+    use crate::ClaimId;
     use tempfile::tempdir;
 
     fn create_test_claim(id: ClaimId, text: &str) -> DerivedClaim {

@@ -25,27 +25,34 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
     // Apply profile-specific limits
     if is_free {
         // FREE PROFILE: Reduced limits
-        config.redb_cache_size_mb = 64;      // 64MB redb cache (vs 256MB normal)
-        config.memory_cache_size = 1_000;    // 1K memories in RAM (vs 10K normal)
-        config.strategy_cache_size = 500;    // 500 strategies in RAM (vs 5K normal)
-        config.max_graph_size = 50_000;      // Max 50K nodes (vs 1M normal)
-        config.enable_louvain = false;       // Louvain disabled in free
+        config.redb_cache_size_mb = 64; // 64MB redb cache (vs 256MB normal)
+        config.memory_cache_size = 1_000; // 1K memories in RAM (vs 10K normal)
+        config.strategy_cache_size = 500; // 500 strategies in RAM (vs 5K normal)
+        config.max_graph_size = 50_000; // Max 50K nodes (vs 1M normal)
+        config.enable_louvain = false; // Louvain disabled in free
         info!("  Cache limits: 64MB redb / 1K memories / 500 strategies");
         info!("  Max graph size: 50,000 nodes");
         info!("  Louvain: DISABLED");
     } else {
         // NORMAL PROFILE: Full capacity
-        config.redb_cache_size_mb = 256;     // 256MB redb cache
-        config.memory_cache_size = 10_000;   // 10K memories in RAM
-        config.strategy_cache_size = 5_000;  // 5K strategies in RAM
-        config.max_graph_size = 1_000_000;   // Max 1M nodes
+        config.redb_cache_size_mb = 256; // 256MB redb cache
+        config.memory_cache_size = 10_000; // 10K memories in RAM
+        config.strategy_cache_size = 5_000; // 5K strategies in RAM
+        config.max_graph_size = 1_000_000; // Max 1M nodes
         config.enable_louvain = env::var("ENABLE_LOUVAIN")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(true);                // Louvain enabled by default
+            .unwrap_or(true); // Louvain enabled by default
         info!("  Cache limits: 256MB redb / 10K memories / 5K strategies");
         info!("  Max graph size: 1,000,000 nodes");
-        info!("  Louvain: {}", if config.enable_louvain { "ENABLED" } else { "DISABLED" });
+        info!(
+            "  Louvain: {}",
+            if config.enable_louvain {
+                "ENABLED"
+            } else {
+                "DISABLED"
+            }
+        );
     }
 
     config.louvain_interval = env::var("LOUVAIN_INTERVAL")

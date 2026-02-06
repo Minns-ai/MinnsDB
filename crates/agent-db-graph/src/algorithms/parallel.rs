@@ -182,7 +182,10 @@ impl ParallelGraphAlgorithms {
                     predecessors.insert(neighbor, vec![current]);
                     queue.push_back(neighbor);
                 } else if distances[&neighbor] == current_dist + 1 {
-                    predecessors.entry(neighbor).or_insert_with(Vec::new).push(current);
+                    predecessors
+                        .entry(neighbor)
+                        .or_insert_with(Vec::new)
+                        .push(current);
                 }
             }
         }

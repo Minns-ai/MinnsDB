@@ -978,15 +978,16 @@ impl GraphEngine {
                 memory_ids,
             } => {
                 // DashMap provides lock-free concurrent access
-                let mut trace = self.decision_traces
-                    .entry(query_id.clone())
-                    .or_insert(DecisionTrace {
-                        memory_ids: Vec::new(),
-                        memory_used: Vec::new(),
-                        strategy_ids: Vec::new(),
-                        strategy_used: Vec::new(),
-                        last_updated: now,
-                    });
+                let mut trace =
+                    self.decision_traces
+                        .entry(query_id.clone())
+                        .or_insert(DecisionTrace {
+                            memory_ids: Vec::new(),
+                            memory_used: Vec::new(),
+                            strategy_ids: Vec::new(),
+                            strategy_used: Vec::new(),
+                            last_updated: now,
+                        });
                 trace.memory_ids = memory_ids.clone();
                 trace.last_updated = now;
                 tracing::info!(
@@ -1000,15 +1001,16 @@ impl GraphEngine {
                 memory_id,
             } => {
                 // DashMap provides lock-free concurrent access
-                let mut trace = self.decision_traces
-                    .entry(query_id.clone())
-                    .or_insert(DecisionTrace {
-                        memory_ids: Vec::new(),
-                        memory_used: Vec::new(),
-                        strategy_ids: Vec::new(),
-                        strategy_used: Vec::new(),
-                        last_updated: now,
-                    });
+                let mut trace =
+                    self.decision_traces
+                        .entry(query_id.clone())
+                        .or_insert(DecisionTrace {
+                            memory_ids: Vec::new(),
+                            memory_used: Vec::new(),
+                            strategy_ids: Vec::new(),
+                            strategy_used: Vec::new(),
+                            last_updated: now,
+                        });
                 if !trace.memory_used.contains(memory_id) {
                     trace.memory_used.push(*memory_id);
                 }
@@ -1024,15 +1026,16 @@ impl GraphEngine {
                 strategy_ids,
             } => {
                 // DashMap provides lock-free concurrent access
-                let mut trace = self.decision_traces
-                    .entry(query_id.clone())
-                    .or_insert(DecisionTrace {
-                        memory_ids: Vec::new(),
-                        memory_used: Vec::new(),
-                        strategy_ids: Vec::new(),
-                        strategy_used: Vec::new(),
-                        last_updated: now,
-                    });
+                let mut trace =
+                    self.decision_traces
+                        .entry(query_id.clone())
+                        .or_insert(DecisionTrace {
+                            memory_ids: Vec::new(),
+                            memory_used: Vec::new(),
+                            strategy_ids: Vec::new(),
+                            strategy_used: Vec::new(),
+                            last_updated: now,
+                        });
                 trace.strategy_ids = strategy_ids.clone();
                 trace.last_updated = now;
                 tracing::info!(
@@ -1046,15 +1049,16 @@ impl GraphEngine {
                 strategy_id,
             } => {
                 // DashMap provides lock-free concurrent access
-                let mut trace = self.decision_traces
-                    .entry(query_id.clone())
-                    .or_insert(DecisionTrace {
-                        memory_ids: Vec::new(),
-                        memory_used: Vec::new(),
-                        strategy_ids: Vec::new(),
-                        strategy_used: Vec::new(),
-                        last_updated: now,
-                    });
+                let mut trace =
+                    self.decision_traces
+                        .entry(query_id.clone())
+                        .or_insert(DecisionTrace {
+                            memory_ids: Vec::new(),
+                            memory_used: Vec::new(),
+                            strategy_ids: Vec::new(),
+                            strategy_used: Vec::new(),
+                            last_updated: now,
+                        });
                 if !trace.strategy_used.contains(strategy_id) {
                     trace.strategy_used.push(*strategy_id);
                 }
