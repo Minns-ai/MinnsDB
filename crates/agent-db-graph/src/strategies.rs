@@ -1399,7 +1399,8 @@ impl StrategyExtractor {
     }
 
     fn should_distill(&self, bucket_count: u32) -> bool {
-        bucket_count.is_multiple_of(self.config.distill_every)
+        let n = self.config.distill_every;
+        n != 0 && bucket_count % n == 0
     }
 
     fn update_motif_stats(
