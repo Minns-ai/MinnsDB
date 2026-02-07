@@ -806,7 +806,11 @@ impl StrategyExtractor {
         let mut indicators = Vec::new();
 
         for event in events {
-            if let EventType::Action { outcome: agent_db_events::core::ActionOutcome::Success { .. }, .. } = &event.event_type {
+            if let EventType::Action {
+                outcome: agent_db_events::core::ActionOutcome::Success { .. },
+                ..
+            } = &event.event_type
+            {
                 indicators.push("action_succeeded".to_string());
             }
         }

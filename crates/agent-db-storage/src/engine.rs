@@ -185,7 +185,6 @@ impl Default for StorageConfig {
 }
 
 impl StorageConfig {
-
     /// Create config with custom directory
     pub fn with_directory<P: Into<PathBuf>>(directory: P) -> Self {
         let mut config = Self::default();

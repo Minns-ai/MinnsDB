@@ -358,10 +358,7 @@ impl LouvainAlgorithm {
         let mut communities: HashMap<CommunityId, Vec<NodeId>> = HashMap::new();
 
         for (&node_id, &community_id) in node_communities {
-            communities
-                .entry(community_id)
-                .or_default()
-                .push(node_id);
+            communities.entry(community_id).or_default().push(node_id);
         }
 
         communities

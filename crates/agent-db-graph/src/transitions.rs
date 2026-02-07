@@ -104,10 +104,7 @@ impl TransitionModel {
             }
         }
 
-        let bucket = self
-            .buckets
-            .entry(goal_bucket_id)
-            .or_default();
+        let bucket = self.buckets.entry(goal_bucket_id).or_default();
         let keys: Vec<TransitionKey> = trace.transitions.iter().map(TransitionKey::from).collect();
 
         for key in &keys {

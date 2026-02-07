@@ -777,11 +777,8 @@ impl RedbStrategyStore {
     /// Persist a strategy to redb
     fn persist_strategy(&self, strategy: &Strategy) -> StorageResult<()> {
         // Store main record
-        self.backend.put(
-            "strategy_records",
-            strategy.id.to_be_bytes(),
-            strategy,
-        )?;
+        self.backend
+            .put("strategy_records", strategy.id.to_be_bytes(), strategy)?;
 
         // Index by goal bucket: (goal_bucket_id, strategy_id) → empty
         let mut bucket_key = Vec::with_capacity(16);

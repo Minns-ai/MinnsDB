@@ -404,8 +404,9 @@ impl GraphEngine {
         )));
 
         // Initialize stores based on storage backend configuration
-        let (memory_store, strategy_store): (MemoryStoreType, StrategyStoreType) =
-            match config.storage_backend {
+        let (memory_store, strategy_store): (MemoryStoreType, StrategyStoreType) = match config
+            .storage_backend
+        {
             StorageBackend::InMemory => {
                 tracing::info!("Initializing with InMemory storage backend");
                 let mem = Arc::new(RwLock::new(Box::new(InMemoryMemoryStore::new(

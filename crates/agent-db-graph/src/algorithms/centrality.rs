@@ -313,10 +313,7 @@ impl CentralityMeasures {
                     queue.push_back(neighbor);
                 } else if distances[&neighbor] == current_dist + 1 {
                     // Same distance, another shortest path
-                    predecessors
-                        .entry(neighbor)
-                        .or_default()
-                        .push(current);
+                    predecessors.entry(neighbor).or_default().push(current);
                 }
             }
         }

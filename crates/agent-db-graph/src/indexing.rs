@@ -116,26 +116,17 @@ impl PropertyIndex {
 
         match self.index_type {
             IndexType::BTree => {
-                self.btree_index
-                    .entry(key)
-                    .or_default()
-                    .push(node_id);
+                self.btree_index.entry(key).or_default().push(node_id);
             },
             IndexType::Hash => {
-                self.hash_index
-                    .entry(key)
-                    .or_default()
-                    .push(node_id);
+                self.hash_index.entry(key).or_default().push(node_id);
             },
             IndexType::FullText => {
                 // For full-text, index each word
                 if let serde_json::Value::String(s) = value {
                     for word in s.split_whitespace() {
                         let word_key = IndexKey::String(word.to_lowercase());
-                        self.hash_index
-                            .entry(word_key)
-                            .or_default()
-                            .push(node_id);
+                        self.hash_index.entry(word_key).or_default().push(node_id);
                     }
                 }
             },

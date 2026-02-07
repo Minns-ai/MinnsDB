@@ -204,9 +204,8 @@ impl EpisodeCatalog for RedbEpisodeCatalog {
 
     fn get_episode_by_event(&self, event_id: EventId) -> StorageResult<Option<EpisodeRecord>> {
         // Look up episode_id from reverse index
-        let episode_id: Option<EpisodeId> = self
-            .backend
-            .get("partition_map", event_id.to_be_bytes())?;
+        let episode_id: Option<EpisodeId> =
+            self.backend.get("partition_map", event_id.to_be_bytes())?;
 
         match episode_id {
             Some(ep_id) => self.get_episode(ep_id, None),

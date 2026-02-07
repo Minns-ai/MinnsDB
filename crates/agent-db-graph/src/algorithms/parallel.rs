@@ -182,10 +182,7 @@ impl ParallelGraphAlgorithms {
                     predecessors.insert(neighbor, vec![current]);
                     queue.push_back(neighbor);
                 } else if distances[&neighbor] == current_dist + 1 {
-                    predecessors
-                        .entry(neighbor)
-                        .or_default()
-                        .push(current);
+                    predecessors.entry(neighbor).or_default().push(current);
                 }
             }
         }
@@ -232,10 +229,8 @@ impl ParallelGraphAlgorithms {
         let nodes = graph.get_all_node_ids();
 
         // Initialize: each node in its own component
-        let components: HashMap<NodeId, u64> = nodes
-            .iter()
-            .map(|&node_id| (node_id, node_id))
-            .collect();
+        let components: HashMap<NodeId, u64> =
+            nodes.iter().map(|&node_id| (node_id, node_id)).collect();
 
         // Use sequential Union-Find for actual merging
         // (Parallel Union-Find is complex and requires lock-free data structures)
