@@ -11,13 +11,13 @@ services:
     image: eventgraphdb:latest
 
     ports:
-      - "8080:8080"
-      - "127.0.0.1:9090:9090"  # Metrics endpoint
+      - "3000:3000"
+      - "127.0.0.1:9090:9090"  # Metrics endpoint (not implemented)
 
     environment:
       - RUST_LOG=info
       - SERVER_HOST=0.0.0.0
-      - SERVER_PORT=8080
+      - SERVER_PORT=3000
       - STORAGE_BACKEND=persistent
       - REDB_PATH=/data/eventgraph.redb
       - REDB_CACHE_SIZE_MB=256
@@ -35,7 +35,7 @@ services:
     restart: unless-stopped
 
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/health || exit 1"]
       interval: 30s
       timeout: 3s
       retries: 3

@@ -50,6 +50,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/indexes", get(handlers::get_indexes))
         .route("/api/communities", get(handlers::get_communities))
         .route("/api/centrality", get(handlers::get_centrality))
+        // Search
+        .route("/api/search", post(handlers::search))
         // Semantic memory / claims
         .route("/api/claims", get(handlers::list_claims))
         .route("/api/claims/:id", get(handlers::get_claim))

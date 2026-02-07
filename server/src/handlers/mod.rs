@@ -6,6 +6,7 @@ pub mod events;
 pub mod graph;
 pub mod health;
 pub mod memories;
+pub mod search;
 pub mod strategies;
 
 // Re-export all handlers for convenience
@@ -15,4 +16,5 @@ pub use events::*;
 pub use graph::*;
 pub use health::*;
 pub use memories::*;
+pub use search::*;
 pub use strategies::*;

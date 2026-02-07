@@ -126,6 +126,21 @@ pub struct ClaimListQuery {
     pub event_id: Option<u128>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchRequest {
+    /// Search query text
+    pub query: String,
+    /// Search mode: keyword, semantic, or hybrid
+    #[serde(default)]
+    pub mode: agent_db_graph::indexing::SearchMode,
+    /// Maximum number of results
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Fusion strategy for hybrid search
+    #[serde(default)]
+    pub fusion_strategy: Option<agent_db_graph::indexing::FusionStrategy>,
+}
+
 // ============================================================================
 // Response Types
 // ============================================================================
@@ -367,6 +382,28 @@ pub struct EvidenceSpanResponse {
 pub struct EmbeddingProcessResponse {
     pub claims_processed: usize,
     pub success: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    /// Ranked search results with scores
+    pub results: Vec<SearchResultItem>,
+    /// Search mode used
+    pub mode: String,
+    /// Total results found
+    pub total: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResultItem {
+    /// Node ID
+    pub node_id: u64,
+    /// Relevance score
+    pub score: f32,
+    /// Node type
+    pub node_type: String,
+    /// Node properties (excerpt)
+    pub properties: serde_json::Value,
 }
 
 // ============================================================================

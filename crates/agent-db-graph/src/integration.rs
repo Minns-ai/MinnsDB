@@ -1206,6 +1206,71 @@ impl GraphEngine {
         inference.graph().stats().clone()
     }
 
+    /// Search nodes using BM25 full-text search
+    ///
+    /// Returns a list of (NodeId, score) tuples ranked by relevance
+    pub async fn search_bm25(&self, query: &str, limit: usize) -> Vec<(u64, f32)> {
+        let inference = self.inference.read().await;
+        inference.graph().bm25_index.search(query, limit)
+    }
+
+    /// Get a node by ID for search results
+    pub async fn get_node(&self, node_id: u64) -> Option<crate::structures::GraphNode> {
+        let inference = self.inference.read().await;
+        inference.graph().nodes.get(&node_id).cloned()
+    }
+
+    /// Search claims by semantic similarity for hybrid search
+    ///
+    /// Returns a list of (NodeId, score) tuples for claims ranked by semantic similarity
+    pub async fn search_claims_semantic(
+        &self,
+        query: &str,
+        limit: usize,
+        min_similarity: f32,
+    ) -> crate::GraphResult<Vec<(u64, f32)>> {
+        // Check if embedding client is available
+        let embedding_client = match &self.embedding_client {
+            Some(c) => c,
+            None => return Ok(vec![]), // No semantic search available
+        };
+
+        let claim_store = match &self.claim_store {
+            Some(s) => s,
+            None => return Ok(vec![]), // No claim store available
+        };
+
+        // Generate embedding for query
+        let request = crate::claims::EmbeddingRequest {
+            text: query.to_string(),
+            context: None,
+        };
+
+        let response = embedding_client.embed(request).await.map_err(|e| {
+            crate::GraphError::OperationError(format!("Failed to generate query embedding: {}", e))
+        })?;
+
+        // Search for similar claims
+        let similar_claims = claim_store
+            .find_similar(&response.embedding, limit, min_similarity)
+            .map_err(|e| {
+                crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
+            })?;
+
+        // Convert claim IDs to node IDs
+        let inference = self.inference.read().await;
+        let graph = inference.graph();
+
+        let mut results = Vec::new();
+        for (claim_id, similarity) in similar_claims {
+            if let Some(&node_id) = graph.claim_index.get(&claim_id) {
+                results.push((node_id, similarity));
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Get engine statistics
     pub async fn get_engine_stats(&self) -> GraphEngineStats {
         let stats = self.stats.read().await;

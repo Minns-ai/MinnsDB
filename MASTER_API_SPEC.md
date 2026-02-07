@@ -1,8 +1,9 @@
 # EventGraphDB Master API Specification
 
-**Version:** 1.3.0
-**Status:** Comprehensive Type Documentation
+**Version:** 1.4.0
+**Status:** Comprehensive Type Documentation + Hybrid Search
 **Base URL:** `http://localhost:3000` (Default)
+**Port:** `3000` (Configurable via `SERVER_PORT` environment variable)
 
 **Specification Source:** This spec is generated from the actual Rust source code:
 - Event types: `crates/agent-db-events/src/core.rs`
@@ -11,6 +12,13 @@
 - Handlers: `server/src/handlers/*.rs`
 
 **Verified Routes:** All endpoint paths verified against `server/src/routes.rs` (no `/v1/` prefix)
+
+**Version 1.4.0 Changes:**
+- ✨ **NEW**: `/api/search` endpoint for hybrid BM25 + semantic search
+- ✨ **NEW**: Three search modes: keyword, semantic, hybrid
+- ✨ **NEW**: Fusion strategies (Reciprocal Rank Fusion, Weighted)
+- 📚 Updated query selection guide with hybrid search examples
+- 🔗 Documented NER entity relationship integration
 
 ---
 
@@ -44,6 +52,23 @@ EventGraphDB is designed for **Agentic Workflows**. Unlike traditional databases
 | **Memory** | Long-term storage of significant episodes, retrieved by context. |
 | **Claim** | Atomic "facts" extracted from events (e.g., "User likes Sci-Fi"). |
 | **Strategy** | Learned behavioral patterns that lead to successful goal completion. |
+| **Entity** | NER-extracted entities (PERSON, ORG, LOC, etc.) that become Concept nodes. |
+| **Hybrid Search** | Combines BM25 keyword + semantic embeddings for comprehensive results. |
+
+### Quick Reference: Search Endpoints
+
+| Endpoint | Search Type | Scope | Use Case |
+| :--- | :--- | :--- | :--- |
+| `POST /api/search` | Hybrid/Keyword/Semantic | ALL nodes | ⭐ Best general-purpose search |
+| `POST /api/claims/search` | Semantic only | Claims | Concept/meaning search |
+| `POST /api/memories/context` | Context fingerprint | Episodes | "What did we do before?" |
+| `POST /api/strategies/similar` | Strategy embedding | Strategies | Find successful patterns |
+| `GET /api/graph` | Graph traversal | Nodes + Edges | Relationship queries |
+
+**New in v1.4.0:** `/api/search` endpoint with three modes:
+- `"keyword"` - Fast BM25 across all nodes
+- `"semantic"` - AI-powered meaning search (claims)
+- `"hybrid"` - Best of both with fusion algorithms
 
 ---
 
@@ -875,6 +900,137 @@ Manually trigger embedding generation for pending claims.
 
 ---
 
+### `POST /api/search`
+Hybrid full-text and semantic search across all graph nodes. Combines BM25 keyword search with semantic embeddings.
+
+**Request Body (`SearchRequest`):**
+
+| Field | Type | Required | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `query` | `String` | ✅ Yes | N/A | Search query text |
+| `mode` | `SearchMode` | ❌ No | `"keyword"` | Search mode (see below) |
+| `limit` | `usize` | ❌ No | `10` | Maximum number of results |
+| `fusion_strategy` | `FusionStrategy` or `null` | ❌ No | `null` | Fusion strategy for hybrid mode (see below) |
+
+**SearchMode Options:**
+
+| Mode | Description | Use Case |
+| :--- | :--- | :--- |
+| `"keyword"` | BM25 keyword search across ALL node types | Fast exact keyword matching |
+| `"semantic"` | Semantic embedding search (claims only) | Meaning-based search, finds similar concepts |
+| `"hybrid"` | Combines BM25 + semantic using fusion | Best of both: exact matches + similar meanings |
+
+**FusionStrategy Options (for `"hybrid"` mode only):**
+
+Reciprocal Rank Fusion (RRF) - Default, more robust:
+```json
+{
+  "type": "reciprocal_rank",
+  "k": 60.0
+}
+```
+
+Weighted Fusion - More control:
+```json
+{
+  "type": "weighted",
+  "keyword_weight": 0.7,
+  "semantic_weight": 0.3
+}
+```
+
+**Response (`SearchResponse`):**
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `results` | `SearchResultItem[]` | Ranked search results |
+| `mode` | `String` | Search mode used |
+| `total` | `usize` | Total number of results |
+
+**SearchResultItem:**
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `node_id` | `u64` | Graph node identifier |
+| `score` | `f32` | Relevance score |
+| `node_type` | `String` | Node type (Event, Claim, Memory, Strategy, etc.) |
+| `properties` | `JSON` | Node properties/metadata |
+
+**Example 1: Keyword Search**
+```json
+{
+  "query": "authentication failed",
+  "mode": "keyword",
+  "limit": 10
+}
+```
+
+**Example 2: Semantic Search**
+```json
+{
+  "query": "user login issues",
+  "mode": "semantic",
+  "limit": 5
+}
+```
+
+**Example 3: Hybrid Search with Default RRF**
+```json
+{
+  "query": "payment timeout error",
+  "mode": "hybrid",
+  "limit": 10
+}
+```
+
+**Example 4: Hybrid Search with Custom Weighted Fusion**
+```json
+{
+  "query": "database connection problems",
+  "mode": "hybrid",
+  "limit": 10,
+  "fusion_strategy": {
+    "type": "weighted",
+    "keyword_weight": 0.7,
+    "semantic_weight": 0.3
+  }
+}
+```
+
+**What Gets Indexed:**
+
+BM25 indexes text from:
+- `Claim.claim_text` (extracted facts)
+- `Goal.description` (agent objectives)
+- `Strategy.name` (learned patterns)
+- `Result.summary` (action outcomes)
+- `Episode.outcome` (episode results)
+- `Concept.concept_name` (learned concepts)
+- Node properties with keys: `text`, `description`, `content`, `name`, `summary`, `data`
+
+Semantic search indexes:
+- Claims with embeddings (via OpenAI/Mock embedding client)
+- Uses cosine similarity for meaning-based matches
+
+**NER Entity Relationships:**
+
+Claims are automatically linked to extracted entities via NER (Named Entity Recognition):
+- Entities (PERSON, ORG, LOC, DATE, etc.) become Concept nodes
+- Claims link to entities via `ABOUT` edges
+- Enables entity-aware queries like "Find claims about Alice"
+
+**Hybrid Search Algorithm:**
+
+1. **BM25 Search**: Searches ALL node types for keyword matches
+2. **Semantic Search**: Searches claims with embeddings for semantic similarity
+3. **Fusion**: Combines results using selected strategy
+   - **RRF**: Rank-based fusion, robust to score scale differences
+   - **Weighted**: Score-based fusion, more controllable
+
+Nodes appearing in BOTH result sets rank highest in hybrid mode.
+
+---
+
 ## 7. Graph & Analytics
 
 ### `GET /api/graph`
@@ -1236,7 +1392,7 @@ Every event listed above should be sent inside an `Event` object that includes a
 
 ## 12. Querying Deep Dive: Which Search to Use?
 
-EventGraphDB provides five distinct ways to find data. Choosing the right one is critical for AI performance.
+EventGraphDB provides six distinct ways to find data. Choosing the right one is critical for AI performance.
 
 ### A. Direct Node Search (The "Hard Fact" Search)
 **Endpoint:** `GET /api/graph` or `GET /api/graph/context`
@@ -1248,10 +1404,24 @@ GET /api/graph?session_id=5001&limit=10
 ```
 *   **Advice:** Use this for retrieving graph structures. For metadata filtering, use the event metadata system.
 
-### B. Semantic Search (The "Concept" Search)
-**Endpoint:** `POST /api/claims/search`  
-**What it is:** A vector-based search over "Claims" (facts extracted from text).  
-**When to use:** For fuzzy concepts like "User preferences," "Past complaints," or "Vibe."  
+### B. Keyword Search (The "Exact Match" Search)
+**Endpoint:** `POST /api/search` with `mode: "keyword"`
+**What it is:** BM25 full-text keyword search across ALL graph nodes (events, claims, strategies, memories, etc.)
+**When to use:** When you need fast, exact keyword matching across all node types.
+**Example (Find authentication errors):**
+```json
+{
+  "query": "authentication failed",
+  "mode": "keyword",
+  "limit": 10
+}
+```
+*   **Advice:** Use specific keywords. BM25 ranks by term frequency, inverse document frequency, and document length normalization. Great for technical terms, error codes, and specific phrases.
+
+### C. Semantic Search (The "Concept" Search)
+**Endpoint:** `POST /api/claims/search` OR `POST /api/search` with `mode: "semantic"`
+**What it is:** Vector-based search over "Claims" (facts extracted from text) using embeddings.
+**When to use:** For fuzzy concepts like "User preferences," "Past complaints," or finding semantically similar content.
 **Example (Find Movie Preferences):**
 ```json
 {
@@ -1260,12 +1430,30 @@ GET /api/graph?session_id=5001&limit=10
   "min_similarity": 0.7
 }
 ```
-*   **Advice:** Keep the `query_text` natural. Don't include IDs in the string; filter the results in your app code instead.
+*   **Advice:** Keep the `query_text` natural. Don't include IDs in the string; filter the results in your app code instead. Semantic search understands meaning, not just keywords.
 
-### C. Context/Fingerprint Search (The "Task" Search)
-**Endpoint:** `POST /api/memories/context`  
-**What it is:** Finds previous **Episodes** that match a specific environmental state.  
-**When to use:** To answer "What did we do last time we were in this exact situation?"  
+### D. Hybrid Search (The "Best of Both" Search) ⭐ NEW
+**Endpoint:** `POST /api/search` with `mode: "hybrid"`
+**What it is:** Combines BM25 keyword search + semantic embeddings using fusion algorithms.
+**When to use:** When you want both exact keyword matches AND semantically similar results. Best for comprehensive search.
+**Example (Find payment issues):**
+```json
+{
+  "query": "payment timeout",
+  "mode": "hybrid",
+  "limit": 10,
+  "fusion_strategy": {
+    "type": "reciprocal_rank",
+    "k": 60.0
+  }
+}
+```
+*   **Advice:** Hybrid mode searches ALL nodes via BM25 and claims via embeddings, then fuses results. Nodes appearing in both result sets rank highest. Use RRF (Reciprocal Rank Fusion) for robustness, or weighted fusion for more control.
+
+### E. Context/Fingerprint Search (The "Task" Search)
+**Endpoint:** `POST /api/memories/context`
+**What it is:** Finds previous **Episodes** that match a specific environmental state.
+**When to use:** To answer "What did we do last time we were in this exact situation?"
 **Example (Find history for a specific Goal):**
 ```json
 {
@@ -1277,7 +1465,7 @@ GET /api/graph?session_id=5001&limit=10
 ```
 *   **Advice:** The system uses a `fingerprint` (a hash of the context) to find near-identical situations instantly. Use this to maintain "state" across sessions.
 
-### D. Graph Traversal (The "Relationship" Search)
+### F. Graph Traversal (The "Relationship" Search)
 **Endpoint:** `GET /api/graph` with filters
 **What it is:** Retrieves graph structure showing nodes and their connections (edges).
 **When to use:** To see relationships between events, goals, actions, and contexts.
@@ -1285,12 +1473,12 @@ GET /api/graph?session_id=5001&limit=10
 ```http
 GET /api/graph?session_id=5001&limit=100
 ```
-*   **Advice:** The response includes both nodes and edges, showing how events are connected. Use this to understand event causality and episode formation.
+*   **Advice:** The response includes both nodes and edges, showing how events are connected. Use this to understand event causality and episode formation. Claims are linked to entities via `ABOUT` edges and events via `DERIVED_FROM` edges.
 
-### E. Embedding Search (The "Similarity" Search)
-**Endpoint:** `POST /api/strategies/similar`  
-**What it is:** Finds learned behaviors (Strategies) that "look like" the current goal.  
-**When to use:** When the AI is stuck and needs to find a successful "recipe" from a similar task.  
+### G. Strategy Similarity Search (The "Recipe" Search)
+**Endpoint:** `POST /api/strategies/similar`
+**What it is:** Finds learned behaviors (Strategies) that "look like" the current goal.
+**When to use:** When the AI is stuck and needs to find a successful "recipe" from a similar task.
 **Example (Find a strategy for a new goal):**
 ```json
 {
@@ -1308,10 +1496,13 @@ GET /api/graph?session_id=5001&limit=100
 | If you want to find... | Use this Search | Accuracy |
 | :--- | :--- | :--- |
 | **Member # / Email** | **Direct Node Search** | 100% |
+| **"Error code AUTH_401"** | **Keyword Search (BM25)** | High |
 | **"Does he like popcorn?"** | **Semantic Search** | Fuzzy |
+| **"Find auth errors and login problems"** | **Hybrid Search** ⭐ | Comprehensive |
 | **"Where did we leave off?"** | **Context Search** | High |
 | **"What's his booking history?"** | **Graph Traversal** | 100% |
-| **"How do I solve this error?"** | **Embedding Search** | Fuzzy |
+| **"How do I solve this error?"** | **Strategy Similarity** | Fuzzy |
+| **"Claims about Alice from Acme Corp"** | **Hybrid + Entity Relationships** | Comprehensive |
 
 ---
 
@@ -1401,6 +1592,315 @@ async function getNextAction(contextHash) {
 }
 ```
 
+### D. Hybrid Search with NER Entity Relationships ⭐ NEW
+```javascript
+async function searchWithNER(query) {
+  // 1. Hybrid Search: Combines BM25 keyword + semantic embeddings
+  const searchRes = await client.post('/search', {
+    query: query,
+    mode: "hybrid",
+    limit: 10,
+    fusion_strategy: {
+      type: "reciprocal_rank",
+      k: 60.0  // Default RRF parameter
+    }
+  });
+
+  console.log(`Found ${searchRes.data.total} results using ${searchRes.data.mode} mode`);
+
+  // Results include nodes from ALL types (claims, events, strategies, etc.)
+  for (const result of searchRes.data.results) {
+    console.log(`[${result.node_type}] Score: ${result.score.toFixed(3)}`);
+
+    // For claims, properties include NER-extracted entities
+    if (result.node_type === "Claim") {
+      const entities = result.properties.metadata?.found_entities || "";
+      console.log(`  Claim: ${result.properties.claim_text}`);
+      console.log(`  Entities: ${entities}`);
+      console.log(`  Confidence: ${result.properties.confidence}`);
+    } else if (result.node_type === "Event") {
+      console.log(`  Event: ${result.properties.event_type}`);
+    } else if (result.node_type === "Strategy") {
+      console.log(`  Strategy: ${result.properties.name}`);
+    }
+  }
+}
+
+// Example 1: Keyword-focused search
+await searchWithNER("authentication error code 401");
+// Returns: Events and claims with exact keyword matches
+
+// Example 2: Semantic-focused search
+const semanticRes = await client.post('/search', {
+  query: "user login problems",
+  mode: "semantic",  // Only searches claims with embeddings
+  limit: 5
+});
+
+// Example 3: Custom weighted fusion
+const weightedRes = await client.post('/search', {
+  query: "database timeout issues",
+  mode: "hybrid",
+  limit: 10,
+  fusion_strategy: {
+    type: "weighted",
+    keyword_weight: 0.7,    // Prefer exact keywords
+    semantic_weight: 0.3    // Some semantic matching
+  }
+});
+```
+
+### E. Entity-Aware Query Pattern
+```javascript
+async function findClaimsAboutEntity(entityName) {
+  // Step 1: Use hybrid search to find claims mentioning the entity
+  const searchRes = await client.post('/search', {
+    query: entityName,
+    mode: "hybrid",
+    limit: 20
+  });
+
+  // Step 2: Filter for claims (hybrid returns all node types)
+  const claims = searchRes.data.results
+    .filter(r => r.node_type === "Claim")
+    .map(r => ({
+      claim_text: r.properties.claim_text,
+      confidence: r.properties.confidence,
+      entities: r.properties.metadata?.found_entities?.split(',') || [],
+      score: r.score
+    }));
+
+  // Step 3: Further filter for exact entity match
+  const exactMatches = claims.filter(c =>
+    c.entities.some(e => e.trim().toLowerCase() === entityName.toLowerCase())
+  );
+
+  console.log(`Found ${exactMatches.length} claims about "${entityName}"`);
+  return exactMatches;
+}
+
+// Example: Find all claims about "Alice"
+const aliceClaims = await findClaimsAboutEntity("Alice");
+// Returns claims where NER extracted "Alice" as a PERSON entity
+
+// Example: Find claims about "Acme Corp"
+const companyClaims = await findClaimsAboutEntity("Acme Corp");
+// Returns claims where NER extracted "Acme Corp" as an ORG entity
+```
+
+### F. Search Mode Comparison
+```javascript
+async function compareSearchModes(query) {
+  const [keyword, semantic, hybrid] = await Promise.all([
+    client.post('/search', { query, mode: "keyword", limit: 10 }),
+    client.post('/search', { query, mode: "semantic", limit: 10 }),
+    client.post('/search', { query, mode: "hybrid", limit: 10 })
+  ]);
+
+  console.log("\n=== KEYWORD RESULTS (BM25) ===");
+  console.log(`Total: ${keyword.data.total}`);
+  keyword.data.results.forEach(r =>
+    console.log(`  - [${r.node_type}] ${r.score.toFixed(3)}`)
+  );
+
+  console.log("\n=== SEMANTIC RESULTS (Embeddings) ===");
+  console.log(`Total: ${semantic.data.total}`);
+  semantic.data.results.forEach(r =>
+    console.log(`  - [${r.node_type}] ${r.score.toFixed(3)}`)
+  );
+
+  console.log("\n=== HYBRID RESULTS (Fused) ===");
+  console.log(`Total: ${hybrid.data.total}`);
+  hybrid.data.results.forEach(r =>
+    console.log(`  - [${r.node_type}] ${r.score.toFixed(3)}`)
+  );
+}
+
+// Compare all three modes
+await compareSearchModes("authentication timeout error");
+```
+
+---
+
+## 14.5 Semantic Memory Pipeline Architecture
+
+EventGraphDB uses a sophisticated pipeline to extract structured knowledge from events:
+
+### Pipeline Overview
+
+```
+Event (with text)
+      ↓
+┌─────────────────────────────────────┐
+│  1. NER Extraction (Async)          │
+│     Extracts: PERSON, ORG, LOC,     │
+│     DATE, PRODUCT entities          │
+└─────────────┬───────────────────────┘
+              ↓
+      EntitySpan[]
+      - Alice (PERSON)
+      - Acme Corp (ORG)
+      - January 15 (DATE)
+              ↓
+┌─────────────────────────────────────┐
+│  2. Claim Extraction (LLM)          │
+│     Uses NER context to extract     │
+│     atomic facts with evidence      │
+└─────────────┬───────────────────────┘
+              ↓
+      DerivedClaim[]
+      - claim_text
+      - supporting_evidence
+      - found_entities (from NER)
+              ↓
+┌─────────────────────────────────────┐
+│  3. Graph Integration               │
+│     Creates nodes and relationships │
+└─────────────┬───────────────────────┘
+              ↓
+      Graph Structure:
+      Claim --[DERIVED_FROM]--> Event
+      Claim --[SUPPORTED_BY]--> Event (with evidence spans)
+      Claim --[ABOUT]--> Concept (Entity)
+              ↓
+┌─────────────────────────────────────┐
+│  4. Embedding Generation (Async)    │
+│     OpenAI/Mock client generates    │
+│     embeddings for semantic search  │
+└─────────────┬───────────────────────┘
+              ↓
+┌─────────────────────────────────────┐
+│  5. BM25 Indexing (Automatic)       │
+│     Indexes text from all nodes     │
+│     for keyword search              │
+└─────────────────────────────────────┘
+```
+
+### Search Integration
+
+**Keyword Search (BM25)**
+- Automatically indexes text from ALL node types
+- Extracts searchable text from:
+  - `Claim.claim_text`
+  - `Goal.description`
+  - `Strategy.name`
+  - `Episode.outcome`
+  - `Concept.concept_name` (entities)
+  - Node properties with text-like keys
+- Fast, exact keyword matching
+- No embeddings required
+
+**Semantic Search (Embeddings)**
+- Uses OpenAI API (or mock client)
+- Only searches claims with embeddings
+- Cosine similarity matching
+- Finds semantically similar content
+
+**Hybrid Search (Best of Both)**
+- Runs BM25 across ALL nodes
+- Runs semantic search on claims
+- Fuses results using:
+  - **RRF**: Reciprocal Rank Fusion (robust)
+  - **Weighted**: Score-based fusion (controllable)
+- Nodes in BOTH result sets rank highest
+
+### Entity Relationship Graph
+
+When a claim is created, NER entities become first-class graph nodes:
+
+```
+Event: "Alice joined Acme Corp on January 15"
+  ↓ NER extracts entities
+EntitySpans: [Alice, Acme Corp, January 15]
+  ↓ Claim extraction
+Claim: "Alice joined Acme Corp"
+  ↓ Graph integration creates:
+
+    Concept(Alice)
+    [PERSON]
+         ↑
+         │ ABOUT (relevance: 0.9)
+         │
+    Claim(1) ←──[DERIVED_FROM]── Event(12345)
+    "Alice joined         ↑
+     Acme Corp"           │ SUPPORTED_BY
+         │                │ (span: 0-24)
+         │                │
+         └────────────────┘
+         │
+         │ ABOUT (relevance: 0.9)
+         ↓
+    Concept(Acme Corp)
+    [ORG]
+```
+
+### Query Patterns
+
+**1. Entity-Centric Queries**
+```javascript
+// Find claims about a specific entity
+POST /search
+{
+  "query": "Alice",
+  "mode": "hybrid"
+}
+// Returns:
+// - Keyword matches (BM25 finds "Alice" in claim_text)
+// - Semantic matches (embeddings find related concepts)
+// - Entity concepts (Alice as PERSON node)
+```
+
+**2. Multi-Entity Queries**
+```javascript
+POST /search
+{
+  "query": "Alice Acme Corp",
+  "mode": "hybrid"
+}
+// Hybrid fusion boosts claims mentioning both entities
+```
+
+**3. Semantic Concept Queries**
+```javascript
+POST /search
+{
+  "query": "new employee onboarding",
+  "mode": "semantic"
+}
+// Finds claims like "Alice joined Acme Corp"
+// even without exact keyword match
+```
+
+### Configuration
+
+**Enable Semantic Memory** (in GraphEngineConfig):
+```rust
+semantic_memory_enabled: true,
+llm_api_key: Some("sk-..."),        // For claim extraction
+embedding_api_key: Some("sk-..."),  // For embeddings
+ner_promotion_threshold: 1024,       // Bytes to trigger NER
+```
+
+**Search Endpoints**:
+- `/api/search` - Hybrid/keyword/semantic across all nodes
+- `/api/claims/search` - Semantic search (claims only)
+- `/api/graph` - Graph traversal with entity relationships
+
+### Performance Characteristics
+
+| Operation | Time Complexity | Notes |
+|-----------|----------------|-------|
+| BM25 Index | O(n) per node | Automatic on node creation |
+| BM25 Search | O(m × d) | m=query terms, d=documents |
+| Semantic Search | O(n) | Brute force, consider ANN for scale |
+| Hybrid Fusion (RRF) | O(k log k) | k=combined result count |
+| Entity Linking | O(1) | Hash map lookup |
+
+**Scalability Tips**:
+- BM25 is memory-efficient (~100 bytes per document)
+- Semantic search is O(n) - consider HNSW for large datasets
+- Entity relationships enable efficient graph queries
+
 ---
 
 ## 15. System Limits & Profiles
@@ -1412,6 +1912,34 @@ async function getNextAction(contextHash) {
 | **Strategy Cache** | 500 items | 5,000 items |
 | **Redb Cache** | 64 MB | 256 MB |
 | **Louvain (Analytics)** | Disabled | Enabled |
+
+### Server Configuration
+
+**Port Configuration:**
+- **Default Port**: `3000`
+- **Environment Variable**: `SERVER_PORT`
+- **Host Binding**: `SERVER_HOST` (default: `0.0.0.0`)
+
+**Example: Custom Port**
+```bash
+# Native build
+SERVER_PORT=8080 cargo run --bin eventgraphdb-server
+
+# Docker
+docker run -e SERVER_PORT=8080 -p 8080:8080 eventgraphdb:latest
+```
+
+**Available Ports:**
+
+| Port | Service | Status |
+|------|---------|--------|
+| `3000` | HTTP/REST API | ✅ Default |
+| `9090` | Metrics (Prometheus) | ❌ Not implemented |
+
+**Docker Health Check:**
+```bash
+curl -f http://localhost:3000/api/health
+```
 
 ### Query Limits
 *   **Default Limit**: 10 items.

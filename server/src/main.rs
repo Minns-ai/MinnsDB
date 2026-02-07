@@ -42,13 +42,16 @@ async fn main() -> anyhow::Result<()> {
     // Build router
     let app = routes::create_router(state);
 
-    // Start server
-    let addr = "0.0.0.0:3000";
+    // Start server with configurable port
+    let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "3000".to_string());
+    let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = format!("{}:{}", host, port);
+
     info!("🌐 Server listening on http://{}", addr);
     info!("📚 API documentation: http://{}/docs", addr);
     info!("❤️  Health check: http://{}/api/health", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())

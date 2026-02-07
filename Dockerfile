@@ -7,7 +7,7 @@
 # ============================================
 # Stage 1: Builder
 # ============================================
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.93-slim-bookworm AS builder
 WORKDIR /build
 
 # Install build dependencies
@@ -35,7 +35,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="EventGraphDB Team"
 LABEL description="EventGraphDB - Event-driven graph database with self-evolution"
-LABEL version="0.2.0"
+LABEL version="0.2.5"
 
 WORKDIR /app
 
@@ -63,13 +63,13 @@ RUN chmod +x /app/server
 USER eventgraph
 
 # Expose ports
-# 8080 - HTTP/WebSocket API
-# 9090 - Metrics endpoint (Prometheus)
-EXPOSE 8080 9090
+# 3000 - HTTP/WebSocket API
+# 9090 - Metrics endpoint (Prometheus - not implemented)
+EXPOSE 3000 9090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8080/api/health || exit 1
+  CMD curl -f http://localhost:3000/api/health || exit 1
 
 # Service profile (normal or free)
 ARG SERVICE_PROFILE=normal
@@ -78,7 +78,7 @@ ENV SERVICE_PROFILE=${SERVICE_PROFILE}
 # Environment variables (can be overridden at runtime)
 ENV RUST_LOG=info
 ENV SERVER_HOST=0.0.0.0
-ENV SERVER_PORT=8080
+ENV SERVER_PORT=3000
 ENV STORAGE_BACKEND=persistent
 ENV REDB_PATH=/data/eventgraph.redb
 

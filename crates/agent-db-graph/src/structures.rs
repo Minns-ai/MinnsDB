@@ -321,6 +321,9 @@ pub struct Graph {
     /// Concept index for concept-node mapping (by name)
     pub(crate) concept_index: HashMap<String, NodeId>,
 
+    /// BM25 full-text search index
+    pub(crate) bm25_index: crate::indexing::Bm25Index,
+
     /// Next available IDs
     pub(crate) next_node_id: NodeId,
     pub(crate) next_edge_id: EdgeId,
@@ -552,6 +555,7 @@ impl Graph {
             result_index: HashMap::new(),
             claim_index: HashMap::new(),
             concept_index: HashMap::new(),
+            bm25_index: crate::indexing::Bm25Index::new(),
             next_node_id: 1,
             next_edge_id: 1,
             stats: GraphStats::default(),
@@ -612,6 +616,57 @@ impl Graph {
         // Initialize adjacency lists
         self.adjacency_out.insert(node_id, Vec::new());
         self.adjacency_in.insert(node_id, Vec::new());
+
+        // Index text content with BM25 for full-text search
+        let mut text_parts = Vec::new();
+
+        // Extract searchable text from NodeType fields
+        match &node.node_type {
+            NodeType::Claim { claim_text, .. } => {
+                text_parts.push(claim_text.as_str());
+            },
+            NodeType::Goal { description, .. } => {
+                text_parts.push(description.as_str());
+            },
+            NodeType::Strategy { name, .. } => {
+                text_parts.push(name.as_str());
+            },
+            NodeType::Result { summary, .. } => {
+                text_parts.push(summary.as_str());
+            },
+            NodeType::Concept { concept_name, .. } => {
+                text_parts.push(concept_name.as_str());
+            },
+            NodeType::Tool { tool_name, .. } => {
+                text_parts.push(tool_name.as_str());
+            },
+            NodeType::Episode { outcome, .. } => {
+                text_parts.push(outcome.as_str());
+            },
+            _ => {}, // Other node types don't have text in NodeType
+        }
+
+        // Extract searchable text from common property keys
+        for (key, value) in &node.properties {
+            let key_lower = key.to_lowercase();
+            if key_lower.contains("text")
+                || key_lower.contains("description")
+                || key_lower.contains("content")
+                || key_lower.contains("name")
+                || key_lower.contains("summary")
+                || key_lower == "data"
+            {
+                if let Some(text) = value.as_str() {
+                    text_parts.push(text);
+                }
+            }
+        }
+
+        // Index combined text if available
+        if !text_parts.is_empty() {
+            let combined_text = text_parts.join(" ");
+            self.bm25_index.index_document(node_id, &combined_text);
+        }
 
         self.nodes.insert(node_id, node);
         self.update_stats();
