@@ -15,32 +15,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@1.83.0
       with:
-        profile: minimal
-        toolchain: stable
-        override: true
         components: rustfmt, clippy
-    
-    - name: Cache cargo registry
-      uses: actions/cache@v3
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
       with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-    
-    - name: Cache cargo index
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-    
-    - name: Cache cargo target
-      uses: actions/cache@v3
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+        shared-key: "rust-cache"
 
     - name: Check formatting
       run: cargo fmt -- --check
@@ -60,13 +44,9 @@ jobs:
     if: github.event_name == 'push'
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@1.83.0
     
     - name: Run benchmarks
       run: cargo bench --all-features
@@ -76,13 +56,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@1.83.0
     
     - name: Install cargo-audit
       run: cargo install cargo-audit
