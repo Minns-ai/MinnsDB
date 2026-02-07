@@ -209,8 +209,13 @@ impl LouvainAlgorithm {
             communities.insert(community);
         }
 
-        // Add neighbors' communities
+        // Add neighbors' communities (both outgoing and incoming)
         for neighbor_id in graph.get_neighbors(node_id) {
+            if let Some(&community) = node_communities.get(&neighbor_id) {
+                communities.insert(community);
+            }
+        }
+        for neighbor_id in graph.get_incoming_neighbors(node_id) {
             if let Some(&community) = node_communities.get(&neighbor_id) {
                 communities.insert(community);
             }
@@ -264,10 +269,24 @@ impl LouvainAlgorithm {
     ) -> f32 {
         let mut weight = 0.0;
 
+        // Check outgoing edges
         for neighbor_id in graph.get_neighbors(node_id) {
             if let Some(&neighbor_community) = node_communities.get(&neighbor_id) {
                 if neighbor_community == community {
                     if let Some(edge_weight) = graph.get_edge_weight(node_id, neighbor_id) {
+                        weight += edge_weight;
+                    } else {
+                        weight += 1.0; // Default weight if not specified
+                    }
+                }
+            }
+        }
+
+        // Check incoming edges (treat graph as undirected)
+        for neighbor_id in graph.get_incoming_neighbors(node_id) {
+            if let Some(&neighbor_community) = node_communities.get(&neighbor_id) {
+                if neighbor_community == community {
+                    if let Some(edge_weight) = graph.get_edge_weight(neighbor_id, node_id) {
                         weight += edge_weight;
                     } else {
                         weight += 1.0; // Default weight if not specified
@@ -319,11 +338,7 @@ impl LouvainAlgorithm {
                 }
 
                 // A_ij - (k_i * k_j) / (2m)
-                let a_ij = if let Some(weight) = graph.get_edge_weight(node_i, node_j) {
-                    weight
-                } else {
-                    0.0
-                };
+                let a_ij = graph.get_edge_weight(node_i, node_j).unwrap_or(0.0);
 
                 let k_i = graph.get_node_degree(node_i);
                 let k_j = graph.get_node_degree(node_j);
@@ -345,7 +360,7 @@ impl LouvainAlgorithm {
         for (&node_id, &community_id) in node_communities {
             communities
                 .entry(community_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(node_id);
         }
 

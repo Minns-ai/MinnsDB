@@ -350,13 +350,13 @@ impl GraphStore for InMemoryGraphStore {
         // Add to forward adjacency
         self.forward_edges
             .entry((bucket, edge.from))
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(edge.to);
 
         // Add to reverse adjacency
         self.reverse_edges
             .entry((bucket, edge.to))
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(edge.from);
 
         // Store edge metadata
@@ -581,6 +581,7 @@ impl GraphStore for InMemoryGraphStore {
         let mut current_path = Vec::new();
         let mut visited = std::collections::HashSet::new();
 
+        #[allow(clippy::too_many_arguments)]
         fn find_paths_helper(
             store: &InMemoryGraphStore,
             bucket: GoalBucketId,

@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let batch_start = Instant::now();
 
         for i in 0..batch_size {
-            let event_id = (batch * batch_size + i) as u64;
+            let event_id = batch * batch_size + i;
             let event = create_test_event(event_id);
 
             // Validate event

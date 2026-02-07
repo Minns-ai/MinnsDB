@@ -149,7 +149,7 @@ impl CompressionStats {
     /// Calculate compression statistics
     pub fn calculate(nodes: &[NodeId]) -> Self {
         let node_count = nodes.len();
-        let original_bytes = node_count * std::mem::size_of::<NodeId>();
+        let original_bytes = std::mem::size_of_val(nodes);
 
         // Compressed: 16 bytes (base) + 4 bytes per delta
         let compressed_bytes = if node_count == 0 {

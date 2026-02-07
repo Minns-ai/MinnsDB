@@ -92,9 +92,8 @@ pub struct WriteAheadLog {
     last_checkpoint: Arc<Mutex<u64>>,
 }
 
-impl WalConfig {
-    /// Create default WAL configuration
-    pub fn default() -> Self {
+impl Default for WalConfig {
+    fn default() -> Self {
         Self {
             max_file_size: 64 * 1024 * 1024, // 64MB
             wal_directory: std::path::PathBuf::from("./data/wal"),
@@ -103,12 +102,15 @@ impl WalConfig {
             checkpoint_interval: 10000,
         }
     }
+}
 
+impl WalConfig {
     /// Create WAL config with custom directory
     pub fn with_directory<P: AsRef<Path>>(directory: P) -> Self {
-        let mut config = Self::default();
-        config.wal_directory = directory.as_ref().to_path_buf();
-        config
+        Self {
+            wal_directory: directory.as_ref().to_path_buf(),
+            ..Default::default()
+        }
     }
 }
 
@@ -228,15 +230,15 @@ impl WriteAheadLog {
         record_with_checksum.checksum = self.calculate_checksum(&record_with_checksum);
 
         // Add to pending buffer
-        {
+        let should_flush = {
             let mut pending = self.pending_entries.lock().unwrap();
             pending.push_back(record_with_checksum.clone());
+            pending.len() >= self.config.buffer_size
+        };
 
-            // Flush if buffer is full
-            if pending.len() >= self.config.buffer_size {
-                drop(pending); // Release lock before flush
-                self.flush_buffer().await?;
-            }
+        // Flush outside of lock scope
+        if should_flush {
+            self.flush_buffer().await?;
         }
 
         // Check if we need to sync

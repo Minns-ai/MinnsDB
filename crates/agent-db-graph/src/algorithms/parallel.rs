@@ -177,14 +177,14 @@ impl ParallelGraphAlgorithms {
             let current_dist = distances[&current];
 
             for neighbor in graph.get_neighbors(current) {
-                if !distances.contains_key(&neighbor) {
-                    distances.insert(neighbor, current_dist + 1);
+                if let std::collections::hash_map::Entry::Vacant(e) = distances.entry(neighbor) {
+                    e.insert(current_dist + 1);
                     predecessors.insert(neighbor, vec![current]);
                     queue.push_back(neighbor);
                 } else if distances[&neighbor] == current_dist + 1 {
                     predecessors
                         .entry(neighbor)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(current);
                 }
             }
@@ -234,7 +234,7 @@ impl ParallelGraphAlgorithms {
         // Initialize: each node in its own component
         let components: HashMap<NodeId, u64> = nodes
             .iter()
-            .map(|&node_id| (node_id, node_id as u64))
+            .map(|&node_id| (node_id, node_id))
             .collect();
 
         // Use sequential Union-Find for actual merging

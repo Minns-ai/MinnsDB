@@ -185,6 +185,12 @@ pub struct GraphTraversal {
     max_cache_size: usize,
 }
 
+impl Default for GraphTraversal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GraphTraversal {
     /// Create new traversal engine
     pub fn new() -> Self {
@@ -325,7 +331,7 @@ impl GraphTraversal {
 
                 let is_shorter = distances
                     .get(&neighbor_id)
-                    .map_or(true, |&current_distance| new_distance < current_distance);
+                    .is_none_or(|&current_distance| new_distance < current_distance);
 
                 if is_shorter {
                     distances.insert(neighbor_id, new_distance);
@@ -414,6 +420,7 @@ impl GraphTraversal {
     }
 
     /// Helper for Tarjan's strongly connected components algorithm
+    #[allow(clippy::too_many_arguments)]
     fn strongconnect(
         &self,
         graph: &Graph,

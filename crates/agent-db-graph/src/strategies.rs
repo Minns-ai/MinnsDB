@@ -519,17 +519,15 @@ impl StrategyExtractor {
         // First pass: collect all reasoning traces
         for event in events {
             if let EventType::Cognitive {
-                process_type,
+                process_type: CognitiveType::Reasoning,
                 reasoning_trace,
                 ..
             } = &event.event_type
             {
                 // Only extract from reasoning events
-                if let CognitiveType::Reasoning = process_type {
-                    for trace_step in reasoning_trace {
-                        raw_steps.push((trace_step.clone(), order));
-                        order += 1;
-                    }
+                for trace_step in reasoning_trace {
+                    raw_steps.push((trace_step.clone(), order));
+                    order += 1;
                 }
             }
         }
@@ -603,7 +601,7 @@ impl StrategyExtractor {
                     let after_pos = pos + keyword.len();
                     // Find end of error message (next period, newline, or end)
                     let end_pos = generalized[after_pos..]
-                        .find(|c: char| c == '.' || c == '\n' || c == '\r')
+                        .find(['.', '\n', '\r'])
                         .map(|i| after_pos + i)
                         .unwrap_or(generalized.len());
                     generalized = format!(
@@ -808,10 +806,8 @@ impl StrategyExtractor {
         let mut indicators = Vec::new();
 
         for event in events {
-            if let EventType::Action { outcome, .. } = &event.event_type {
-                if let agent_db_events::core::ActionOutcome::Success { .. } = outcome {
-                    indicators.push("action_succeeded".to_string());
-                }
+            if let EventType::Action { outcome: agent_db_events::core::ActionOutcome::Success { .. }, .. } = &event.event_type {
+                indicators.push("action_succeeded".to_string());
             }
         }
 
@@ -839,18 +835,16 @@ impl StrategyExtractor {
         // Extract patterns from failed actions
         for event in events {
             if let EventType::Action {
-                outcome,
+                outcome: agent_db_events::core::ActionOutcome::Failure { error, .. },
                 action_name,
                 ..
             } = &event.event_type
             {
-                if let agent_db_events::core::ActionOutcome::Failure { error, .. } = outcome {
-                    // Record what action failed
-                    patterns.push(format!("avoid_action:{}", action_name));
+                // Record what action failed
+                patterns.push(format!("avoid_action:{}", action_name));
 
-                    // Record the error message
-                    patterns.push(format!("failure_reason:{}", error));
-                }
+                // Record the error message
+                patterns.push(format!("failure_reason:{}", error));
             }
         }
 
@@ -1079,12 +1073,12 @@ impl StrategyExtractor {
         let candidate_ids: Vec<StrategyId> = if let Some(context_hash) = query.context_hash {
             self.context_index
                 .get(&context_hash)
-                .map(|ids| ids.clone())
+                .cloned()
                 .unwrap_or_default()
         } else if goal_bucket_id != 0 {
             self.goal_bucket_index
                 .get(&goal_bucket_id)
-                .map(|ids| ids.clone())
+                .cloned()
                 .unwrap_or_default()
         } else {
             self.strategies.keys().copied().collect()
@@ -1339,10 +1333,10 @@ impl StrategyExtractor {
                 existing.last_used = current_timestamp();
                 existing
                     .source_episodes
-                    .extend(strategy.source_episodes.drain(..));
+                    .append(&mut strategy.source_episodes);
                 existing
                     .source_outcomes
-                    .extend(strategy.source_outcomes.drain(..));
+                    .append(&mut strategy.source_outcomes);
 
                 let expected_success = (existing.success_count as f32 + self.config.alpha)
                     / (existing.support_count as f32 + self.config.alpha + self.config.beta);
@@ -1368,21 +1362,21 @@ impl StrategyExtractor {
 
         self.agent_strategies
             .entry(agent_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(strategy_id);
 
         for pattern in context_patterns {
             if let Some(context_hash) = self.pattern_to_hash(pattern) {
                 self.context_index
                     .entry(context_hash)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(strategy_id);
             }
         }
 
         self.goal_bucket_index
             .entry(goal_bucket_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(strategy_id);
 
         if let Some(sig) = self
@@ -1393,7 +1387,7 @@ impl StrategyExtractor {
         {
             self.behavior_index
                 .entry(sig)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(strategy_id);
         }
 
@@ -1401,7 +1395,7 @@ impl StrategyExtractor {
     }
 
     fn should_distill(&self, bucket_count: u32) -> bool {
-        bucket_count % self.config.distill_every == 0
+        bucket_count.is_multiple_of(self.config.distill_every)
     }
 
     fn update_motif_stats(
@@ -1415,7 +1409,7 @@ impl StrategyExtractor {
         let bucket_stats = self
             .motif_stats_by_bucket
             .entry((agent_id, goal_bucket_id))
-            .or_insert_with(HashMap::new);
+            .or_default();
 
         for motif in motifs.iter() {
             let stats = bucket_stats.entry(motif.clone()).or_default();
@@ -1428,7 +1422,7 @@ impl StrategyExtractor {
         let cache = self
             .episode_cache_by_bucket
             .entry((agent_id, goal_bucket_id))
-            .or_insert_with(Vec::new);
+            .or_default();
         cache.push(EpisodeMotifRecord { outcome, motifs });
         if cache.len() > self.config.cache_max {
             cache.remove(0);
@@ -1913,19 +1907,19 @@ impl StrategyExtractor {
         // Index by agent
         self.agent_strategies
             .entry(agent_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(strategy_id);
 
         // Index by goal bucket
         self.goal_bucket_index
             .entry(goal_bucket_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(strategy_id);
 
         // Index by behavior signature
         self.behavior_index
             .entry(behavior_signature)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(strategy_id);
 
         Ok(())

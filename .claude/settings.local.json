@@ -11,7 +11,8 @@
       "Bash(xargs:*)",
       "Bash(cargo check:*)",
       "Bash(cargo run:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(cargo clippy:*)"
     ]
   }
 }

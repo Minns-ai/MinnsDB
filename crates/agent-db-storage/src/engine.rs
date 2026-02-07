@@ -137,7 +137,7 @@ struct DataSegment {
 #[derive(Debug)]
 enum FlushRequest {
     Event {
-        event: Event,
+        event: Box<Event>,
         compressed_data: Vec<u8>,
         is_compressed: bool,
     },
@@ -164,9 +164,8 @@ struct StorageCounters {
     segments_created: AtomicU64,
 }
 
-impl StorageConfig {
-    /// Create default storage configuration
-    pub fn default() -> Self {
+impl Default for StorageConfig {
+    fn default() -> Self {
         Self {
             data_directory: PathBuf::from("./data"),
             data_dir: "./data".to_string(),
@@ -183,6 +182,9 @@ impl StorageConfig {
             compaction_min_segments: 3,
         }
     }
+}
+
+impl StorageConfig {
 
     /// Create config with custom directory
     pub fn with_directory<P: Into<PathBuf>>(directory: P) -> Self {
@@ -207,7 +209,7 @@ impl StorageEngine {
 
         // Create data directory
         std::fs::create_dir_all(&data_path).map_err(StorageError::Io)?;
-        std::fs::create_dir_all(&data_path.join("segments")).map_err(StorageError::Io)?;
+        std::fs::create_dir_all(data_path.join("segments")).map_err(StorageError::Io)?;
 
         // Initialize WAL
         let wal = Arc::new(WriteAheadLog::new(config.wal_config.clone())?);
@@ -287,7 +289,7 @@ impl StorageEngine {
         // Queue for background storage
         self.flush_sender
             .send(FlushRequest::Event {
-                event: event.clone(),
+                event: Box::new(event.clone()),
                 compressed_data: data,
                 is_compressed,
             })
@@ -399,7 +401,7 @@ impl StorageEngine {
         let engine = self.clone_for_flush();
         tokio::task::spawn_blocking(move || engine.compact_segments_blocking())
             .await
-            .map_err(|err| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, err)))?
+            .map_err(|err| StorageError::Io(std::io::Error::other(err)))?
     }
 
     fn compact_segments_blocking(&self) -> StorageResult<CompactionStats> {
@@ -469,6 +471,7 @@ impl StorageEngine {
                 let segment_path = temp_dir.join(format!("segment_{:08}.dat", segment_id));
                 let file = OpenOptions::new()
                     .create(true)
+                    .truncate(true)
                     .read(true)
                     .write(true)
                     .open(&segment_path)
@@ -672,6 +675,7 @@ impl StorageEngine {
 
         let file = OpenOptions::new()
             .create(true)
+            .truncate(true)
             .read(true)
             .write(true)
             .open(&segment_path)

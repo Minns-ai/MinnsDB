@@ -516,13 +516,15 @@ async fn test_graph_engine_with_persistent_storage() {
     let temp_dir = TempDir::new().unwrap();
 
     // Create config with persistent storage
-    let mut config = GraphEngineConfig::default();
-    config.storage_backend = StorageBackend::Persistent;
-    config.redb_path = temp_dir.path().join("graph.redb");
-    config.memory_cache_size = 100;
-    config.strategy_cache_size = 50;
-    config.auto_episode_detection = true;
-    config.auto_memory_formation = true;
+    let config = GraphEngineConfig {
+        storage_backend: StorageBackend::Persistent,
+        redb_path: temp_dir.path().join("graph.redb"),
+        memory_cache_size: 100,
+        strategy_cache_size: 50,
+        auto_episode_detection: true,
+        auto_memory_formation: true,
+        ..Default::default()
+    };
 
     // Create engine
     let engine = GraphEngine::with_config(config).await.unwrap();

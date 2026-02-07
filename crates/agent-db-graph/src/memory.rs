@@ -266,13 +266,13 @@ impl MemoryFormation {
         // Index by agent
         self.agent_memories
             .entry(episode.agent_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(memory_id);
 
         // Index by context
         self.context_index
             .entry(memory.context.fingerprint)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(memory_id);
 
         // Index by episode
@@ -339,7 +339,7 @@ impl MemoryFormation {
             }
             self.context_index
                 .entry(memory.context.fingerprint)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(memory_id);
         }
 
@@ -370,7 +370,7 @@ impl MemoryFormation {
         let candidate_ids: Vec<MemoryId> = self
             .context_index
             .get(&context_hash)
-            .map(|ids| ids.clone())
+            .cloned()
             .unwrap_or_default();
 
         // Update access tracking and collect memories
@@ -535,7 +535,7 @@ impl MemoryFormation {
         if weight == 0.0 {
             0.0
         } else {
-            (total / weight).min(1.0).max(0.0)
+            (total / weight).clamp(0.0, 1.0)
         }
     }
 
@@ -596,7 +596,7 @@ impl MemoryFormation {
             1.0 - ((mem_a - mem_b).abs() / mem_max).min(1.0)
         };
 
-        ((cpu_sim + mem_sim) / 2.0).min(1.0).max(0.0)
+        ((cpu_sim + mem_sim) / 2.0).clamp(0.0, 1.0)
     }
 
     /// Retrieve memories for a specific agent
@@ -715,13 +715,13 @@ impl MemoryFormation {
         // Index by agent
         self.agent_memories
             .entry(agent_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(memory_id);
 
         // Index by context
         self.context_index
             .entry(context_hash)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(memory_id);
 
         // Index by episode

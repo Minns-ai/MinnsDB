@@ -133,7 +133,7 @@ impl RedbBackend {
     pub fn open(config: RedbConfig) -> StorageResult<Self> {
         // Create parent directory
         if let Some(parent) = config.data_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| StorageError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
         }
 
         // Open database
@@ -284,7 +284,7 @@ impl RedbBackend {
         V: Serialize,
     {
         let table_def = Self::get_table_def(table_name)?;
-        let value_bytes = bincode::serialize(value).map_err(|e| StorageError::Serialization(e))?;
+        let value_bytes = bincode::serialize(value).map_err(StorageError::Serialization)?;
 
         let write_txn = self
             .db
@@ -360,8 +360,7 @@ impl RedbBackend {
         {
             Some(access_guard) => {
                 let bytes = access_guard.value();
-                let value =
-                    bincode::deserialize(bytes).map_err(|e| StorageError::Deserialization(e))?;
+                let value = bincode::deserialize(bytes).map_err(StorageError::Deserialization)?;
                 Ok(Some(value))
             },
             None => Ok(None),
@@ -455,8 +454,8 @@ impl RedbBackend {
                 break;
             }
 
-            let deserialized = bincode::deserialize(value.value())
-                .map_err(|e| StorageError::Deserialization(e))?;
+            let deserialized =
+                bincode::deserialize(value.value()).map_err(StorageError::Deserialization)?;
 
             results.push((key.value().to_vec(), deserialized));
         }
@@ -554,8 +553,7 @@ impl RedbBackend {
 
     /// Get approximate disk usage (bytes)
     pub fn disk_usage(&self) -> StorageResult<u64> {
-        let metadata =
-            std::fs::metadata(&self.config.data_path).map_err(|e| StorageError::Io(e))?;
+        let metadata = std::fs::metadata(&self.config.data_path).map_err(StorageError::Io)?;
         Ok(metadata.len())
     }
 }

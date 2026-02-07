@@ -53,7 +53,7 @@ impl EmbeddingQueue {
                     match job {
                         Some(job) => {
                             let result =
-                                Self::process_job(job.claim, &*embedding_client, &*claim_store)
+                                Self::process_job(job.claim, &*embedding_client, &claim_store)
                                     .await;
 
                             // Send result if channel exists

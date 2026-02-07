@@ -41,6 +41,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
+/// Type alias for the memory store type used in the engine
+type MemoryStoreType = Arc<RwLock<Box<dyn MemoryStore>>>;
+
+/// Type alias for the strategy store type used in the engine
+type StrategyStoreType = Arc<RwLock<Box<dyn StrategyStore>>>;
+
 /// Storage backend type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageBackend {
@@ -398,10 +404,8 @@ impl GraphEngine {
         )));
 
         // Initialize stores based on storage backend configuration
-        let (memory_store, strategy_store): (
-            Arc<RwLock<Box<dyn MemoryStore>>>,
-            Arc<RwLock<Box<dyn StrategyStore>>>,
-        ) = match config.storage_backend {
+        let (memory_store, strategy_store): (MemoryStoreType, StrategyStoreType) =
+            match config.storage_backend {
             StorageBackend::InMemory => {
                 tracing::info!("Initializing with InMemory storage backend");
                 let mem = Arc::new(RwLock::new(Box::new(InMemoryMemoryStore::new(
@@ -629,15 +633,13 @@ impl GraphEngine {
                 let client: Arc<dyn crate::claims::EmbeddingClient> =
                     if let Some(ref client) = embedding_client {
                         client.clone()
+                    } else if let Some(key) = &config.openai_api_key {
+                        Arc::new(crate::claims::OpenAiEmbeddingClient::new(
+                            key.clone(),
+                            "text-embedding-3-small".to_string(),
+                        ))
                     } else {
-                        if let Some(key) = &config.openai_api_key {
-                            Arc::new(crate::claims::OpenAiEmbeddingClient::new(
-                                key.clone(),
-                                "text-embedding-3-small".to_string(),
-                            ))
-                        } else {
-                            Arc::new(crate::claims::MockEmbeddingClient::new(384))
-                        }
+                        Arc::new(crate::claims::MockEmbeddingClient::new(384))
                     };
 
                 // Create embedding queue if claim store is available
@@ -1173,11 +1175,11 @@ impl GraphEngine {
         let start_time = std::time::Instant::now();
 
         // Get read access to the graph through inference engine
-        let _graph = {
+        {
             let _inference = self.inference.read().await;
             // We need a way to get a reference to the graph
             // For now, we'll execute queries directly through traversal
-        };
+        }
 
         let result = {
             let inference = self.inference.read().await;
@@ -2068,12 +2070,11 @@ impl GraphEngine {
             Self::build_graph_node_data(context_node, None),
         );
 
-        let mut edge_count = 0usize;
         let mut candidate_edges = Vec::new();
         candidate_edges.extend(graph.get_edges_from(context_node.id));
         candidate_edges.extend(graph.get_edges_to(context_node.id));
 
-        for edge in candidate_edges {
+        for (edge_count, edge) in candidate_edges.into_iter().enumerate() {
             if edge_count >= limit {
                 break;
             }
@@ -2099,7 +2100,6 @@ impl GraphEngine {
                 weight: edge.weight,
                 confidence: edge.confidence,
             });
-            edge_count += 1;
 
             for node_id in [edge.source, edge.target] {
                 if nodes.contains_key(&node_id) {

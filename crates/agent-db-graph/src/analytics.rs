@@ -65,7 +65,7 @@ impl<'a> GraphAnalytics<'a> {
         for &node_id in &nodes {
             if !visited.contains(&node_id) {
                 // Start DFS from this node
-                self.dfs_mark(&self.graph, node_id, &mut visited);
+                self.dfs_mark(self.graph, node_id, &mut visited);
                 components += 1;
             }
         }
@@ -84,7 +84,13 @@ impl<'a> GraphAnalytics<'a> {
 
             visited.insert(node_id);
 
+            // Check both outgoing and incoming neighbors (treat as undirected)
             for neighbor in graph.get_neighbors(node_id) {
+                if !visited.contains(&neighbor) {
+                    stack.push(neighbor);
+                }
+            }
+            for neighbor in graph.get_incoming_neighbors(node_id) {
                 if !visited.contains(&neighbor) {
                     stack.push(neighbor);
                 }
@@ -100,7 +106,7 @@ impl<'a> GraphAnalytics<'a> {
 
         for &node_id in &nodes {
             if !visited.contains(&node_id) {
-                let component_nodes = self.get_component_nodes(&self.graph, node_id);
+                let component_nodes = self.get_component_nodes(self.graph, node_id);
                 let size = component_nodes.len();
                 max_size = max_size.max(size);
 
@@ -123,7 +129,13 @@ impl<'a> GraphAnalytics<'a> {
 
             visited.insert(node_id);
 
+            // Check both outgoing and incoming neighbors (treat as undirected)
             for neighbor in graph.get_neighbors(node_id) {
+                if !visited.contains(&neighbor) {
+                    stack.push(neighbor);
+                }
+            }
+            for neighbor in graph.get_incoming_neighbors(node_id) {
                 if !visited.contains(&neighbor) {
                     stack.push(neighbor);
                 }
@@ -254,21 +266,21 @@ impl<'a> GraphAnalytics<'a> {
     /// Calculate modularity using Louvain
     fn modularity(&self) -> GraphResult<f32> {
         let louvain = LouvainAlgorithm::new();
-        let result = louvain.detect_communities(&self.graph)?;
+        let result = louvain.detect_communities(self.graph)?;
         Ok(result.modularity)
     }
 
     /// Get community count
     fn community_count(&self) -> GraphResult<usize> {
         let louvain = LouvainAlgorithm::new();
-        let result = louvain.detect_communities(&self.graph)?;
+        let result = louvain.detect_communities(self.graph)?;
         Ok(result.community_count)
     }
 
     /// Get top central nodes
     fn top_centrality_nodes(&self, n: usize) -> GraphResult<Vec<(NodeId, f32)>> {
         let centrality = CentralityMeasures::new();
-        let all_centralities = centrality.all_centralities(&self.graph)?;
+        let all_centralities = centrality.all_centralities(self.graph)?;
         Ok(all_centralities.top_combined(n))
     }
 
@@ -309,7 +321,7 @@ impl<'a> GraphAnalytics<'a> {
             total_events: event_nodes.len(),
             unique_contexts: context_nodes.len(),
             learned_patterns: pattern_count,
-            strong_memories: strong_memories,
+            strong_memories,
             overall_success_rate,
             total_successful_actions: total_success,
             total_failed_actions: total_failure,

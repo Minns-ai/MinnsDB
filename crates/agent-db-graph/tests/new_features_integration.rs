@@ -198,11 +198,8 @@ async fn test_memory_formation() -> Result<(), Box<dyn std::error::Error>> {
             println!("   ✓ Memories retrieved: {}", retrieved.len());
 
             if !retrieved.is_empty() {
-                match retrieved[0].memory_type {
-                    MemoryType::Episodic { .. } => {
-                        println!("   ✓ Memory is Episodic type");
-                    },
-                    _ => {},
+                if let MemoryType::Episodic { .. } = retrieved[0].memory_type {
+                    println!("   ✓ Memory is Episodic type");
                 }
             }
         }

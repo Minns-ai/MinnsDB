@@ -85,7 +85,7 @@ fn make_edge_key(bucket: GoalBucketId, from: NodeId, to: NodeId) -> Vec<u8> {
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 fn get_timestamp_ms() -> u64 {
-    let start = START_TIME.get_or_init(|| Instant::now());
+    let start = START_TIME.get_or_init(Instant::now);
     start.elapsed().as_millis() as u64
 }
 

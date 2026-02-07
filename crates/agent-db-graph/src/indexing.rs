@@ -118,13 +118,13 @@ impl PropertyIndex {
             IndexType::BTree => {
                 self.btree_index
                     .entry(key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(node_id);
             },
             IndexType::Hash => {
                 self.hash_index
                     .entry(key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(node_id);
             },
             IndexType::FullText => {
@@ -134,7 +134,7 @@ impl PropertyIndex {
                         let word_key = IndexKey::String(word.to_lowercase());
                         self.hash_index
                             .entry(word_key)
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(node_id);
                     }
                 }

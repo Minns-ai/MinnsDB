@@ -275,13 +275,12 @@ impl EpisodeDetector {
         }
 
         // Check for goal completion
-        if let EventType::Action { outcome, .. } = &event.event_type {
-            match outcome {
-                ActionOutcome::Success { .. } | ActionOutcome::Failure { .. } => {
-                    return true;
-                },
-                _ => {},
-            }
+        if let EventType::Action {
+            outcome: ActionOutcome::Success { .. } | ActionOutcome::Failure { .. },
+            ..
+        } = &event.event_type
+        {
+            return true;
         }
 
         // Check for significant context shift
@@ -511,20 +510,14 @@ impl EpisodeDetector {
             let Some(end_ts) = episode.end_timestamp else {
                 continue;
             };
-            let delta = if event.timestamp >= end_ts {
-                event.timestamp - end_ts
-            } else {
-                end_ts - event.timestamp
-            };
+            let delta = event.timestamp.abs_diff(end_ts);
             if delta <= window {
                 target_index = Some(idx);
                 break;
             }
         }
 
-        let Some(idx) = target_index else {
-            return None;
-        };
+        let idx = target_index?;
 
         let outcome_from_event = self.determine_outcome(event);
 
@@ -684,7 +677,7 @@ impl EpisodeDetector {
             Some(&count) => {
                 // Novelty decays as we see it more: 1/(1 + log(count))
                 let novelty = 1.0 / (1.0 + (count as f32).log2());
-                novelty.max(0.0).min(1.0)
+                novelty.clamp(0.0, 1.0)
             },
         }
     }
@@ -708,7 +701,7 @@ impl EpisodeDetector {
             None => 1.0, // Never seen before
             Some(&count) => {
                 let novelty = 1.0 / (1.0 + (count as f32).log2());
-                novelty.max(0.0).min(1.0)
+                novelty.clamp(0.0, 1.0)
             },
         }
     }

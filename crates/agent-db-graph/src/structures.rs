@@ -411,7 +411,7 @@ impl GraphEdge {
     /// Strengthen the edge based on repeated observation
     pub fn strengthen(&mut self, weight_delta: EdgeWeight) {
         self.observation_count += 1;
-        self.weight = (self.weight + weight_delta).min(1.0).max(0.0);
+        self.weight = (self.weight + weight_delta).clamp(0.0, 1.0);
 
         // Increase confidence based on observations
         let confidence_boost = (self.observation_count as f32).ln() * 0.1;
@@ -423,7 +423,7 @@ impl GraphEdge {
     /// Weaken the edge based on negative outcomes
     pub fn weaken(&mut self, weight_delta: EdgeWeight) {
         self.observation_count += 1;
-        self.weight = (self.weight - weight_delta).min(1.0).max(0.0);
+        self.weight = (self.weight - weight_delta).clamp(0.0, 1.0);
 
         // Decrease confidence on failures (but more slowly than increase)
         let confidence_penalty = (self.observation_count as f32).ln() * 0.05;
@@ -526,6 +526,12 @@ impl GraphEdge {
     }
 }
 
+impl Default for Graph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Graph {
     /// Create a new empty graph
     pub fn new() -> Self {
@@ -563,7 +569,7 @@ impl Graph {
         let type_name = node.type_name();
         self.type_index
             .entry(type_name)
-            .or_insert_with(HashSet::new)
+            .or_default()
             .insert(node_id);
 
         // Update specialized indices

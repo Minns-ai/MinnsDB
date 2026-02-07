@@ -216,10 +216,11 @@ impl Graph {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claims::types::{ClaimStatus, EvidenceSpan};
+    use crate::claims::types::EvidenceSpan;
     use crate::structures::NodeType;
 
     fn create_test_claim(id: u64, event_id: EventId, text: &str) -> DerivedClaim {
@@ -504,7 +505,7 @@ impl GraphEngine {
         };
 
         let count = embedding_queue
-            .process_pending_embeddings(&claim_store, batch_size)
+            .process_pending_embeddings(claim_store, batch_size)
             .await
             .map_err(|e| {
                 crate::GraphError::OperationError(format!("Failed to process embeddings: {}", e))

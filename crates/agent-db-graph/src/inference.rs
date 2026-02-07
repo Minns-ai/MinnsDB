@@ -108,6 +108,12 @@ impl Default for InferenceConfig {
     }
 }
 
+impl Default for GraphInference {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GraphInference {
     /// Create a new inference engine with default configuration
     pub fn new() -> Self {
@@ -199,7 +205,7 @@ impl GraphInference {
         }
 
         // Periodically clean up buffer and detect patterns
-        if self.stats.events_processed % 100 == 0 {
+        if self.stats.events_processed.is_multiple_of(100) {
             tracing::info!("Inference detect_patterns event_id={}", event.id);
             self.detect_patterns()?;
             self.cleanup_old_associations();
@@ -930,7 +936,7 @@ impl GraphInference {
         for event in &self.temporal_buffer {
             context_groups
                 .entry(event.context.fingerprint)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(event);
         }
 

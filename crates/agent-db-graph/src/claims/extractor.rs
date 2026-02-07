@@ -59,7 +59,7 @@ impl ClaimExtractionQueue {
                                 job,
                                 &*llm_client,
                                 &*embedding_client,
-                                &*claim_store,
+                                &claim_store,
                                 &config,
                             )
                             .await;

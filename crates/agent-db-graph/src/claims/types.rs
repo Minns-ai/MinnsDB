@@ -180,6 +180,7 @@ pub enum RejectionReason {
 
 impl DerivedClaim {
     /// Create a new claim with current timestamp
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: ClaimId,
         claim_text: String,

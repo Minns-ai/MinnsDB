@@ -187,7 +187,7 @@ impl RedbMemoryStore {
         // Cache miss - load from redb
         match self
             .backend
-            .get::<_, Memory>("memory_records", memory_id.to_be_bytes().to_vec())
+            .get::<_, Memory>("memory_records", memory_id.to_be_bytes())
         {
             Ok(Some(memory)) => {
                 // Add to cache
@@ -226,7 +226,7 @@ impl RedbMemoryStore {
     fn persist_memory(&self, memory: &Memory) -> StorageResult<()> {
         // Store main record
         self.backend
-            .put("memory_records", memory.id.to_be_bytes().to_vec(), memory)?;
+            .put("memory_records", memory.id.to_be_bytes(), memory)?;
 
         // Index by context hash: (context_hash, memory_id) → empty
         let mut context_key = Vec::with_capacity(16);
@@ -248,7 +248,7 @@ impl RedbMemoryStore {
     fn delete_memory(&self, memory: &Memory) -> StorageResult<()> {
         // Delete main record
         self.backend
-            .delete("memory_records", memory.id.to_be_bytes().to_vec())?;
+            .delete("memory_records", memory.id.to_be_bytes())?;
 
         // Delete context index
         let mut context_key = Vec::with_capacity(16);
@@ -277,9 +277,7 @@ impl MemoryStore for RedbMemoryStore {
         }
 
         // Check if episode has ended
-        if episode.end_timestamp.is_none() {
-            return None;
-        }
+        episode.end_timestamp?;
 
         // Allocate new memory ID
         let memory_id = self.next_memory_id;
@@ -355,7 +353,7 @@ impl MemoryStore for RedbMemoryStore {
         // Load from redb
         match self
             .backend
-            .get::<_, Memory>("memory_records", memory_id.to_be_bytes().to_vec())
+            .get::<_, Memory>("memory_records", memory_id.to_be_bytes())
         {
             Ok(memory) => memory,
             Err(e) => {
@@ -367,7 +365,7 @@ impl MemoryStore for RedbMemoryStore {
 
     fn get_agent_memories(&self, agent_id: AgentId, limit: usize) -> Vec<Memory> {
         // Scan agent index
-        let agent_prefix = agent_id.to_be_bytes().to_vec();
+        let agent_prefix = agent_id.to_be_bytes();
         let results: Vec<(Vec<u8>, ())> =
             match self.backend.scan_prefix("mem_by_bucket", agent_prefix) {
                 Ok(r) => r,
@@ -402,7 +400,7 @@ impl MemoryStore for RedbMemoryStore {
             context.fingerprint
         };
 
-        let context_prefix = context_hash.to_be_bytes().to_vec();
+        let context_prefix = context_hash.to_be_bytes();
         let results: Vec<(Vec<u8>, ())> = match self
             .backend
             .scan_prefix("mem_by_context_hash", context_prefix)
@@ -741,7 +739,7 @@ impl RedbStrategyStore {
         // Cache miss - load from redb
         match self
             .backend
-            .get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes().to_vec())
+            .get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes())
         {
             Ok(Some(strategy)) => {
                 // Add to cache
@@ -781,7 +779,7 @@ impl RedbStrategyStore {
         // Store main record
         self.backend.put(
             "strategy_records",
-            strategy.id.to_be_bytes().to_vec(),
+            strategy.id.to_be_bytes(),
             strategy,
         )?;
 
@@ -824,7 +822,7 @@ impl RedbStrategyStore {
     fn delete_strategy(&self, strategy: &Strategy) -> StorageResult<()> {
         // Delete main record
         self.backend
-            .delete("strategy_records", strategy.id.to_be_bytes().to_vec())?;
+            .delete("strategy_records", strategy.id.to_be_bytes())?;
 
         // Delete bucket index
         let mut bucket_key = Vec::with_capacity(16);
@@ -893,7 +891,7 @@ impl StrategyStore for RedbStrategyStore {
         // Fall back to persistent storage
         match self
             .backend
-            .get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes().to_vec())
+            .get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes())
         {
             Ok(Some(strategy)) => Some(strategy),
             Ok(None) => None,
@@ -910,7 +908,7 @@ impl StrategyStore for RedbStrategyStore {
 
     fn get_agent_strategies(&self, agent_id: AgentId, limit: usize) -> Vec<Strategy> {
         // Scan agent index (using strategy_feature_postings table)
-        let agent_prefix = agent_id.to_be_bytes().to_vec();
+        let agent_prefix = agent_id.to_be_bytes();
         let results: Vec<(Vec<u8>, f32)> = match self
             .backend
             .scan_prefix("strategy_feature_postings", agent_prefix)
@@ -941,7 +939,7 @@ impl StrategyStore for RedbStrategyStore {
 
     fn get_strategies_for_context(&self, context_hash: ContextHash, limit: usize) -> Vec<Strategy> {
         // Scan goal bucket index (using context_hash as proxy)
-        let bucket_prefix = context_hash.to_be_bytes().to_vec();
+        let bucket_prefix = context_hash.to_be_bytes();
         let results: Vec<(Vec<u8>, ())> = match self
             .backend
             .scan_prefix("strategy_by_bucket", bucket_prefix)

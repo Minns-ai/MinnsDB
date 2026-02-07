@@ -434,8 +434,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_name() {
-        let mut config = NerServiceConfig::default();
-        config.model = Some("test-model".to_string());
+        let config = NerServiceConfig {
+            model: Some("test-model".to_string()),
+            ..Default::default()
+        };
         let extractor = NerServiceExtractor::new(config).unwrap();
         assert_eq!(extractor.model_name(), "test-model");
     }

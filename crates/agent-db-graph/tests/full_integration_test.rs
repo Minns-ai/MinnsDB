@@ -118,7 +118,7 @@ async fn test_fully_integrated_self_evolution_pipeline() -> Result<(), Box<dyn s
     println!("\n📥 Phase 1: Processing events (automatic pipeline triggers)");
 
     let base_time = current_timestamp();
-    let events = vec![
+    let events = [
         // Event 1: Start reasoning about a bug
         create_cognitive_event(
             1,

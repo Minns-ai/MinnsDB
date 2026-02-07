@@ -306,16 +306,16 @@ impl CentralityMeasures {
             let current_dist = distances[&current];
 
             for neighbor in graph.get_neighbors(current) {
-                if !distances.contains_key(&neighbor) {
+                if let std::collections::hash_map::Entry::Vacant(e) = distances.entry(neighbor) {
                     // First time visiting
-                    distances.insert(neighbor, current_dist + 1);
+                    e.insert(current_dist + 1);
                     predecessors.insert(neighbor, vec![current]);
                     queue.push_back(neighbor);
                 } else if distances[&neighbor] == current_dist + 1 {
                     // Same distance, another shortest path
                     predecessors
                         .entry(neighbor)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(current);
                 }
             }
@@ -396,7 +396,7 @@ pub struct AllCentralities {
 impl AllCentralities {
     /// Get combined score (average of all centralities)
     pub fn combined_score(&self, node_id: NodeId) -> f32 {
-        let scores = vec![
+        let scores = [
             self.degree.get(&node_id).copied().unwrap_or(0.0),
             self.betweenness.get(&node_id).copied().unwrap_or(0.0),
             self.closeness.get(&node_id).copied().unwrap_or(0.0),

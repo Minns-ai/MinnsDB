@@ -147,7 +147,7 @@ impl EpisodeCatalog for RedbEpisodeCatalog {
         for &event_id in &record.event_ids {
             self.backend.put(
                 "partition_map", // Reusing partition_map as event→episode index
-                event_id.to_be_bytes().to_vec(),
+                event_id.to_be_bytes(),
                 &episode_id,
             )?;
         }
@@ -206,7 +206,7 @@ impl EpisodeCatalog for RedbEpisodeCatalog {
         // Look up episode_id from reverse index
         let episode_id: Option<EpisodeId> = self
             .backend
-            .get("partition_map", event_id.to_be_bytes().to_vec())?;
+            .get("partition_map", event_id.to_be_bytes())?;
 
         match episode_id {
             Some(ep_id) => self.get_episode(ep_id, None),
