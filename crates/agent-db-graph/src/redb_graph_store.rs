@@ -111,8 +111,7 @@ impl PartitionCache {
     }
 
     fn touch(&self) {
-        self.last_accessed
-            .store(next_lru_tick(), Ordering::Relaxed);
+        self.last_accessed.store(next_lru_tick(), Ordering::Relaxed);
     }
 
     fn last_accessed(&self) -> u64 {
