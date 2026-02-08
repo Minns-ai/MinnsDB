@@ -43,7 +43,7 @@ async fn test_real_claims_pipeline_end_to_end() {
         _ => {
             eprintln!("Skipping: OPENAI_API_KEY not set");
             return;
-        }
+        },
     };
 
     let dir = tempdir().unwrap();
@@ -114,7 +114,10 @@ async fn test_real_claims_pipeline_end_to_end() {
             "  Claim {}: \"{}\" (confidence: {:.2})",
             claim.id, claim.claim_text, claim.confidence
         );
-        assert!(!claim.claim_text.is_empty(), "Claim text should not be empty");
+        assert!(
+            !claim.claim_text.is_empty(),
+            "Claim text should not be empty"
+        );
         assert!(
             claim.confidence > 0.0 && claim.confidence <= 1.0,
             "Confidence {} should be in (0, 1]",
@@ -161,7 +164,7 @@ async fn test_real_embedding_generation() {
         _ => {
             eprintln!("Skipping: OPENAI_API_KEY not set");
             return;
-        }
+        },
     };
 
     // Test the embedding client directly
@@ -189,6 +192,9 @@ async fn test_real_embedding_generation() {
         magnitude
     );
 
-    println!("=== Embedding generation test PASSED (dims={}, tokens={}) ===",
-        response.embedding.len(), response.tokens_used);
+    println!(
+        "=== Embedding generation test PASSED (dims={}, tokens={}) ===",
+        response.embedding.len(),
+        response.tokens_used
+    );
 }

@@ -433,10 +433,7 @@ impl ClaimStore {
 
     /// Number of embeddings in the in-memory vector index.
     pub fn vector_index_size(&self) -> usize {
-        self.index
-            .read()
-            .map(|idx| idx.entries.len())
-            .unwrap_or(0)
+        self.index.read().map(|idx| idx.entries.len()).unwrap_or(0)
     }
 }
 

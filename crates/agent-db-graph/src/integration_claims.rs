@@ -372,12 +372,18 @@ impl GraphEngine {
             } => {
                 use agent_db_events::core::ActionOutcome;
                 let outcome_text = match outcome {
-                    ActionOutcome::Success { result } => format!("succeeded with result: {}", result),
+                    ActionOutcome::Success { result } => {
+                        format!("succeeded with result: {}", result)
+                    },
                     ActionOutcome::Failure { error, error_code } => {
                         format!("failed with error code {}: {}", error_code, error)
                     },
                     ActionOutcome::Partial { result, issues } => {
-                        format!("partially succeeded ({}), issues: {}", result, issues.join("; "))
+                        format!(
+                            "partially succeeded ({}), issues: {}",
+                            result,
+                            issues.join("; ")
+                        )
                     },
                 };
                 format!(
@@ -421,34 +427,43 @@ impl GraphEngine {
             EventType::Learning { event: learning } => {
                 use agent_db_events::core::LearningEvent;
                 match learning {
-                    LearningEvent::MemoryRetrieved { query_id, memory_ids } => {
+                    LearningEvent::MemoryRetrieved {
+                        query_id,
+                        memory_ids,
+                    } => {
                         format!(
                             "Learning: retrieved memories {:?} for query '{}'",
                             memory_ids, query_id
                         )
                     },
-                    LearningEvent::MemoryUsed { query_id, memory_id } => {
+                    LearningEvent::MemoryUsed {
+                        query_id,
+                        memory_id,
+                    } => {
                         format!(
                             "Learning: used memory {} for query '{}'",
                             memory_id, query_id
                         )
                     },
-                    LearningEvent::StrategyServed { query_id, strategy_ids } => {
+                    LearningEvent::StrategyServed {
+                        query_id,
+                        strategy_ids,
+                    } => {
                         format!(
                             "Learning: served strategies {:?} for query '{}'",
                             strategy_ids, query_id
                         )
                     },
-                    LearningEvent::StrategyUsed { query_id, strategy_id } => {
+                    LearningEvent::StrategyUsed {
+                        query_id,
+                        strategy_id,
+                    } => {
                         format!(
                             "Learning: used strategy {} for query '{}'",
                             strategy_id, query_id
                         )
                     },
-                    LearningEvent::Outcome {
-                        query_id,
-                        success,
-                    } => {
+                    LearningEvent::Outcome { query_id, success } => {
                         format!(
                             "Learning outcome for query '{}': success={}",
                             query_id, success
