@@ -11,6 +11,7 @@ mod state;
 
 use agent_db_graph::GraphEngine;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::info;
 
 #[tokio::main]
@@ -34,9 +35,12 @@ async fn main() -> anyhow::Result<()> {
     info!("  Strategy cache: 5,000 items (~15MB)");
     info!("  Redb cache: 128MB");
 
+    let engine = Arc::new(engine);
+
     // Create application state
     let state = state::AppState {
-        engine: Arc::new(engine),
+        engine: engine.clone(),
+        started_at: Instant::now(),
     };
 
     // Build router
@@ -52,7 +56,43 @@ async fn main() -> anyhow::Result<()> {
     info!("❤️  Health check: http://{}/api/health", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+
+    // Serve with graceful shutdown on SIGINT (Ctrl+C) / SIGTERM
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // ── Post-shutdown: flush all in-flight work to redb ──
+    info!("🛑 Server stopped accepting connections — flushing engine buffers");
+    engine.shutdown().await;
+    info!("✅ Graceful shutdown complete");
 
     Ok(())
+}
+
+/// Returns a future that resolves when the process receives a termination
+/// signal.  On Unix this listens for SIGTERM (container orchestrators) and
+/// SIGINT (Ctrl+C).  On Windows it listens for Ctrl+C only.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>(); // no SIGTERM on Windows
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received SIGINT (Ctrl+C) — initiating graceful shutdown"),
+        _ = terminate => info!("Received SIGTERM — initiating graceful shutdown"),
+    }
 }

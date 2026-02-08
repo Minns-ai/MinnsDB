@@ -16,7 +16,7 @@ pub async fn health_check(State(state): State<AppState>) -> Result<Json<HealthRe
             "degraded".to_string()
         },
         version: env!("CARGO_PKG_VERSION").to_string(),
-        uptime_seconds: 0, // TODO: track uptime
+        uptime_seconds: state.started_at.elapsed().as_secs(),
         is_healthy: health.is_healthy,
         node_count: health.node_count,
         edge_count: health.edge_count,
