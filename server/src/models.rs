@@ -4,7 +4,7 @@ use agent_db_core::types::{AgentId, AgentType, ContextHash, EventId, SessionId};
 use agent_db_events::core::EventContext;
 use agent_db_events::Event;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{serde_as, DisplayFromStr, PickFirst};
 
 // ============================================================================
 // Request Types
@@ -20,13 +20,16 @@ pub struct ProcessEventRequest {
 
 /// Simplified event request for easy integration
 /// Only requires the absolute minimum fields
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SimpleEventRequest {
     /// Agent identifier
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
     pub agent_id: AgentId,
     /// Agent type (e.g., "chatbot", "assistant")
     pub agent_type: AgentType,
     /// Session identifier
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
     pub session_id: SessionId,
     /// Action name or event type
     pub action: String,
@@ -76,34 +79,43 @@ pub struct GraphContextQuery {
     pub agent_type: Option<AgentType>,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize)]
 pub struct ContextMemoriesRequest {
     pub context: EventContext,
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default)]
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
     pub min_similarity: Option<f32>,
     #[serde(default)]
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
     pub agent_id: Option<AgentId>,
     #[serde(default)]
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
     pub session_id: Option<SessionId>,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize)]
 pub struct StrategySimilarityRequest {
     #[serde(default)]
+    #[serde_as(as = "Vec<PickFirst<(_, DisplayFromStr)>>")]
     pub goal_ids: Vec<u64>,
     #[serde(default)]
     pub tool_names: Vec<String>,
     #[serde(default)]
     pub result_types: Vec<String>,
     #[serde(default)]
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
     pub context_hash: Option<ContextHash>,
     #[serde(default)]
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
     pub agent_id: Option<AgentId>,
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default)]
+    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
     pub min_score: Option<f32>,
 }
 
