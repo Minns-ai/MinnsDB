@@ -38,6 +38,27 @@ jobs:
     - name: Run doc tests
       run: cargo test --doc
 
+  claims-integration:
+    name: Claims Pipeline (real LLM)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: test
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@1.83.0
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: "rust-cache"
+
+    - name: Run claims integration tests
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      run: cargo test -p agent-db-graph --test claims_integration -- --ignored --nocapture
+
   benchmark:
     name: Benchmark
     runs-on: ubuntu-latest

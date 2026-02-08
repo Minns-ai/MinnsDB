@@ -351,7 +351,10 @@ impl GraphEngine {
         let inference: Arc<RwLock<crate::inference::GraphInference>> = self.inference.clone();
         let ner_promotion_threshold = self.config.ner_promotion_threshold;
 
-        // Extract canonical text from event
+        // Extract canonical text from event.
+        // Context events carry inline text; other event types synthesise a
+        // textual representation from their structured fields so the claims
+        // pipeline can extract factual knowledge from *any* event.
         let canonical_text = match &event.event_type {
             EventType::Context { text, .. } => {
                 if text.is_empty() {
@@ -359,15 +362,130 @@ impl GraphEngine {
                 }
                 text.clone()
             },
-            _ => {
-                // Check promotion threshold
-                if event.context_size_bytes >= ner_promotion_threshold {
-                    // TODO: Implement segment storage dereferencing
-                    return;
+
+            // ── Action events ───────────────────────────────────────────
+            EventType::Action {
+                action_name,
+                parameters,
+                outcome,
+                duration_ns,
+            } => {
+                use agent_db_events::core::ActionOutcome;
+                let outcome_text = match outcome {
+                    ActionOutcome::Success { result } => format!("succeeded with result: {}", result),
+                    ActionOutcome::Failure { error, error_code } => {
+                        format!("failed with error code {}: {}", error_code, error)
+                    },
+                    ActionOutcome::Partial { result, issues } => {
+                        format!("partially succeeded ({}), issues: {}", result, issues.join("; "))
+                    },
+                };
+                format!(
+                    "Action '{}' with parameters {} {} (took {} ns)",
+                    action_name, parameters, outcome_text, duration_ns
+                )
+            },
+
+            // ── Observation events ──────────────────────────────────────
+            EventType::Observation {
+                observation_type,
+                data,
+                confidence,
+                source,
+            } => {
+                format!(
+                    "Observation [{}] from source '{}' (confidence {:.2}): {}",
+                    observation_type, source, confidence, data
+                )
+            },
+
+            // ── Cognitive / Decision events ─────────────────────────────
+            EventType::Cognitive {
+                process_type,
+                input,
+                output,
+                reasoning_trace,
+            } => {
+                let trace = if reasoning_trace.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Reasoning: {}", reasoning_trace.join(" → "))
+                };
+                format!(
+                    "Cognitive process {:?}: input={} output={}.{}",
+                    process_type, input, output, trace
+                )
+            },
+
+            // ── Learning telemetry events ───────────────────────────────
+            EventType::Learning { event: learning } => {
+                use agent_db_events::core::LearningEvent;
+                match learning {
+                    LearningEvent::MemoryRetrieved { query_id, memory_ids } => {
+                        format!(
+                            "Learning: retrieved memories {:?} for query '{}'",
+                            memory_ids, query_id
+                        )
+                    },
+                    LearningEvent::MemoryUsed { query_id, memory_id } => {
+                        format!(
+                            "Learning: used memory {} for query '{}'",
+                            memory_id, query_id
+                        )
+                    },
+                    LearningEvent::StrategyServed { query_id, strategy_ids } => {
+                        format!(
+                            "Learning: served strategies {:?} for query '{}'",
+                            strategy_ids, query_id
+                        )
+                    },
+                    LearningEvent::StrategyUsed { query_id, strategy_id } => {
+                        format!(
+                            "Learning: used strategy {} for query '{}'",
+                            strategy_id, query_id
+                        )
+                    },
+                    LearningEvent::Outcome {
+                        query_id,
+                        success,
+                    } => {
+                        format!(
+                            "Learning outcome for query '{}': success={}",
+                            query_id, success
+                        )
+                    },
                 }
-                return;
+            },
+
+            // ── Communication events ────────────────────────────────────
+            EventType::Communication {
+                message_type,
+                sender,
+                recipient,
+                content,
+            } => {
+                format!(
+                    "Communication [{}] from agent {} to agent {}: {}",
+                    message_type, sender, recipient, content
+                )
             },
         };
+
+        // Skip empty synthesised text
+        if canonical_text.is_empty() {
+            return;
+        }
+
+        // Promotion threshold: if the event's raw context exceeds the
+        // threshold, we prefer the segment-stored content (future: dereference
+        // segment_pointer).  For now, fall through to use the synthesised text
+        // above — the LLM can still extract claims from it.
+        if event.context_size_bytes >= ner_promotion_threshold {
+            debug!(
+                "Event {} exceeds promotion threshold ({} >= {}), using synthesised text ({} bytes)",
+                event.id, event.context_size_bytes, ner_promotion_threshold, canonical_text.len()
+            );
+        }
 
         debug!(
             "Submitting event {} for claim extraction ({} bytes)",
