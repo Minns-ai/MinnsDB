@@ -15,7 +15,6 @@ use agent_db_storage::RedbBackend;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 // Table names for redb
 const TABLE_GRAPH_NODES: &str = "graph_nodes";
@@ -81,12 +80,13 @@ fn make_edge_key(bucket: GoalBucketId, from: NodeId, to: NodeId) -> Vec<u8> {
 // Partition Cache (for LRU management)
 // ============================================================================
 
-// Reference time for calculating relative timestamps (milliseconds since program start)
-static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+// Monotonic counter for deterministic LRU ordering.
+// Using a counter instead of wall-clock timestamps avoids flaky eviction
+// when multiple partitions are touched within the same millisecond.
+static LRU_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn get_timestamp_ms() -> u64 {
-    let start = START_TIME.get_or_init(Instant::now);
-    start.elapsed().as_millis() as u64
+fn next_lru_tick() -> u64 {
+    LRU_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Cached partition data (loaded into memory)
@@ -96,7 +96,7 @@ struct PartitionCache {
     forward_edges: HashMap<NodeId, Vec<NodeId>>,
     reverse_edges: HashMap<NodeId, Vec<NodeId>>,
     edge_metadata: HashMap<(NodeId, NodeId), GraphEdge>,
-    last_accessed_ms: AtomicU64, // Timestamp in milliseconds for LRU (thread-safe)
+    last_accessed: AtomicU64, // Monotonic counter tick for LRU ordering (thread-safe)
 }
 
 impl PartitionCache {
@@ -106,17 +106,17 @@ impl PartitionCache {
             forward_edges: HashMap::new(),
             reverse_edges: HashMap::new(),
             edge_metadata: HashMap::new(),
-            last_accessed_ms: AtomicU64::new(get_timestamp_ms()),
+            last_accessed: AtomicU64::new(next_lru_tick()),
         }
     }
 
     fn touch(&self) {
-        self.last_accessed_ms
-            .store(get_timestamp_ms(), Ordering::Relaxed);
+        self.last_accessed
+            .store(next_lru_tick(), Ordering::Relaxed);
     }
 
     fn last_accessed(&self) -> u64 {
-        self.last_accessed_ms.load(Ordering::Relaxed)
+        self.last_accessed.load(Ordering::Relaxed)
     }
 }
 
