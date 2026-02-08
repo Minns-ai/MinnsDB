@@ -596,7 +596,7 @@ pub struct Bm25Stats {
 // ============================================================================
 
 /// Search mode for hybrid retrieval
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
     /// BM25 keyword search only
@@ -604,13 +604,8 @@ pub enum SearchMode {
     /// Semantic embedding search only
     Semantic,
     /// Hybrid: combine both with fusion
+    #[default]
     Hybrid,
-}
-
-impl Default for SearchMode {
-    fn default() -> Self {
-        SearchMode::Hybrid
-    }
 }
 
 /// Fusion strategy for combining search results

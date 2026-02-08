@@ -205,7 +205,7 @@ impl GraphInference {
         }
 
         // Periodically clean up buffer and detect patterns
-        if self.stats.events_processed % 100 == 0 {
+        if self.stats.events_processed.is_multiple_of(100) {
             tracing::info!("Inference detect_patterns event_id={}", event.id);
             self.detect_patterns()?;
             self.cleanup_old_associations();

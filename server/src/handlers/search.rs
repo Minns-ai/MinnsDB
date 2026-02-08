@@ -113,7 +113,7 @@ pub async fn search(
             // Use fusion strategy if provided, otherwise use default (RRF)
             let fusion_strategy = request
                 .fusion_strategy
-                .unwrap_or_else(|| agent_db_graph::indexing::FusionStrategy::default());
+                .unwrap_or_else(agent_db_graph::indexing::FusionStrategy::default);
 
             // Fuse results
             let fused = fusion_strategy.fuse(bm25_results, semantic_results);
