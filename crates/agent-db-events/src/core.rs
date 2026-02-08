@@ -2,7 +2,7 @@
 
 use agent_db_core::types::*;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr, PickFirst};
+use serde_with::{serde_as, DisplayFromStr, IfIsHumanReadable, PickFirst};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -21,14 +21,14 @@ pub struct Event {
     pub timestamp: Timestamp,
 
     /// Agent that generated this event
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub agent_id: AgentId,
 
     /// Agent type classification (e.g., "coding-assistant", "data-analyst")
     pub agent_type: AgentType,
 
     /// Session identifier for grouping
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub session_id: SessionId,
 
     /// Type and payload of the event
@@ -49,7 +49,7 @@ pub struct Event {
 
     /// Size of context in bytes (for semantic memory promotion threshold)
     #[serde(default)]
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub context_size_bytes: usize,
 
     /// Pointer to segment storage for large contexts
@@ -67,7 +67,7 @@ pub enum EventType {
         action_name: String,
         parameters: serde_json::Value,
         outcome: ActionOutcome,
-        #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+        #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
         duration_ns: u64,
     },
 
@@ -75,7 +75,7 @@ pub enum EventType {
     Observation {
         observation_type: String,
         data: serde_json::Value,
-        #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+        #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
         confidence: f32,
         source: String,
     },
@@ -91,9 +91,9 @@ pub enum EventType {
     /// Communication events
     Communication {
         message_type: String,
-        #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+        #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
         sender: AgentId,
-        #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+        #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
         recipient: AgentId,
         content: serde_json::Value,
     },
@@ -118,22 +118,22 @@ pub enum EventType {
 pub enum LearningEvent {
     MemoryRetrieved {
         query_id: String,
-        #[serde_as(as = "Vec<PickFirst<(_, DisplayFromStr)>>")]
+        #[serde_as(as = "Vec<IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>>")]
         memory_ids: Vec<u64>,
     },
     MemoryUsed {
         query_id: String,
-        #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+        #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
         memory_id: u64,
     },
     StrategyServed {
         query_id: String,
-        #[serde_as(as = "Vec<PickFirst<(_, DisplayFromStr)>>")]
+        #[serde_as(as = "Vec<IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>>")]
         strategy_ids: Vec<u64>,
     },
     StrategyUsed {
         query_id: String,
-        #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+        #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
         strategy_id: u64,
     },
     Outcome {
@@ -151,7 +151,7 @@ pub enum ActionOutcome {
     },
     Failure {
         error: String,
-        #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+        #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
         error_code: u32,
     },
     Partial {
@@ -186,7 +186,7 @@ pub struct EventContext {
     /// Context fingerprint for fast matching
     /// If not provided during deserialization, it will be auto-computed
     #[serde(default = "default_fingerprint")]
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub fingerprint: ContextHash,
 
     /// Context embeddings for similarity
@@ -215,16 +215,16 @@ pub struct EnvironmentState {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Goal {
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub id: GoalId,
     pub description: String,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub priority: f32,
-    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[serde_as(as = "Option<IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>>")]
     pub deadline: Option<Timestamp>,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub progress: f32,
-    #[serde_as(as = "Vec<PickFirst<(_, DisplayFromStr)>>")]
+    #[serde_as(as = "Vec<IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>>")]
     pub subgoals: Vec<GoalId>,
 }
 
@@ -270,13 +270,13 @@ pub struct TemporalContext {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputationalResources {
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub cpu_percent: f32,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub memory_bytes: u64,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub storage_bytes: u64,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub network_bandwidth: u64,
 }
 
@@ -285,11 +285,11 @@ pub struct ComputationalResources {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceAvailability {
     pub available: bool,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub capacity: f32,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub current_usage: f32,
-    #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
+    #[serde_as(as = "Option<IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>>")]
     pub estimated_cost: Option<f32>,
 }
 
@@ -297,9 +297,9 @@ pub struct ResourceAvailability {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeOfDay {
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub hour: u8,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub minute: u8,
     pub timezone: String,
 }
@@ -308,11 +308,11 @@ pub struct TimeOfDay {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deadline {
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub goal_id: GoalId,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub timestamp: Timestamp,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub priority: f32,
 }
 
@@ -322,7 +322,7 @@ pub struct Deadline {
 pub struct TemporalPattern {
     pub pattern_name: String,
     pub frequency: Duration,
-    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub phase: f32,
 }
 
