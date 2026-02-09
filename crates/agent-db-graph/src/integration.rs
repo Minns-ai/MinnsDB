@@ -174,6 +174,16 @@ pub struct GraphEngineConfig {
 
     /// Enable automatic embedding generation for claims
     pub enable_embedding_generation: bool,
+
+    // ========== 10x/100x: Consolidation + Refinement ==========
+    /// Configuration for memory consolidation
+    pub consolidation_config: crate::consolidation::ConsolidationConfig,
+
+    /// Configuration for LLM refinement
+    pub refinement_config: crate::refinement::RefinementConfig,
+
+    /// How many episodes between consolidation passes
+    pub consolidation_interval: u64,
 }
 
 /// Results from graph operations
@@ -287,6 +297,16 @@ pub struct GraphEngine {
 
     /// Embedding client (optional, when semantic memory is enabled)
     pub(crate) embedding_client: Option<Arc<dyn crate::claims::EmbeddingClient>>,
+
+    // ========== 10x/100x: Consolidation + Refinement ==========
+    /// Consolidation engine for memory hierarchy
+    pub(crate) consolidation_engine: Arc<RwLock<crate::consolidation::ConsolidationEngine>>,
+
+    /// Refinement engine for LLM-enhanced summaries
+    pub(crate) refinement_engine: Option<Arc<crate::refinement::RefinementEngine>>,
+
+    /// Counter for triggering periodic consolidation
+    pub(crate) episodes_since_consolidation: Arc<RwLock<u64>>,
 }
 
 /// Statistics for the graph engine
@@ -351,6 +371,10 @@ impl Default for GraphEngineConfig {
             claim_max_per_input: 10,
             embedding_workers: 2,
             enable_embedding_generation: true,
+            // Consolidation + Refinement
+            consolidation_config: crate::consolidation::ConsolidationConfig::default(),
+            refinement_config: crate::refinement::RefinementConfig::default(),
+            consolidation_interval: 10, // Run consolidation every 10 episodes
         }
     }
 }
@@ -664,6 +688,27 @@ impl GraphEngine {
                 (None, embedding_client)
             };
 
+        // 10x/100x: Build consolidation + refinement before config is moved
+        let consolidation_engine_arc =
+            Arc::new(RwLock::new(crate::consolidation::ConsolidationEngine::new(
+                config.consolidation_config.clone(),
+                100_000,
+            )));
+        let refinement_engine_arc = {
+            let mut refine_config = config.refinement_config.clone();
+            if config.openai_api_key.is_some() {
+                refine_config.enable_llm_refinement = true;
+            }
+            if config.openai_api_key.is_some() || config.enable_semantic_memory {
+                refine_config.enable_summary_embedding = true;
+            }
+            let engine = crate::refinement::RefinementEngine::new(
+                refine_config,
+                config.openai_api_key.clone(),
+            );
+            Some(Arc::new(engine))
+        };
+
         Ok(Self {
             inference,
             traversal,
@@ -690,6 +735,10 @@ impl GraphEngine {
             llm_client,
             embedding_queue,
             embedding_client,
+            // 10x/100x: Consolidation + Refinement — built BEFORE config is moved
+            consolidation_engine: consolidation_engine_arc,
+            refinement_engine: refinement_engine_arc,
+            episodes_since_consolidation: Arc::new(RwLock::new(0)),
         })
     }
 
@@ -706,6 +755,25 @@ impl GraphEngine {
     /// Get reference to claim store (if semantic memory is enabled)
     pub fn claim_store(&self) -> Option<&Arc<crate::claims::ClaimStore>> {
         self.claim_store.as_ref()
+    }
+
+    /// Retrieve memories using hierarchical search (Schema > Semantic > Episodic)
+    pub async fn retrieve_memories_hierarchical(
+        &self,
+        context: &agent_db_events::core::EventContext,
+        limit: usize,
+        min_similarity: f32,
+        agent_id: Option<AgentId>,
+    ) -> Vec<Memory> {
+        let mut store = self.memory_store.write().await;
+        store.retrieve_hierarchical(context, limit, min_similarity, agent_id)
+    }
+
+    /// Manually trigger a consolidation pass
+    pub async fn run_consolidation(&self) -> crate::consolidation::ConsolidationResult {
+        let mut store = self.memory_store.write().await;
+        let mut engine = self.consolidation_engine.write().await;
+        engine.run_consolidation(store.as_mut())
     }
 
     /// Process a single event and update the graph
@@ -1507,6 +1575,16 @@ impl GraphEngine {
 
     /// Process episode for memory formation
     async fn process_episode_for_memory(&self, episode: &Episode) -> GraphResult<()> {
+        // Load events for summary generation
+        let events: Vec<agent_db_events::core::Event> = {
+            let store = self.event_store.read().await;
+            episode
+                .events
+                .iter()
+                .filter_map(|event_id| store.get(event_id).cloned())
+                .collect()
+        };
+
         let mut memory_store = self.memory_store.write().await;
 
         tracing::info!(
@@ -1517,7 +1595,7 @@ impl GraphEngine {
             episode.significance,
             episode.outcome
         );
-        if let Some(upsert) = memory_store.store_episode(episode) {
+        if let Some(upsert) = memory_store.store_episode(episode, &events) {
             if upsert.is_new {
                 self.stats.write().await.total_memories_formed += 1;
             }
@@ -1531,14 +1609,60 @@ impl GraphEngine {
                     outputs.behavior_signature
                 );
                 tracing::info!(
-                    "Memory formed id={} episode_id={} strength={:.3} relevance={:.3} context_hash={}",
+                    "Memory formed id={} episode_id={} strength={:.3} relevance={:.3} context_hash={} tier={:?}",
                     upsert.id,
                     episode.id,
                     memory.strength,
                     memory.relevance_score,
-                    memory.context.fingerprint
+                    memory.context.fingerprint,
+                    memory.tier
                 );
                 self.attach_memory_to_graph(episode, &memory).await?;
+
+                // Fire-and-forget: async LLM refinement + embedding
+                if let Some(ref refinement) = self.refinement_engine {
+                    let memory_id = upsert.id;
+                    let store_ref = self.memory_store.clone();
+                    let refinement_ref = refinement.clone();
+                    let embedding_client = self.embedding_client.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = refinement_ref
+                            .refine_and_embed_memory(
+                                memory_id,
+                                &store_ref,
+                                embedding_client.as_ref(),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Memory refinement failed for {}: {}", memory_id, e);
+                        }
+                    });
+                }
+            }
+
+            // Check if we should run consolidation
+            let should_consolidate = {
+                let mut counter = self.episodes_since_consolidation.write().await;
+                *counter += 1;
+                *counter >= self.config.consolidation_interval
+            };
+            if should_consolidate {
+                *self.episodes_since_consolidation.write().await = 0;
+                let store_ref = self.memory_store.clone();
+                let engine_ref = self.consolidation_engine.clone();
+                tokio::spawn(async move {
+                    let mut store = store_ref.write().await;
+                    let mut engine = engine_ref.write().await;
+                    let result = engine.run_consolidation(store.as_mut());
+                    if result.semantic_created > 0 || result.schema_created > 0 {
+                        tracing::info!(
+                            "Consolidation pass: {} semantic created, {} schemas created, {} episodes consolidated",
+                            result.semantic_created,
+                            result.schema_created,
+                            result.consolidated_episode_ids.len()
+                        );
+                    }
+                });
             }
         } else {
             tracing::info!(

@@ -2,8 +2,9 @@
 
 use crate::errors::ApiError;
 use crate::models::{
-    ActionSuggestionResponse, ActionSuggestionsQuery, PaginationQuery, ReasoningStepResponse,
-    SimilarStrategyResponse, StrategyResponse, StrategySimilarityRequest,
+    ActionSuggestionResponse, ActionSuggestionsQuery, PaginationQuery, PlaybookBranchResponse,
+    PlaybookStepResponse, ReasoningStepResponse, SimilarStrategyResponse, StrategyResponse,
+    StrategySimilarityRequest,
 };
 use crate::state::AppState;
 use agent_db_core::types::AgentId;
@@ -28,32 +29,7 @@ pub async fn get_agent_strategies(
 
     let response: Vec<StrategyResponse> = strategies
         .into_iter()
-        .map(|s| StrategyResponse {
-            id: s.id,
-            name: s.name.clone(),
-            agent_id: s.agent_id,
-            quality_score: s.quality_score,
-            success_count: s.success_count,
-            failure_count: s.failure_count,
-            reasoning_steps: s
-                .reasoning_steps
-                .iter()
-                .map(|step| ReasoningStepResponse {
-                    description: step.description.clone(),
-                    sequence_order: step.sequence_order,
-                })
-                .collect(),
-            strategy_type: format!("{:?}", s.strategy_type),
-            support_count: s.support_count,
-            expected_success: s.expected_success,
-            expected_cost: s.expected_cost,
-            expected_value: s.expected_value,
-            confidence: s.confidence,
-            goal_bucket_id: s.goal_bucket_id,
-            behavior_signature: s.behavior_signature.clone(),
-            precondition: s.precondition.clone(),
-            action_hint: s.action_hint.clone(),
-        })
+        .map(|s| strategy_to_response(s))
         .collect();
 
     Ok(Json(response))
@@ -79,36 +55,98 @@ pub async fn get_similar_strategies(
 
     let response: Vec<SimilarStrategyResponse> = strategies
         .into_iter()
-        .map(|(s, score)| SimilarStrategyResponse {
-            score,
-            id: s.id,
-            name: s.name.clone(),
-            agent_id: s.agent_id,
-            quality_score: s.quality_score,
-            success_count: s.success_count,
-            failure_count: s.failure_count,
-            reasoning_steps: s
-                .reasoning_steps
-                .iter()
-                .map(|step| ReasoningStepResponse {
-                    description: step.description.clone(),
-                    sequence_order: step.sequence_order,
-                })
-                .collect(),
-            strategy_type: format!("{:?}", s.strategy_type),
-            support_count: s.support_count,
-            expected_success: s.expected_success,
-            expected_cost: s.expected_cost,
-            expected_value: s.expected_value,
-            confidence: s.confidence,
-            goal_bucket_id: s.goal_bucket_id,
-            behavior_signature: s.behavior_signature.clone(),
-            precondition: s.precondition.clone(),
-            action_hint: s.action_hint.clone(),
+        .map(|(s, score)| {
+            let base = strategy_to_response(s);
+            SimilarStrategyResponse {
+                score,
+                id: base.id,
+                name: base.name,
+                agent_id: base.agent_id,
+                summary: base.summary,
+                when_to_use: base.when_to_use,
+                when_not_to_use: base.when_not_to_use,
+                failure_modes: base.failure_modes,
+                playbook: base.playbook,
+                counterfactual: base.counterfactual,
+                supersedes: base.supersedes,
+                applicable_domains: base.applicable_domains,
+                quality_score: base.quality_score,
+                success_count: base.success_count,
+                failure_count: base.failure_count,
+                reasoning_steps: base.reasoning_steps,
+                strategy_type: base.strategy_type,
+                support_count: base.support_count,
+                expected_success: base.expected_success,
+                expected_cost: base.expected_cost,
+                expected_value: base.expected_value,
+                confidence: base.confidence,
+                goal_bucket_id: base.goal_bucket_id,
+                behavior_signature: base.behavior_signature,
+                precondition: base.precondition,
+                action_hint: base.action_hint,
+            }
         })
         .collect();
 
     Ok(Json(response))
+}
+
+fn playbook_to_response(steps: &[agent_db_graph::PlaybookStep]) -> Vec<PlaybookStepResponse> {
+    steps
+        .iter()
+        .map(|step| PlaybookStepResponse {
+            step: step.step,
+            action: step.action.clone(),
+            condition: step.condition.clone(),
+            skip_if: step.skip_if.clone(),
+            recovery: step.recovery.clone(),
+            branches: step
+                .branches
+                .iter()
+                .map(|b| PlaybookBranchResponse {
+                    condition: b.condition.clone(),
+                    action: b.action.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn strategy_to_response(s: agent_db_graph::strategies::Strategy) -> StrategyResponse {
+    StrategyResponse {
+        id: s.id,
+        name: s.name.clone(),
+        agent_id: s.agent_id,
+        summary: s.summary.clone(),
+        when_to_use: s.when_to_use.clone(),
+        when_not_to_use: s.when_not_to_use.clone(),
+        failure_modes: s.failure_modes.clone(),
+        playbook: playbook_to_response(&s.playbook),
+        counterfactual: s.counterfactual.clone(),
+        supersedes: s.supersedes.clone(),
+        applicable_domains: s.applicable_domains.clone(),
+        quality_score: s.quality_score,
+        success_count: s.success_count,
+        failure_count: s.failure_count,
+        reasoning_steps: s
+            .reasoning_steps
+            .iter()
+            .map(|step| ReasoningStepResponse {
+                description: step.description.clone(),
+                sequence_order: step.sequence_order,
+            })
+            .collect(),
+        strategy_type: format!("{:?}", s.strategy_type),
+        support_count: s.support_count,
+        expected_success: s.expected_success,
+        expected_cost: s.expected_cost,
+        expected_value: s.expected_value,
+        confidence: s.confidence,
+        goal_bucket_id: s.goal_bucket_id,
+        behavior_signature: s.behavior_signature.clone(),
+        precondition: s.precondition.clone(),
+        action_hint: s.action_hint.clone(),
+    }
 }
 
 // GET /api/suggestions - Get action suggestions (Policy Guide)

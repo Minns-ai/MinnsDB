@@ -34,20 +34,7 @@ pub async fn get_agent_memories(
 
     let response: Vec<MemoryResponse> = memories
         .into_iter()
-        .map(|m| MemoryResponse {
-            id: m.id,
-            agent_id: m.agent_id,
-            session_id: m.session_id,
-            strength: m.strength,
-            relevance_score: m.relevance_score,
-            access_count: m.access_count,
-            formed_at: m.formed_at,
-            last_accessed: m.last_accessed,
-            context_hash: m.context.fingerprint,
-            context: m.context.clone(),
-            outcome: format!("{:?}", m.outcome),
-            memory_type: memory_type_label(&m.memory_type),
-        })
+        .map(|m| memory_to_response(m))
         .collect();
 
     Ok(Json(response))
@@ -77,21 +64,32 @@ pub async fn get_memories_by_context(
 
     let response: Vec<MemoryResponse> = memories
         .into_iter()
-        .map(|m| MemoryResponse {
-            id: m.id,
-            agent_id: m.agent_id,
-            session_id: m.session_id,
-            strength: m.strength,
-            relevance_score: m.relevance_score,
-            access_count: m.access_count,
-            formed_at: m.formed_at,
-            last_accessed: m.last_accessed,
-            context_hash: m.context.fingerprint,
-            context: m.context.clone(),
-            outcome: format!("{:?}", m.outcome),
-            memory_type: memory_type_label(&m.memory_type),
-        })
+        .map(|m| memory_to_response(m))
         .collect();
 
     Ok(Json(response))
+}
+
+fn memory_to_response(m: agent_db_graph::memory::Memory) -> MemoryResponse {
+    MemoryResponse {
+        id: m.id,
+        agent_id: m.agent_id,
+        session_id: m.session_id,
+        summary: m.summary.clone(),
+        takeaway: m.takeaway.clone(),
+        causal_note: m.causal_note.clone(),
+        tier: format!("{:?}", m.tier),
+        consolidation_status: format!("{:?}", m.consolidation_status),
+        schema_id: None, // populated for consolidated memories
+        consolidated_from: Vec::new(),
+        strength: m.strength,
+        relevance_score: m.relevance_score,
+        access_count: m.access_count,
+        formed_at: m.formed_at,
+        last_accessed: m.last_accessed,
+        context_hash: m.context.fingerprint,
+        context: m.context.clone(),
+        outcome: format!("{:?}", m.outcome),
+        memory_type: memory_type_label(&m.memory_type),
+    }
 }

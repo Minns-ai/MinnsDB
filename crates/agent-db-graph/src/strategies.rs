@@ -8,7 +8,7 @@
 use crate::episodes::{Episode, EpisodeId, EpisodeOutcome};
 use crate::GraphResult;
 use agent_db_core::types::{current_timestamp, AgentId, ContextHash, Timestamp};
-use agent_db_events::core::{CognitiveType, Event, EventType, MetadataValue};
+use agent_db_events::core::{ActionOutcome, CognitiveType, Event, EventType, MetadataValue};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
@@ -58,6 +58,48 @@ pub struct Strategy {
     /// Human-readable strategy name
     pub name: String,
 
+    // ========== LLM-Retrievable Fields (10x) ==========
+    /// Natural language summary of this strategy
+    #[serde(default)]
+    pub summary: String,
+
+    /// Natural language description of when to use this strategy
+    #[serde(default)]
+    pub when_to_use: String,
+
+    /// Conditions where this strategy should NOT be used
+    #[serde(default)]
+    pub when_not_to_use: String,
+
+    /// Known failure modes and how to recover
+    #[serde(default)]
+    pub failure_modes: Vec<String>,
+
+    /// Executable playbook — structured steps with branching and recovery (100x)
+    #[serde(default)]
+    pub playbook: Vec<PlaybookStep>,
+
+    /// What would have happened if a different approach was taken
+    #[serde(default)]
+    pub counterfactual: String,
+
+    /// Strategy IDs this one supersedes (makes obsolete)
+    #[serde(default)]
+    pub supersedes: Vec<StrategyId>,
+
+    /// Domains where this strategy has been shown to work
+    #[serde(default)]
+    pub applicable_domains: Vec<String>,
+
+    /// How many generations of evolution this strategy has gone through
+    #[serde(default)]
+    pub lineage_depth: u32,
+
+    /// Embedding of the summary text for semantic retrieval
+    #[serde(default)]
+    pub summary_embedding: Vec<f32>,
+
+    // ========== Original Fields ==========
     /// Agent that created/used this strategy
     pub agent_id: AgentId,
 
@@ -142,6 +184,41 @@ pub struct Strategy {
 
     /// Parent strategy ID if this was refined from another strategy
     pub parent_strategy: Option<StrategyId>,
+}
+
+/// A single step in an executable playbook
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PlaybookStep {
+    /// Step number (1-indexed)
+    pub step: u32,
+
+    /// What to do
+    pub action: String,
+
+    /// Prerequisite condition (when to execute this step)
+    #[serde(default)]
+    pub condition: String,
+
+    /// Condition under which this step should be skipped
+    #[serde(default)]
+    pub skip_if: String,
+
+    /// Branching conditions: maps a condition string to an alternative action
+    #[serde(default)]
+    pub branches: Vec<PlaybookBranch>,
+
+    /// Recovery instruction if this step fails
+    #[serde(default)]
+    pub recovery: String,
+}
+
+/// A branch in a playbook step
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PlaybookBranch {
+    /// The condition that triggers this branch
+    pub condition: String,
+    /// What to do when this condition is met
+    pub action: String,
 }
 
 /// A single reasoning step in a strategy
@@ -402,6 +479,44 @@ impl StrategyExtractor {
             self.extract_behavior_skeleton(events, &strategy_type, goal_bucket_id);
         let (expected_success, expected_value, confidence) =
             self.derive_calibrated_metrics(&strategy_type, &outcome, events.len() as u32);
+        // Generate natural language summary
+        let summary = synthesize_strategy_summary(
+            &strategy_type,
+            &outcome,
+            episode,
+            events,
+            &success_indicators,
+            &failure_patterns,
+        );
+
+        // Generate 10x/100x fields
+        let when_to_use = synthesize_when_to_use(&strategy_type, episode, events);
+        let when_not_to_use = synthesize_when_not_to_use(&strategy_type, episode, events);
+        let failure_mode_hints = synthesize_failure_modes(events);
+        let playbook = build_playbook(events, &strategy_type);
+        let counterfactual = synthesize_counterfactual(&outcome, events);
+
+        // Detect applicable domains from goals + context
+        let applicable_domains: Vec<String> = episode
+            .context
+            .active_goals
+            .iter()
+            .filter_map(|g| {
+                if g.description.is_empty() {
+                    None
+                } else {
+                    // Extract domain keyword from goal description
+                    Some(
+                        g.description
+                            .split_whitespace()
+                            .take(4)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    )
+                }
+            })
+            .collect();
+
         let mut strategy = Strategy {
             id: strategy_id,
             name: match strategy_type {
@@ -412,6 +527,16 @@ impl StrategyExtractor {
                     format!("constraint_{}_ep_{}", episode.agent_id, episode.id)
                 },
             },
+            summary,
+            when_to_use,
+            when_not_to_use,
+            failure_modes: failure_mode_hints,
+            playbook,
+            counterfactual,
+            supersedes: Vec::new(),
+            applicable_domains,
+            lineage_depth: 0,
+            summary_embedding: Vec::new(),
             agent_id: episode.agent_id,
             reasoning_steps,
             context_patterns: context_patterns.clone(),
@@ -1513,12 +1638,56 @@ impl StrategyExtractor {
             let strategy_id = self.next_strategy_id;
             self.next_strategy_id += 1;
 
+            // Build summary for distiller-generated strategy
+            let distiller_summary = match strategy_type {
+                StrategyType::Positive => format!(
+                    "DO this when applicable. Prefer motif pattern '{}' in goal_bucket {}. Success rate {:.0}%, uplift {:.0}%, supported by {} episodes. Confidence {:.0}%.",
+                    motif, goal_bucket_id, p_s * 100.0, uplift * 100.0, support, confidence * 100.0
+                ),
+                StrategyType::Constraint => format!(
+                    "AVOID this pattern. Motif '{}' in goal_bucket {} correlates with failure. Failure uplift {:.0}%, supported by {} episodes. Confidence {:.0}%.",
+                    motif, goal_bucket_id, failure_uplift * 100.0, support, confidence * 100.0
+                ),
+            };
+
+            // Generate 10x fields for distiller-generated strategies
+            let distiller_when_to_use = match strategy_type {
+                StrategyType::Positive => format!(
+                    "Use when goal bucket is {} and the motif '{}' is applicable. Best when success rate > {:.0}%.",
+                    goal_bucket_id, motif, p_s * 100.0
+                ),
+                StrategyType::Constraint => format!(
+                    "Avoid when goal bucket is {} and the motif '{}' appears. Failure correlation is strong ({:.0}%).",
+                    goal_bucket_id, motif, failure_uplift * 100.0
+                ),
+            };
+            let distiller_when_not_to_use = match strategy_type {
+                StrategyType::Positive => format!(
+                    "Do not use when context significantly differs from goal_bucket {} or when contradictions were observed.",
+                    goal_bucket_id
+                ),
+                StrategyType::Constraint => format!(
+                    "Safe to ignore when success rate in similar contexts is already > {:.0}% without this motif.",
+                    p_s * 100.0
+                ),
+            };
+
             let mut strategy = Strategy {
                 id: strategy_id,
                 name: match strategy_type {
                     StrategyType::Positive => format!("strategy_{}_motif", goal_bucket_id),
                     StrategyType::Constraint => format!("constraint_{}_motif", goal_bucket_id),
                 },
+                summary: distiller_summary,
+                when_to_use: distiller_when_to_use,
+                when_not_to_use: distiller_when_not_to_use,
+                failure_modes: Vec::new(),
+                playbook: Vec::new(), // Distiller strategies are motif-level, no step playbook
+                counterfactual: String::new(),
+                supersedes: Vec::new(),
+                applicable_domains: Vec::new(),
+                lineage_depth: 0,
+                summary_embedding: Vec::new(),
                 agent_id,
                 reasoning_steps: Vec::new(),
                 context_patterns: Vec::new(),
@@ -1935,6 +2104,463 @@ fn outcome_to_counts(outcome: Option<&EpisodeOutcome>) -> (u32, u32) {
         Some(EpisodeOutcome::Success) | Some(EpisodeOutcome::Partial) => (1, 0),
         Some(EpisodeOutcome::Failure) => (0, 1),
         Some(EpisodeOutcome::Interrupted) | None => (0, 0),
+    }
+}
+
+/// Truncate a string to `max_len` chars, appending "…" if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}…", &s[..max_len])
+    } else {
+        s.to_string()
+    }
+}
+
+/// Truncate a `serde_json::Value` to a readable string of at most `max_len` chars.
+fn truncate_value(v: &serde_json::Value, max_len: usize) -> String {
+    let raw = match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    truncate_str(&raw, max_len)
+}
+
+/// Synthesize a natural language strategy summary from an episode and its events.
+///
+/// The summary describes *when* to use this strategy, *what steps* to follow,
+/// *what success looks like*, and *what to avoid* — all in plain English an LLM can use.
+pub fn synthesize_strategy_summary(
+    strategy_type: &StrategyType,
+    outcome: &EpisodeOutcome,
+    episode: &Episode,
+    events: &[Event],
+    success_indicators: &[String],
+    failure_patterns: &[String],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // 1. Strategy type framing
+    match strategy_type {
+        StrategyType::Positive => parts.push("DO this when applicable.".to_string()),
+        StrategyType::Constraint => parts.push("AVOID this pattern.".to_string()),
+    }
+
+    // 2. When — goals and context
+    let goals: Vec<&str> = episode
+        .context
+        .active_goals
+        .iter()
+        .map(|g| g.description.as_str())
+        .filter(|d| !d.is_empty())
+        .collect();
+    if !goals.is_empty() {
+        parts.push(format!("When: {}", goals.join("; ")));
+    }
+
+    let env_vars = &episode.context.environment.variables;
+    let mut context_hints = Vec::new();
+    if let Some(intent) = env_vars
+        .get("intent_type")
+        .or_else(|| env_vars.get("intent"))
+    {
+        context_hints.push(format!("intent={}", intent));
+    }
+    for (k, v) in env_vars.iter().take(3) {
+        if k != "intent_type" && k != "intent" && k != "user_id" && k != "user" {
+            context_hints.push(format!("{}={}", k, v));
+        }
+    }
+    if !context_hints.is_empty() {
+        parts.push(format!("Context: {}", context_hints.join(", ")));
+    }
+
+    // 3. Steps — walk events and produce a human-readable sequence
+    let mut steps: Vec<String> = Vec::new();
+    let mut step_num = 1u32;
+    for event in events {
+        match &event.event_type {
+            EventType::Action {
+                action_name,
+                outcome: action_outcome,
+                ..
+            } => {
+                let result_hint = match action_outcome {
+                    ActionOutcome::Success { result } => {
+                        format!(" -> {}", truncate_value(result, 80))
+                    },
+                    ActionOutcome::Failure { error, .. } => {
+                        format!(" [FAILED: {}]", truncate_str(error, 60))
+                    },
+                    ActionOutcome::Partial { .. } => " [partial]".to_string(),
+                };
+                steps.push(format!("{}. {}{}", step_num, action_name, result_hint));
+                step_num += 1;
+            },
+            EventType::Context {
+                context_type, text, ..
+            } => {
+                steps.push(format!(
+                    "{}. Receive [{}]: {}",
+                    step_num,
+                    context_type,
+                    truncate_str(text, 100)
+                ));
+                step_num += 1;
+            },
+            EventType::Observation {
+                observation_type,
+                data,
+                ..
+            } => {
+                steps.push(format!(
+                    "{}. Observe [{}]: {}",
+                    step_num,
+                    observation_type,
+                    truncate_value(data, 100)
+                ));
+                step_num += 1;
+            },
+            EventType::Cognitive { process_type, .. } => {
+                steps.push(format!("{}. Think ({:?})", step_num, process_type));
+                step_num += 1;
+            },
+            EventType::Communication {
+                message_type,
+                content,
+                ..
+            } => {
+                steps.push(format!(
+                    "{}. Communicate [{}]: {}",
+                    step_num,
+                    message_type,
+                    truncate_value(content, 100)
+                ));
+                step_num += 1;
+            },
+            _ => {},
+        }
+    }
+    if !steps.is_empty() {
+        // Limit to first 8 steps to keep summary digestible
+        let shown: Vec<&str> = steps.iter().take(8).map(|s| s.as_str()).collect();
+        let suffix = if steps.len() > 8 {
+            format!(" ... ({} more steps)", steps.len() - 8)
+        } else {
+            String::new()
+        };
+        parts.push(format!("Steps: {}{}", shown.join(" → "), suffix));
+    }
+
+    // 4. Success indicators
+    if !success_indicators.is_empty() {
+        let shown: Vec<&str> = success_indicators
+            .iter()
+            .take(3)
+            .map(|s| s.as_str())
+            .collect();
+        parts.push(format!("Success looks like: {}", shown.join("; ")));
+    }
+
+    // 5. Failure patterns
+    if !failure_patterns.is_empty() {
+        let shown: Vec<&str> = failure_patterns
+            .iter()
+            .take(3)
+            .map(|s| s.as_str())
+            .collect();
+        parts.push(format!("Avoid: {}", shown.join("; ")));
+    }
+
+    // 6. Outcome + stats
+    let outcome_label = match outcome {
+        EpisodeOutcome::Success => "succeeded",
+        EpisodeOutcome::Failure => "failed",
+        EpisodeOutcome::Partial => "partially succeeded",
+        EpisodeOutcome::Interrupted => "was interrupted",
+    };
+    parts.push(format!(
+        "This episode {} ({} events, significance {:.0}%).",
+        outcome_label,
+        events.len(),
+        episode.significance * 100.0
+    ));
+
+    parts.join(" ")
+}
+
+// ============================================================================
+// 10x / 100x Synthesis Functions
+// ============================================================================
+
+/// Generate "when to use" in natural language.
+fn synthesize_when_to_use(
+    strategy_type: &StrategyType,
+    episode: &Episode,
+    _events: &[Event],
+) -> String {
+    let goals: Vec<&str> = episode
+        .context
+        .active_goals
+        .iter()
+        .map(|g| g.description.as_str())
+        .filter(|d| !d.is_empty())
+        .collect();
+
+    let env_hints: Vec<String> = episode
+        .context
+        .environment
+        .variables
+        .iter()
+        .filter(|(k, _)| k != &"user_id" && k != &"user")
+        .take(3)
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+
+    match strategy_type {
+        StrategyType::Positive => {
+            let mut parts = Vec::new();
+            if !goals.is_empty() {
+                parts.push(format!("Use when the goal is: {}", goals.join("; ")));
+            }
+            if !env_hints.is_empty() {
+                parts.push(format!("Context matches: {}", env_hints.join(", ")));
+            }
+            parts.push(format!(
+                "Best for episodes with significance ≥ {:.0}%",
+                episode.significance * 100.0
+            ));
+            parts.join(". ")
+        },
+        StrategyType::Constraint => {
+            let mut parts = Vec::new();
+            if !goals.is_empty() {
+                parts.push(format!("Watch out when the goal is: {}", goals.join("; ")));
+            }
+            parts.push(
+                "Applies when the agent is about to repeat a pattern that previously failed"
+                    .to_string(),
+            );
+            parts.join(". ")
+        },
+    }
+}
+
+/// Generate "when NOT to use" in natural language.
+fn synthesize_when_not_to_use(
+    strategy_type: &StrategyType,
+    episode: &Episode,
+    events: &[Event],
+) -> String {
+    match strategy_type {
+        StrategyType::Positive => {
+            let mut reasons = Vec::new();
+            // If there were failures in the episode, note the fragile conditions
+            let has_failures = events.iter().any(|e| {
+                matches!(
+                    &e.event_type,
+                    EventType::Action {
+                        outcome: ActionOutcome::Failure { .. },
+                        ..
+                    }
+                )
+            });
+            if has_failures {
+                reasons.push(
+                    "Some actions failed during this episode; the strategy is fragile under error conditions"
+                        .to_string(),
+                );
+            }
+            if episode.significance < 0.3 {
+                reasons.push("Low-significance episodes may not generalize".to_string());
+            }
+            reasons.push(
+                "Do not use when the context significantly differs from the original goals"
+                    .to_string(),
+            );
+            reasons.join(". ")
+        },
+        StrategyType::Constraint => {
+            "Safe to ignore when a newer strategy explicitly supersedes this constraint, or when the failure pattern is no longer applicable to the current context."
+                .to_string()
+        },
+    }
+}
+
+/// Extract known failure modes from event data.
+fn synthesize_failure_modes(events: &[Event]) -> Vec<String> {
+    let mut modes = Vec::new();
+    for event in events {
+        if let EventType::Action {
+            action_name,
+            outcome: ActionOutcome::Failure { error, .. },
+            ..
+        } = &event.event_type
+        {
+            modes.push(format!(
+                "Action '{}' can fail: {}",
+                action_name,
+                truncate_str(error, 120)
+            ));
+        }
+        if let EventType::Action {
+            action_name,
+            outcome: ActionOutcome::Partial { issues, .. },
+            ..
+        } = &event.event_type
+        {
+            modes.push(format!(
+                "Action '{}' partially succeeds with issues: {:?}",
+                action_name,
+                issues.iter().take(2).cloned().collect::<Vec<_>>()
+            ));
+        }
+    }
+    modes.truncate(5); // Keep top 5
+    modes
+}
+
+/// Build an executable playbook from the event sequence (100x).
+fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<PlaybookStep> {
+    let mut steps = Vec::new();
+    let mut step_num = 1u32;
+
+    for event in events {
+        match &event.event_type {
+            EventType::Action {
+                action_name,
+                outcome: action_outcome,
+                ..
+            } => {
+                let mut branches = Vec::new();
+                let mut recovery = String::new();
+
+                match action_outcome {
+                    ActionOutcome::Failure { error, .. } => {
+                        recovery = format!(
+                            "On failure ({}): retry or use alternative approach",
+                            truncate_str(error, 80)
+                        );
+                    },
+                    ActionOutcome::Partial { issues, .. } => {
+                        recovery = format!(
+                            "On partial success: address {:?}",
+                            issues.iter().take(2).cloned().collect::<Vec<_>>()
+                        );
+                    },
+                    ActionOutcome::Success { .. } => {
+                        // For constraint strategies, add a branch to avoid this action
+                        if *strategy_type == StrategyType::Constraint {
+                            branches.push(PlaybookBranch {
+                                condition: "If this pattern appears".to_string(),
+                                action: format!("Skip '{}' and use alternative", action_name),
+                            });
+                        }
+                    },
+                }
+
+                steps.push(PlaybookStep {
+                    step: step_num,
+                    action: format!("Execute '{}'", action_name),
+                    condition: String::new(),
+                    skip_if: String::new(),
+                    branches,
+                    recovery,
+                });
+                step_num += 1;
+            },
+            EventType::Context {
+                context_type, text, ..
+            } => {
+                steps.push(PlaybookStep {
+                    step: step_num,
+                    action: format!("Receive [{}]: {}", context_type, truncate_str(text, 80)),
+                    condition: String::new(),
+                    skip_if: "No input available".to_string(),
+                    branches: Vec::new(),
+                    recovery: String::new(),
+                });
+                step_num += 1;
+            },
+            EventType::Observation {
+                observation_type, ..
+            } => {
+                steps.push(PlaybookStep {
+                    step: step_num,
+                    action: format!("Observe [{}]", observation_type),
+                    condition: String::new(),
+                    skip_if: String::new(),
+                    branches: Vec::new(),
+                    recovery: String::new(),
+                });
+                step_num += 1;
+            },
+            EventType::Cognitive { process_type, .. } => {
+                steps.push(PlaybookStep {
+                    step: step_num,
+                    action: format!("Think ({:?})", process_type),
+                    condition: String::new(),
+                    skip_if: String::new(),
+                    branches: Vec::new(),
+                    recovery: String::new(),
+                });
+                step_num += 1;
+            },
+            _ => {},
+        }
+    }
+
+    // Cap at 12 steps
+    steps.truncate(12);
+    steps
+}
+
+/// Generate a counterfactual: what would have happened differently.
+fn synthesize_counterfactual(outcome: &EpisodeOutcome, events: &[Event]) -> String {
+    // Find failure points and suggest alternatives
+    let failures: Vec<String> = events
+        .iter()
+        .filter_map(|e| {
+            if let EventType::Action {
+                action_name,
+                outcome: ActionOutcome::Failure { error, .. },
+                ..
+            } = &e.event_type
+            {
+                Some(format!("'{}' ({})", action_name, truncate_str(error, 60)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    match outcome {
+        EpisodeOutcome::Success => {
+            if failures.is_empty() {
+                "All actions succeeded; no obvious alternative path needed.".to_string()
+            } else {
+                format!(
+                    "Despite failures at {}, the episode recovered. Skipping those steps could have been faster.",
+                    failures.join(", ")
+                )
+            }
+        },
+        EpisodeOutcome::Failure => {
+            if failures.is_empty() {
+                "Episode failed without clear action errors; the approach may need rethinking."
+                    .to_string()
+            } else {
+                format!(
+                    "If {} had been handled differently (retry, alternative, or skip), the outcome might have been success.",
+                    failures.join(" and ")
+                )
+            }
+        },
+        EpisodeOutcome::Partial => {
+            "A more conservative approach (smaller steps, more validation) could have improved completeness.".to_string()
+        },
+        EpisodeOutcome::Interrupted => {
+            "Ensuring preconditions and resources before starting would reduce interruption risk.".to_string()
+        },
     }
 }
 

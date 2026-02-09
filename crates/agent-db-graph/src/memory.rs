@@ -10,7 +10,7 @@ use agent_db_core::types::{
     current_timestamp, AgentId, ContextHash, EventId, SessionId, Timestamp,
 };
 use agent_db_core::utils::cosine_similarity;
-use agent_db_events::core::EventContext;
+use agent_db_events::core::{ActionOutcome, Event, EventContext, EventType};
 use std::collections::{HashMap, HashSet};
 
 /// Unique identifier for a memory
@@ -34,9 +34,44 @@ pub struct Memory {
     /// Session that formed this memory
     pub session_id: SessionId,
 
-    /// Episode this memory was formed from
+    /// Episode this memory was formed from (None for consolidated memories)
     pub episode_id: EpisodeId,
 
+    // ========== LLM-Retrievable Fields ==========
+    /// Natural language summary of what happened
+    #[serde(default)]
+    pub summary: String,
+
+    /// Key takeaway / lesson learned from this experience
+    #[serde(default)]
+    pub takeaway: String,
+
+    /// Why this succeeded or failed — causal explanation
+    #[serde(default)]
+    pub causal_note: String,
+
+    /// Embedding of the summary text for semantic retrieval
+    #[serde(default)]
+    pub summary_embedding: Vec<f32>,
+
+    // ========== Hierarchy Fields ==========
+    /// Memory tier in the consolidation hierarchy
+    #[serde(default)]
+    pub tier: MemoryTier,
+
+    /// IDs of episodic memories this was consolidated from (for Semantic/Schema tiers)
+    #[serde(default)]
+    pub consolidated_from: Vec<MemoryId>,
+
+    /// Schema ID this memory was consolidated into (for Episodic tier)
+    #[serde(default)]
+    pub schema_id: Option<MemoryId>,
+
+    /// Consolidation lifecycle status
+    #[serde(default)]
+    pub consolidation_status: ConsolidationStatus,
+
+    // ========== Original Fields ==========
     /// Context snapshot when memory was formed
     pub context: EventContext,
 
@@ -66,6 +101,42 @@ pub struct Memory {
 
     /// Additional metadata
     pub metadata: HashMap<String, String>,
+}
+
+// ========== Memory Hierarchy Types ==========
+
+/// Tier in the memory consolidation hierarchy (Episodic → Semantic → Schema)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MemoryTier {
+    /// Raw experience from a single episode
+    Episodic,
+    /// Generalized knowledge consolidated from multiple episodic memories
+    Semantic,
+    /// Reusable mental model consolidated from multiple semantic memories
+    Schema,
+}
+
+impl Default for MemoryTier {
+    fn default() -> Self {
+        Self::Episodic
+    }
+}
+
+/// Lifecycle status in the consolidation pipeline
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConsolidationStatus {
+    /// Active — not yet consolidated
+    Active,
+    /// Has been consolidated into a higher-tier memory; decay can be accelerated
+    Consolidated,
+    /// Archived — kept for audit but excluded from retrieval
+    Archived,
+}
+
+impl Default for ConsolidationStatus {
+    fn default() -> Self {
+        Self::Active
+    }
 }
 
 /// Type of memory
@@ -166,7 +237,7 @@ impl MemoryFormation {
     /// Form a memory from an episode
     ///
     /// Returns the memory ID if a memory was formed, None if episode doesn't meet criteria
-    pub fn form_memory(&mut self, episode: &Episode) -> Option<MemoryUpsert> {
+    pub fn form_memory(&mut self, episode: &Episode, events: &[Event]) -> Option<MemoryUpsert> {
         if let Some(existing_id) = self.episode_index.get(&episode.id).copied() {
             let updated = self.update_memory_from_episode(existing_id, episode);
             if updated {
@@ -239,12 +310,25 @@ impl MemoryFormation {
             context.fingerprint = context.compute_fingerprint();
         }
 
+        // Generate natural language summary + causal analysis from events
+        let summary = synthesize_memory_summary(episode, events);
+        let causal_note = synthesize_causal_note(episode, events);
+        let takeaway = synthesize_takeaway(episode, events);
+
         // Create memory from episode
         let memory = Memory {
             id: memory_id,
             agent_id: episode.agent_id,
             session_id: episode.session_id,
             episode_id: episode.id,
+            summary,
+            takeaway,
+            causal_note,
+            summary_embedding: Vec::new(), // Populated async by refinement pipeline
+            tier: MemoryTier::Episodic,
+            consolidated_from: Vec::new(),
+            schema_id: None,
+            consolidation_status: ConsolidationStatus::Active,
             context,
             key_events: episode.events.clone(),
             strength: prediction_weighted_strength.min(self.config.max_strength),
@@ -729,6 +813,483 @@ impl MemoryFormation {
 
         Ok(())
     }
+
+    // ========== Consolidation API ==========
+
+    /// List all memories (for consolidation engine)
+    pub fn list_all(&self) -> Vec<Memory> {
+        self.memories.values().cloned().collect()
+    }
+
+    /// Store a pre-built consolidated memory directly (bypasses episode formation)
+    pub fn store_direct(&mut self, memory: Memory) {
+        let id = memory.id;
+        let agent_id = memory.agent_id;
+        let episode_id = memory.episode_id;
+        let fp = memory.context.fingerprint;
+
+        if id >= self.next_memory_id {
+            self.next_memory_id = id + 1;
+        }
+
+        self.memories.insert(id, memory);
+        self.agent_memories.entry(agent_id).or_default().push(id);
+        self.context_index.entry(fp).or_default().push(id);
+        if episode_id > 0 {
+            self.episode_index.insert(episode_id, id);
+        }
+    }
+
+    /// Mark a memory as consolidated into a higher-tier memory, applying strength decay
+    pub fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, decay: f32) {
+        if let Some(m) = self.memories.get_mut(&memory_id) {
+            m.consolidation_status = ConsolidationStatus::Consolidated;
+            m.schema_id = Some(into_id);
+            m.strength *= decay; // Accelerated decay for consolidated memories
+        }
+    }
+
+    /// Schema-first hierarchical retrieval.
+    /// Returns memories preferring Schema > Semantic > Episodic within the limit.
+    pub fn retrieve_hierarchical(
+        &self,
+        context: &EventContext,
+        limit: usize,
+        min_similarity: f32,
+        agent_id: Option<AgentId>,
+    ) -> Vec<Memory> {
+        use agent_db_core::utils::cosine_similarity;
+
+        let query_fp = if context.fingerprint != 0 {
+            context.fingerprint
+        } else {
+            context.compute_fingerprint()
+        };
+
+        let query_embedding = context.embeddings.as_deref().unwrap_or(&[]);
+
+        // Score all active memories
+        let mut scored: Vec<(f32, &Memory)> = self
+            .memories
+            .values()
+            .filter(|m| m.consolidation_status != ConsolidationStatus::Archived)
+            .filter(|m| agent_id.map_or(true, |aid| m.agent_id == aid))
+            .filter_map(|m| {
+                // Compute similarity
+                let fp_sim = if m.context.fingerprint == query_fp {
+                    1.0f32
+                } else {
+                    0.0
+                };
+                let emb_sim = if !query_embedding.is_empty() {
+                    let m_emb = m.context.embeddings.as_deref().unwrap_or(&[]);
+                    if !m_emb.is_empty() {
+                        cosine_similarity(query_embedding, m_emb)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                let sim = fp_sim.max(emb_sim);
+
+                if sim >= min_similarity {
+                    // Tier boost: Schema > Semantic > Episodic
+                    let tier_boost = match m.tier {
+                        MemoryTier::Schema => 0.3,
+                        MemoryTier::Semantic => 0.15,
+                        MemoryTier::Episodic => 0.0,
+                    };
+                    Some((sim + tier_boost, m))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, m)| m.clone())
+            .collect()
+    }
+}
+
+/// Truncate a string to `max_len` chars, appending "…" if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}…", &s[..max_len])
+    } else {
+        s.to_string()
+    }
+}
+
+/// Truncate a `serde_json::Value` to a readable string of at most `max_len` chars.
+fn truncate_value(v: &serde_json::Value, max_len: usize) -> String {
+    // For strings, extract the inner string to avoid extra quotes
+    let raw = match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    truncate_str(&raw, max_len)
+}
+
+/// Synthesize a natural language summary from an episode and its events.
+///
+/// The summary is designed to be directly usable by an LLM for retrieval-augmented
+/// generation — it describes *what happened*, *what was done*, and *how it ended*
+/// in plain English.
+pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // 1. Goal context
+    let goals: Vec<&str> = episode
+        .context
+        .active_goals
+        .iter()
+        .map(|g| g.description.as_str())
+        .filter(|d| !d.is_empty())
+        .collect();
+    if !goals.is_empty() {
+        if goals.len() == 1 {
+            parts.push(format!("Goal: {}", goals[0]));
+        } else {
+            parts.push(format!("Goals: {}", goals.join("; ")));
+        }
+    }
+
+    // 2. Environment context (user, intent, key vars)
+    let env_vars = &episode.context.environment.variables;
+    let mut env_parts = Vec::new();
+    if let Some(user) = env_vars.get("user_id").or_else(|| env_vars.get("user")) {
+        env_parts.push(format!("user={}", user));
+    }
+    if let Some(intent) = env_vars
+        .get("intent_type")
+        .or_else(|| env_vars.get("intent"))
+    {
+        env_parts.push(format!("intent={}", intent));
+    }
+    // Include up to 3 other notable variables
+    for (k, v) in env_vars.iter() {
+        if env_parts.len() >= 5 {
+            break;
+        }
+        if k != "user_id" && k != "user" && k != "intent_type" && k != "intent" {
+            env_parts.push(format!("{}={}", k, v));
+        }
+    }
+    if !env_parts.is_empty() {
+        parts.push(format!("Context: {}", env_parts.join(", ")));
+    }
+
+    // 3. Walk events and extract narrative
+    let mut actions: Vec<String> = Vec::new();
+    let mut observations: Vec<String> = Vec::new();
+    let mut context_texts: Vec<String> = Vec::new();
+    let mut communications: Vec<String> = Vec::new();
+
+    for event in events {
+        match &event.event_type {
+            EventType::Action {
+                action_name,
+                outcome,
+                ..
+            } => {
+                let outcome_str = match outcome {
+                    ActionOutcome::Success { result } => {
+                        format!("succeeded: {}", truncate_value(result, 120))
+                    },
+                    ActionOutcome::Failure { error, .. } => {
+                        format!("failed: {}", truncate_str(error, 120))
+                    },
+                    ActionOutcome::Partial { result, issues } => {
+                        format!(
+                            "partial: {} (issues: {:?})",
+                            truncate_value(result, 80),
+                            issues
+                        )
+                    },
+                };
+                actions.push(format!("'{}' {}", action_name, outcome_str));
+            },
+            EventType::Observation {
+                observation_type,
+                data,
+                source,
+                confidence,
+                ..
+            } => {
+                observations.push(format!(
+                    "[{}] from '{}' (conf {:.0}%): {}",
+                    observation_type,
+                    source,
+                    confidence * 100.0,
+                    truncate_value(data, 150)
+                ));
+            },
+            EventType::Context {
+                text, context_type, ..
+            } => {
+                context_texts.push(format!("[{}] {}", context_type, truncate_str(text, 200)));
+            },
+            EventType::Communication {
+                message_type,
+                sender,
+                recipient,
+                content,
+            } => {
+                communications.push(format!(
+                    "{} agent {} -> agent {}: {}",
+                    message_type,
+                    sender,
+                    recipient,
+                    truncate_value(content, 150)
+                ));
+            },
+            _ => {}, // Cognitive & Learning are internal machinery, skip for narrative
+        }
+    }
+
+    if !context_texts.is_empty() {
+        // Limit to first 3 to keep summary tight
+        let shown: Vec<&str> = context_texts.iter().take(3).map(|s| s.as_str()).collect();
+        parts.push(format!("Input: {}", shown.join(" | ")));
+    }
+    if !actions.is_empty() {
+        let shown: Vec<&str> = actions.iter().take(5).map(|s| s.as_str()).collect();
+        parts.push(format!("Actions: {}", shown.join("; ")));
+    }
+    if !observations.is_empty() {
+        let shown: Vec<&str> = observations.iter().take(3).map(|s| s.as_str()).collect();
+        parts.push(format!("Observations: {}", shown.join("; ")));
+    }
+    if !communications.is_empty() {
+        let shown: Vec<&str> = communications.iter().take(2).map(|s| s.as_str()).collect();
+        parts.push(format!("Comms: {}", shown.join("; ")));
+    }
+
+    // 4. Outcome
+    let outcome_str = match &episode.outcome {
+        Some(EpisodeOutcome::Success) => "Outcome: Success",
+        Some(EpisodeOutcome::Failure) => "Outcome: Failure",
+        Some(EpisodeOutcome::Partial) => "Outcome: Partial success",
+        Some(EpisodeOutcome::Interrupted) | None => "Outcome: Interrupted/unknown",
+    };
+    parts.push(outcome_str.to_string());
+
+    // 5. Stats
+    parts.push(format!(
+        "({} events, significance {:.0}%)",
+        events.len(),
+        episode.significance * 100.0
+    ));
+
+    if parts.is_empty() {
+        format!(
+            "Episode {} for agent {} — no detailed events available.",
+            episode.id, episode.agent_id
+        )
+    } else {
+        parts.join(". ")
+    }
+}
+
+/// Synthesize a causal explanation for why the episode succeeded or failed.
+pub fn synthesize_causal_note(episode: &Episode, events: &[Event]) -> String {
+    let outcome = episode
+        .outcome
+        .clone()
+        .unwrap_or(EpisodeOutcome::Interrupted);
+
+    let mut causes: Vec<String> = Vec::new();
+
+    // Analyze action outcomes for causal signal
+    let mut successes = 0u32;
+    let mut failures = 0u32;
+    let mut last_failure_error = String::new();
+    let mut last_success_action = String::new();
+
+    for event in events {
+        if let EventType::Action {
+            action_name,
+            outcome: action_out,
+            ..
+        } = &event.event_type
+        {
+            match action_out {
+                ActionOutcome::Success { .. } => {
+                    successes += 1;
+                    last_success_action = action_name.clone();
+                },
+                ActionOutcome::Failure { error, .. } => {
+                    failures += 1;
+                    last_failure_error = error.clone();
+                },
+                ActionOutcome::Partial { issues, .. } => {
+                    causes.push(format!(
+                        "Action '{}' partially succeeded with issues: {:?}",
+                        action_name, issues
+                    ));
+                },
+            }
+        }
+    }
+
+    match outcome {
+        EpisodeOutcome::Success => {
+            if failures == 0 {
+                causes.push(format!(
+                    "All {} actions succeeded cleanly (last: '{}')",
+                    successes, last_success_action
+                ));
+            } else {
+                causes.push(format!(
+                    "Recovered from {} failure(s) — final action '{}' succeeded",
+                    failures, last_success_action
+                ));
+            }
+            // Goal context
+            for goal in &episode.context.active_goals {
+                if goal.progress >= 0.8 && !goal.description.is_empty() {
+                    causes.push(format!(
+                        "Goal '{}' reached {:.0}% progress",
+                        goal.description,
+                        goal.progress * 100.0
+                    ));
+                }
+            }
+        },
+        EpisodeOutcome::Failure => {
+            if !last_failure_error.is_empty() {
+                causes.push(format!(
+                    "Failed because: {}",
+                    truncate_str(&last_failure_error, 200)
+                ));
+            } else {
+                causes.push("Episode ended in failure without a clear action error".to_string());
+            }
+            if successes > 0 {
+                causes.push(format!(
+                    "{} action(s) succeeded before the failure occurred",
+                    successes
+                ));
+            }
+        },
+        EpisodeOutcome::Partial => {
+            causes.push(format!(
+                "Partial: {} action(s) succeeded, {} failed",
+                successes, failures
+            ));
+        },
+        EpisodeOutcome::Interrupted => {
+            causes.push("Episode was interrupted before completion".to_string());
+        },
+    }
+
+    if episode.prediction_error > 0.3 {
+        causes.push(format!(
+            "This was a surprising outcome (prediction error {:.0}%)",
+            episode.prediction_error * 100.0
+        ));
+    }
+
+    if causes.is_empty() {
+        "No causal signal extracted from events.".to_string()
+    } else {
+        causes.join(". ")
+    }
+}
+
+/// Synthesize the single most important lesson from this episode.
+pub fn synthesize_takeaway(episode: &Episode, events: &[Event]) -> String {
+    let outcome = episode
+        .outcome
+        .clone()
+        .unwrap_or(EpisodeOutcome::Interrupted);
+
+    // Find the pivotal action (last success for successful episodes, last failure for failed)
+    let mut pivotal_action: Option<(&str, &ActionOutcome)> = None;
+    for event in events.iter().rev() {
+        if let EventType::Action {
+            action_name,
+            outcome: action_out,
+            ..
+        } = &event.event_type
+        {
+            match (&outcome, action_out) {
+                (EpisodeOutcome::Success, ActionOutcome::Success { .. }) => {
+                    pivotal_action = Some((action_name, action_out));
+                    break;
+                },
+                (EpisodeOutcome::Failure, ActionOutcome::Failure { .. }) => {
+                    pivotal_action = Some((action_name, action_out));
+                    break;
+                },
+                _ => {},
+            }
+        }
+    }
+
+    // Build takeaway
+    let goals: Vec<&str> = episode
+        .context
+        .active_goals
+        .iter()
+        .map(|g| g.description.as_str())
+        .filter(|d| !d.is_empty())
+        .collect();
+    let goal_str = if goals.is_empty() {
+        "this task".to_string()
+    } else {
+        goals[0].to_string()
+    };
+
+    match (&outcome, pivotal_action) {
+        (EpisodeOutcome::Success, Some((action, ActionOutcome::Success { result }))) => {
+            format!(
+                "For '{}': action '{}' was the key step that led to success (result: {}).",
+                goal_str,
+                action,
+                truncate_value(result, 100)
+            )
+        },
+        (EpisodeOutcome::Failure, Some((action, ActionOutcome::Failure { error, .. }))) => {
+            format!(
+                "For '{}': action '{}' caused failure — {}. Avoid this in similar contexts.",
+                goal_str,
+                action,
+                truncate_str(error, 100)
+            )
+        },
+        (EpisodeOutcome::Success, _) => {
+            format!(
+                "Successfully completed '{}' with {} actions and significance {:.0}%.",
+                goal_str,
+                events.len(),
+                episode.significance * 100.0
+            )
+        },
+        (EpisodeOutcome::Failure, _) => {
+            format!(
+                "Failed '{}' — review approach for this context to avoid repeating.",
+                goal_str
+            )
+        },
+        (EpisodeOutcome::Partial, _) => {
+            format!(
+                "Partially completed '{}' — some actions succeeded, others need improvement.",
+                goal_str
+            )
+        },
+        (EpisodeOutcome::Interrupted, _) => {
+            format!(
+                "'{}' was interrupted — retry when context is stable.",
+                goal_str
+            )
+        },
+    }
 }
 
 /// Statistics about memory formation and retrieval
@@ -811,7 +1372,7 @@ mod tests {
         let mut memory_formation = MemoryFormation::new(MemoryFormationConfig::default());
 
         let episode = create_test_episode(1, 1, 0.8);
-        let memory_id = memory_formation.form_memory(&episode);
+        let memory_id = memory_formation.form_memory(&episode, &[]);
 
         assert!(memory_id.is_some());
         assert_eq!(memory_formation.memory_count(), 1);
@@ -822,7 +1383,7 @@ mod tests {
         let mut memory_formation = MemoryFormation::new(MemoryFormationConfig::default());
 
         let episode = create_test_episode(1, 1, 0.1); // Low significance
-        let memory_id = memory_formation.form_memory(&episode);
+        let memory_id = memory_formation.form_memory(&episode, &[]);
 
         assert!(memory_id.is_none());
         assert_eq!(memory_formation.memory_count(), 0);
@@ -837,9 +1398,9 @@ mod tests {
         let episode2 = create_test_episode(2, 1, 0.7);
         let episode3 = create_test_episode(3, 2, 0.9);
 
-        memory_formation.form_memory(&episode1);
-        memory_formation.form_memory(&episode2);
-        memory_formation.form_memory(&episode3);
+        memory_formation.form_memory(&episode1, &[]);
+        memory_formation.form_memory(&episode2, &[]);
+        memory_formation.form_memory(&episode3, &[]);
 
         let agent1_memories = memory_formation.retrieve_by_agent(1, 10);
         assert_eq!(agent1_memories.len(), 2);
@@ -853,7 +1414,7 @@ mod tests {
         let mut memory_formation = MemoryFormation::new(MemoryFormationConfig::default());
 
         let episode = create_test_episode(1, 1, 0.8);
-        let memory_id = memory_formation.form_memory(&episode).unwrap().id;
+        let memory_id = memory_formation.form_memory(&episode, &[]).unwrap().id;
 
         let initial_strength = memory_formation.get_memory(memory_id).unwrap().strength;
 

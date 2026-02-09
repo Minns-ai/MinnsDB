@@ -189,7 +189,7 @@ async fn test_memory_formation() -> Result<(), Box<dyn std::error::Error>> {
         episode.significance = 0.8; // Set high significance
         episode.outcome = Some(EpisodeOutcome::Success);
 
-        let memory_id = memory_formation.form_memory(&episode);
+        let memory_id = memory_formation.form_memory(&episode, &[]);
 
         println!("   ✓ Memory formed: {:?}", memory_id.is_some());
 
@@ -397,7 +397,7 @@ async fn test_complete_self_evolution_pipeline() -> Result<(), Box<dyn std::erro
 
         // Step 3: Memory formation
         println!("   Step 3: Forming memories...");
-        let memory_id = memory_formation.form_memory(&episode);
+        let memory_id = memory_formation.form_memory(&episode, &[]);
         println!("      ✓ Memory formed: {:?}", memory_id.is_some());
 
         // Step 4: Strategy extraction

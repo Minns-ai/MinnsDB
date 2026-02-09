@@ -69,8 +69,15 @@ pub mod redb_graph_store;
 // Semantic Memory (2026-01-22)
 pub mod claims;
 
+// 10x/100x: Memory Consolidation + LLM Refinement
+pub mod consolidation;
+pub mod refinement;
+
 // Re-export commonly used items
 pub use catalog::{EpisodeCatalog, EpisodeRecord, RedbEpisodeCatalog};
+pub use consolidation::{
+    ConsolidationConfig, ConsolidationEngine, ConsolidationResult, StrategyEvolution,
+};
 pub use decision_trace::{
     DecisionTrace, DecisionTraceStore, OutcomeSignal, RedbDecisionTraceStore,
 };
@@ -86,15 +93,17 @@ pub use integration::{
 };
 pub use learning::{LearningStatsStore, MotifStats, RedbLearningStatsStore, TransitionStats};
 pub use memory::{
-    Memory, MemoryFormation, MemoryFormationConfig, MemoryId, MemoryStats, MemoryType,
+    ConsolidationStatus, Memory, MemoryFormation, MemoryFormationConfig, MemoryId, MemoryStats,
+    MemoryTier, MemoryType,
 };
+pub use refinement::{RefinementConfig, RefinementEngine};
 pub use stores::{
     InMemoryMemoryStore, InMemoryStrategyStore, MemoryStore, RedbMemoryStore, RedbStrategyStore,
     StrategyStore,
 };
 pub use strategies::{
-    ContextPattern, ReasoningStep, Strategy, StrategyExtractionConfig, StrategyExtractor,
-    StrategyId, StrategyStats,
+    ContextPattern, PlaybookBranch, PlaybookStep, ReasoningStep, Strategy,
+    StrategyExtractionConfig, StrategyExtractor, StrategyId, StrategyStats, StrategyType,
 };
 pub use structures::{
     ConceptType, EdgeId, EdgeType, EdgeWeight, GoalRelationType, GoalStatus, Graph, GraphEdge,

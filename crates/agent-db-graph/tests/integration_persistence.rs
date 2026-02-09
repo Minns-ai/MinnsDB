@@ -235,7 +235,7 @@ fn test_memory_store_lru_eviction() {
     // Store 5 episodes to create 5 memories
     for i in 1..=5 {
         let episode = create_test_episode(i, 100, EpisodeOutcome::Success);
-        let result = store.store_episode(&episode);
+        let result = store.store_episode(&episode, &[]);
         assert!(result.is_some());
         assert_eq!(result.unwrap().id, i);
     }
@@ -278,7 +278,7 @@ fn test_memory_store_persistence_across_restart() {
         // Store 3 memories
         for i in 1..=3 {
             let episode = create_test_episode(i, 100, EpisodeOutcome::Success);
-            store.store_episode(&episode);
+            store.store_episode(&episode, &[]);
         }
     }
 
@@ -611,7 +611,7 @@ fn test_full_pipeline_persistence() {
         // Skip initialize on fresh database - it's empty
         for i in 1..=3 {
             let episode = create_test_episode(i, 100, EpisodeOutcome::Success);
-            mem_store.store_episode(&episode);
+            mem_store.store_episode(&episode, &[]);
         }
 
         // 3. Store learning stats

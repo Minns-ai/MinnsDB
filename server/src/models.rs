@@ -174,6 +174,17 @@ pub struct MemoryResponse {
     pub id: u64,
     pub agent_id: AgentId,
     pub session_id: SessionId,
+    // ========== LLM-Retrievable Fields ==========
+    pub summary: String,
+    pub takeaway: String,
+    pub causal_note: String,
+    pub tier: String,
+    pub consolidation_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub consolidated_from: Vec<u64>,
+    // ========== Core Fields ==========
     pub strength: f32,
     pub relevance_score: f32,
     pub access_count: u32,
@@ -192,6 +203,20 @@ pub struct StrategyResponse {
     pub id: u64,
     pub name: String,
     pub agent_id: AgentId,
+    // ========== LLM-Retrievable Fields ==========
+    pub summary: String,
+    pub when_to_use: String,
+    pub when_not_to_use: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failure_modes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub playbook: Vec<PlaybookStepResponse>,
+    pub counterfactual: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub applicable_domains: Vec<String>,
+    // ========== Core Fields ==========
     pub quality_score: f32,
     pub success_count: u32,
     pub failure_count: u32,
@@ -214,6 +239,20 @@ pub struct SimilarStrategyResponse {
     pub id: u64,
     pub name: String,
     pub agent_id: AgentId,
+    // ========== LLM-Retrievable Fields ==========
+    pub summary: String,
+    pub when_to_use: String,
+    pub when_not_to_use: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failure_modes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub playbook: Vec<PlaybookStepResponse>,
+    pub counterfactual: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub applicable_domains: Vec<String>,
+    // ========== Core Fields ==========
     pub quality_score: f32,
     pub success_count: u32,
     pub failure_count: u32,
@@ -234,6 +273,26 @@ pub struct SimilarStrategyResponse {
 pub struct ReasoningStepResponse {
     pub description: String,
     pub sequence_order: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlaybookStepResponse {
+    pub step: u32,
+    pub action: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub condition: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub skip_if: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub recovery: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<PlaybookBranchResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlaybookBranchResponse {
+    pub condition: String,
+    pub action: String,
 }
 
 #[derive(Debug, Serialize)]

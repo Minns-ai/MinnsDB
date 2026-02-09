@@ -3,7 +3,7 @@
 //! These abstractions keep the graph engine independent from persistence.
 
 use agent_db_core::types::{AgentId, ContextHash, SessionId};
-use agent_db_events::core::EventContext;
+use agent_db_events::core::{Event, EventContext};
 use agent_db_storage::{RedbBackend, StorageResult};
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crate::strategies::{
 };
 
 pub trait MemoryStore: Send + Sync {
-    fn store_episode(&mut self, episode: &Episode) -> Option<MemoryUpsert>;
+    fn store_episode(&mut self, episode: &Episode, events: &[Event]) -> Option<MemoryUpsert>;
     fn get_memory(&self, memory_id: MemoryId) -> Option<Memory>;
     fn get_agent_memories(&self, agent_id: AgentId, limit: usize) -> Vec<Memory>;
     fn retrieve_by_context(&mut self, context: &EventContext, limit: usize) -> Vec<Memory>;
@@ -32,6 +32,25 @@ pub trait MemoryStore: Send + Sync {
     fn apply_outcome(&mut self, memory_id: MemoryId, success: bool) -> bool;
     fn get_stats(&self) -> MemoryStats;
     fn apply_decay(&mut self);
+
+    // ========== Consolidation API ==========
+    /// List all memories (for consolidation passes)
+    fn list_all_memories(&self) -> Vec<Memory>;
+    /// Store a pre-built consolidated memory (Semantic or Schema tier)
+    fn store_consolidated_memory(&mut self, memory: Memory);
+    /// Mark a memory as consolidated, linking it to a higher-tier memory and applying decay
+    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, decay: f32);
+    /// Schema-first retrieval: returns Schema > Semantic > Episodic, preferring higher tiers
+    fn retrieve_hierarchical(
+        &mut self,
+        context: &EventContext,
+        limit: usize,
+        min_similarity: f32,
+        agent_id: Option<AgentId>,
+    ) -> Vec<Memory> {
+        // Default: fall back to flat retrieval, implementations can override
+        self.retrieve_by_context_similar(context, limit, min_similarity, agent_id, None)
+    }
 }
 
 pub struct InMemoryMemoryStore {
@@ -47,8 +66,8 @@ impl InMemoryMemoryStore {
 }
 
 impl MemoryStore for InMemoryMemoryStore {
-    fn store_episode(&mut self, episode: &Episode) -> Option<MemoryUpsert> {
-        self.inner.form_memory(episode)
+    fn store_episode(&mut self, episode: &Episode, events: &[Event]) -> Option<MemoryUpsert> {
+        self.inner.form_memory(episode, events)
     }
 
     fn get_memory(&self, memory_id: MemoryId) -> Option<Memory> {
@@ -89,6 +108,29 @@ impl MemoryStore for InMemoryMemoryStore {
 
     fn apply_decay(&mut self) {
         self.inner.apply_decay();
+    }
+
+    fn list_all_memories(&self) -> Vec<Memory> {
+        self.inner.list_all()
+    }
+
+    fn store_consolidated_memory(&mut self, memory: Memory) {
+        self.inner.store_direct(memory);
+    }
+
+    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, decay: f32) {
+        self.inner.mark_consolidated(memory_id, into_id, decay);
+    }
+
+    fn retrieve_hierarchical(
+        &mut self,
+        context: &EventContext,
+        limit: usize,
+        min_similarity: f32,
+        agent_id: Option<AgentId>,
+    ) -> Vec<Memory> {
+        self.inner
+            .retrieve_hierarchical(context, limit, min_similarity, agent_id)
     }
 }
 
@@ -267,8 +309,9 @@ impl RedbMemoryStore {
 }
 
 impl MemoryStore for RedbMemoryStore {
-    fn store_episode(&mut self, episode: &Episode) -> Option<MemoryUpsert> {
+    fn store_episode(&mut self, episode: &Episode, events: &[Event]) -> Option<MemoryUpsert> {
         use crate::episodes::EpisodeOutcome;
+        use crate::memory::synthesize_memory_summary;
         use agent_db_core::types::current_timestamp;
 
         // Check significance threshold
@@ -308,11 +351,24 @@ impl MemoryStore for RedbMemoryStore {
             context.fingerprint = context.compute_fingerprint();
         }
 
+        // Generate natural language summary + causal analysis
+        let summary = synthesize_memory_summary(episode, events);
+        let causal_note = crate::memory::synthesize_causal_note(episode, events);
+        let takeaway = crate::memory::synthesize_takeaway(episode, events);
+
         let memory = Memory {
             id: memory_id,
             agent_id: episode.agent_id,
             session_id: episode.session_id,
             episode_id: episode.id,
+            summary,
+            takeaway,
+            causal_note,
+            summary_embedding: Vec::new(),
+            tier: crate::memory::MemoryTier::Episodic,
+            consolidated_from: Vec::new(),
+            schema_id: None,
+            consolidation_status: crate::memory::ConsolidationStatus::Active,
             context,
             key_events: episode.events.clone(),
             strength: prediction_weighted_strength.min(self.config.max_strength),
@@ -561,6 +617,115 @@ impl MemoryStore for RedbMemoryStore {
         for id in to_remove {
             self.memory_cache.remove(&id);
         }
+    }
+
+    fn list_all_memories(&self) -> Vec<Memory> {
+        // Scan redb for all memories, use cache version where available
+        let mut all = std::collections::HashMap::new();
+
+        // First, load everything from redb
+        let scan_result: Result<Vec<(Vec<u8>, Memory)>, _> =
+            self.backend.scan_prefix("memory_records", vec![]);
+        match scan_result {
+            Ok(records) => {
+                for (_, memory) in records {
+                    all.insert(memory.id, memory);
+                }
+            },
+            Err(e) => {
+                tracing::error!("Failed to scan memories from redb: {:?}", e);
+            },
+        }
+
+        // Override with cached versions (fresher)
+        for (id, entry) in &self.memory_cache {
+            all.insert(*id, entry.memory.clone());
+        }
+
+        all.into_values().collect()
+    }
+
+    fn store_consolidated_memory(&mut self, memory: Memory) {
+        let id = memory.id;
+        if id >= self.next_memory_id {
+            self.next_memory_id = id + 1;
+        }
+        // Persist
+        if let Err(e) = self.persist_memory(&memory) {
+            tracing::error!("Failed to persist consolidated memory {}: {:?}", id, e);
+        }
+        // Cache
+        self.cache_memory(memory);
+    }
+
+    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, decay: f32) {
+        // Update in cache or load from redb
+        if let Some(entry) = self.memory_cache.get_mut(&memory_id) {
+            entry.memory.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
+            entry.memory.schema_id = Some(into_id);
+            entry.memory.strength *= decay;
+            let mem_clone = entry.memory.clone();
+            let _ = self.persist_memory(&mem_clone);
+        } else if let Some(mut memory) = self.load_memory(memory_id) {
+            memory.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
+            memory.schema_id = Some(into_id);
+            memory.strength *= decay;
+            let _ = self.persist_memory(&memory);
+            self.cache_memory(memory);
+        }
+    }
+
+    fn retrieve_hierarchical(
+        &mut self,
+        context: &EventContext,
+        limit: usize,
+        min_similarity: f32,
+        agent_id: Option<AgentId>,
+    ) -> Vec<Memory> {
+        let all = self.list_all_memories();
+        let query_fp = if context.fingerprint != 0 {
+            context.fingerprint
+        } else {
+            context.compute_fingerprint()
+        };
+        let query_emb = context.embeddings.as_deref().unwrap_or(&[]);
+
+        let mut scored: Vec<(f32, Memory)> = all
+            .into_iter()
+            .filter(|m| m.consolidation_status != crate::memory::ConsolidationStatus::Archived)
+            .filter(|m| agent_id.map_or(true, |aid| m.agent_id == aid))
+            .filter_map(|m| {
+                let fp_sim = if m.context.fingerprint == query_fp {
+                    1.0f32
+                } else {
+                    0.0
+                };
+                let emb_sim = if !query_emb.is_empty() {
+                    let m_emb = m.context.embeddings.as_deref().unwrap_or(&[]);
+                    if !m_emb.is_empty() {
+                        agent_db_core::utils::cosine_similarity(query_emb, m_emb)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                let sim = fp_sim.max(emb_sim);
+                if sim >= min_similarity {
+                    let tier_boost = match m.tier {
+                        crate::memory::MemoryTier::Schema => 0.3,
+                        crate::memory::MemoryTier::Semantic => 0.15,
+                        crate::memory::MemoryTier::Episodic => 0.0,
+                    };
+                    Some((sim + tier_boost, m))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(limit).map(|(_, m)| m).collect()
     }
 }
 
