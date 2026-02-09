@@ -1290,6 +1290,55 @@ impl GraphEngine {
         }
     }
 
+    /// Get live aggregate counts from all stores
+    pub async fn get_store_metrics(&self) -> StoreMetrics {
+        // Memory stats
+        let memory_stats = {
+            let store = self.memory_store.read().await;
+            store.get_stats()
+        };
+
+        // Strategy stats
+        let strategy_stats = {
+            let store = self.strategy_store.read().await;
+            store.get_stats()
+        };
+
+        // Claim stats
+        let (claim_count, claim_embeddings_indexed) = match &self.claim_store {
+            Some(store) => (store.count().unwrap_or(0), store.vector_index_size()),
+            None => (0, 0),
+        };
+
+        // Graph stats
+        let graph_stats = self.get_graph_stats().await;
+
+        StoreMetrics {
+            memories: MemoryMetrics {
+                total: memory_stats.total_memories,
+                avg_strength: memory_stats.avg_strength,
+                avg_access_count: memory_stats.avg_access_count,
+                agents_with_memories: memory_stats.agents_with_memories,
+            },
+            strategies: StrategyMetrics {
+                total: strategy_stats.total_strategies,
+                high_quality: strategy_stats.high_quality_strategies,
+                avg_quality: strategy_stats.average_quality,
+                agents_with_strategies: strategy_stats.agents_with_strategies,
+            },
+            claims: ClaimMetrics {
+                total: claim_count,
+                embeddings_indexed: claim_embeddings_indexed,
+            },
+            graph: GraphMetricsSummary {
+                nodes: graph_stats.node_count,
+                edges: graph_stats.edge_count,
+                avg_degree: graph_stats.avg_degree,
+                largest_component: graph_stats.largest_component_size,
+            },
+        }
+    }
+
     /// Get detected patterns
     pub async fn get_patterns(&self) -> Vec<String> {
         let inference = self.inference.read().await;
@@ -2621,6 +2670,45 @@ impl GraphEngineStats {
             total_reinforcements_applied: 0,
         }
     }
+}
+
+/// Live aggregate metrics from all stores
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoreMetrics {
+    pub memories: MemoryMetrics,
+    pub strategies: StrategyMetrics,
+    pub claims: ClaimMetrics,
+    pub graph: GraphMetricsSummary,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryMetrics {
+    pub total: usize,
+    pub avg_strength: f32,
+    pub avg_access_count: u32,
+    pub agents_with_memories: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StrategyMetrics {
+    pub total: usize,
+    pub high_quality: usize,
+    pub avg_quality: f32,
+    pub agents_with_strategies: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClaimMetrics {
+    pub total: usize,
+    pub embeddings_indexed: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GraphMetricsSummary {
+    pub nodes: usize,
+    pub edges: usize,
+    pub avg_degree: f32,
+    pub largest_component: usize,
 }
 
 impl Default for GraphEngineStats {

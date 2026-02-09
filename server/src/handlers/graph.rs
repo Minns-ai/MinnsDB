@@ -105,6 +105,7 @@ pub async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsRespon
     info!("Getting system statistics");
 
     let stats = state.engine.get_engine_stats().await;
+    let store_metrics = state.engine.get_store_metrics().await;
 
     Ok(Json(StatsResponse {
         total_events_processed: stats.total_events_processed,
@@ -114,5 +115,6 @@ pub async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsRespon
         total_strategies_extracted: stats.total_strategies_extracted,
         total_reinforcements_applied: stats.total_reinforcements_applied,
         average_processing_time_ms: stats.average_processing_time_ms,
+        stores: store_metrics,
     }))
 }

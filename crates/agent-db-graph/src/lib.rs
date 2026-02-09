@@ -80,7 +80,10 @@ pub use inference::{
     ContextualAssociation, EntityReference, EpisodeMetrics, GraphInference, InferenceConfig,
     InferenceResults, InferenceStats, ReinforcementResult, ReinforcementStats, TemporalPattern,
 };
-pub use integration::{GraphEngine, GraphEngineConfig, GraphOperationResult};
+pub use integration::{
+    ClaimMetrics, GraphEngine, GraphEngineConfig, GraphMetricsSummary, GraphOperationResult,
+    MemoryMetrics, StoreMetrics, StrategyMetrics,
+};
 pub use learning::{LearningStatsStore, MotifStats, RedbLearningStatsStore, TransitionStats};
 pub use memory::{
     Memory, MemoryFormation, MemoryFormationConfig, MemoryId, MemoryStats, MemoryType,

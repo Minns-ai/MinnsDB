@@ -262,6 +262,8 @@ pub struct StatsResponse {
     pub total_strategies_extracted: u64,
     pub total_reinforcements_applied: u64,
     pub average_processing_time_ms: f64,
+    /// Live aggregate counts from all stores
+    pub stores: agent_db_graph::StoreMetrics,
 }
 
 #[derive(Debug, Serialize)]
