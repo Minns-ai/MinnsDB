@@ -27,10 +27,8 @@ pub async fn get_agent_strategies(
         .get_agent_strategies(agent_id, pagination.limit)
         .await;
 
-    let response: Vec<StrategyResponse> = strategies
-        .into_iter()
-        .map(strategy_to_response)
-        .collect();
+    let response: Vec<StrategyResponse> =
+        strategies.into_iter().map(strategy_to_response).collect();
 
     Ok(Json(response))
 }

@@ -32,10 +32,7 @@ pub async fn get_agent_memories(
         .get_agent_memories(agent_id, pagination.limit)
         .await;
 
-    let response: Vec<MemoryResponse> = memories
-        .into_iter()
-        .map(memory_to_response)
-        .collect();
+    let response: Vec<MemoryResponse> = memories.into_iter().map(memory_to_response).collect();
 
     Ok(Json(response))
 }
@@ -62,10 +59,7 @@ pub async fn get_memories_by_context(
         )
         .await;
 
-    let response: Vec<MemoryResponse> = memories
-        .into_iter()
-        .map(memory_to_response)
-        .collect();
+    let response: Vec<MemoryResponse> = memories.into_iter().map(memory_to_response).collect();
 
     Ok(Json(response))
 }
