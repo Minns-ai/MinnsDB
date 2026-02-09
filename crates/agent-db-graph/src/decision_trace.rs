@@ -390,13 +390,16 @@ mod tests {
         let (backend, _temp) = create_test_backend();
         let mut store = RedbDecisionTraceStore::new(backend);
 
-        // Create multiple traces
+        // Create multiple traces with small delays to guarantee unique
+        // timestamps on CI runners with coarse clock resolution.
         store
             .start("query_1".to_string(), 100, 1, vec![1], vec![])
             .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
         store
             .start("query_2".to_string(), 100, 1, vec![2], vec![])
             .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
         store
             .start("query_3".to_string(), 100, 1, vec![3], vec![])
             .unwrap();
