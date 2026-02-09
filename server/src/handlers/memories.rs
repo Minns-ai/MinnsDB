@@ -34,7 +34,7 @@ pub async fn get_agent_memories(
 
     let response: Vec<MemoryResponse> = memories
         .into_iter()
-        .map(|m| memory_to_response(m))
+        .map(memory_to_response)
         .collect();
 
     Ok(Json(response))
@@ -64,7 +64,7 @@ pub async fn get_memories_by_context(
 
     let response: Vec<MemoryResponse> = memories
         .into_iter()
-        .map(|m| memory_to_response(m))
+        .map(memory_to_response)
         .collect();
 
     Ok(Json(response))

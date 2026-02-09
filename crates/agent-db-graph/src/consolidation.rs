@@ -451,8 +451,10 @@ mod tests {
     use agent_db_events::core::EventContext;
 
     fn make_episodic_memory(id: MemoryId, fingerprint: u64, outcome: EpisodeOutcome) -> Memory {
-        let mut ctx = EventContext::default();
-        ctx.fingerprint = fingerprint;
+        let ctx = EventContext {
+            fingerprint,
+            ..Default::default()
+        };
 
         Memory {
             id,

@@ -693,7 +693,7 @@ impl MemoryStore for RedbMemoryStore {
         let mut scored: Vec<(f32, Memory)> = all
             .into_iter()
             .filter(|m| m.consolidation_status != crate::memory::ConsolidationStatus::Archived)
-            .filter(|m| agent_id.map_or(true, |aid| m.agent_id == aid))
+            .filter(|m| agent_id.is_none_or(|aid| m.agent_id == aid))
             .filter_map(|m| {
                 let fp_sim = if m.context.fingerprint == query_fp {
                     1.0f32

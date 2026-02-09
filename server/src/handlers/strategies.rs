@@ -29,7 +29,7 @@ pub async fn get_agent_strategies(
 
     let response: Vec<StrategyResponse> = strategies
         .into_iter()
-        .map(|s| strategy_to_response(s))
+        .map(strategy_to_response)
         .collect();
 
     Ok(Json(response))

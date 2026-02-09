@@ -106,9 +106,10 @@ pub struct Memory {
 // ========== Memory Hierarchy Types ==========
 
 /// Tier in the memory consolidation hierarchy (Episodic → Semantic → Schema)
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemoryTier {
     /// Raw experience from a single episode
+    #[default]
     Episodic,
     /// Generalized knowledge consolidated from multiple episodic memories
     Semantic,
@@ -116,27 +117,16 @@ pub enum MemoryTier {
     Schema,
 }
 
-impl Default for MemoryTier {
-    fn default() -> Self {
-        Self::Episodic
-    }
-}
-
 /// Lifecycle status in the consolidation pipeline
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConsolidationStatus {
     /// Active — not yet consolidated
+    #[default]
     Active,
     /// Has been consolidated into a higher-tier memory; decay can be accelerated
     Consolidated,
     /// Archived — kept for audit but excluded from retrieval
     Archived,
-}
-
-impl Default for ConsolidationStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 /// Type of memory
@@ -873,7 +863,7 @@ impl MemoryFormation {
             .memories
             .values()
             .filter(|m| m.consolidation_status != ConsolidationStatus::Archived)
-            .filter(|m| agent_id.map_or(true, |aid| m.agent_id == aid))
+            .filter(|m| agent_id.is_none_or(|aid| m.agent_id == aid))
             .filter_map(|m| {
                 // Compute similarity
                 let fp_sim = if m.context.fingerprint == query_fp {
