@@ -418,6 +418,7 @@ fn create_context() -> EventContext {
             external: std::collections::HashMap::new(),
         },
         fingerprint: 98765,
+        goal_bucket_id: 0,
         embeddings: None,
     }
 }

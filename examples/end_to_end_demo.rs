@@ -370,6 +370,7 @@ fn create_development_context() -> EventContext {
             external: HashMap::new(),
         },
         fingerprint: 11111,
+        goal_bucket_id: 0,
         embeddings: None,
     }
 }
@@ -413,6 +414,7 @@ fn create_analysis_context() -> EventContext {
             external: HashMap::new(),
         },
         fingerprint: 22222,
+        goal_bucket_id: 0,
         embeddings: None,
     }
 }
@@ -456,6 +458,7 @@ fn create_monitoring_context() -> EventContext {
             external: HashMap::new(),
         },
         fingerprint: 33333,
+        goal_bucket_id: 0,
         embeddings: None,
     }
 }

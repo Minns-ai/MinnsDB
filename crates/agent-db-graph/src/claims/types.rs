@@ -12,6 +12,17 @@ use crate::episodes::EpisodeId;
 pub type ClaimId = u64;
 pub type ThreadId = String;
 
+/// An entity attached to a claim, carrying the NER label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimEntity {
+    /// Entity text as it appears in the source (e.g. "John", "Google")
+    pub text: String,
+    /// NER label (e.g. "PERSON", "ORG", "LOC", "DATE", "PRODUCT", "EVENT")
+    pub label: String,
+    /// Normalized form for dedup (lowercased, trimmed, determiners stripped)
+    pub normalized: String,
+}
+
 /// Status of a claim in its lifecycle
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaimStatus {
@@ -23,6 +34,74 @@ pub enum ClaimStatus {
     Disputed,
     /// Failed validation, kept for audit only
     Rejected,
+    /// Replaced by a newer claim that contradicts this one (temporal recency wins)
+    Superseded,
+}
+
+/// Type of knowledge a claim represents.
+///
+/// Each type has a different default half-life (temporal decay rate) and
+/// different contradiction-resolution rules:
+///
+/// | Type        | Half-life | Notes |
+/// |-------------|-----------|-------|
+/// | Preference  | 30 days   | Personal taste, can flip |
+/// | Fact        | 365 days  | Objective, stable until corrected |
+/// | Belief      | 14 days   | Uncertain, needs validation |
+/// | Intention   | 3 days    | Time-bound, action-oriented |
+/// | Capability  | 180 days  | System/agent feature, binary |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ClaimType {
+    /// Personal taste or preference — "I like X", "I prefer Y"
+    Preference,
+    /// Objective statement — "X costs $10", "The API uses REST"
+    #[default]
+    Fact,
+    /// Uncertain opinion — "I think X will work", "Maybe we should Y"
+    Belief,
+    /// Desired future action — "I want to do X", "I plan to Y"
+    Intention,
+    /// System/agent ability — "The system supports X", "Agent can Y"
+    Capability,
+}
+
+impl ClaimType {
+    /// Default half-life for this claim type in seconds.
+    ///
+    /// After `half_life` seconds the temporal weight drops to 0.5.
+    pub fn half_life_secs(&self) -> f64 {
+        match self {
+            ClaimType::Intention => 3.0 * 86_400.0,   // 3 days
+            ClaimType::Belief => 14.0 * 86_400.0,     // 14 days
+            ClaimType::Preference => 30.0 * 86_400.0,  // 30 days
+            ClaimType::Capability => 180.0 * 86_400.0,  // 180 days
+            ClaimType::Fact => 365.0 * 86_400.0,       // 365 days
+        }
+    }
+
+    /// Attempt to classify from the LLM-provided string.
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_lowercase().trim() {
+            "preference" => ClaimType::Preference,
+            "fact" => ClaimType::Fact,
+            "belief" => ClaimType::Belief,
+            "intention" | "intent" => ClaimType::Intention,
+            "capability" => ClaimType::Capability,
+            _ => ClaimType::Fact, // default
+        }
+    }
+}
+
+impl std::fmt::Display for ClaimType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClaimType::Preference => write!(f, "Preference"),
+            ClaimType::Fact => write!(f, "Fact"),
+            ClaimType::Belief => write!(f, "Belief"),
+            ClaimType::Intention => write!(f, "Intention"),
+            ClaimType::Capability => write!(f, "Capability"),
+        }
+    }
 }
 
 /// A derived claim extracted from context
@@ -75,6 +154,31 @@ pub struct DerivedClaim {
 
     /// Diagnostic metadata (optional)
     pub metadata: HashMap<String, String>,
+
+    // ── New fields (P0 upgrade) ──────────────────────────────────────────
+
+    /// Semantic type of this claim (Preference, Fact, Belief, …)
+    #[serde(default)]
+    pub claim_type: ClaimType,
+
+    /// Normalized primary entity this claim is about (lowercased, trimmed).
+    /// e.g. "adidas", "openai api", "dark mode".
+    #[serde(default)]
+    pub subject_entity: Option<String>,
+
+    /// Optional explicit expiry timestamp (epoch seconds).
+    /// Claims past this time get status Dormant during maintenance.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+
+    /// If this claim was superseded, the ID of the replacing claim.
+    #[serde(default)]
+    pub superseded_by: Option<ClaimId>,
+
+    /// NER entities found in this claim, with labels.
+    /// e.g. [("John", "PERSON"), ("Google", "ORG")]
+    #[serde(default)]
+    pub entities: Vec<ClaimEntity>,
 }
 
 /// Evidence span within source text
@@ -215,6 +319,11 @@ impl DerivedClaim {
             status: ClaimStatus::Active,
             support_count: 1,
             metadata: HashMap::new(),
+            claim_type: ClaimType::Fact,
+            subject_entity: None,
+            expires_at: None,
+            superseded_by: None,
+            entities: Vec::new(),
         }
     }
 
@@ -242,6 +351,44 @@ impl DerivedClaim {
 
         self.last_accessed = now;
         self.access_count += 1;
+    }
+
+    /// Temporal weight ∈ (0, 1] based on claim age and type-specific half-life.
+    ///
+    /// Uses exponential decay: `w(t) = 2^(−age / half_life)`.
+    ///
+    /// If `expires_at` is set and in the past, returns 0.0 immediately.
+    pub fn temporal_weight(&self) -> f32 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Expired?
+        if let Some(exp) = self.expires_at {
+            if now > exp {
+                return 0.0;
+            }
+        }
+
+        let age_secs = now.saturating_sub(self.created_at) as f64;
+        let half_life = self.claim_type.half_life_secs();
+
+        // 2^(-age/half_life)
+        let weight = (2.0_f64).powf(-age_secs / half_life);
+        weight as f32
+    }
+
+    /// Compute a retrieval score that blends similarity with temporal freshness.
+    ///
+    /// `score = similarity * (alpha + (1 - alpha) * temporal_weight)`
+    ///
+    /// With alpha = 0.6 a perfect-similarity claim that is ancient still gets 0.6,
+    /// while a fresh one gets 1.0.
+    pub fn retrieval_score(&self, similarity: f32) -> f32 {
+        const ALPHA: f32 = 0.6;
+        let tw = self.temporal_weight();
+        similarity * (ALPHA + (1.0 - ALPHA) * tw)
     }
 }
 
@@ -314,5 +461,105 @@ mod tests {
         );
 
         assert!(claim.validate_evidence(source_text));
+    }
+
+    #[test]
+    fn test_claim_type_from_str_loose() {
+        assert_eq!(ClaimType::from_str_loose("preference"), ClaimType::Preference);
+        assert_eq!(ClaimType::from_str_loose("Fact"), ClaimType::Fact);
+        assert_eq!(ClaimType::from_str_loose("BELIEF"), ClaimType::Belief);
+        assert_eq!(ClaimType::from_str_loose("intention"), ClaimType::Intention);
+        assert_eq!(ClaimType::from_str_loose("intent"), ClaimType::Intention);
+        assert_eq!(ClaimType::from_str_loose("capability"), ClaimType::Capability);
+        assert_eq!(ClaimType::from_str_loose("unknown"), ClaimType::Fact); // default
+    }
+
+    #[test]
+    fn test_claim_type_half_lives_ordered() {
+        // Intention < Belief < Preference < Capability < Fact
+        assert!(ClaimType::Intention.half_life_secs() < ClaimType::Belief.half_life_secs());
+        assert!(ClaimType::Belief.half_life_secs() < ClaimType::Preference.half_life_secs());
+        assert!(ClaimType::Preference.half_life_secs() < ClaimType::Capability.half_life_secs());
+        assert!(ClaimType::Capability.half_life_secs() < ClaimType::Fact.half_life_secs());
+    }
+
+    #[test]
+    fn test_temporal_weight_fresh_claim() {
+        let claim = DerivedClaim::new(
+            1,
+            "Fresh claim".to_string(),
+            vec![EvidenceSpan::new(0, 5, "Fresh")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        // Just created — weight should be very close to 1.0
+        assert!(claim.temporal_weight() > 0.99);
+    }
+
+    #[test]
+    fn test_temporal_weight_expired() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Expired claim".to_string(),
+            vec![EvidenceSpan::new(0, 7, "Expired")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        // Set expires_at to 1 second ago
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        claim.expires_at = Some(now - 1);
+        assert_eq!(claim.temporal_weight(), 0.0);
+    }
+
+    #[test]
+    fn test_retrieval_score_fresh() {
+        let claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        // Fresh claim with perfect similarity → score ≈ 1.0
+        let score = claim.retrieval_score(1.0);
+        assert!(score > 0.99);
+    }
+
+    #[test]
+    fn test_new_claim_has_default_type() {
+        let claim = DerivedClaim::new(
+            1,
+            "Default".to_string(),
+            vec![EvidenceSpan::new(0, 7, "Default")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(claim.claim_type, ClaimType::Fact);
+        assert!(claim.subject_entity.is_none());
+        assert!(claim.expires_at.is_none());
+        assert!(claim.superseded_by.is_none());
     }
 }

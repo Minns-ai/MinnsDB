@@ -2,8 +2,8 @@
 
 use crate::errors::ApiError;
 use crate::models::{
-    GraphContextQuery, GraphEdgeResponse, GraphNodeResponse, GraphQuery, GraphResponse,
-    StatsResponse,
+    GraphContextQuery, GraphEdgeResponse, GraphNodeResponse, GraphPersistResponse, GraphQuery,
+    GraphResponse, StatsResponse,
 };
 use crate::state::AppState;
 use axum::{
@@ -98,6 +98,24 @@ pub async fn get_graph_for_context(
         .collect();
 
     Ok(Json(GraphResponse { nodes, edges }))
+}
+
+// POST /api/graph/persist - Force-flush graph state to disk
+pub async fn persist_graph(
+    State(state): State<AppState>,
+) -> Result<Json<GraphPersistResponse>, ApiError> {
+    info!("Force-persisting graph state to disk");
+
+    let (nodes_persisted, edges_persisted) =
+        state.engine.persist_graph_state().await.map_err(|e| {
+            ApiError::Internal(format!("Graph persistence failed: {}", e))
+        })?;
+
+    Ok(Json(GraphPersistResponse {
+        success: true,
+        nodes_persisted,
+        edges_persisted,
+    }))
 }
 
 // GET /api/stats - Get system statistics

@@ -44,6 +44,7 @@ pub fn create_router(state: AppState) -> Router {
         // Graph visualization
         .route("/api/graph", get(handlers::get_graph))
         .route("/api/graph/context", get(handlers::get_graph_for_context))
+        .route("/api/graph/persist", post(handlers::persist_graph))
         .route("/api/stats", get(handlers::get_stats))
         // Advanced analytics
         .route("/api/analytics", get(handlers::get_analytics))

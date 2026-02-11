@@ -38,8 +38,10 @@ pub trait MemoryStore: Send + Sync {
     fn list_all_memories(&self) -> Vec<Memory>;
     /// Store a pre-built consolidated memory (Semantic or Schema tier)
     fn store_consolidated_memory(&mut self, memory: Memory);
-    /// Mark a memory as consolidated, linking it to a higher-tier memory and applying decay
-    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, decay: f32);
+    /// Mark a memory as consolidated, linking it to a higher-tier memory and applying decay.
+    /// When `into_tier` is `Schema`, sets `schema_id = Some(into_id)`.
+    /// When `into_tier` is `Semantic`, leaves `schema_id` unchanged (None).
+    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, into_tier: crate::memory::MemoryTier, decay: f32);
     /// Schema-first retrieval: returns Schema > Semantic > Episodic, preferring higher tiers
     fn retrieve_hierarchical(
         &mut self,
@@ -118,8 +120,8 @@ impl MemoryStore for InMemoryMemoryStore {
         self.inner.store_direct(memory);
     }
 
-    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, decay: f32) {
-        self.inner.mark_consolidated(memory_id, into_id, decay);
+    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, into_tier: crate::memory::MemoryTier, decay: f32) {
+        self.inner.mark_consolidated(memory_id, into_id, into_tier, decay);
     }
 
     fn retrieve_hierarchical(
@@ -148,10 +150,11 @@ struct MemoryCacheEntry {
 /// - Cold: All memories persisted in redb (unbounded)
 ///
 /// Uses the following redb tables:
-/// - memory_records: memory_id → Memory  (main storage)
-/// - mem_by_bucket: (goal_bucket_id, memory_id) → empty  (index)
-/// - mem_by_context_hash: (context_hash, memory_id) → empty  (index)
-/// - mem_feature_postings: (feature, memory_id) → relevance_score  (similarity search)
+/// - memory_records: memory_id -> Memory  (main storage)
+/// - mem_by_context_hash: (context_fingerprint, memory_id) -> ()  (exact context index)
+/// - mem_by_bucket: (agent_id, memory_id) -> ()  (agent index)
+/// - mem_by_goal_bucket: (goal_bucket_id, memory_id) -> ()  (goal bucket index for consolidation)
+/// - mem_feature_postings: (feature, memory_id) -> relevance_score  (similarity search)
 pub struct RedbMemoryStore {
     backend: Arc<RedbBackend>,
     config: MemoryFormationConfig,
@@ -270,17 +273,26 @@ impl RedbMemoryStore {
         self.backend
             .put("memory_records", memory.id.to_be_bytes(), memory)?;
 
-        // Index by context hash: (context_hash, memory_id) → empty
+        // Index by context fingerprint: (context_fingerprint, memory_id) -> ()
         let mut context_key = Vec::with_capacity(16);
         context_key.extend_from_slice(&memory.context.fingerprint.to_be_bytes());
         context_key.extend_from_slice(&memory.id.to_be_bytes());
         self.backend.put("mem_by_context_hash", context_key, &())?;
 
-        // Index by agent: using mem_by_bucket with agent_id as bucket
+        // Index by agent: (agent_id, memory_id) -> ()
         let mut agent_key = Vec::with_capacity(16);
         agent_key.extend_from_slice(&memory.agent_id.to_be_bytes());
         agent_key.extend_from_slice(&memory.id.to_be_bytes());
         self.backend.put("mem_by_bucket", agent_key, &())?;
+
+        // Index by goal bucket: (goal_bucket_id, memory_id) -> ()
+        let goal_bucket = memory.context.goal_bucket_id;
+        if goal_bucket != 0 {
+            let mut gb_key = Vec::with_capacity(16);
+            gb_key.extend_from_slice(&goal_bucket.to_be_bytes());
+            gb_key.extend_from_slice(&memory.id.to_be_bytes());
+            self.backend.put("mem_by_goal_bucket", gb_key, &())?;
+        }
 
         Ok(())
     }
@@ -304,7 +316,43 @@ impl RedbMemoryStore {
         agent_key.extend_from_slice(&memory.id.to_be_bytes());
         self.backend.delete("mem_by_bucket", agent_key)?;
 
+        // Delete goal bucket index
+        let goal_bucket = memory.context.goal_bucket_id;
+        if goal_bucket != 0 {
+            let mut gb_key = Vec::with_capacity(16);
+            gb_key.extend_from_slice(&goal_bucket.to_be_bytes());
+            gb_key.extend_from_slice(&memory.id.to_be_bytes());
+            self.backend.delete("mem_by_goal_bucket", gb_key)?;
+        }
+
         Ok(())
+    }
+    /// Load memories belonging to a specific goal bucket.
+    /// Scans the mem_by_goal_bucket index and loads each memory via cache.
+    fn get_memories_for_goal_bucket(&mut self, goal_bucket_id: u64, limit: usize) -> Vec<Memory> {
+        let prefix = goal_bucket_id.to_be_bytes();
+        let results: Vec<(Vec<u8>, ())> =
+            match self.backend.scan_prefix("mem_by_goal_bucket", prefix) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("Failed to scan goal bucket index: {:?}", e);
+                    return Vec::new();
+                },
+            };
+
+        let mut memories = Vec::new();
+        for (key, _) in results {
+            if key.len() >= 16 {
+                let memory_id = u64::from_be_bytes(key[8..16].try_into().unwrap());
+                if let Some(memory) = self.load_memory(memory_id) {
+                    memories.push(memory);
+                    if memories.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        memories
     }
 }
 
@@ -349,6 +397,9 @@ impl MemoryStore for RedbMemoryStore {
         let mut context = episode.context.clone();
         if context.fingerprint == 0 {
             context.fingerprint = context.compute_fingerprint();
+        }
+        if context.goal_bucket_id == 0 {
+            context.goal_bucket_id = context.compute_goal_bucket_id();
         }
 
         // Generate natural language summary + causal analysis
@@ -551,43 +602,58 @@ impl MemoryStore for RedbMemoryStore {
     }
 
     fn get_stats(&self) -> MemoryStats {
-        // Count total memories in redb (slow but accurate)
-        let total_memories = match self
+        // Full scan of all memories from redb for accurate stats
+        let all_memories: Vec<(Vec<u8>, Memory)> = self
             .backend
-            .scan_prefix::<Vec<u8>, Memory>("memory_records", vec![])
-        {
-            Ok(memories) => memories.len(),
-            Err(_) => 0,
-        };
+            .scan_prefix("memory_records", vec![])
+            .unwrap_or_default();
 
-        // Compute stats from cache (approximate)
-        let cached_memories: Vec<_> = self.memory_cache.values().collect();
-        let avg_strength = if !cached_memories.is_empty() {
-            cached_memories
-                .iter()
-                .map(|e| e.memory.strength)
-                .sum::<f32>()
-                / cached_memories.len() as f32
-        } else {
-            0.0
-        };
+        let total = all_memories.len();
+        if total == 0 {
+            return MemoryStats {
+                total_memories: 0,
+                avg_strength: 0.0,
+                avg_access_count: 0,
+                agents_with_memories: 0,
+                unique_contexts: 0,
+                episodic_count: 0,
+                semantic_count: 0,
+                schema_count: 0,
+            };
+        }
 
-        let avg_access_count = if !cached_memories.is_empty() {
-            cached_memories
-                .iter()
-                .map(|e| e.memory.access_count)
-                .sum::<u32>()
-                / cached_memories.len() as u32
-        } else {
-            0
-        };
+        let avg_strength = all_memories.iter().map(|(_, m)| m.strength).sum::<f32>() / total as f32;
+        let avg_access_count = all_memories
+            .iter()
+            .map(|(_, m)| m.access_count)
+            .sum::<u32>()
+            / total as u32;
+
+        let mut agents: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut contexts: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut episodic_count = 0usize;
+        let mut semantic_count = 0usize;
+        let mut schema_count = 0usize;
+
+        for (_, m) in &all_memories {
+            agents.insert(m.agent_id);
+            contexts.insert(m.context.fingerprint);
+            match m.tier {
+                crate::memory::MemoryTier::Episodic => episodic_count += 1,
+                crate::memory::MemoryTier::Semantic => semantic_count += 1,
+                crate::memory::MemoryTier::Schema => schema_count += 1,
+            }
+        }
 
         MemoryStats {
-            total_memories,
+            total_memories: total,
             avg_strength,
             avg_access_count,
-            agents_with_memories: 0, // TODO: Track this
-            unique_contexts: self.memory_cache.len(),
+            agents_with_memories: agents.len(),
+            unique_contexts: contexts.len(),
+            episodic_count,
+            semantic_count,
+            schema_count,
         }
     }
 
@@ -658,17 +724,21 @@ impl MemoryStore for RedbMemoryStore {
         self.cache_memory(memory);
     }
 
-    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, decay: f32) {
+    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, into_tier: crate::memory::MemoryTier, decay: f32) {
         // Update in cache or load from redb
         if let Some(entry) = self.memory_cache.get_mut(&memory_id) {
             entry.memory.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
-            entry.memory.schema_id = Some(into_id);
+            if into_tier == crate::memory::MemoryTier::Schema {
+                entry.memory.schema_id = Some(into_id);
+            }
             entry.memory.strength *= decay;
             let mem_clone = entry.memory.clone();
             let _ = self.persist_memory(&mem_clone);
         } else if let Some(mut memory) = self.load_memory(memory_id) {
             memory.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
-            memory.schema_id = Some(into_id);
+            if into_tier == crate::memory::MemoryTier::Schema {
+                memory.schema_id = Some(into_id);
+            }
             memory.strength *= decay;
             let _ = self.persist_memory(&memory);
             self.cache_memory(memory);
@@ -682,19 +752,40 @@ impl MemoryStore for RedbMemoryStore {
         min_similarity: f32,
         agent_id: Option<AgentId>,
     ) -> Vec<Memory> {
-        let all = self.list_all_memories();
+        const MAX_CANDIDATES: usize = 500;
+
         let query_fp = if context.fingerprint != 0 {
             context.fingerprint
         } else {
             context.compute_fingerprint()
         };
+        let query_bucket = if context.goal_bucket_id != 0 {
+            context.goal_bucket_id
+        } else {
+            context.compute_goal_bucket_id()
+        };
         let query_emb = context.embeddings.as_deref().unwrap_or(&[]);
 
-        let mut scored: Vec<(f32, Memory)> = all
+        // Use goal bucket index for a targeted scan when goals are available.
+        // Fall back to full scan only when no goal bucket exists.
+        let candidates: Vec<Memory> = if query_bucket != 0 {
+            self.get_memories_for_goal_bucket(query_bucket, MAX_CANDIDATES)
+        } else {
+            self.list_all_memories()
+        };
+
+        let mut scored: Vec<(f32, Memory)> = candidates
             .into_iter()
             .filter(|m| m.consolidation_status != crate::memory::ConsolidationStatus::Archived)
             .filter(|m| agent_id.is_none_or(|aid| m.agent_id == aid))
             .filter_map(|m| {
+                // Memories in the same goal bucket get a baseline similarity of 0.5
+                // since they share the same goal set even if fingerprints differ.
+                let bucket_sim = if query_bucket != 0 && m.context.goal_bucket_id == query_bucket {
+                    0.5f32
+                } else {
+                    0.0
+                };
                 let fp_sim = if m.context.fingerprint == query_fp {
                     1.0f32
                 } else {
@@ -710,7 +801,7 @@ impl MemoryStore for RedbMemoryStore {
                 } else {
                     0.0
                 };
-                let sim = fp_sim.max(emb_sim);
+                let sim = fp_sim.max(emb_sim).max(bucket_sim);
                 if sim >= min_similarity {
                     let tier_boost = match m.tier {
                         crate::memory::MemoryTier::Schema => 0.3,
@@ -745,6 +836,19 @@ pub trait StrategyStore: Send + Sync {
         success: bool,
     ) -> crate::GraphResult<()>;
     fn get_stats(&self) -> StrategyStats;
+
+    // ========== Pruning API ==========
+    /// Remove weak / stale strategies and merge near-duplicates.
+    /// Returns the total number of strategies removed.
+    fn prune_strategies(
+        &mut self,
+        min_confidence: f32,
+        min_support: u32,
+        max_stale_hours: f32,
+    ) -> usize;
+
+    /// List all strategies (for pruning / analytics).
+    fn list_all_strategies(&self) -> Vec<Strategy>;
 }
 
 pub struct InMemoryStrategyStore {
@@ -802,6 +906,23 @@ impl StrategyStore for InMemoryStrategyStore {
 
     fn get_stats(&self) -> StrategyStats {
         self.inner.get_stats()
+    }
+
+    fn prune_strategies(
+        &mut self,
+        min_confidence: f32,
+        min_support: u32,
+        max_stale_hours: f32,
+    ) -> usize {
+        let pruned = self
+            .inner
+            .prune_weak_strategies(min_confidence, min_support, max_stale_hours);
+        let merged = self.inner.merge_similar_strategies();
+        pruned.len() + merged
+    }
+
+    fn list_all_strategies(&self) -> Vec<Strategy> {
+        self.inner.list_all_strategies().into_iter().cloned().collect()
     }
 }
 
@@ -980,7 +1101,6 @@ impl RedbStrategyStore {
     }
 
     /// Delete a strategy from redb
-    #[allow(dead_code)]
     fn delete_strategy(&self, strategy: &Strategy) -> StorageResult<()> {
         // Delete main record
         self.backend
@@ -1184,7 +1304,6 @@ impl StrategyStore for RedbStrategyStore {
     }
 
     fn get_stats(&self) -> StrategyStats {
-        // Count total strategies in redb (slow but accurate)
         let strategies: Vec<(Vec<u8>, Strategy)> =
             match self.backend.scan_prefix("strategy_records", vec![]) {
                 Ok(s) => s,
@@ -1194,7 +1313,7 @@ impl StrategyStore for RedbStrategyStore {
                         high_quality_strategies: 0,
                         agents_with_strategies: 0,
                         average_quality: 0.0,
-                    }
+                    };
                 },
             };
 
@@ -1210,11 +1329,67 @@ impl StrategyStore for RedbStrategyStore {
             0.0
         };
 
+        let agents: std::collections::HashSet<u64> =
+            strategies.iter().map(|(_, s)| s.agent_id).collect();
+
         StrategyStats {
             total_strategies: total,
             high_quality_strategies: high_quality,
-            agents_with_strategies: 0, // TODO: Track this
+            agents_with_strategies: agents.len(),
             average_quality: avg_quality,
         }
+    }
+
+    fn prune_strategies(
+        &mut self,
+        min_confidence: f32,
+        min_support: u32,
+        max_stale_hours: f32,
+    ) -> usize {
+        // Prune from in-memory extractor
+        let pruned_ids = self.strategy_extractor.prune_weak_strategies(
+            min_confidence,
+            min_support,
+            max_stale_hours,
+        );
+        let merged = self.strategy_extractor.merge_similar_strategies();
+
+        // Delete pruned strategies from redb + cache
+        for id in &pruned_ids {
+            self.strategy_cache.remove(id);
+            // Build a temporary strategy to clean up indexes
+            if let Ok(Some(strategy)) = self
+                .backend
+                .get::<_, Strategy>("strategy_records", id.to_be_bytes())
+            {
+                let _ = self.delete_strategy(&strategy);
+            } else {
+                let _ = self
+                    .backend
+                    .delete("strategy_records", id.to_be_bytes());
+            }
+        }
+
+        pruned_ids.len() + merged
+    }
+
+    fn list_all_strategies(&self) -> Vec<Strategy> {
+        let mut all = std::collections::HashMap::new();
+
+        // Load from redb
+        let scan: Result<Vec<(Vec<u8>, Strategy)>, _> =
+            self.backend.scan_prefix("strategy_records", vec![]);
+        if let Ok(records) = scan {
+            for (_, strategy) in records {
+                all.insert(strategy.id, strategy);
+            }
+        }
+
+        // Override with cached versions
+        for (id, entry) in &self.strategy_cache {
+            all.insert(*id, entry.strategy.clone());
+        }
+
+        all.into_values().collect()
     }
 }

@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             external: std::collections::HashMap::new(),
         },
         fingerprint: 12345,
+        goal_bucket_id: 0,
         embeddings: None,
     };
 

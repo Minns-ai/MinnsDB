@@ -111,19 +111,30 @@ impl ClaimExtractionQueue {
                 agent_db_events::SentenceEntities::split_into_sentences(&request.canonical_text)
             };
 
-            let all_context_entities: Vec<String> = if let Some(ner) = &request.ner_features {
-                ner.entity_spans
-                    .iter()
-                    .map(|span| span.text.clone())
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            // Build labeled entities for LLM (text + NER label)
+            let labeled_entities: Vec<super::llm_client::LabeledEntity> =
+                if let Some(ner) = &request.ner_features {
+                    ner.entity_spans
+                        .iter()
+                        .map(|span| super::llm_client::LabeledEntity {
+                            text: span.text.clone(),
+                            label: span.label.clone(),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+            // Bare text list for backward-compat NER overlap checks below
+            let all_context_entities: Vec<String> = labeled_entities
+                .iter()
+                .map(|e| e.text.clone())
+                .collect();
 
             // Step 2: Call LLM for claim extraction
             let llm_request = LlmExtractionRequest {
                 text: request.canonical_text.clone(),
-                entities: all_context_entities.clone(),
+                entities: labeled_entities.clone(),
                 max_claims: config.max_claims_per_input,
             };
 
@@ -278,6 +289,58 @@ impl ClaimExtractionQueue {
                     &best_sent.text,
                 )];
 
+                // ── Dedup / Contradiction check ──────────────────────────
+                let claim_text_for_dedup = llm_claim.claim_text.clone();
+                if config.enable_dedup && !claim_embedding.is_empty() {
+                    use crate::maintenance::{check_claim_dedup, ClaimDedupDecision};
+
+                    let decision = check_claim_dedup(
+                        claim_store,
+                        &claim_text_for_dedup,
+                        &claim_embedding,
+                        &config.maintenance_config,
+                    );
+
+                    match decision {
+                        ClaimDedupDecision::Duplicate {
+                            existing_id,
+                            similarity: dedup_sim,
+                        } => {
+                            info!(
+                                "Claim dedup: merging into existing claim {} (sim={:.3}): \"{}\"",
+                                existing_id, dedup_sim, claim_text_for_dedup
+                            );
+                            let _ = claim_store.add_support(existing_id);
+                            rejected_claims.push(RejectedClaim {
+                                claim_text: claim_text_for_dedup,
+                                rejection_reason: RejectionReason::DuplicateMerged,
+                            });
+                            continue;
+                        },
+                        ClaimDedupDecision::Contradiction {
+                            existing_id,
+                            similarity: contra_sim,
+                        } => {
+                            info!(
+                                "Claim contradiction: superseding claim {} (sim={:.3}): old=\"...\" new=\"{}\"",
+                                existing_id, contra_sim, claim_text_for_dedup
+                            );
+                            // Mark old claim as Superseded
+                            let _ = claim_store.update_status(
+                                existing_id,
+                                ClaimStatus::Superseded,
+                            );
+
+                            // Fall through to store the new (superseding) claim below,
+                            // with metadata linking back to the old one.
+                            // We'll add the metadata after creating the claim object.
+                        },
+                        ClaimDedupDecision::NewClaim => {
+                            // Normal path — nothing to do
+                        },
+                    }
+                }
+
                 // Create claim
                 let claim_id = claim_store.next_id()?;
                 let mut claim = DerivedClaim::new(
@@ -293,6 +356,33 @@ impl ClaimExtractionQueue {
                     request.workspace_id.clone(),
                 );
 
+                // ── Set claim type and subject entity from LLM output ────
+                claim.claim_type =
+                    crate::claims::types::ClaimType::from_str_loose(&llm_claim.claim_type);
+                claim.subject_entity = llm_claim
+                    .subject_entity
+                    .as_deref()
+                    .map(normalize_entity);
+
+                // ── Attach NER-labeled entities found in the claim text ────
+                {
+                    let claim_lower = claim.claim_text.to_lowercase();
+                    let mut seen = HashSet::new();
+                    for labeled in &labeled_entities {
+                        // Match entity text case-insensitively in the claim
+                        if claim_lower.contains(&labeled.text.to_lowercase()) {
+                            let norm = normalize_entity(&labeled.text);
+                            if seen.insert(norm.clone()) {
+                                claim.entities.push(ClaimEntity {
+                                    text: labeled.text.clone(),
+                                    label: labeled.label.clone(),
+                                    normalized: norm,
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Add diagnostics to metadata
                 claim
                     .metadata
@@ -302,7 +392,12 @@ impl ClaimExtractionQueue {
                     .insert("overlap".to_string(), overlap.to_string());
                 claim.metadata.insert(
                     "found_entities".to_string(),
-                    e_claim.iter().cloned().collect::<Vec<_>>().join(", "),
+                    claim
+                        .entities
+                        .iter()
+                        .map(|e| format!("{}:{}", e.text, e.label))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 );
                 claim
                     .metadata
@@ -310,6 +405,14 @@ impl ClaimExtractionQueue {
                 claim
                     .metadata
                     .insert("sentence_index".to_string(), best_sent_idx.to_string());
+                claim
+                    .metadata
+                    .insert("claim_type".to_string(), claim.claim_type.to_string());
+                if let Some(ref ent) = claim.subject_entity {
+                    claim
+                        .metadata
+                        .insert("subject_entity".to_string(), ent.clone());
+                }
 
                 // Store claim
                 claim_store.store(&claim)?;
@@ -375,6 +478,36 @@ impl ClaimExtractionQueue {
     }
 }
 
+// ── Entity resolution ────────────────────────────────────────────────────────
+
+/// Normalize an entity string for deduplication.
+///
+/// * Lowercases
+/// * Trims whitespace
+/// * Collapses internal whitespace
+/// * Strips common determiners ("the", "a", "an")
+/// * Strips trailing punctuation
+///
+/// "The  Adidas  Shoes." → "adidas shoes"
+/// "OPENAI API" → "openai api"
+pub fn normalize_entity(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    // Collapse whitespace
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    // Strip determiners from the front
+    let start = words
+        .iter()
+        .position(|w| !matches!(*w, "the" | "a" | "an"))
+        .unwrap_or(0);
+    let trimmed: Vec<&str> = words[start..].to_vec();
+    let mut result = trimmed.join(" ");
+    // Strip trailing punctuation
+    while result.ends_with(|c: char| c.is_ascii_punctuation()) {
+        result.pop();
+    }
+    result
+}
+
 /// Configuration for claim extraction
 #[derive(Debug, Clone)]
 pub struct ClaimExtractionConfig {
@@ -384,6 +517,10 @@ pub struct ClaimExtractionConfig {
     pub min_confidence: f32,
     /// Minimum evidence length (characters)
     pub min_evidence_length: usize,
+    /// Enable dedup / contradiction detection before storing claims
+    pub enable_dedup: bool,
+    /// Maintenance config for dedup thresholds (shared with maintenance loop)
+    pub maintenance_config: crate::maintenance::MaintenanceConfig,
 }
 
 impl Default for ClaimExtractionConfig {
@@ -392,6 +529,8 @@ impl Default for ClaimExtractionConfig {
             max_claims_per_input: 10,
             min_confidence: 0.7,
             min_evidence_length: 10,
+            enable_dedup: true,
+            maintenance_config: crate::maintenance::MaintenanceConfig::default(),
         }
     }
 }
@@ -413,5 +552,27 @@ mod tests {
         let config = ClaimExtractionConfig::default();
 
         let _queue = ClaimExtractionQueue::new(client, embedding_client, store, 1, config);
+    }
+
+    #[test]
+    fn test_normalize_entity_basic() {
+        assert_eq!(normalize_entity("Adidas"), "adidas");
+        assert_eq!(normalize_entity("  OPENAI  API  "), "openai api");
+        assert_eq!(normalize_entity("The Adidas Shoes."), "adidas shoes");
+        assert_eq!(normalize_entity("a Big Company!"), "big company");
+        assert_eq!(normalize_entity("An Example"), "example");
+    }
+
+    #[test]
+    fn test_normalize_entity_preserves_meaningful_content() {
+        assert_eq!(normalize_entity("dark mode"), "dark mode");
+        assert_eq!(normalize_entity("John"), "john");
+        assert_eq!(normalize_entity("REST API v3.2"), "rest api v3.2");
+    }
+
+    #[test]
+    fn test_normalize_entity_empty() {
+        assert_eq!(normalize_entity(""), "");
+        assert_eq!(normalize_entity("   "), "");
     }
 }

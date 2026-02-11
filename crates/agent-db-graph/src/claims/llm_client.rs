@@ -5,13 +5,23 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+/// A single labeled entity from NER, passed to the LLM for grounding.
+#[derive(Debug, Clone)]
+pub struct LabeledEntity {
+    /// Entity text as it appears in the source (e.g. "John", "Google")
+    pub text: String,
+    /// NER label (e.g. "PERSON", "ORG", "LOC", "DATE", "PRODUCT", "EVENT")
+    pub label: String,
+}
+
 /// LLM extraction request
 #[derive(Debug, Clone)]
 pub struct LlmExtractionRequest {
     /// Raw text to extract claims from
     pub text: String,
-    /// Entity mentions from NER (optional)
-    pub entities: Vec<String>,
+    /// Labeled entity mentions from NER (optional).
+    /// Each entry carries the entity text **and** its NER label.
+    pub entities: Vec<LabeledEntity>,
     /// Maximum number of claims to extract
     pub max_claims: usize,
 }
@@ -34,6 +44,16 @@ pub struct LlmClaim {
     pub evidence_spans: Vec<LlmEvidenceSpan>,
     /// Confidence score [0.0, 1.0]
     pub confidence: f32,
+    /// Claim type: "preference", "fact", "belief", "intention", "capability"
+    #[serde(default = "default_claim_type_str")]
+    pub claim_type: String,
+    /// Primary entity this claim is about (optional, LLM best-effort)
+    #[serde(default)]
+    pub subject_entity: Option<String>,
+}
+
+fn default_claim_type_str() -> String {
+    "fact".to_string()
 }
 
 /// Evidence span from LLM
@@ -75,16 +95,32 @@ impl OpenAiClient {
     /// Build the system prompt
     fn system_prompt(max_claims: usize) -> String {
         format!(
-            r#"You are a claim extractor. Extract atomic factual claims from the text provided.
+            r#"You are a claim extractor. You receive text **and** a list of named entities
+pre-identified by an NER service (each with its label: PERSON, ORG, PRODUCT,
+LOC, DATE, EVENT, etc.).  Use these entities to anchor your claims.
 
 Rules:
-1. Extract at most {} claims
-2. Each claim must be atomic (single fact/statement)
-3. Each claim MUST have supporting evidence spans (byte offsets)
-4. Only extract claims that are explicitly stated in the text
-5. Do not infer or generate claims not present in the text
+1. Extract at most {max_claims} claims.
+2. Each claim must be **atomic** (single fact/statement).
+3. Each claim MUST have supporting evidence spans (UTF-8 byte offsets into the original text).
+4. Only extract claims that are **explicitly** stated in the text — do not infer.
+5. Classify each claim as one of:
+   - "preference"  — personal taste or like/dislike ("I like X", "I prefer Y")
+   - "fact"        — objective, verifiable statement ("X costs $10", "The API uses REST")
+   - "belief"      — uncertain opinion ("I think X will work", "Maybe we should Y")
+   - "intention"   — desired future action ("I want to do X", "I plan to Y")
+   - "capability"  — system/agent ability ("The system supports X", "It can handle 1k RPS")
+   Use the NER labels as a signal:
+     • Claims about PERSON/ORG entities are often "fact".
+     • Claims with sentiment words (like/dislike/prefer/hate) are "preference".
+     • Claims about PRODUCT capabilities are "capability".
+     • Claims with future-tense verbs (want/plan/will) are "intention".
+     • Claims with hedging words (think/maybe/probably) are "belief".
+6. Set "subject_entity" to the **primary NER entity** the claim is about.
+   Prefer the exact entity text from the NER list (case-sensitive match).
+   If no NER entity matches, use the most relevant noun phrase.
 
-Output format: JSON with this structure:
+Output format — strict JSON:
 {{
   "claims": [
     {{
@@ -92,20 +128,27 @@ Output format: JSON with this structure:
       "evidence_spans": [
         {{"start_offset": 0, "end_offset": 24}}
       ],
-      "confidence": 0.95
+      "confidence": 0.95,
+      "claim_type": "fact",
+      "subject_entity": "John"
     }}
   ]
 }}"#,
-            max_claims
+            max_claims = max_claims
         )
     }
 
-    /// Build the user prompt
-    fn user_prompt(text: &str, entities: &[String]) -> String {
+    /// Build the user prompt, formatting NER entities with their labels.
+    fn user_prompt(text: &str, entities: &[LabeledEntity]) -> String {
         let entity_hint = if entities.is_empty() {
             String::new()
         } else {
-            format!("\n\nEntities found: {}", entities.join(", "))
+            // Group entities by label for a structured hint
+            let formatted: Vec<String> = entities
+                .iter()
+                .map(|e| format!("{} [{}]", e.text, e.label))
+                .collect();
+            format!("\n\nNER entities detected:\n{}", formatted.join("\n"))
         };
 
         format!(
@@ -327,12 +370,33 @@ mod tests {
         assert!(prompt.contains("5 claims"));
         assert!(prompt.contains("atomic"));
         assert!(prompt.contains("evidence"));
+        assert!(prompt.contains("preference"));
+        assert!(prompt.contains("NER"));
     }
 
     #[test]
-    fn test_user_prompt() {
-        let prompt = OpenAiClient::user_prompt("Test text", &["PERSON".to_string()]);
-        assert!(prompt.contains("Test text"));
-        assert!(prompt.contains("PERSON"));
+    fn test_user_prompt_with_labeled_entities() {
+        let entities = vec![
+            LabeledEntity {
+                text: "John".to_string(),
+                label: "PERSON".to_string(),
+            },
+            LabeledEntity {
+                text: "Google".to_string(),
+                label: "ORG".to_string(),
+            },
+        ];
+        let prompt = OpenAiClient::user_prompt("John works at Google", &entities);
+        assert!(prompt.contains("John works at Google"));
+        assert!(prompt.contains("John [PERSON]"));
+        assert!(prompt.contains("Google [ORG]"));
+        assert!(prompt.contains("NER entities detected"));
+    }
+
+    #[test]
+    fn test_user_prompt_empty_entities() {
+        let prompt = OpenAiClient::user_prompt("No entities here", &[]);
+        assert!(prompt.contains("No entities here"));
+        assert!(!prompt.contains("NER entities"));
     }
 }

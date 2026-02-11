@@ -94,28 +94,52 @@ impl Graph {
             claim.supporting_evidence.len()
         );
 
-        // Auto-link to entities found in claim metadata
-        if let Some(entities_str) = claim.metadata.get("found_entities") {
-            for entity_name in entities_str.split(',') {
-                let entity_name = entity_name.trim();
-                if entity_name.is_empty() {
-                    continue;
-                }
+        // Auto-link to NER entities attached to the claim (with proper labels)
+        for entity in &claim.entities {
+            // Find or create concept node for entity, using the NER label
+            let concept_type =
+                crate::structures::ConceptType::from_ner_label(&entity.label);
 
-                // Find or create concept node for entity
-                let entity_node_id = if let Some(node) = self.get_concept_node(entity_name) {
+            let entity_node_id =
+                if let Some(node) = self.get_concept_node(&entity.text) {
                     node.id
                 } else {
                     let new_node = GraphNode::new(NodeType::Concept {
-                        concept_name: entity_name.to_string(),
-                        concept_type: crate::structures::ConceptType::ContextualAssociation,
+                        concept_name: entity.text.clone(),
+                        concept_type,
                         confidence: claim.confidence,
                     });
                     self.add_node(new_node)
                 };
 
-                // Link claim to entity
-                self.link_claim_to_entity(claim.id, entity_node_id, 0.9);
+            // Link claim to entity
+            self.link_claim_to_entity(claim.id, entity_node_id, 0.9);
+        }
+
+        // Backward-compat: if no structured entities, fall back to metadata
+        if claim.entities.is_empty() {
+            if let Some(entities_str) = claim.metadata.get("found_entities") {
+                for entity_name in entities_str.split(',') {
+                    let entity_name = entity_name.trim();
+                    if entity_name.is_empty() {
+                        continue;
+                    }
+
+                    let entity_node_id =
+                        if let Some(node) = self.get_concept_node(entity_name) {
+                            node.id
+                        } else {
+                            let new_node = GraphNode::new(NodeType::Concept {
+                                concept_name: entity_name.to_string(),
+                                concept_type:
+                                    crate::structures::ConceptType::ContextualAssociation,
+                                confidence: claim.confidence,
+                            });
+                            self.add_node(new_node)
+                        };
+
+                    self.link_claim_to_entity(claim.id, entity_node_id, 0.9);
+                }
             }
         }
 
@@ -693,24 +717,36 @@ impl GraphEngine {
             response.embedding.len()
         );
 
-        // Search for similar claims
+        // Search for similar claims — request extra candidates so temporal
+        // re-ranking can still fill top_k after reordering.
+        let fetch_k = (top_k * 3).max(20);
         let similar_ids = claim_store
-            .find_similar(&response.embedding, top_k, min_similarity)
+            .find_similar(&response.embedding, fetch_k, min_similarity)
             .map_err(|e| {
                 crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
             })?;
 
-        debug!("Found {} similar claims", similar_ids.len());
+        debug!("Found {} candidate claims for re-ranking", similar_ids.len());
 
-        // Retrieve full claims
-        let mut results = Vec::new();
+        // Retrieve full claims and compute temporally-weighted retrieval score
+        let mut results: Vec<(crate::claims::DerivedClaim, f32)> = Vec::new();
         for (claim_id, similarity) in similar_ids {
             if let Some(claim) = claim_store.get(claim_id).map_err(|e| {
                 crate::GraphError::OperationError(format!("Failed to retrieve claim: {}", e))
             })? {
-                results.push((claim, similarity));
+                let score = claim.retrieval_score(similarity);
+                results.push((claim, score));
             }
         }
+
+        // Re-sort by temporally-weighted score (descending) and truncate
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(top_k);
+
+        debug!(
+            "Returning {} claims after temporal re-ranking",
+            results.len()
+        );
 
         Ok(results)
     }

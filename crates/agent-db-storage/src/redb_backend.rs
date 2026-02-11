@@ -40,6 +40,8 @@ mod table_defs {
     pub const MEM_BY_BUCKET: TableDefinition<&[u8], &[u8]> = TableDefinition::new("mem_by_bucket");
     pub const MEM_BY_CONTEXT_HASH: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("mem_by_context_hash");
+    pub const MEM_BY_GOAL_BUCKET: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("mem_by_goal_bucket");
     pub const MEM_FEATURE_POSTINGS: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("mem_feature_postings");
 
@@ -83,6 +85,7 @@ pub mod table_names {
     pub const MEMORY_RECORDS: &str = "memory_records";
     pub const MEM_BY_BUCKET: &str = "mem_by_bucket";
     pub const MEM_BY_CONTEXT_HASH: &str = "mem_by_context_hash";
+    pub const MEM_BY_GOAL_BUCKET: &str = "mem_by_goal_bucket";
     pub const MEM_FEATURE_POSTINGS: &str = "mem_feature_postings";
     pub const STRATEGY_RECORDS: &str = "strategy_records";
     pub const STRATEGY_BY_BUCKET: &str = "strategy_by_bucket";
@@ -175,6 +178,9 @@ impl RedbBackend {
                 .open_table(table_defs::MEM_BY_CONTEXT_HASH)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
             let _ = write_txn
+                .open_table(table_defs::MEM_BY_GOAL_BUCKET)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+            let _ = write_txn
                 .open_table(table_defs::MEM_FEATURE_POSTINGS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
@@ -254,6 +260,7 @@ impl RedbBackend {
             table_names::MEMORY_RECORDS => table_defs::MEMORY_RECORDS,
             table_names::MEM_BY_BUCKET => table_defs::MEM_BY_BUCKET,
             table_names::MEM_BY_CONTEXT_HASH => table_defs::MEM_BY_CONTEXT_HASH,
+            table_names::MEM_BY_GOAL_BUCKET => table_defs::MEM_BY_GOAL_BUCKET,
             table_names::MEM_FEATURE_POSTINGS => table_defs::MEM_FEATURE_POSTINGS,
             table_names::STRATEGY_RECORDS => table_defs::STRATEGY_RECORDS,
             table_names::STRATEGY_BY_BUCKET => table_defs::STRATEGY_BY_BUCKET,
@@ -507,49 +514,51 @@ impl RedbBackend {
 
     /// Batch write operation (atomic)
     pub fn write_batch(&self, operations: Vec<BatchOperation>) -> StorageResult<()> {
-        let write_txn = self
-            .db
-            .begin_write()
+    use std::collections::HashMap;
+    let write_txn = self
+        .db
+        .begin_write()
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+    // Group ops by table for fewer open_table calls.
+    let mut by_table: HashMap<String, Vec<BatchOperation>> = HashMap::new();
+    for op in operations {
+        let table_name = match &op {
+            BatchOperation::Put { table_name, .. } => table_name.clone(),
+            BatchOperation::Delete { table_name, .. } => table_name.clone(),
+        };
+        by_table.entry(table_name).or_default().push(op);
+    }
+
+    for (table_name, ops) in by_table {
+        let table_def = Self::get_table_def(&table_name)?;
+        let mut table = write_txn
+            .open_table(table_def)
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-        for op in operations {
+        for op in ops {
             match op {
-                BatchOperation::Put {
-                    ref table_name,
-                    ref key,
-                    ref value,
-                } => {
-                    let table_def = Self::get_table_def(table_name)?;
-                    let mut table = write_txn
-                        .open_table(table_def)
-                        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-
+                BatchOperation::Put { key, value, .. } => {
                     table
                         .insert(key.as_slice(), value.as_slice())
                         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-                },
-                BatchOperation::Delete {
-                    ref table_name,
-                    ref key,
-                } => {
-                    let table_def = Self::get_table_def(table_name)?;
-                    let mut table = write_txn
-                        .open_table(table_def)
-                        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-
+                }
+                BatchOperation::Delete { key, .. } => {
                     table
                         .remove(key.as_slice())
                         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-                },
+                }
             }
         }
-
-        write_txn
-            .commit()
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-
-        Ok(())
     }
+
+    write_txn
+        .commit()
+        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+    Ok(())
+}
+
 
     /// Get approximate disk usage (bytes)
     pub fn disk_usage(&self) -> StorageResult<u64> {

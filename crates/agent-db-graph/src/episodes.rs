@@ -917,6 +917,7 @@ mod tests {
                     external: HashMap::new(),
                 },
                 fingerprint: 12345,
+                goal_bucket_id: 0,
                 embeddings: None,
             },
             metadata: HashMap::new(),

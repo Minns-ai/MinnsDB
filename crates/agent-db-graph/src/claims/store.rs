@@ -435,6 +435,45 @@ impl ClaimStore {
     pub fn vector_index_size(&self) -> usize {
         self.index.read().map(|idx| idx.entries.len()).unwrap_or(0)
     }
+
+    /// Expire all active claims whose `expires_at` is in the past.
+    ///
+    /// Returns the number of claims that were moved to `Dormant`.
+    pub fn expire_stale_claims(&self) -> Result<usize> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(CLAIMS_TABLE)?;
+
+        let mut to_dormant: Vec<ClaimId> = Vec::new();
+        for item in table.iter()? {
+            let (id_guard, value) = item?;
+            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            if claim.status == ClaimStatus::Active {
+                if let Some(exp) = claim.expires_at {
+                    if now > exp {
+                        to_dormant.push(id_guard.value());
+                    }
+                }
+            }
+        }
+        drop(table);
+        drop(read_txn);
+
+        let count = to_dormant.len();
+        for cid in to_dormant {
+            self.update_status(cid, ClaimStatus::Dormant)?;
+        }
+
+        if count > 0 {
+            info!("Expired {} stale claims to Dormant", count);
+        }
+
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

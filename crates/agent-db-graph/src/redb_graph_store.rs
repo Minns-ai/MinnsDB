@@ -5,13 +5,21 @@
 // - Delta-encoded adjacency lists for compression
 // - Goal-bucket partitioning for semantic sharding
 // - LRU partition loading for memory efficiency
+//
+// Updates in this version:
+// - Uses RedbBackend::write_batch() for atomic multi-write mutations (fewer transactions)
+// - delete_node removes all incident edges (no dangling adjacency or edge metadata)
+// - add_edge uses binary insertion (no full sort per insert)
+// - delete_edge uses binary removal and deletes adjacency keys when lists become empty
+// - load_partition key-length validation
+// - get_subgraph uses HashSet membership checks
 
 use crate::compression::CompressedAdjacencyList;
 use crate::graph_store::{
     BucketInfo, GraphEdge, GraphNode, GraphPath, GraphStore, GraphStoreError, Subgraph,
 };
 use crate::structures::{GoalBucketId, NodeId};
-use agent_db_storage::RedbBackend;
+use agent_db_storage::{BatchOperation, RedbBackend};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,7 +40,7 @@ const TABLE_GRAPH_BUCKETS: &str = "graph_buckets";
 #[derive(Debug, Clone, Copy)]
 enum KeyType {
     NodeMeta = 0x01,         // Node metadata
-    AdjacencyForward = 0x02, // Forward edges (A → [B, C, D])
+    AdjacencyForward = 0x02, // Forward edges (A -> [B, C, D])
     AdjacencyReverse = 0x03, // Reverse edges (backlinks)
     EdgeMeta = 0x04,         // Edge metadata
     #[allow(dead_code)]
@@ -77,12 +85,63 @@ fn make_edge_key(bucket: GoalBucketId, from: NodeId, to: NodeId) -> Vec<u8> {
 }
 
 // ============================================================================
+// Small helpers
+// ============================================================================
+
+#[inline]
+fn insert_sorted_unique(v: &mut Vec<NodeId>, x: NodeId) -> bool {
+    match v.binary_search(&x) {
+        Ok(_) => false,
+        Err(i) => {
+            v.insert(i, x);
+            true
+        }
+    }
+}
+
+#[inline]
+fn remove_sorted(v: &mut Vec<NodeId>, x: NodeId) -> bool {
+    match v.binary_search(&x) {
+        Ok(i) => {
+            v.remove(i);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[inline]
+fn json_bytes<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, GraphStoreError> {
+    serde_json::to_vec(v).map_err(|e| GraphStoreError::Serialization(e.to_string()))
+}
+
+#[inline]
+fn bincode_bytes<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, GraphStoreError> {
+    bincode::serialize(v).map_err(|e| GraphStoreError::Serialization(e.to_string()))
+}
+
+#[inline]
+fn op_put(table: &str, key: Vec<u8>, value: Vec<u8>) -> BatchOperation {
+    BatchOperation::Put {
+        table_name: table.to_string(),
+        key,
+        value,
+    }
+}
+
+#[inline]
+fn op_del(table: &str, key: Vec<u8>) -> BatchOperation {
+    BatchOperation::Delete {
+        table_name: table.to_string(),
+        key,
+    }
+}
+
+// ============================================================================
 // Partition Cache (for LRU management)
 // ============================================================================
 
 // Monotonic counter for deterministic LRU ordering.
-// Using a counter instead of wall-clock timestamps avoids flaky eviction
-// when multiple partitions are touched within the same millisecond.
 static LRU_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn next_lru_tick() -> u64 {
@@ -96,7 +155,7 @@ struct PartitionCache {
     forward_edges: HashMap<NodeId, Vec<NodeId>>,
     reverse_edges: HashMap<NodeId, Vec<NodeId>>,
     edge_metadata: HashMap<(NodeId, NodeId), GraphEdge>,
-    last_accessed: AtomicU64, // Monotonic counter tick for LRU ordering (thread-safe)
+    last_accessed: AtomicU64,
 }
 
 impl PartitionCache {
@@ -147,20 +206,7 @@ impl RedbGraphStore {
         }
     }
 
-    /// Helper: put with JSON serialization (for types containing serde_json::Value)
-    fn put_json<K, V>(&self, table: &str, key: K, value: &V) -> Result<(), GraphStoreError>
-    where
-        K: AsRef<[u8]>,
-        V: serde::Serialize,
-    {
-        let json_bytes =
-            serde_json::to_vec(value).map_err(|e| GraphStoreError::Serialization(e.to_string()))?;
-        self.backend
-            .put_raw(table, key, &json_bytes)
-            .map_err(|e| GraphStoreError::Storage(e.to_string()))
-    }
-
-    /// Helper: get with JSON deserialization (for types containing serde_json::Value)
+    /// Helper: get with JSON deserialization (for GraphNode / GraphEdge containing serde_json::Value)
     fn get_json<K, V>(&self, table: &str, key: K) -> Result<Option<V>, GraphStoreError>
     where
         K: AsRef<[u8]>,
@@ -175,7 +221,7 @@ impl RedbGraphStore {
                 let value = serde_json::from_slice(&bytes)
                     .map_err(|e| GraphStoreError::Serialization(e.to_string()))?;
                 Ok(Some(value))
-            },
+            }
             None => Ok(None),
         }
     }
@@ -207,18 +253,15 @@ impl RedbGraphStore {
     /// Ensure partition is loaded into memory
     fn ensure_partition_loaded(&mut self, bucket: GoalBucketId) -> Result<(), GraphStoreError> {
         if self.loaded_partitions.contains_key(&bucket) {
-            // Update LRU
             if let Some(partition) = self.loaded_partitions.get_mut(&bucket) {
                 partition.touch();
             }
             return Ok(());
         }
 
-        // Load partition from disk
         tracing::debug!("Loading partition {} from disk", bucket);
         self.load_partition_internal(bucket)?;
 
-        // Evict LRU if needed
         if self.loaded_partitions.len() > self.max_loaded_partitions {
             self.evict_lru_partition()?;
         }
@@ -243,7 +286,7 @@ impl RedbGraphStore {
             partition.nodes.insert(node.id, node);
         }
 
-        // Load forward adjacency lists
+        // Load forward adjacency lists (bincode values)
         let fwd_prefix = {
             let mut p = vec![KeyType::AdjacencyForward as u8];
             p.extend_from_slice(&bucket.to_be_bytes());
@@ -255,7 +298,12 @@ impl RedbGraphStore {
             .scan_prefix::<Vec<u8>, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, fwd_prefix)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?
         {
-            // Extract node_id from key (NodeId is u64 = 8 bytes at offset 9)
+            if key.len() != 17 {
+                return Err(GraphStoreError::Storage(
+                    "Invalid adjacency key length".to_string(),
+                ));
+            }
+
             let node_id = u64::from_be_bytes(
                 key[9..17]
                     .try_into()
@@ -267,7 +315,7 @@ impl RedbGraphStore {
                 .insert(node_id, compressed.decompress());
         }
 
-        // Load reverse adjacency lists
+        // Load reverse adjacency lists (bincode values)
         let rev_prefix = {
             let mut p = vec![KeyType::AdjacencyReverse as u8];
             p.extend_from_slice(&bucket.to_be_bytes());
@@ -279,6 +327,12 @@ impl RedbGraphStore {
             .scan_prefix::<Vec<u8>, CompressedAdjacencyList>(TABLE_GRAPH_ADJACENCY, rev_prefix)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?
         {
+            if key.len() != 17 {
+                return Err(GraphStoreError::Storage(
+                    "Invalid adjacency key length".to_string(),
+                ));
+            }
+
             let node_id = u64::from_be_bytes(
                 key[9..17]
                     .try_into()
@@ -290,7 +344,7 @@ impl RedbGraphStore {
                 .insert(node_id, compressed.decompress());
         }
 
-        // Load edge metadata
+        // Load edge metadata (JSON values)
         let edge_prefix = {
             let mut p = vec![KeyType::EdgeMeta as u8];
             p.extend_from_slice(&bucket.to_be_bytes());
@@ -300,7 +354,12 @@ impl RedbGraphStore {
         for (key, edge) in
             self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, edge_prefix)?
         {
-            // Extract from (offset 9-17), to (offset 17-25)
+            if key.len() != 25 {
+                return Err(GraphStoreError::Storage(
+                    "Invalid edge key length".to_string(),
+                ));
+            }
+
             let from = u64::from_be_bytes(
                 key[9..17]
                     .try_into()
@@ -316,11 +375,12 @@ impl RedbGraphStore {
         }
 
         tracing::info!(
-            "Loaded partition {}: {} nodes, {} forward edges, {} reverse edges",
+            "Loaded partition {}: {} nodes, {} forward lists, {} reverse lists, {} edges",
             bucket,
             partition.nodes.len(),
             partition.forward_edges.len(),
-            partition.reverse_edges.len()
+            partition.reverse_edges.len(),
+            partition.edge_metadata.len()
         );
 
         self.loaded_partitions.insert(bucket, partition);
@@ -342,6 +402,70 @@ impl RedbGraphStore {
 
         tracing::debug!("Evicting LRU partition {}", lru_bucket);
         self.loaded_partitions.remove(&lru_bucket);
+        Ok(())
+    }
+
+    /// Internal: apply delete_edge changes into the in-memory cache and append batch ops.
+    /// Requires the partition to be loaded.
+    fn delete_edge_in_batch(
+        &mut self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+        ops: &mut Vec<BatchOperation>,
+    ) -> Result<(), GraphStoreError> {
+        let partition = self
+            .loaded_partitions
+            .get_mut(&bucket)
+            .ok_or_else(|| GraphStoreError::Storage("Partition not loaded".to_string()))?;
+
+        // Forward adjacency (from -> neighbors)
+        {
+            let mut neighbors = partition.forward_edges.get(&from).cloned().unwrap_or_default();
+            let changed = remove_sorted(&mut neighbors, to);
+            if changed {
+                let fwd_key = make_adjacency_forward_key(bucket, from);
+
+                if neighbors.is_empty() {
+                    ops.push(op_del(TABLE_GRAPH_ADJACENCY, fwd_key));
+                    partition.forward_edges.remove(&from);
+                } else {
+                    let compressed = CompressedAdjacencyList::compress(&neighbors);
+                    ops.push(op_put(
+                        TABLE_GRAPH_ADJACENCY,
+                        fwd_key,
+                        bincode_bytes(&compressed)?,
+                    ));
+                    partition.forward_edges.insert(from, neighbors);
+                }
+            }
+        }
+
+        // Reverse adjacency (to -> predecessors)
+        {
+            let mut preds = partition.reverse_edges.get(&to).cloned().unwrap_or_default();
+            let changed = remove_sorted(&mut preds, from);
+            if changed {
+                let rev_key = make_adjacency_reverse_key(bucket, to);
+
+                if preds.is_empty() {
+                    ops.push(op_del(TABLE_GRAPH_ADJACENCY, rev_key));
+                    partition.reverse_edges.remove(&to);
+                } else {
+                    let compressed = CompressedAdjacencyList::compress(&preds);
+                    ops.push(op_put(
+                        TABLE_GRAPH_ADJACENCY,
+                        rev_key,
+                        bincode_bytes(&compressed)?,
+                    ));
+                    partition.reverse_edges.insert(to, preds);
+                }
+            }
+        }
+
+        // Edge metadata
+        partition.edge_metadata.remove(&(from, to));
+        ops.push(op_del(TABLE_GRAPH_EDGES, make_edge_key(bucket, from, to)));
 
         Ok(())
     }
@@ -355,8 +479,13 @@ impl GraphStore for RedbGraphStore {
     fn add_node(&mut self, bucket: GoalBucketId, node: GraphNode) -> Result<(), GraphStoreError> {
         self.ensure_partition_loaded(bucket)?;
 
+        // Persist in a single-operation batch (still one txn, consistent API)
         let key = make_node_key(bucket, node.id);
-        self.put_json(TABLE_GRAPH_NODES, &key, &node)?;
+        let ops = vec![op_put(TABLE_GRAPH_NODES, key, json_bytes(&node)?)];
+
+        self.backend
+            .write_batch(ops)
+            .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
 
         if let Some(partition) = self.loaded_partitions.get_mut(&bucket) {
             partition.nodes.insert(node.id, node);
@@ -371,13 +500,11 @@ impl GraphStore for RedbGraphStore {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<Option<GraphNode>, GraphStoreError> {
-        // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
-            partition.touch(); // Update LRU timestamp
+            partition.touch();
             return Ok(partition.nodes.get(&node_id).cloned());
         }
 
-        // Load from disk
         let key = make_node_key(bucket, node_id);
         self.get_json(TABLE_GRAPH_NODES, &key)
     }
@@ -387,17 +514,48 @@ impl GraphStore for RedbGraphStore {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<(), GraphStoreError> {
-        let key = make_node_key(bucket, node_id);
+        self.ensure_partition_loaded(bucket)?;
+
+        // Snapshot incident edges from cache
+        let (preds, nbrs) = {
+            let p = self
+                .loaded_partitions
+                .get(&bucket)
+                .ok_or_else(|| GraphStoreError::Storage("Partition not loaded".to_string()))?;
+
+            let preds = p.reverse_edges.get(&node_id).cloned().unwrap_or_default();
+            let nbrs = p.forward_edges.get(&node_id).cloned().unwrap_or_default();
+            (preds, nbrs)
+        };
+
+        let mut ops: Vec<BatchOperation> = Vec::new();
+
+        // Remove incoming edges: pred -> node_id
+        for from in preds {
+            self.delete_edge_in_batch(bucket, from, node_id, &mut ops)?;
+        }
+
+        // Remove outgoing edges: node_id -> nbr
+        for to in nbrs {
+            self.delete_edge_in_batch(bucket, node_id, to, &mut ops)?;
+        }
+
+        // Delete node record
+        ops.push(op_del(TABLE_GRAPH_NODES, make_node_key(bucket, node_id)));
+
+        // Delete node's own adjacency keys (should be absent after edge deletion, but safe)
+        ops.push(op_del(
+            TABLE_GRAPH_ADJACENCY,
+            make_adjacency_forward_key(bucket, node_id),
+        ));
+        ops.push(op_del(
+            TABLE_GRAPH_ADJACENCY,
+            make_adjacency_reverse_key(bucket, node_id),
+        ));
+
         self.backend
-            .delete(TABLE_GRAPH_NODES, &key)
+            .write_batch(ops)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
-
-        // Delete adjacency lists
-        let fwd_key = make_adjacency_forward_key(bucket, node_id);
-        let _ = self.backend.delete(TABLE_GRAPH_ADJACENCY, &fwd_key);
-
-        let rev_key = make_adjacency_reverse_key(bucket, node_id);
-        let _ = self.backend.delete(TABLE_GRAPH_ADJACENCY, &rev_key);
 
         // Update cache
         if let Some(partition) = self.loaded_partitions.get_mut(&bucket) {
@@ -415,12 +573,10 @@ impl GraphStore for RedbGraphStore {
     }
 
     fn get_all_nodes(&self, bucket: GoalBucketId) -> Result<Vec<GraphNode>, GraphStoreError> {
-        // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
             return Ok(partition.nodes.values().cloned().collect());
         }
 
-        // Load from disk
         let prefix = {
             let mut p = vec![KeyType::NodeMeta as u8];
             p.extend_from_slice(&bucket.to_be_bytes());
@@ -428,7 +584,6 @@ impl GraphStore for RedbGraphStore {
         };
 
         let results = self.scan_prefix_json::<Vec<u8>, GraphNode>(TABLE_GRAPH_NODES, prefix)?;
-
         Ok(results.into_iter().map(|(_, node)| node).collect())
     }
 
@@ -439,55 +594,55 @@ impl GraphStore for RedbGraphStore {
     fn add_edge(&mut self, bucket: GoalBucketId, edge: GraphEdge) -> Result<(), GraphStoreError> {
         self.ensure_partition_loaded(bucket)?;
 
-        // 1. Add to forward adjacency
-        let mut neighbors = if let Some(partition) = self.loaded_partitions.get(&bucket) {
-            partition
-                .forward_edges
-                .get(&edge.from)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+        // Fetch current adjacency from cache (partition is loaded)
+        let (mut neighbors, mut preds) = {
+            let p = self
+                .loaded_partitions
+                .get(&bucket)
+                .ok_or_else(|| GraphStoreError::Storage("Partition not loaded".to_string()))?;
+            (
+                p.forward_edges.get(&edge.from).cloned().unwrap_or_default(),
+                p.reverse_edges.get(&edge.to).cloned().unwrap_or_default(),
+            )
         };
 
-        if !neighbors.contains(&edge.to) {
-            neighbors.push(edge.to);
-            neighbors.sort();
+        let changed_fwd = insert_sorted_unique(&mut neighbors, edge.to);
+        let changed_rev = insert_sorted_unique(&mut preds, edge.from);
+
+        let mut ops: Vec<BatchOperation> = Vec::with_capacity(3);
+
+        if changed_fwd {
+            let fwd_key = make_adjacency_forward_key(bucket, edge.from);
+            let compressed = CompressedAdjacencyList::compress(&neighbors);
+            ops.push(op_put(
+                TABLE_GRAPH_ADJACENCY,
+                fwd_key,
+                bincode_bytes(&compressed)?,
+            ));
         }
 
-        let compressed = CompressedAdjacencyList::compress(&neighbors);
-        let fwd_key = make_adjacency_forward_key(bucket, edge.from);
-        self.backend
-            .put(TABLE_GRAPH_ADJACENCY, &fwd_key, &compressed)
-            .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
-
-        // 2. Add to reverse adjacency (backlinks)
-        let mut preds = if let Some(partition) = self.loaded_partitions.get(&bucket) {
-            partition
-                .reverse_edges
-                .get(&edge.to)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        if !preds.contains(&edge.from) {
-            preds.push(edge.from);
-            preds.sort();
+        if changed_rev {
+            let rev_key = make_adjacency_reverse_key(bucket, edge.to);
+            let compressed = CompressedAdjacencyList::compress(&preds);
+            ops.push(op_put(
+                TABLE_GRAPH_ADJACENCY,
+                rev_key,
+                bincode_bytes(&compressed)?,
+            ));
         }
 
-        let compressed_preds = CompressedAdjacencyList::compress(&preds);
-        let rev_key = make_adjacency_reverse_key(bucket, edge.to);
+        // Store edge metadata (JSON)
+        ops.push(op_put(
+            TABLE_GRAPH_EDGES,
+            make_edge_key(bucket, edge.from, edge.to),
+            json_bytes(&edge)?,
+        ));
+
         self.backend
-            .put(TABLE_GRAPH_ADJACENCY, &rev_key, &compressed_preds)
+            .write_batch(ops)
             .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
 
-        // 3. Store edge metadata
-        let edge_key = make_edge_key(bucket, edge.from, edge.to);
-        self.put_json(TABLE_GRAPH_EDGES, &edge_key, &edge)?;
-
-        // 4. Update cache
+        // Update cache
         if let Some(partition) = self.loaded_partitions.get_mut(&bucket) {
             partition.forward_edges.insert(edge.from, neighbors);
             partition.reverse_edges.insert(edge.to, preds);
@@ -504,12 +659,10 @@ impl GraphStore for RedbGraphStore {
         from: NodeId,
         to: NodeId,
     ) -> Result<Option<GraphEdge>, GraphStoreError> {
-        // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
             return Ok(partition.edge_metadata.get(&(from, to)).cloned());
         }
 
-        // Load from disk
         let key = make_edge_key(bucket, from, to);
         self.get_json(TABLE_GRAPH_EDGES, &key)
     }
@@ -522,38 +675,16 @@ impl GraphStore for RedbGraphStore {
     ) -> Result<(), GraphStoreError> {
         self.ensure_partition_loaded(bucket)?;
 
-        // Update forward adjacency
+        let mut ops: Vec<BatchOperation> = Vec::with_capacity(3);
+        self.delete_edge_in_batch(bucket, from, to, &mut ops)?;
+
+        self.backend
+            .write_batch(ops)
+            .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
+
         if let Some(partition) = self.loaded_partitions.get_mut(&bucket) {
-            if let Some(neighbors) = partition.forward_edges.get_mut(&from) {
-                neighbors.retain(|&n| n != to);
-
-                let compressed = CompressedAdjacencyList::compress(neighbors);
-                let fwd_key = make_adjacency_forward_key(bucket, from);
-                self.backend
-                    .put(TABLE_GRAPH_ADJACENCY, &fwd_key, &compressed)
-                    .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
-            }
-
-            // Update reverse adjacency
-            if let Some(preds) = partition.reverse_edges.get_mut(&to) {
-                preds.retain(|&p| p != from);
-
-                let compressed = CompressedAdjacencyList::compress(preds);
-                let rev_key = make_adjacency_reverse_key(bucket, to);
-                self.backend
-                    .put(TABLE_GRAPH_ADJACENCY, &rev_key, &compressed)
-                    .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
-            }
-
-            partition.edge_metadata.remove(&(from, to));
             partition.touch();
         }
-
-        // Delete edge metadata
-        let edge_key = make_edge_key(bucket, from, to);
-        self.backend
-            .delete(TABLE_GRAPH_EDGES, &edge_key)
-            .map_err(|e| GraphStoreError::Storage(e.to_string()))?;
 
         Ok(())
     }
@@ -563,7 +694,6 @@ impl GraphStore for RedbGraphStore {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<Vec<NodeId>, GraphStoreError> {
-        // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
             return Ok(partition
                 .forward_edges
@@ -572,7 +702,6 @@ impl GraphStore for RedbGraphStore {
                 .unwrap_or_default());
         }
 
-        // Load from disk
         let key = make_adjacency_forward_key(bucket, node_id);
         match self
             .backend
@@ -589,7 +718,6 @@ impl GraphStore for RedbGraphStore {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<Vec<NodeId>, GraphStoreError> {
-        // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
             return Ok(partition
                 .reverse_edges
@@ -598,7 +726,6 @@ impl GraphStore for RedbGraphStore {
                 .unwrap_or_default());
         }
 
-        // Load from disk
         let key = make_adjacency_reverse_key(bucket, node_id);
         match self
             .backend
@@ -667,7 +794,6 @@ impl GraphStore for RedbGraphStore {
     }
 
     fn get_partition_stats(&self, bucket: GoalBucketId) -> Result<BucketInfo, GraphStoreError> {
-        // Try cache first
         if let Some(partition) = self.loaded_partitions.get(&bucket) {
             return Ok(BucketInfo {
                 bucket_id: bucket,
@@ -678,7 +804,6 @@ impl GraphStore for RedbGraphStore {
             });
         }
 
-        // Count from disk
         let node_prefix = {
             let mut p = vec![KeyType::NodeMeta as u8];
             p.extend_from_slice(&bucket.to_be_bytes());
@@ -754,8 +879,7 @@ impl GraphStore for RedbGraphStore {
 
             if depth < max_depth {
                 for neighbor in self.get_neighbors(bucket, node)? {
-                    if !visited.contains(&neighbor) {
-                        visited.insert(neighbor);
+                    if visited.insert(neighbor) {
                         queue.push_back((neighbor, depth + 1));
                     }
                 }
@@ -829,6 +953,7 @@ impl GraphStore for RedbGraphStore {
         radius: u32,
     ) -> Result<Subgraph, GraphStoreError> {
         let node_ids = self.traverse_bfs(bucket, center, radius)?;
+        let node_set: HashSet<NodeId> = node_ids.iter().copied().collect();
 
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -839,7 +964,7 @@ impl GraphStore for RedbGraphStore {
             }
 
             for edge in self.get_outgoing_edges(bucket, node_id)? {
-                if node_ids.contains(&edge.to) {
+                if node_set.contains(&edge.to) {
                     edges.push(edge);
                 }
             }
@@ -857,8 +982,8 @@ impl GraphStore for RedbGraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_store::{GraphEdge, GraphEdgeType, GraphNode, GraphNodeType};
-    use agent_db_storage::{RedbBackend, RedbConfig};
+    use crate::graph_store::{GraphEdgeType, GraphNodeType};
+    use agent_db_storage::{RedbConfig, RedbBackend};
     use tempfile::TempDir;
 
     fn create_test_store() -> (RedbGraphStore, TempDir) {
@@ -867,12 +992,12 @@ mod tests {
 
         let config = RedbConfig {
             data_path: db_path,
-            cache_size_bytes: 64 * 1024 * 1024, // 64MB for tests
+            cache_size_bytes: 64 * 1024 * 1024,
             repair_on_open: false,
         };
 
         let backend = Arc::new(RedbBackend::open(config).unwrap());
-        let store = RedbGraphStore::new(backend, 3); // Max 3 partitions in cache
+        let store = RedbGraphStore::new(backend, 3);
         (store, temp_dir)
     }
 
@@ -887,7 +1012,7 @@ mod tests {
         }
     }
 
-    fn create_test_edge(from: NodeId, to: NodeId, _bucket: GoalBucketId) -> GraphEdge {
+    fn create_test_edge(from: NodeId, to: NodeId) -> GraphEdge {
         GraphEdge {
             from,
             to,
@@ -896,6 +1021,37 @@ mod tests {
             confidence: 0.9,
             created_at: 2000,
         }
+    }
+
+    #[test]
+    fn test_edge_batching_and_delete_node_cleanup() {
+        let (mut store, _temp) = create_test_store();
+        let bucket = 1;
+
+        for id in [100u64, 101u64, 102u64] {
+            store.add_node(bucket, create_test_node(id, bucket)).unwrap();
+        }
+
+        // 102 -> 100, 100 -> 101
+        store
+            .add_edge(bucket, create_test_edge(102, 100))
+            .unwrap();
+        store
+            .add_edge(bucket, create_test_edge(100, 101))
+            .unwrap();
+
+        store.delete_node(bucket, 100).unwrap();
+
+        // No dangling adjacency references
+        let n102 = store.get_neighbors(bucket, 102).unwrap();
+        assert!(!n102.contains(&100));
+
+        let p101 = store.get_predecessors(bucket, 101).unwrap();
+        assert!(!p101.contains(&100));
+
+        // No dangling edge metadata
+        assert!(store.get_edge(bucket, 102, 100).unwrap().is_none());
+        assert!(store.get_edge(bucket, 100, 101).unwrap().is_none());
     }
 
     #[test]
@@ -911,7 +1067,7 @@ mod tests {
         let retrieved = store.get_node(bucket, 100).unwrap();
         assert_eq!(retrieved, Some(node.clone()));
 
-        // Update (just add same node with updated properties)
+        // Update (add same node with updated properties)
         let mut updated_node = node.clone();
         updated_node.properties = serde_json::json!({"test": "updated"});
         store.add_node(bucket, updated_node.clone()).unwrap();
@@ -940,9 +1096,7 @@ mod tests {
 
         // Add edges: 100 -> 101 -> 102 -> 103 -> 104
         for i in 100..104 {
-            store
-                .add_edge(bucket, create_test_edge(i, i + 1, bucket))
-                .unwrap();
+            store.add_edge(bucket, create_test_edge(i, i + 1)).unwrap();
         }
 
         // Test forward adjacency
@@ -966,6 +1120,10 @@ mod tests {
         store.delete_edge(bucket, 100, 101).unwrap();
         let neighbors = store.get_neighbors(bucket, 100).unwrap();
         assert_eq!(neighbors.len(), 0);
+
+        // Reverse should also be updated
+        let predecessors = store.get_predecessors(bucket, 101).unwrap();
+        assert_eq!(predecessors.len(), 0);
     }
 
     #[test]
@@ -1020,7 +1178,7 @@ mod tests {
         // Access bucket 2 to make it recently used
         store.get_node(2, 200).unwrap();
 
-        // Add to bucket 5, should evict bucket 1 or 3 (not 2 or 5)
+        // Add to bucket 5, should evict bucket 1 or 3 or 4 (not 2 or 5)
         store.add_node(5, create_test_node(500, 5)).unwrap();
         assert_eq!(store.loaded_partitions.len(), 3);
         assert!(store.loaded_partitions.contains_key(&2)); // Should still be loaded
@@ -1048,12 +1206,10 @@ mod tests {
             }
 
             for i in 100..104 {
-                store
-                    .add_edge(bucket, create_test_edge(i, i + 1, bucket))
-                    .unwrap();
+                store.add_edge(bucket, create_test_edge(i, i + 1)).unwrap();
             }
 
-            // Unload partition to force flush to disk
+            // Unload partition (data already persisted, but forces in-memory drop)
             store.unload_partition(bucket).unwrap();
         }
 
@@ -1067,10 +1223,11 @@ mod tests {
             let backend = Arc::new(RedbBackend::open(config).unwrap());
             let store = RedbGraphStore::new(backend, 3);
 
-            // Load partition and verify
+            // Verify node exists
             let node = store.get_node(1, 100).unwrap();
             assert!(node.is_some());
 
+            // Verify adjacency exists
             let neighbors = store.get_neighbors(1, 100).unwrap();
             assert_eq!(neighbors, vec![101]);
 
@@ -1079,6 +1236,10 @@ mod tests {
                 let node = store.get_node(1, i).unwrap();
                 assert!(node.is_some(), "Node {} should exist", i);
             }
+
+            // Verify edges persisted (metadata)
+            let edge = store.get_edge(1, 100, 101).unwrap();
+            assert!(edge.is_some());
         }
     }
 
@@ -1097,18 +1258,10 @@ mod tests {
             store.add_node(bucket, create_test_node(i, bucket)).unwrap();
         }
 
-        store
-            .add_edge(bucket, create_test_edge(100, 101, bucket))
-            .unwrap();
-        store
-            .add_edge(bucket, create_test_edge(100, 102, bucket))
-            .unwrap();
-        store
-            .add_edge(bucket, create_test_edge(101, 103, bucket))
-            .unwrap();
-        store
-            .add_edge(bucket, create_test_edge(102, 104, bucket))
-            .unwrap();
+        store.add_edge(bucket, create_test_edge(100, 101)).unwrap();
+        store.add_edge(bucket, create_test_edge(100, 102)).unwrap();
+        store.add_edge(bucket, create_test_edge(101, 103)).unwrap();
+        store.add_edge(bucket, create_test_edge(102, 104)).unwrap();
 
         // BFS from root with max depth 1
         let result = store.traverse_bfs(bucket, 100, 1).unwrap();
@@ -1138,9 +1291,7 @@ mod tests {
         }
 
         for i in 100..103 {
-            store
-                .add_edge(bucket, create_test_edge(i, i + 1, bucket))
-                .unwrap();
+            store.add_edge(bucket, create_test_edge(i, i + 1)).unwrap();
         }
 
         // DFS with max depth 1
@@ -1160,14 +1311,10 @@ mod tests {
         let bucket = 1;
 
         // Create a star graph with center 100
-        store
-            .add_node(bucket, create_test_node(100, bucket))
-            .unwrap();
+        store.add_node(bucket, create_test_node(100, bucket)).unwrap();
         for i in 101..105 {
             store.add_node(bucket, create_test_node(i, bucket)).unwrap();
-            store
-                .add_edge(bucket, create_test_edge(100, i, bucket))
-                .unwrap();
+            store.add_edge(bucket, create_test_edge(100, i)).unwrap();
         }
 
         // Extract subgraph with radius 1
@@ -1211,7 +1358,7 @@ mod tests {
             }
         }
 
-        // Verify buckets are isolated (node from bucket 1 shouldn't be in bucket 2)
+        // Verify buckets are isolated (node from bucket 1 should not be in bucket 2)
         let node = store.get_node(2, 100).unwrap();
         assert!(node.is_none(), "Node 100 should not exist in bucket 2");
 
@@ -1220,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrent_partition_access() {
+    fn test_repeated_partition_access_uses_cache() {
         let (mut store, _temp) = create_test_store();
 
         // Add nodes to bucket 1
@@ -1257,14 +1404,10 @@ mod tests {
         let bucket = 1;
 
         // Create a node with many sequential neighbors (good compression case)
-        store
-            .add_node(bucket, create_test_node(100, bucket))
-            .unwrap();
+        store.add_node(bucket, create_test_node(100, bucket)).unwrap();
         for i in 200..300 {
             store.add_node(bucket, create_test_node(i, bucket)).unwrap();
-            store
-                .add_edge(bucket, create_test_edge(100, i, bucket))
-                .unwrap();
+            store.add_edge(bucket, create_test_edge(100, i)).unwrap();
         }
 
         // Get neighbors (should be decompressed from delta encoding)
@@ -1275,5 +1418,60 @@ mod tests {
         for i in 200..300 {
             assert!(neighbors.contains(&i), "Should contain neighbor {}", i);
         }
+    }
+
+    #[test]
+    fn test_delete_node_removes_incident_edges_and_metadata() {
+        let (mut store, _temp) = create_test_store();
+        let bucket = 1;
+
+        // Nodes: 100, 101, 102
+        for id in [100u64, 101u64, 102u64] {
+            store.add_node(bucket, create_test_node(id, bucket)).unwrap();
+        }
+
+        // 100 -> 101 and 102 -> 100
+        store.add_edge(bucket, create_test_edge(100, 101)).unwrap();
+        store.add_edge(bucket, create_test_edge(102, 100)).unwrap();
+
+        // Delete node 100
+        store.delete_node(bucket, 100).unwrap();
+
+        // Forward adjacency cleaned: 102 no longer points to 100
+        let n102 = store.get_neighbors(bucket, 102).unwrap();
+        assert!(!n102.contains(&100));
+
+        // Reverse adjacency cleaned: 101 no longer has predecessor 100
+        let p101 = store.get_predecessors(bucket, 101).unwrap();
+        assert!(!p101.contains(&100));
+
+        // Edge metadata cleaned
+        assert!(store.get_edge(bucket, 100, 101).unwrap().is_none());
+        assert!(store.get_edge(bucket, 102, 100).unwrap().is_none());
+
+        // Node removed
+        assert!(store.get_node(bucket, 100).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_delete_edge_removes_adjacency_keys_when_empty() {
+        let (mut store, _temp) = create_test_store();
+        let bucket = 1;
+
+        store.add_node(bucket, create_test_node(1, bucket)).unwrap();
+        store.add_node(bucket, create_test_node(2, bucket)).unwrap();
+
+        store.add_edge(bucket, create_test_edge(1, 2)).unwrap();
+
+        // Ensure exists
+        assert_eq!(store.get_neighbors(bucket, 1).unwrap(), vec![2]);
+        assert_eq!(store.get_predecessors(bucket, 2).unwrap(), vec![1]);
+
+        // Delete edge should remove adjacency keys if list becomes empty
+        store.delete_edge(bucket, 1, 2).unwrap();
+
+        assert_eq!(store.get_neighbors(bucket, 1).unwrap().len(), 0);
+        assert_eq!(store.get_predecessors(bucket, 2).unwrap().len(), 0);
+        assert!(store.get_edge(bucket, 1, 2).unwrap().is_none());
     }
 }

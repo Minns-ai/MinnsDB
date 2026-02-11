@@ -46,7 +46,6 @@ pub mod event_ordering;
 pub mod inference;
 pub mod integration;
 pub mod integration_claims;
-pub mod integration_ner;
 pub mod learning;
 pub mod memory;
 pub mod scoped_inference;
@@ -73,6 +72,9 @@ pub mod claims;
 pub mod consolidation;
 pub mod refinement;
 
+// Background maintenance (decay, pruning, dedup)
+pub mod maintenance;
+
 // Re-export commonly used items
 pub use catalog::{EpisodeCatalog, EpisodeRecord, RedbEpisodeCatalog};
 pub use consolidation::{
@@ -97,6 +99,7 @@ pub use memory::{
     MemoryTier, MemoryType,
 };
 pub use refinement::{RefinementConfig, RefinementEngine};
+pub use maintenance::{MaintenanceConfig, MaintenanceResult};
 pub use stores::{
     InMemoryMemoryStore, InMemoryStrategyStore, MemoryStore, RedbMemoryStore, RedbStrategyStore,
     StrategyStore,
@@ -133,6 +136,6 @@ pub use redb_graph_store::RedbGraphStore;
 
 // Semantic Memory
 pub use claims::{
-    ClaimExtractionRequest, ClaimExtractionResult, ClaimId, ClaimStatus, DerivedClaim,
+    ClaimExtractionRequest, ClaimExtractionResult, ClaimId, ClaimStatus, ClaimType, DerivedClaim,
     EvidenceSpan, RejectedClaim, RejectionReason, ThreadId,
 };

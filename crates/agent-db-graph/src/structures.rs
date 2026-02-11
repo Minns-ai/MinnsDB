@@ -137,6 +137,37 @@ pub enum ConceptType {
     ContextualAssociation,
     /// Goal-oriented strategy
     Strategy,
+    // ── NER-derived concept types ──
+    /// Person entity (NER label: PERSON, PER)
+    Person,
+    /// Organization entity (NER label: ORG)
+    Organization,
+    /// Location/place entity (NER label: LOC, GPE)
+    Location,
+    /// Product/brand entity (NER label: PRODUCT)
+    Product,
+    /// Date/time entity (NER label: DATE, TIME)
+    DateTime,
+    /// Event entity (NER label: EVENT)
+    Event,
+    /// Miscellaneous named entity (NER label: MISC, NORP, WORK_OF_ART, etc.)
+    NamedEntity,
+}
+
+impl ConceptType {
+    /// Map a NER label string to a `ConceptType`.
+    pub fn from_ner_label(label: &str) -> Self {
+        match label.to_uppercase().as_str() {
+            "PERSON" | "PER" => ConceptType::Person,
+            "ORG" | "ORGANIZATION" => ConceptType::Organization,
+            "LOC" | "GPE" | "FAC" | "LOCATION" => ConceptType::Location,
+            "PRODUCT" | "BRAND" => ConceptType::Product,
+            "DATE" | "TIME" => ConceptType::DateTime,
+            "EVENT" => ConceptType::Event,
+            "MISC" | "NORP" | "WORK_OF_ART" | "LAW" | "LANGUAGE" => ConceptType::NamedEntity,
+            _ => ConceptType::ContextualAssociation,
+        }
+    }
 }
 
 /// Goal status
@@ -333,7 +364,7 @@ pub struct Graph {
 }
 
 /// Graph statistics for monitoring and optimization
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GraphStats {
     pub node_count: usize,
     pub edge_count: usize,

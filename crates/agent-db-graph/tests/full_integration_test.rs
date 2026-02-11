@@ -42,6 +42,7 @@ fn create_test_context() -> EventContext {
             external: HashMap::new(),
         },
         fingerprint: 12345,
+        goal_bucket_id: 0,
         embeddings: None,
     }
 }

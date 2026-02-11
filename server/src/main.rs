@@ -37,6 +37,9 @@ async fn main() -> anyhow::Result<()> {
 
     let engine = Arc::new(engine);
 
+    // Start background maintenance loop (memory decay + strategy pruning)
+    let _maintenance_handle = engine.start_maintenance_loop();
+
     // Create application state
     let state = state::AppState {
         engine: engine.clone(),

@@ -2,8 +2,8 @@
 
 use crate::errors::ApiError;
 use crate::models::{
-    ClaimListQuery, ClaimResponse, ClaimSearchRequest, EmbeddingProcessResponse,
-    EvidenceSpanResponse, PaginationQuery,
+    ClaimEntityResponse, ClaimListQuery, ClaimResponse, ClaimSearchRequest,
+    EmbeddingProcessResponse, EvidenceSpanResponse, PaginationQuery,
 };
 use crate::state::AppState;
 use axum::{
@@ -11,6 +11,47 @@ use axum::{
     Json,
 };
 use tracing::info;
+
+/// Convert a DerivedClaim into a ClaimResponse.
+fn claim_to_response(
+    claim: agent_db_graph::claims::DerivedClaim,
+    similarity: Option<f32>,
+) -> ClaimResponse {
+    let tw = claim.temporal_weight();
+    ClaimResponse {
+        claim_id: claim.id,
+        claim_text: claim.claim_text,
+        confidence: claim.confidence,
+        source_event_id: claim.source_event_id,
+        similarity,
+        evidence_spans: claim
+            .supporting_evidence
+            .into_iter()
+            .map(|span| EvidenceSpanResponse {
+                start_offset: span.start_offset,
+                end_offset: span.end_offset,
+                text_snippet: span.text_snippet,
+            })
+            .collect(),
+        support_count: claim.support_count,
+        status: format!("{:?}", claim.status),
+        created_at: claim.created_at,
+        last_accessed: claim.last_accessed,
+        claim_type: claim.claim_type.to_string(),
+        subject_entity: claim.subject_entity,
+        expires_at: claim.expires_at,
+        temporal_weight: tw,
+        superseded_by: claim.superseded_by,
+        entities: claim
+            .entities
+            .into_iter()
+            .map(|e| ClaimEntityResponse {
+                text: e.text,
+                label: e.label,
+            })
+            .collect(),
+    }
+}
 
 // POST /api/claims/search - Search for similar claims
 pub async fn search_claims(
@@ -30,26 +71,7 @@ pub async fn search_claims(
 
     let responses: Vec<ClaimResponse> = results
         .into_iter()
-        .map(|(claim, similarity)| ClaimResponse {
-            claim_id: claim.id,
-            claim_text: claim.claim_text,
-            confidence: claim.confidence,
-            source_event_id: claim.source_event_id,
-            similarity: Some(similarity),
-            evidence_spans: claim
-                .supporting_evidence
-                .into_iter()
-                .map(|span| EvidenceSpanResponse {
-                    start_offset: span.start_offset,
-                    end_offset: span.end_offset,
-                    text_snippet: span.text_snippet,
-                })
-                .collect(),
-            support_count: claim.support_count,
-            status: format!("{:?}", claim.status),
-            created_at: claim.created_at,
-            last_accessed: claim.last_accessed,
-        })
+        .map(|(claim, sim)| claim_to_response(claim, Some(sim)))
         .collect();
 
     info!("Found {} similar claims", responses.len());
@@ -98,26 +120,7 @@ pub async fn get_claim(
         .map_err(|e| ApiError::Internal(format!("Failed to retrieve claim: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("Claim {} not found", claim_id)))?;
 
-    Ok(Json(ClaimResponse {
-        claim_id: claim.id,
-        claim_text: claim.claim_text,
-        confidence: claim.confidence,
-        source_event_id: claim.source_event_id,
-        similarity: None,
-        evidence_spans: claim
-            .supporting_evidence
-            .into_iter()
-            .map(|span| EvidenceSpanResponse {
-                start_offset: span.start_offset,
-                end_offset: span.end_offset,
-                text_snippet: span.text_snippet,
-            })
-            .collect(),
-        support_count: claim.support_count,
-        status: format!("{:?}", claim.status),
-        created_at: claim.created_at,
-        last_accessed: claim.last_accessed,
-    }))
+    Ok(Json(claim_to_response(claim, None)))
 }
 
 // GET /api/claims - List all claims
@@ -145,26 +148,7 @@ pub async fn list_claims(
                 true
             }
         })
-        .map(|claim| ClaimResponse {
-            claim_id: claim.id,
-            claim_text: claim.claim_text,
-            confidence: claim.confidence,
-            source_event_id: claim.source_event_id,
-            similarity: None,
-            evidence_spans: claim
-                .supporting_evidence
-                .into_iter()
-                .map(|span| EvidenceSpanResponse {
-                    start_offset: span.start_offset,
-                    end_offset: span.end_offset,
-                    text_snippet: span.text_snippet,
-                })
-                .collect(),
-            support_count: claim.support_count,
-            status: format!("{:?}", claim.status),
-            created_at: claim.created_at,
-            last_accessed: claim.last_accessed,
-        })
+        .map(|claim| claim_to_response(claim, None))
         .collect();
 
     info!("Found {} claims", responses.len());

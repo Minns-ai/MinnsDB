@@ -514,7 +514,7 @@ impl MemoryFormation {
                     }
                 }
 
-                let similarity = Self::calculate_context_similarity(context, &memory.context);
+                let similarity = calculate_context_similarity(context, &memory.context);
                 if similarity < min_similarity {
                     return None;
                 }
@@ -759,12 +759,26 @@ impl MemoryFormation {
             0
         };
 
+        let mut episodic_count = 0usize;
+        let mut semantic_count = 0usize;
+        let mut schema_count = 0usize;
+        for m in self.memories.values() {
+            match m.tier {
+                MemoryTier::Episodic => episodic_count += 1,
+                MemoryTier::Semantic => semantic_count += 1,
+                MemoryTier::Schema => schema_count += 1,
+            }
+        }
+
         MemoryStats {
             total_memories,
             avg_strength,
             avg_access_count,
             agents_with_memories: self.agent_memories.len(),
             unique_contexts: self.context_index.len(),
+            episodic_count,
+            semantic_count,
+            schema_count,
         }
     }
 
@@ -1294,11 +1308,20 @@ pub struct MemoryStats {
     /// Average access count per memory
     pub avg_access_count: u32,
 
-    /// Number of agents with memories
+    /// Number of distinct agents that have at least one memory
     pub agents_with_memories: usize,
 
     /// Number of unique contexts in memory
     pub unique_contexts: usize,
+
+    /// Count of Episodic-tier memories
+    pub episodic_count: usize,
+
+    /// Count of Semantic-tier memories
+    pub semantic_count: usize,
+
+    /// Count of Schema-tier memories
+    pub schema_count: usize,
 }
 
 #[cfg(test)]

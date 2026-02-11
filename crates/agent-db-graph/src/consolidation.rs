@@ -98,9 +98,9 @@ impl ConsolidationEngine {
 
             store.store_consolidated_memory(semantic);
 
-            // Mark consolidated episodic memories
+            // Mark consolidated episodic memories (into Semantic, so schema_id stays None)
             for &mid in &episode_ids {
-                store.mark_consolidated(mid, semantic_id, self.config.post_consolidation_decay);
+                store.mark_consolidated(mid, semantic_id, MemoryTier::Semantic, self.config.post_consolidation_decay);
             }
             result.consolidated_episode_ids.extend(episode_ids);
             result.semantic_created += 1;
@@ -128,8 +128,9 @@ impl ConsolidationEngine {
 
             store.store_consolidated_memory(schema);
 
+            // Mark consolidated semantic memories (into Schema, so schema_id is set)
             for &mid in &sem_ids {
-                store.mark_consolidated(mid, schema_id, self.config.post_consolidation_decay);
+                store.mark_consolidated(mid, schema_id, MemoryTier::Schema, self.config.post_consolidation_decay);
             }
             result.consolidated_semantic_ids.extend(sem_ids);
             result.schema_created += 1;
@@ -385,8 +386,7 @@ impl ConsolidationEngine {
     fn group_by_goal_bucket<'a>(memories: &[&'a Memory]) -> HashMap<u64, Vec<&'a Memory>> {
         let mut groups: HashMap<u64, Vec<&'a Memory>> = HashMap::new();
         for m in memories {
-            let bucket = m.context.fingerprint; // Use context fingerprint as goal bucket proxy
-            groups.entry(bucket).or_default().push(m);
+            groups.entry(m.context.goal_bucket_id).or_default().push(m);
         }
         groups
     }
@@ -450,9 +450,10 @@ mod tests {
     };
     use agent_db_events::core::EventContext;
 
-    fn make_episodic_memory(id: MemoryId, fingerprint: u64, outcome: EpisodeOutcome) -> Memory {
+    fn make_episodic_memory(id: MemoryId, goal_bucket: u64, outcome: EpisodeOutcome) -> Memory {
         let ctx = EventContext {
-            fingerprint,
+            fingerprint: goal_bucket, // Legacy: use same value as fallback
+            goal_bucket_id: goal_bucket,
             ..Default::default()
         };
 
@@ -528,10 +529,14 @@ mod tests {
             .contains("Generalized from 4 episodes"));
         assert_eq!(semantic_mems[0].consolidated_from.len(), 4);
 
-        // Check the episodic memories were marked
+        // Check the episodic memories were marked consolidated with schema_id = None
         for i in 1..=4u64 {
             let m = store.get_memory(i).unwrap();
             assert_eq!(m.consolidation_status, ConsolidationStatus::Consolidated);
+            assert_eq!(
+                m.schema_id, None,
+                "Episodic memories consolidated into Semantic must NOT have schema_id set"
+            );
         }
     }
 
@@ -577,5 +582,193 @@ mod tests {
             .collect();
         assert_eq!(schemas.len(), 1);
         assert!(schemas[0].summary.contains("Schema: Reusable mental model"));
+
+        let created_schema_id = schemas[0].id;
+
+        // Schema memory itself should have schema_id = None
+        assert_eq!(
+            schemas[0].schema_id, None,
+            "Schema memory itself should have schema_id = None"
+        );
+
+        // Semantic memories consolidated into the schema must have schema_id = Some(schema_id)
+        for i in 50..53u64 {
+            let m = store.get_memory(i).unwrap();
+            assert_eq!(m.consolidation_status, ConsolidationStatus::Consolidated);
+            assert_eq!(
+                m.schema_id,
+                Some(created_schema_id),
+                "Semantic memories consolidated into Schema must have schema_id set to the schema's ID"
+            );
+        }
     }
+
+    #[test]
+    fn test_full_pipeline_schema_id_correctness() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // Create 3 batches of 3 episodic memories (9 total), same goal bucket
+        for i in 1..=9u64 {
+            let mem = make_episodic_memory(i, 42, EpisodeOutcome::Success);
+            store.store_consolidated_memory(mem);
+        }
+
+        let mut engine = ConsolidationEngine::new(config.clone(), 100);
+
+        // Phase 1: Episodic -> Semantic
+        let result = engine.run_consolidation(&mut store);
+        assert_eq!(result.semantic_created, 1, "Should create 1 semantic from 9 episodics");
+
+        // All episodic memories: consolidated, schema_id = None
+        for i in 1..=9u64 {
+            let m = store.get_memory(i).unwrap();
+            assert_eq!(m.consolidation_status, ConsolidationStatus::Consolidated);
+            assert_eq!(m.schema_id, None, "After Phase 1, episodic schema_id must be None");
+        }
+
+        // The semantic memory should be active with schema_id = None
+        let all = store.list_all_memories();
+        let semantics: Vec<&Memory> = all.iter().filter(|m| m.tier == MemoryTier::Semantic).collect();
+        assert_eq!(semantics.len(), 1);
+        assert_eq!(semantics[0].schema_id, None);
+        assert_eq!(semantics[0].consolidation_status, ConsolidationStatus::Active);
+
+        // Now add 2 more semantic memories manually so we have 3 total for Schema consolidation
+        for i in 200..202u64 {
+            let mut mem = make_episodic_memory(i, 42, EpisodeOutcome::Success);
+            mem.tier = MemoryTier::Semantic;
+            mem.summary = format!("Semantic memory {}", i);
+            mem.consolidated_from = vec![i * 10, i * 10 + 1];
+            store.store_consolidated_memory(mem);
+        }
+
+        // Phase 2: Semantic -> Schema
+        let result2 = engine.run_consolidation(&mut store);
+        assert_eq!(result2.schema_created, 1, "Should create 1 schema");
+
+        let all = store.list_all_memories();
+        let schemas: Vec<&Memory> = all.iter().filter(|m| m.tier == MemoryTier::Schema).collect();
+        assert_eq!(schemas.len(), 1);
+        let schema_id = schemas[0].id;
+
+        // All 3 semantic memories should now have schema_id = Some(schema_id)
+        for sem in all.iter().filter(|m| m.tier == MemoryTier::Semantic) {
+            assert_eq!(sem.consolidation_status, ConsolidationStatus::Consolidated);
+            assert_eq!(
+                sem.schema_id,
+                Some(schema_id),
+                "Semantic memories must point to the schema after Phase 2"
+            );
+        }
+
+        // Episodic memories must still have schema_id = None
+        for ep in all.iter().filter(|m| m.tier == MemoryTier::Episodic) {
+            assert_eq!(
+                ep.schema_id, None,
+                "Episodic memories must never get schema_id set"
+            );
+        }
+    }
+
+    #[test]
+    fn test_consolidation_groups_by_goal_bucket_not_fingerprint() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // Create 4 episodic memories with SAME goal_bucket_id but DIFFERENT fingerprints.
+        // This simulates same goals pursued across different environments.
+        let shared_bucket = 777u64;
+        for i in 1..=4u64 {
+            let ctx = EventContext {
+                fingerprint: 1000 + i, // Each has a unique fingerprint
+                goal_bucket_id: shared_bucket, // But same goal bucket
+                ..Default::default()
+            };
+            let mem = Memory {
+                id: i,
+                agent_id: 1,
+                session_id: 100,
+                episode_id: i,
+                summary: format!("Episode {} happened", i),
+                takeaway: format!("Lesson from episode {}", i),
+                causal_note: format!("Because of X in episode {}", i),
+                summary_embedding: Vec::new(),
+                tier: MemoryTier::Episodic,
+                consolidated_from: Vec::new(),
+                schema_id: None,
+                consolidation_status: ConsolidationStatus::Active,
+                context: ctx,
+                key_events: Vec::new(),
+                strength: 0.8,
+                relevance_score: 0.7,
+                formed_at: 1000,
+                last_accessed: 1000,
+                access_count: 0,
+                outcome: EpisodeOutcome::Success,
+                memory_type: MemoryType::Episodic { significance: 0.8 },
+                metadata: HashMap::new(),
+            };
+            store.store_consolidated_memory(mem);
+        }
+
+        let mut engine = ConsolidationEngine::new(config, 100);
+        let result = engine.run_consolidation(&mut store);
+
+        // All 4 should consolidate into 1 semantic despite different fingerprints
+        assert_eq!(
+            result.semantic_created, 1,
+            "Memories with same goal_bucket_id but different fingerprints must consolidate"
+        );
+        assert_eq!(result.consolidated_episode_ids.len(), 4);
+    }
+
+    #[test]
+    fn test_different_goal_buckets_do_not_consolidate() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // 2 memories in bucket A, 2 in bucket B (threshold is 3, so neither consolidates)
+        for i in 1..=2u64 {
+            let mem = make_episodic_memory(i, 100, EpisodeOutcome::Success);
+            store.store_consolidated_memory(mem);
+        }
+        for i in 3..=4u64 {
+            let mem = make_episodic_memory(i, 200, EpisodeOutcome::Success);
+            store.store_consolidated_memory(mem);
+        }
+
+        let mut engine = ConsolidationEngine::new(config, 100);
+        let result = engine.run_consolidation(&mut store);
+
+        assert_eq!(
+            result.semantic_created, 0,
+            "Different goal buckets must not merge"
+        );
+    }
+
 }

@@ -59,6 +59,7 @@ fn create_test_event(
                 external: HashMap::new(),
             },
             fingerprint: 12345,
+            goal_bucket_id: 0,
             embeddings: None,
         },
         metadata: HashMap::new(),
@@ -101,6 +102,7 @@ fn create_test_episode(id: u64, agent_id: AgentId, outcome: EpisodeOutcome) -> E
                 external: HashMap::new(),
             },
             fingerprint: 12345,
+            goal_bucket_id: 0,
             embeddings: None,
         },
         outcome: Some(outcome),
@@ -681,4 +683,173 @@ fn test_full_pipeline_persistence() {
     }
 
     println!("✅ Full pipeline persistence test passed!");
+}
+
+#[test]
+fn test_redb_goal_bucket_index() {
+    use agent_db_events::Goal;
+    use agent_db_graph::{ConsolidationStatus, MemoryTier, MemoryType};
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test_goal_bucket.redb");
+
+    let config = RedbConfig {
+        data_path: db_path,
+        cache_size_bytes: 1024 * 1024,
+        repair_on_open: false,
+    };
+    let backend = Arc::new(RedbBackend::open(config).unwrap());
+    let mut store = RedbMemoryStore::new(backend, MemoryFormationConfig::default(), 1000);
+    store.initialize().unwrap();
+
+    // Build a shared goal set
+    let goals = vec![
+        Goal {
+            id: 10,
+            description: "goal A".to_string(),
+            priority: 0.5,
+            deadline: None,
+            progress: 0.0,
+            subgoals: Vec::new(),
+        },
+        Goal {
+            id: 20,
+            description: "goal B".to_string(),
+            priority: 0.8,
+            deadline: None,
+            progress: 0.0,
+            subgoals: Vec::new(),
+        },
+    ];
+
+    // Create 3 memories with the same goals but different fingerprints.
+    // This simulates the same goal set across varying environments.
+    let shared_ctx = EventContext::new(
+        EnvironmentState::default(),
+        goals.clone(),
+        ResourceState::default(),
+    );
+    let shared_bucket = shared_ctx.goal_bucket_id;
+    assert_ne!(shared_bucket, 0, "goal_bucket_id should be computed");
+
+    for i in 1..=3u64 {
+        let mut ctx = EventContext::new(
+            EnvironmentState {
+                variables: {
+                    let mut v = HashMap::new();
+                    v.insert("run".to_string(), serde_json::json!(i));
+                    v
+                },
+                ..Default::default()
+            },
+            goals.clone(),
+            ResourceState::default(),
+        );
+        // Ensure different fingerprints but same goal bucket
+        assert_eq!(ctx.goal_bucket_id, shared_bucket);
+        if i > 1 {
+            // fingerprints should differ because env vars differ
+            let first_ctx = EventContext::new(
+                EnvironmentState {
+                    variables: {
+                        let mut v = HashMap::new();
+                        v.insert("run".to_string(), serde_json::json!(1));
+                        v
+                    },
+                    ..Default::default()
+                },
+                goals.clone(),
+                ResourceState::default(),
+            );
+            assert_ne!(ctx.fingerprint, first_ctx.fingerprint);
+        }
+
+        let mem = agent_db_graph::Memory {
+            id: i,
+            agent_id: 1,
+            session_id: 1,
+            episode_id: i,
+            summary: format!("memory {}", i),
+            takeaway: String::new(),
+            causal_note: String::new(),
+            summary_embedding: Vec::new(),
+            tier: MemoryTier::Episodic,
+            consolidated_from: Vec::new(),
+            schema_id: None,
+            consolidation_status: ConsolidationStatus::Active,
+            context: ctx,
+            key_events: Vec::new(),
+            strength: 0.8,
+            relevance_score: 0.7,
+            formed_at: 1000,
+            last_accessed: 1000,
+            access_count: 0,
+            outcome: EpisodeOutcome::Success,
+            memory_type: MemoryType::Episodic { significance: 0.8 },
+            metadata: HashMap::new(),
+        };
+        store.store_consolidated_memory(mem);
+    }
+
+    // Also store a memory with a DIFFERENT goal bucket
+    let different_ctx = EventContext::new(
+        EnvironmentState::default(),
+        vec![Goal {
+            id: 99,
+            description: "unrelated".to_string(),
+            priority: 0.5,
+            deadline: None,
+            progress: 0.0,
+            subgoals: Vec::new(),
+        }],
+        ResourceState::default(),
+    );
+    assert_ne!(different_ctx.goal_bucket_id, shared_bucket);
+
+    let other_mem = agent_db_graph::Memory {
+        id: 10,
+        agent_id: 1,
+        session_id: 1,
+        episode_id: 10,
+        summary: "different bucket memory".to_string(),
+        takeaway: String::new(),
+        causal_note: String::new(),
+        summary_embedding: Vec::new(),
+        tier: MemoryTier::Episodic,
+        consolidated_from: Vec::new(),
+        schema_id: None,
+        consolidation_status: ConsolidationStatus::Active,
+        context: different_ctx,
+        key_events: Vec::new(),
+        strength: 0.8,
+        relevance_score: 0.7,
+        formed_at: 1000,
+        last_accessed: 1000,
+        access_count: 0,
+        outcome: EpisodeOutcome::Success,
+        memory_type: MemoryType::Episodic { significance: 0.8 },
+        metadata: HashMap::new(),
+    };
+    store.store_consolidated_memory(other_mem);
+
+    // Retrieve via hierarchical with the shared goal context.
+    // Should find only the 3 memories in the shared bucket, not the 4th.
+    let results = store.retrieve_hierarchical(
+        &shared_ctx,
+        100,
+        0.1, // low threshold to catch bucket-based similarity
+        None,
+    );
+
+    assert_eq!(
+        results.len(),
+        3,
+        "Should retrieve exactly the 3 memories sharing the goal bucket, not the unrelated one"
+    );
+    for r in &results {
+        assert_eq!(r.context.goal_bucket_id, shared_bucket);
+    }
+
+    // list_all_memories still returns all 4
+    assert_eq!(store.list_all_memories().len(), 4);
 }

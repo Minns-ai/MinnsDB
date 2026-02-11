@@ -59,6 +59,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bincode",
+ "blake3",
  "dashmap",
  "indexmap 1.9.3",
  "redb",

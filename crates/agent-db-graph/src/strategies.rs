@@ -15,6 +15,29 @@ use std::collections::{HashMap, HashSet};
 /// Unique identifier for a strategy
 pub type StrategyId = u64;
 
+/// Compute a deterministic goal bucket id from a set of goal ids.
+///
+/// Matches the algorithm used by `EventContext::compute_goal_bucket_id()`:
+/// sort goal ids ascending, serialize each as u64 LE, BLAKE3 hash, take
+/// first 8 bytes as u64 LE. Priority is deliberately excluded so that
+/// minor priority changes do not split buckets.
+///
+/// Returns 0 when the input slice is empty.
+pub fn compute_goal_bucket_id_from_ids(goal_ids: &[u64]) -> u64 {
+    if goal_ids.is_empty() {
+        return 0;
+    }
+    let mut sorted = goal_ids.to_vec();
+    sorted.sort();
+    let mut canonical_bytes = Vec::with_capacity(sorted.len() * 8);
+    for id in &sorted {
+        canonical_bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    let hash = blake3::hash(&canonical_bytes);
+    let bytes: [u8; 8] = hash.as_bytes()[0..8].try_into().unwrap();
+    u64::from_le_bytes(bytes)
+}
+
 #[derive(Debug, Clone)]
 pub struct StrategyUpsert {
     pub id: StrategyId,
@@ -1193,11 +1216,7 @@ impl StrategyExtractor {
             query.min_score,
             query.limit
         );
-        let goal_bucket_id = if !query.goal_ids.is_empty() {
-            *query.goal_ids.iter().min().unwrap_or(&0)
-        } else {
-            0
-        };
+        let goal_bucket_id = compute_goal_bucket_id_from_ids(&query.goal_ids);
 
         let candidate_ids: Vec<StrategyId> = if let Some(context_hash) = query.context_hash {
             self.context_index
@@ -1296,14 +1315,17 @@ impl StrategyExtractor {
     }
 
     fn derive_goal_bucket_id(&self, episode: &Episode) -> u64 {
-        let mut goals: Vec<u64> = episode
+        // Prefer the pre-computed goal_bucket_id from EventContext when available.
+        if episode.context.goal_bucket_id != 0 {
+            return episode.context.goal_bucket_id;
+        }
+        let goal_ids: Vec<u64> = episode
             .context
             .active_goals
             .iter()
             .map(|goal| goal.id)
             .collect();
-        goals.sort();
-        goals.first().copied().unwrap_or(0)
+        compute_goal_bucket_id_from_ids(&goal_ids)
     }
 
     fn compute_behavior_signature(&self, events: &[Event]) -> String {
@@ -2059,6 +2081,176 @@ impl StrategyExtractor {
         }
     }
 
+    /// List all strategies (used by maintenance / pruning).
+    pub fn list_all_strategies(&self) -> Vec<&Strategy> {
+        self.strategies.values().collect()
+    }
+
+    /// Prune weak / stale strategies that no longer contribute value.
+    ///
+    /// Returns the IDs of strategies that were removed.
+    pub fn prune_weak_strategies(
+        &mut self,
+        min_confidence: f32,
+        min_support: u32,
+        max_stale_hours: f32,
+    ) -> Vec<StrategyId> {
+        let now = current_timestamp();
+        let hour_ns = 3_600_000_000_000u64;
+
+        let to_remove: Vec<StrategyId> = self
+            .strategies
+            .values()
+            .filter(|s| {
+                let hours_since_use =
+                    (now.saturating_sub(s.last_used) / hour_ns) as f32;
+
+                // Remove if BOTH low confidence and low support
+                let weak = s.confidence < min_confidence && s.support_count < min_support;
+                // Remove if stale AND weak
+                let stale_and_weak =
+                    hours_since_use > max_stale_hours && s.support_count < min_support;
+
+                weak || stale_and_weak
+            })
+            .map(|s| s.id)
+            .collect();
+
+        for id in &to_remove {
+            if let Some(strategy) = self.strategies.remove(id) {
+                // Clean indexes
+                if let Some(ids) = self.agent_strategies.get_mut(&strategy.agent_id) {
+                    ids.retain(|sid| sid != id);
+                }
+                if let Some(ids) = self.goal_bucket_index.get_mut(&strategy.goal_bucket_id) {
+                    ids.retain(|sid| sid != id);
+                }
+                if let Some(ids) = self.behavior_index.get_mut(&strategy.behavior_signature) {
+                    ids.retain(|sid| sid != id);
+                }
+                // Remove from signature index
+                self.strategy_signature_index.retain(|_, v| v != id);
+                // Remove from episode index
+                self.episode_index.retain(|_, v| v != id);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            tracing::info!(
+                "Strategy pruning removed {} weak/stale strategies",
+                to_remove.len()
+            );
+        }
+
+        to_remove
+    }
+
+    /// Merge near-duplicate strategies within the same goal bucket.
+    ///
+    /// Two strategies are "near-duplicates" if they share the same agent, goal bucket,
+    /// strategy type, AND have overlapping behavior signatures in the behavior_index.
+    /// The weaker strategy is merged into the stronger one (support counts transferred).
+    ///
+    /// Returns the number of strategies merged (removed).
+    pub fn merge_similar_strategies(&mut self) -> usize {
+        let mut merged = 0usize;
+        let mut to_merge: Vec<(StrategyId, StrategyId)> = Vec::new(); // (victim, survivor)
+
+        // Group strategies by (agent_id, goal_bucket_id, strategy_type)
+        let mut groups: HashMap<(AgentId, u64, StrategyType), Vec<StrategyId>> = HashMap::new();
+        for s in self.strategies.values() {
+            groups
+                .entry((s.agent_id, s.goal_bucket_id, s.strategy_type))
+                .or_default()
+                .push(s.id);
+        }
+
+        for ids in groups.values() {
+            if ids.len() < 2 {
+                continue;
+            }
+            // Compare all pairs within the group
+            for i in 0..ids.len() {
+                for j in (i + 1)..ids.len() {
+                    let id_a = ids[i];
+                    let id_b = ids[j];
+                    let (a, b) = match (self.strategies.get(&id_a), self.strategies.get(&id_b)) {
+                        (Some(a), Some(b)) => (a, b),
+                        _ => continue,
+                    };
+
+                    // Word-level Jaccard on action_hint
+                    let a_words: HashSet<&str> = a.action_hint.split_whitespace().collect();
+                    let b_words: HashSet<&str> = b.action_hint.split_whitespace().collect();
+                    let intersection = a_words.intersection(&b_words).count() as f32;
+                    let union = a_words.union(&b_words).count() as f32;
+                    let jaccard = if union > 0.0 { intersection / union } else { 0.0 };
+
+                    if jaccard >= 0.70 {
+                        // Merge weaker into stronger
+                        let (victim, survivor) = if a.quality_score >= b.quality_score {
+                            (id_b, id_a)
+                        } else {
+                            (id_a, id_b)
+                        };
+                        to_merge.push((victim, survivor));
+                    }
+                }
+            }
+        }
+
+        // Deduplicate merge pairs (a victim can only be merged once)
+        let mut already_merged = HashSet::new();
+        for (victim, survivor) in to_merge {
+            if already_merged.contains(&victim) || already_merged.contains(&survivor) {
+                continue;
+            }
+            already_merged.insert(victim);
+
+            // Transfer counts
+            if let Some(victim_strategy) = self.strategies.remove(&victim) {
+                if let Some(survivor_strategy) = self.strategies.get_mut(&survivor) {
+                    survivor_strategy.support_count += victim_strategy.support_count;
+                    survivor_strategy.success_count += victim_strategy.success_count;
+                    survivor_strategy.failure_count += victim_strategy.failure_count;
+
+                    // Record supersession
+                    survivor_strategy.supersedes.push(victim);
+
+                    // Recalculate confidence
+                    let total = survivor_strategy.support_count as f32;
+                    survivor_strategy.confidence = 1.0 - (-(total / 3.0)).exp();
+                    survivor_strategy.expected_success =
+                        (survivor_strategy.success_count as f32 + 1.0) / (total + 2.0);
+                }
+
+                // Clean indexes for victim
+                if let Some(ids) = self.agent_strategies.get_mut(&victim_strategy.agent_id) {
+                    ids.retain(|sid| *sid != victim);
+                }
+                if let Some(ids) =
+                    self.goal_bucket_index.get_mut(&victim_strategy.goal_bucket_id)
+                {
+                    ids.retain(|sid| *sid != victim);
+                }
+                if let Some(ids) =
+                    self.behavior_index.get_mut(&victim_strategy.behavior_signature)
+                {
+                    ids.retain(|sid| *sid != victim);
+                }
+                self.strategy_signature_index.retain(|_, v| *v != victim);
+                self.episode_index.retain(|_, v| *v != victim);
+
+                merged += 1;
+            }
+        }
+
+        if merged > 0 {
+            tracing::info!("Strategy merge: combined {} near-duplicate strategies", merged);
+        }
+        merged
+    }
+
     /// Insert a strategy loaded from persistent storage
     ///
     /// This is used to restore strategies from disk without going through
@@ -2578,4 +2770,74 @@ pub struct StrategyStats {
 
     /// Average quality across all strategies
     pub average_quality: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_goal_bucket_id_differs_for_different_goal_sets_with_same_min() {
+        // Both sets share the same minimum goal id (1), but differ in the full set.
+        let bucket_a = compute_goal_bucket_id_from_ids(&[1, 2, 3]);
+        let bucket_b = compute_goal_bucket_id_from_ids(&[1, 4, 5]);
+
+        assert_ne!(
+            bucket_a, bucket_b,
+            "Different goal sets with the same min id must produce different bucket ids"
+        );
+    }
+
+    #[test]
+    fn test_goal_bucket_id_identical_for_same_goals() {
+        let bucket_a = compute_goal_bucket_id_from_ids(&[3, 1, 2]);
+        let bucket_b = compute_goal_bucket_id_from_ids(&[1, 2, 3]);
+
+        assert_eq!(
+            bucket_a, bucket_b,
+            "Identical goal sets (regardless of order) must produce the same bucket id"
+        );
+    }
+
+    #[test]
+    fn test_goal_bucket_id_empty_returns_zero() {
+        assert_eq!(compute_goal_bucket_id_from_ids(&[]), 0);
+    }
+
+    #[test]
+    fn test_goal_bucket_id_matches_event_context() {
+        use agent_db_events::core::{EventContext, Goal};
+
+        let goals = vec![
+            Goal {
+                id: 10,
+                description: String::new(),
+                priority: 0.5,
+                deadline: None,
+                progress: 0.0,
+                subgoals: Vec::new(),
+            },
+            Goal {
+                id: 3,
+                description: String::new(),
+                priority: 0.9,
+                deadline: None,
+                progress: 0.0,
+                subgoals: Vec::new(),
+            },
+        ];
+
+        let ctx = EventContext::new(
+            Default::default(),
+            goals.clone(),
+            Default::default(),
+        );
+
+        let strategy_bucket = compute_goal_bucket_id_from_ids(&[10, 3]);
+
+        assert_eq!(
+            ctx.goal_bucket_id, strategy_bucket,
+            "Strategy bucket id must match EventContext.goal_bucket_id for the same goals"
+        );
+    }
 }

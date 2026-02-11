@@ -18,7 +18,8 @@ pub use llm_client::{
     OpenAiClient,
 };
 pub use store::ClaimStore;
+pub use llm_client::LabeledEntity;
 pub use types::{
-    ClaimExtractionRequest, ClaimExtractionResult, ClaimId, ClaimStatus, DerivedClaim,
-    EvidenceSpan, RejectedClaim, RejectionReason, ThreadId,
+    ClaimEntity, ClaimExtractionRequest, ClaimExtractionResult, ClaimId, ClaimStatus, ClaimType,
+    DerivedClaim, EvidenceSpan, RejectedClaim, RejectionReason, ThreadId,
 };

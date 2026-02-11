@@ -183,11 +183,18 @@ pub struct EventContext {
     /// Available resources
     pub resources: ResourceState,
 
-    /// Context fingerprint for fast matching
+    /// Context fingerprint for fast matching (strict: env + goals + resources)
     /// If not provided during deserialization, it will be auto-computed
     #[serde(default = "default_fingerprint")]
     #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
     pub fingerprint: ContextHash,
+
+    /// Goal bucket ID for consolidation grouping (coarse: goals only)
+    /// Two contexts with the same active goals but different env/resources
+    /// will share the same goal_bucket_id while having different fingerprints.
+    #[serde(default = "default_fingerprint")]
+    #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
+    pub goal_bucket_id: u64,
 
     /// Context embeddings for similarity
     pub embeddings: Option<Vec<f32>>,
@@ -387,7 +394,7 @@ impl Event {
 }
 
 impl EventContext {
-    /// Create new context with computed fingerprint
+    /// Create new context with computed fingerprint and goal_bucket_id
     pub fn new(
         environment: EnvironmentState,
         active_goals: Vec<Goal>,
@@ -398,9 +405,11 @@ impl EventContext {
             active_goals,
             resources,
             fingerprint: 0,
+            goal_bucket_id: 0,
             embeddings: None,
         };
         context.fingerprint = context.compute_fingerprint();
+        context.goal_bucket_id = context.compute_goal_bucket_id();
         context
     }
 
@@ -485,6 +494,32 @@ impl EventContext {
         let hash = blake3::hash(&canonical_bytes);
 
         // 5. Take first 8 bytes as u64 (little-endian)
+        let bytes: [u8; 8] = hash.as_bytes()[0..8].try_into().unwrap();
+        u64::from_le_bytes(bytes)
+    }
+
+    /// Compute a coarse goal bucket ID based ONLY on active goals.
+    ///
+    /// Unlike `fingerprint` (which includes env vars and resources), this hash
+    /// groups contexts that share the same goal set regardless of environmental
+    /// differences. This enables consolidation across varied situations that
+    /// pursue the same goals.
+    ///
+    /// # Algorithm
+    /// 1. Sort goals by id
+    /// 2. For each goal: serialize goal.id as u64 LE
+    ///    (priority is omitted so that minor priority changes do not split buckets)
+    /// 3. BLAKE3 hash, take first 8 bytes as u64 LE
+    pub fn compute_goal_bucket_id(&self) -> u64 {
+        let mut canonical_bytes = Vec::new();
+
+        let mut sorted_goals = self.active_goals.clone();
+        sorted_goals.sort_by_key(|g| g.id);
+        for goal in &sorted_goals {
+            canonical_bytes.extend_from_slice(&goal.id.to_le_bytes());
+        }
+
+        let hash = blake3::hash(&canonical_bytes);
         let bytes: [u8; 8] = hash.as_bytes()[0..8].try_into().unwrap();
         u64::from_le_bytes(bytes)
     }
@@ -1010,6 +1045,117 @@ mod tests {
 
         // Different contexts should have different fingerprints (most likely)
         assert_ne!(context1.fingerprint, context3.fingerprint);
+    }
+
+    #[test]
+    fn test_goal_bucket_id_same_goals_different_env() {
+        let goals = vec![Goal {
+            id: 1,
+            description: "Test goal".to_string(),
+            priority: 0.5,
+            deadline: None,
+            progress: 0.0,
+            subgoals: Vec::new(),
+        }];
+
+        // Context A: env with temperature=23.5
+        let ctx_a = EventContext::new(
+            EnvironmentState {
+                variables: {
+                    let mut vars = HashMap::new();
+                    vars.insert("temperature".to_string(), json!(23.5));
+                    vars
+                },
+                ..Default::default()
+            },
+            goals.clone(),
+            ResourceState::default(),
+        );
+
+        // Context B: env with temperature=40.0 and extra var
+        let ctx_b = EventContext::new(
+            EnvironmentState {
+                variables: {
+                    let mut vars = HashMap::new();
+                    vars.insert("temperature".to_string(), json!(40.0));
+                    vars.insert("location".to_string(), json!("warehouse"));
+                    vars
+                },
+                ..Default::default()
+            },
+            goals.clone(),
+            ResourceState::default(),
+        );
+
+        // Different fingerprints (env differs)
+        assert_ne!(ctx_a.fingerprint, ctx_b.fingerprint,
+            "Different environments must produce different fingerprints");
+
+        // Same goal_bucket_id (goals are identical)
+        assert_eq!(ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
+            "Same goals must produce same goal_bucket_id regardless of environment");
+        assert_ne!(ctx_a.goal_bucket_id, 0, "goal_bucket_id should be computed");
+    }
+
+    #[test]
+    fn test_goal_bucket_id_different_goals() {
+        let ctx_a = EventContext::new(
+            EnvironmentState::default(),
+            vec![Goal {
+                id: 1,
+                description: "Goal A".to_string(),
+                priority: 0.5,
+                deadline: None,
+                progress: 0.0,
+                subgoals: Vec::new(),
+            }],
+            ResourceState::default(),
+        );
+
+        let ctx_b = EventContext::new(
+            EnvironmentState::default(),
+            vec![Goal {
+                id: 2,
+                description: "Goal B".to_string(),
+                priority: 0.5,
+                deadline: None,
+                progress: 0.0,
+                subgoals: Vec::new(),
+            }],
+            ResourceState::default(),
+        );
+
+        assert_ne!(ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
+            "Different goal sets must produce different goal_bucket_ids");
+    }
+
+    #[test]
+    fn test_goal_bucket_id_ignores_priority_changes() {
+        let make_ctx = |priority: f32| {
+            EventContext::new(
+                EnvironmentState::default(),
+                vec![Goal {
+                    id: 1,
+                    description: "Same goal".to_string(),
+                    priority,
+                    deadline: None,
+                    progress: 0.0,
+                    subgoals: Vec::new(),
+                }],
+                ResourceState::default(),
+            )
+        };
+
+        let ctx_a = make_ctx(0.3);
+        let ctx_b = make_ctx(0.9);
+
+        // goal_bucket_id should be the same (priority is excluded from bucket hash)
+        assert_eq!(ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
+            "goal_bucket_id must not change when only priority differs");
+
+        // But fingerprints differ (priority IS included in fingerprint)
+        assert_ne!(ctx_a.fingerprint, ctx_b.fingerprint,
+            "fingerprint should differ when priority changes");
     }
 
     fn create_test_context() -> EventContext {

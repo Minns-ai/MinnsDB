@@ -331,6 +331,13 @@ pub struct GraphResponse {
     pub edges: Vec<GraphEdgeResponse>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GraphPersistResponse {
+    pub success: bool,
+    pub nodes_persisted: usize,
+    pub edges_persisted: usize,
+}
+
 #[serde_as]
 #[derive(Debug, Serialize)]
 pub struct GraphNodeResponse {
@@ -442,6 +449,27 @@ pub struct ClaimResponse {
     pub created_at: u64,
     #[serde_as(as = "DisplayFromStr")]
     pub last_accessed: u64,
+    /// Claim type: Preference, Fact, Belief, Intention, Capability
+    pub claim_type: String,
+    /// Normalized primary entity this claim is about
+    pub subject_entity: Option<String>,
+    /// Explicit expiry timestamp (epoch seconds), if set
+    pub expires_at: Option<u64>,
+    /// Temporal freshness weight [0.0, 1.0]
+    pub temporal_weight: f32,
+    /// If superseded, the ID of the replacing claim
+    pub superseded_by: Option<u64>,
+    /// NER entities attached to this claim (text + label)
+    pub entities: Vec<ClaimEntityResponse>,
+}
+
+/// A single NER entity attached to a claim.
+#[derive(Debug, Serialize)]
+pub struct ClaimEntityResponse {
+    /// Entity text as it appears in the source
+    pub text: String,
+    /// NER label (PERSON, ORG, LOC, PRODUCT, DATE, EVENT, …)
+    pub label: String,
 }
 
 #[derive(Debug, Serialize)]
