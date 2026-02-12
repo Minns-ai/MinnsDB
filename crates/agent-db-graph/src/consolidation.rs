@@ -18,20 +18,15 @@ use agent_db_core::types::current_timestamp;
 use std::collections::HashMap;
 
 /// How Phase 2 groups semantic memories into schemas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchemaGroupingMode {
     /// Group by exact context fingerprint (original behaviour).
     ExactFingerprint,
     /// Greedy centroid-based embedding clustering.
+    #[default]
     EmbeddingCentroid,
     /// Complete-link (mutual) embedding clustering — every member must meet threshold against every other member.
     EmbeddingMutual,
-}
-
-impl Default for SchemaGroupingMode {
-    fn default() -> Self {
-        Self::EmbeddingCentroid
-    }
 }
 
 /// Configuration for the consolidation engine
@@ -190,7 +185,7 @@ impl ConsolidationEngine {
                     continue;
                 }
 
-                let group_refs: Vec<&Memory> = group.iter().copied().collect();
+                let group_refs: Vec<&Memory> = group.to_vec();
                 let mut schema = self.synthesize_schema(&group_refs, *goal_bucket_id);
 
                 // Annotate schema metadata with grouping info

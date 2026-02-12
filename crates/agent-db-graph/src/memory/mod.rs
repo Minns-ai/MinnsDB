@@ -9,8 +9,8 @@ use crate::episodes::{Episode, EpisodeId, EpisodeOutcome};
 use agent_db_core::types::{
     current_timestamp, AgentId, ContextHash, EventId, SessionId, Timestamp,
 };
-use agent_db_events::core::{ActionOutcome, Event, EventContext, EventType};
-use std::collections::{HashMap, HashSet};
+use agent_db_events::core::{Event, EventContext};
+use std::collections::HashMap;
 
 mod similarity;
 pub(crate) use similarity::calculate_context_similarity;
