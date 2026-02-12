@@ -514,51 +514,50 @@ impl RedbBackend {
 
     /// Batch write operation (atomic)
     pub fn write_batch(&self, operations: Vec<BatchOperation>) -> StorageResult<()> {
-    use std::collections::HashMap;
-    let write_txn = self
-        .db
-        .begin_write()
-        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-
-    // Group ops by table for fewer open_table calls.
-    let mut by_table: HashMap<String, Vec<BatchOperation>> = HashMap::new();
-    for op in operations {
-        let table_name = match &op {
-            BatchOperation::Put { table_name, .. } => table_name.clone(),
-            BatchOperation::Delete { table_name, .. } => table_name.clone(),
-        };
-        by_table.entry(table_name).or_default().push(op);
-    }
-
-    for (table_name, ops) in by_table {
-        let table_def = Self::get_table_def(&table_name)?;
-        let mut table = write_txn
-            .open_table(table_def)
+        use std::collections::HashMap;
+        let write_txn = self
+            .db
+            .begin_write()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
-        for op in ops {
-            match op {
-                BatchOperation::Put { key, value, .. } => {
-                    table
-                        .insert(key.as_slice(), value.as_slice())
-                        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-                }
-                BatchOperation::Delete { key, .. } => {
-                    table
-                        .remove(key.as_slice())
-                        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        // Group ops by table for fewer open_table calls.
+        let mut by_table: HashMap<String, Vec<BatchOperation>> = HashMap::new();
+        for op in operations {
+            let table_name = match &op {
+                BatchOperation::Put { table_name, .. } => table_name.clone(),
+                BatchOperation::Delete { table_name, .. } => table_name.clone(),
+            };
+            by_table.entry(table_name).or_default().push(op);
+        }
+
+        for (table_name, ops) in by_table {
+            let table_def = Self::get_table_def(&table_name)?;
+            let mut table = write_txn
+                .open_table(table_def)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+            for op in ops {
+                match op {
+                    BatchOperation::Put { key, value, .. } => {
+                        table
+                            .insert(key.as_slice(), value.as_slice())
+                            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+                    },
+                    BatchOperation::Delete { key, .. } => {
+                        table
+                            .remove(key.as_slice())
+                            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+                    },
                 }
             }
         }
+
+        write_txn
+            .commit()
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+        Ok(())
     }
-
-    write_txn
-        .commit()
-        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-
-    Ok(())
-}
-
 
     /// Get approximate disk usage (bytes)
     pub fn disk_usage(&self) -> StorageResult<u64> {

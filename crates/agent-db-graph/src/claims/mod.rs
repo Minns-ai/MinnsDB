@@ -13,12 +13,12 @@ pub use embeddings::{
     MockEmbeddingClient, OpenAiEmbeddingClient, VectorSimilarity,
 };
 pub use extractor::{ClaimExtractionConfig, ClaimExtractionQueue};
+pub use llm_client::LabeledEntity;
 pub use llm_client::{
     AnthropicClient, LlmClient, LlmExtractionRequest, LlmExtractionResponse, MockClient,
     OpenAiClient,
 };
 pub use store::ClaimStore;
-pub use llm_client::LabeledEntity;
 pub use types::{
     ClaimEntity, ClaimExtractionRequest, ClaimExtractionResult, ClaimId, ClaimStatus, ClaimType,
     DerivedClaim, EvidenceSpan, RejectedClaim, RejectionReason, ThreadId,

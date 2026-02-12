@@ -264,13 +264,13 @@ impl MemoryFormation {
                     failure_severity: episode.significance,
                     failure_pattern,
                 }
-            }
+            },
             _ => {
                 // Success, Partial, or Interrupted create episodic memories
                 MemoryType::Episodic {
                     significance: episode.significance,
                 }
-            }
+            },
         };
 
         // Phase 1 Feature A: Apply prediction error weighting to memory strength
@@ -730,7 +730,13 @@ impl MemoryFormation {
     }
 
     /// Mark a memory as consolidated into a higher-tier memory, applying strength decay
-    pub fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, into_tier: MemoryTier, decay: f32) {
+    pub fn mark_consolidated(
+        &mut self,
+        memory_id: MemoryId,
+        into_id: MemoryId,
+        into_tier: MemoryTier,
+        decay: f32,
+    ) {
         if let Some(m) = self.memories.get_mut(&memory_id) {
             m.consolidation_status = ConsolidationStatus::Consolidated;
             if into_tier == MemoryTier::Schema {

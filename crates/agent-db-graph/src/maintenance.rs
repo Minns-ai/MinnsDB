@@ -64,10 +64,31 @@ pub struct MaintenanceResult {
 ///   "I like Adidas shoes" vs "I like Nike shoes"           → false
 pub fn is_contradiction(claim_a: &str, claim_b: &str) -> bool {
     const NEGATION_WORDS: &[&str] = &[
-        "not", "no", "don't", "doesn't", "never", "neither", "nor", "isn't",
-        "aren't", "wasn't", "weren't", "won't", "wouldn't", "couldn't",
-        "shouldn't", "cannot", "can't", "haven't", "hasn't", "hadn't",
-        "didn't", "dislike", "hate", "refuse", "reject",
+        "not",
+        "no",
+        "don't",
+        "doesn't",
+        "never",
+        "neither",
+        "nor",
+        "isn't",
+        "aren't",
+        "wasn't",
+        "weren't",
+        "won't",
+        "wouldn't",
+        "couldn't",
+        "shouldn't",
+        "cannot",
+        "can't",
+        "haven't",
+        "hasn't",
+        "hadn't",
+        "didn't",
+        "dislike",
+        "hate",
+        "refuse",
+        "reject",
     ];
 
     let a_lower = claim_a.to_lowercase();
@@ -76,12 +97,16 @@ pub fn is_contradiction(claim_a: &str, claim_b: &str) -> bool {
     let a_words: Vec<&str> = a_lower.split_whitespace().collect();
     let b_words: Vec<&str> = b_lower.split_whitespace().collect();
 
-    let a_has_neg = NEGATION_WORDS
-        .iter()
-        .any(|neg| a_words.iter().any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == *neg));
-    let b_has_neg = NEGATION_WORDS
-        .iter()
-        .any(|neg| b_words.iter().any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == *neg));
+    let a_has_neg = NEGATION_WORDS.iter().any(|neg| {
+        a_words
+            .iter()
+            .any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == *neg)
+    });
+    let b_has_neg = NEGATION_WORDS.iter().any(|neg| {
+        b_words
+            .iter()
+            .any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == *neg)
+    });
 
     // Contradiction when exactly one side is negated
     a_has_neg != b_has_neg
@@ -93,15 +118,9 @@ pub enum ClaimDedupDecision {
     /// No similar claim found — store normally.
     NewClaim,
     /// Near-duplicate found — increment support on existing, skip storing new.
-    Duplicate {
-        existing_id: u64,
-        similarity: f32,
-    },
+    Duplicate { existing_id: u64, similarity: f32 },
     /// Contradiction found — store new claim and mark the old one as Superseded.
-    Contradiction {
-        existing_id: u64,
-        similarity: f32,
-    },
+    Contradiction { existing_id: u64, similarity: f32 },
 }
 
 /// Run dedup check against existing claims via the vector index.
@@ -118,11 +137,11 @@ pub fn check_claim_dedup(
     }
 
     // Find the most similar existing claim
-    let similar = match claim_store.find_similar(new_embedding, 1, config.claim_contradiction_threshold)
-    {
-        Ok(results) => results,
-        Err(_) => return ClaimDedupDecision::NewClaim,
-    };
+    let similar =
+        match claim_store.find_similar(new_embedding, 1, config.claim_contradiction_threshold) {
+            Ok(results) => results,
+            Err(_) => return ClaimDedupDecision::NewClaim,
+        };
 
     let Some((existing_id, similarity)) = similar.first().copied() else {
         return ClaimDedupDecision::NewClaim;
@@ -170,10 +189,7 @@ mod tests {
             "The API is stable",
             "The API isn't stable"
         ));
-        assert!(is_contradiction(
-            "I hate running",
-            "I like running"
-        ));
+        assert!(is_contradiction("I hate running", "I like running"));
         // Same polarity
         assert!(!is_contradiction(
             "I like Adidas shoes",

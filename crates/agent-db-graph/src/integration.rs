@@ -759,11 +759,7 @@ impl GraphEngine {
         // Restore graph state from redb if available
         match engine.restore_graph_state().await {
             Ok((nodes, edges)) if nodes > 0 || edges > 0 => {
-                tracing::info!(
-                    "Restored graph from disk: {} nodes, {} edges",
-                    nodes,
-                    edges
-                );
+                tracing::info!("Restored graph from disk: {} nodes, {} edges", nodes, edges);
             },
             Ok(_) => {},
             Err(e) => {
@@ -1741,9 +1737,7 @@ impl GraphEngine {
                 NodeType::Goal { description, .. } => text_parts.push(description.as_str()),
                 NodeType::Strategy { name, .. } => text_parts.push(name.as_str()),
                 NodeType::Result { summary, .. } => text_parts.push(summary.as_str()),
-                NodeType::Concept { concept_name, .. } => {
-                    text_parts.push(concept_name.as_str())
-                },
+                NodeType::Concept { concept_name, .. } => text_parts.push(concept_name.as_str()),
                 NodeType::Tool { tool_name, .. } => text_parts.push(tool_name.as_str()),
                 NodeType::Episode { outcome, .. } => text_parts.push(outcome.as_str()),
                 _ => {},
@@ -1844,7 +1838,9 @@ impl GraphEngine {
         // 3. Persist graph state to redb before shutdown
         if self.redb_backend.is_some() {
             match self.persist_graph_state().await {
-                Ok((n, e)) => tracing::info!("Graph persisted on shutdown: {} nodes, {} edges", n, e),
+                Ok((n, e)) => {
+                    tracing::info!("Graph persisted on shutdown: {} nodes, {} edges", n, e)
+                },
                 Err(e) => tracing::warn!("Failed to persist graph during shutdown: {}", e),
             }
         }
@@ -1867,9 +1863,7 @@ impl GraphEngine {
     /// Pass `0` to disable.
     ///
     /// The returned `JoinHandle` can be used to abort the loop on shutdown.
-    pub fn start_maintenance_loop(
-        self: &Arc<Self>,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn start_maintenance_loop(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
         let interval_secs = self.config.maintenance_config.interval_secs;
         if interval_secs == 0 {
             tracing::info!("Maintenance loop disabled (interval_secs=0)");
@@ -1878,15 +1872,11 @@ impl GraphEngine {
 
         let engine = Arc::clone(self);
         let handle = tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+            let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
             // Skip the first immediate tick
             ticker.tick().await;
 
-            tracing::info!(
-                "Maintenance loop started (interval={}s)",
-                interval_secs
-            );
+            tracing::info!("Maintenance loop started (interval={}s)", interval_secs);
 
             loop {
                 ticker.tick().await;
@@ -1897,15 +1887,11 @@ impl GraphEngine {
 
                 // 2. Strategy pruning
                 let mc = &engine.config.maintenance_config;
-                let pruned = engine
-                    .strategy_store
-                    .write()
-                    .await
-                    .prune_strategies(
-                        mc.strategy_min_confidence,
-                        mc.strategy_min_support,
-                        mc.strategy_max_stale_hours,
-                    );
+                let pruned = engine.strategy_store.write().await.prune_strategies(
+                    mc.strategy_min_confidence,
+                    mc.strategy_min_support,
+                    mc.strategy_max_stale_hours,
+                );
 
                 if pruned > 0 {
                     tracing::info!("Maintenance: pruned {} strategies", pruned);

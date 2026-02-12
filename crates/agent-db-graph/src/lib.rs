@@ -94,12 +94,12 @@ pub use integration::{
     MemoryMetrics, StoreMetrics, StrategyMetrics,
 };
 pub use learning::{LearningStatsStore, MotifStats, RedbLearningStatsStore, TransitionStats};
+pub use maintenance::{MaintenanceConfig, MaintenanceResult};
 pub use memory::{
     ConsolidationStatus, Memory, MemoryFormation, MemoryFormationConfig, MemoryId, MemoryStats,
     MemoryTier, MemoryType,
 };
 pub use refinement::{RefinementConfig, RefinementEngine};
-pub use maintenance::{MaintenanceConfig, MaintenanceResult};
 pub use stores::{
     InMemoryMemoryStore, InMemoryStrategyStore, MemoryStore, RedbMemoryStore, RedbStrategyStore,
     StrategyStore,

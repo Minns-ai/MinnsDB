@@ -17,6 +17,23 @@ use crate::stores::MemoryStore;
 use agent_db_core::types::current_timestamp;
 use std::collections::HashMap;
 
+/// How Phase 2 groups semantic memories into schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaGroupingMode {
+    /// Group by exact context fingerprint (original behaviour).
+    ExactFingerprint,
+    /// Greedy centroid-based embedding clustering.
+    EmbeddingCentroid,
+    /// Complete-link (mutual) embedding clustering — every member must meet threshold against every other member.
+    EmbeddingMutual,
+}
+
+impl Default for SchemaGroupingMode {
+    fn default() -> Self {
+        Self::EmbeddingCentroid
+    }
+}
+
 /// Configuration for the consolidation engine
 #[derive(Debug, Clone)]
 pub struct ConsolidationConfig {
@@ -28,6 +45,18 @@ pub struct ConsolidationConfig {
     pub post_consolidation_decay: f32,
     /// Whether to archive (hide from retrieval) episodic memories after consolidation
     pub archive_after_consolidation: bool,
+    /// Maximum number of semantic memories created per goal bucket per consolidation pass (Phase 1)
+    pub max_semantics_per_bucket_per_pass: usize,
+    /// How Phase 2 groups semantic memories into schemas
+    pub schema_grouping_mode: SchemaGroupingMode,
+    /// Cosine similarity threshold for embedding-based schema grouping
+    pub schema_similarity_threshold: f32,
+    /// Maximum semantic candidates scanned during embedding schema grouping
+    pub max_schema_candidates: usize,
+    /// Maximum members in a single schema group
+    pub max_schema_group_size: usize,
+    /// Maximum schema groups created per consolidation pass
+    pub max_schema_groups_per_pass: usize,
 }
 
 impl Default for ConsolidationConfig {
@@ -37,6 +66,12 @@ impl Default for ConsolidationConfig {
             semantic_threshold: 3,
             post_consolidation_decay: 0.3,
             archive_after_consolidation: false,
+            max_semantics_per_bucket_per_pass: 3,
+            schema_grouping_mode: SchemaGroupingMode::default(),
+            schema_similarity_threshold: 0.80,
+            max_schema_candidates: 200,
+            max_schema_group_size: 50,
+            max_schema_groups_per_pass: 5,
         }
     }
 }
@@ -74,14 +109,14 @@ impl ConsolidationEngine {
     pub fn run_consolidation(&mut self, store: &mut dyn MemoryStore) -> ConsolidationResult {
         let mut result = ConsolidationResult::default();
 
-        // --- Phase 1: Episodic → Semantic ---
+        // --- Phase 1: Episodic → Semantic (multi-semantic chunking) ---
         let all_memories = store.list_all_memories();
         let episodic = Self::filter_tier(&all_memories, &MemoryTier::Episodic);
         let grouped = Self::group_by_goal_bucket(&episodic);
 
         for (goal_bucket_id, memories) in &grouped {
             // Only active, non-consolidated episodic memories
-            let eligible: Vec<&Memory> = memories
+            let mut eligible: Vec<&Memory> = memories
                 .iter()
                 .filter(|m| m.consolidation_status == ConsolidationStatus::Active)
                 .copied()
@@ -91,19 +126,35 @@ impl ConsolidationEngine {
                 continue;
             }
 
-            // Synthesize semantic memory
-            let semantic = self.synthesize_semantic(&eligible, *goal_bucket_id);
-            let semantic_id = semantic.id;
-            let episode_ids: Vec<MemoryId> = eligible.iter().map(|m| m.id).collect();
+            // Sort by (formed_at asc, id asc) for deterministic chunking
+            eligible.sort_by(|a, b| a.formed_at.cmp(&b.formed_at).then(a.id.cmp(&b.id)));
 
-            store.store_consolidated_memory(semantic);
+            // Chunk into groups of episodic_threshold; only full chunks are processed
+            let threshold = self.config.episodic_threshold;
+            let full_chunks = eligible.len() / threshold;
+            let chunks_to_process = full_chunks.min(self.config.max_semantics_per_bucket_per_pass);
 
-            // Mark consolidated episodic memories (into Semantic, so schema_id stays None)
-            for &mid in &episode_ids {
-                store.mark_consolidated(mid, semantic_id, MemoryTier::Semantic, self.config.post_consolidation_decay);
+            for chunk_idx in 0..chunks_to_process {
+                let start = chunk_idx * threshold;
+                let chunk = &eligible[start..start + threshold];
+
+                let semantic = self.synthesize_semantic(chunk, *goal_bucket_id);
+                let semantic_id = semantic.id;
+                let episode_ids: Vec<MemoryId> = chunk.iter().map(|m| m.id).collect();
+
+                store.store_consolidated_memory(semantic);
+
+                for &mid in &episode_ids {
+                    store.mark_consolidated(
+                        mid,
+                        semantic_id,
+                        MemoryTier::Semantic,
+                        self.config.post_consolidation_decay,
+                    );
+                }
+                result.consolidated_episode_ids.extend(episode_ids);
+                result.semantic_created += 1;
             }
-            result.consolidated_episode_ids.extend(episode_ids);
-            result.semantic_created += 1;
         }
 
         // --- Phase 2: Semantic → Schema ---
@@ -122,21 +173,237 @@ impl ConsolidationEngine {
                 continue;
             }
 
-            let schema = self.synthesize_schema(&eligible, *goal_bucket_id);
-            let schema_id = schema.id;
-            let sem_ids: Vec<MemoryId> = eligible.iter().map(|m| m.id).collect();
+            let groups = match self.config.schema_grouping_mode {
+                SchemaGroupingMode::ExactFingerprint => self.group_by_fingerprint(&eligible),
+                SchemaGroupingMode::EmbeddingCentroid => {
+                    self.group_by_embedding_centroid(&eligible)
+                },
+                SchemaGroupingMode::EmbeddingMutual => self.group_by_embedding_mutual(&eligible),
+            };
 
-            store.store_consolidated_memory(schema);
+            let groups_cap = groups
+                .into_iter()
+                .take(self.config.max_schema_groups_per_pass);
 
-            // Mark consolidated semantic memories (into Schema, so schema_id is set)
-            for &mid in &sem_ids {
-                store.mark_consolidated(mid, schema_id, MemoryTier::Schema, self.config.post_consolidation_decay);
+            for group in groups_cap {
+                if group.len() < self.config.semantic_threshold {
+                    continue;
+                }
+
+                let group_refs: Vec<&Memory> = group.iter().copied().collect();
+                let mut schema = self.synthesize_schema(&group_refs, *goal_bucket_id);
+
+                // Annotate schema metadata with grouping info
+                schema.metadata.insert(
+                    "grouping_mode".to_string(),
+                    format!("{:?}", self.config.schema_grouping_mode),
+                );
+                schema.metadata.insert(
+                    "similarity_threshold".to_string(),
+                    self.config.schema_similarity_threshold.to_string(),
+                );
+                if let Some(seed) = group.first() {
+                    schema
+                        .metadata
+                        .insert("seed_memory_id".to_string(), seed.id.to_string());
+                }
+                schema
+                    .metadata
+                    .insert("member_count".to_string(), group.len().to_string());
+                let member_ids: Vec<String> = group.iter().map(|m| m.id.to_string()).collect();
+                schema
+                    .metadata
+                    .insert("member_ids".to_string(), member_ids.join(","));
+
+                let schema_id = schema.id;
+                let sem_ids: Vec<MemoryId> = group.iter().map(|m| m.id).collect();
+
+                store.store_consolidated_memory(schema);
+
+                for &mid in &sem_ids {
+                    store.mark_consolidated(
+                        mid,
+                        schema_id,
+                        MemoryTier::Schema,
+                        self.config.post_consolidation_decay,
+                    );
+                }
+                result.consolidated_semantic_ids.extend(sem_ids);
+                result.schema_created += 1;
             }
-            result.consolidated_semantic_ids.extend(sem_ids);
-            result.schema_created += 1;
         }
 
         result
+    }
+
+    // ---- Phase 2 grouping strategies ----
+
+    /// ExactFingerprint: group semantics by their context fingerprint (original behaviour).
+    fn group_by_fingerprint<'a>(&self, eligible: &[&'a Memory]) -> Vec<Vec<&'a Memory>> {
+        let mut fp_groups: HashMap<u64, Vec<&'a Memory>> = HashMap::new();
+        for m in eligible {
+            fp_groups.entry(m.context.fingerprint).or_default().push(m);
+        }
+        fp_groups.into_values().collect()
+    }
+
+    /// EmbeddingCentroid: greedy centroid-based clustering.
+    /// Seed ordering: strength desc, formed_at desc, id desc.
+    fn group_by_embedding_centroid<'a>(&self, eligible: &[&'a Memory]) -> Vec<Vec<&'a Memory>> {
+        let mut sorted: Vec<&'a Memory> = eligible.to_vec();
+        // Seed ordering: strength desc, formed_at desc, id desc
+        sorted.sort_by(|a, b| {
+            b.strength
+                .partial_cmp(&a.strength)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.formed_at.cmp(&a.formed_at))
+                .then(b.id.cmp(&a.id))
+        });
+
+        let mut assigned: Vec<bool> = vec![false; sorted.len()];
+        let mut groups: Vec<Vec<&'a Memory>> = Vec::new();
+
+        for seed_idx in 0..sorted.len() {
+            if assigned[seed_idx] {
+                continue;
+            }
+            if groups.len() >= self.config.max_schema_groups_per_pass {
+                break;
+            }
+
+            let seed = sorted[seed_idx];
+            let seed_emb = Self::get_embedding(seed);
+            if seed_emb.is_empty() {
+                continue;
+            }
+
+            assigned[seed_idx] = true;
+            let mut group: Vec<&'a Memory> = vec![seed];
+            let mut centroid = seed_emb.clone();
+            let mut scanned = 0usize;
+
+            for cand_idx in 0..sorted.len() {
+                if assigned[cand_idx] || cand_idx == seed_idx {
+                    continue;
+                }
+                if scanned >= self.config.max_schema_candidates {
+                    break;
+                }
+                if group.len() >= self.config.max_schema_group_size {
+                    break;
+                }
+                scanned += 1;
+
+                let cand = sorted[cand_idx];
+                let cand_emb = Self::get_embedding(cand);
+                if cand_emb.is_empty() {
+                    continue;
+                }
+
+                let sim_centroid = cosine_similarity(&centroid, &cand_emb);
+                let sim_seed = cosine_similarity(&seed_emb, &cand_emb);
+
+                if sim_centroid >= self.config.schema_similarity_threshold
+                    && sim_seed >= self.config.schema_similarity_threshold
+                {
+                    // Update centroid as running mean
+                    let n = group.len() as f32;
+                    centroid = centroid
+                        .iter()
+                        .zip(cand_emb.iter())
+                        .map(|(c, e)| (c * n + e) / (n + 1.0))
+                        .collect();
+                    assigned[cand_idx] = true;
+                    group.push(cand);
+                }
+            }
+
+            groups.push(group);
+        }
+
+        groups
+    }
+
+    /// EmbeddingMutual: complete-link clustering.
+    /// Candidate must meet threshold against every existing member.
+    fn group_by_embedding_mutual<'a>(&self, eligible: &[&'a Memory]) -> Vec<Vec<&'a Memory>> {
+        let mut sorted: Vec<&'a Memory> = eligible.to_vec();
+        sorted.sort_by(|a, b| {
+            b.strength
+                .partial_cmp(&a.strength)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.formed_at.cmp(&a.formed_at))
+                .then(b.id.cmp(&a.id))
+        });
+
+        let mut assigned: Vec<bool> = vec![false; sorted.len()];
+        let mut groups: Vec<Vec<&'a Memory>> = Vec::new();
+
+        // Pre-compute embeddings
+        let embeddings: Vec<Vec<f32>> = sorted.iter().map(|m| Self::get_embedding(m)).collect();
+
+        for seed_idx in 0..sorted.len() {
+            if assigned[seed_idx] {
+                continue;
+            }
+            if groups.len() >= self.config.max_schema_groups_per_pass {
+                break;
+            }
+            if embeddings[seed_idx].is_empty() {
+                continue;
+            }
+
+            assigned[seed_idx] = true;
+            let mut group_indices: Vec<usize> = vec![seed_idx];
+            let mut scanned = 0usize;
+
+            for cand_idx in 0..sorted.len() {
+                if assigned[cand_idx] || cand_idx == seed_idx {
+                    continue;
+                }
+                if scanned >= self.config.max_schema_candidates {
+                    break;
+                }
+                if group_indices.len() >= self.config.max_schema_group_size {
+                    break;
+                }
+                scanned += 1;
+
+                if embeddings[cand_idx].is_empty() {
+                    continue;
+                }
+
+                // Must meet threshold against ALL current members
+                let meets_all = group_indices.iter().all(|&member_idx| {
+                    cosine_similarity(&embeddings[member_idx], &embeddings[cand_idx])
+                        >= self.config.schema_similarity_threshold
+                });
+
+                if meets_all {
+                    assigned[cand_idx] = true;
+                    group_indices.push(cand_idx);
+                }
+            }
+
+            let group: Vec<&'a Memory> = group_indices.iter().map(|&i| sorted[i]).collect();
+            groups.push(group);
+        }
+
+        groups
+    }
+
+    /// Get the best available embedding for a memory.
+    /// Prefers summary_embedding; falls back to context.embeddings.
+    fn get_embedding(memory: &Memory) -> Vec<f32> {
+        if !memory.summary_embedding.is_empty() {
+            return memory.summary_embedding.clone();
+        }
+        if let Some(ref emb) = memory.context.embeddings {
+            if !emb.is_empty() {
+                return emb.clone();
+            }
+        }
+        Vec::new()
     }
 
     // ---- Synthesis helpers ----
@@ -392,6 +659,20 @@ impl ConsolidationEngine {
     }
 }
 
+/// Cosine similarity between two vectors. Returns 0.0 if either is empty or zero-magnitude.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if mag_a == 0.0 || mag_b == 0.0 {
+        return 0.0;
+    }
+    dot / (mag_a * mag_b)
+}
+
 /// Strategy evolution engine — detects when a new strategy supersedes an older one.
 pub struct StrategyEvolution;
 
@@ -492,13 +773,16 @@ mod tests {
             semantic_threshold: 3,
             post_consolidation_decay: 0.3,
             archive_after_consolidation: false,
+            ..Default::default()
         };
 
         let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
 
         // Insert 4 episodic memories with the same fingerprint (goal bucket)
+        // With chunking: threshold=3, so only 1 full chunk of 3 is processed (4th is leftover)
         for i in 1..=4 {
-            let mem = make_episodic_memory(i, 999, EpisodeOutcome::Success);
+            let mut mem = make_episodic_memory(i, 999, EpisodeOutcome::Success);
+            mem.formed_at = 1000 + i; // Distinct formed_at for deterministic ordering
             store.store_consolidated_memory(mem);
         }
 
@@ -509,12 +793,12 @@ mod tests {
 
         assert_eq!(
             result.semantic_created, 1,
-            "Should create 1 semantic memory"
+            "Should create 1 semantic memory (1 full chunk of 3)"
         );
         assert_eq!(
             result.consolidated_episode_ids.len(),
-            4,
-            "Should mark all 4 episodic memories"
+            3,
+            "Should mark only 3 episodic memories (1 full chunk), leaving 1 leftover"
         );
 
         // Check the semantic memory exists
@@ -526,18 +810,33 @@ mod tests {
         assert_eq!(semantic_mems.len(), 1);
         assert!(semantic_mems[0]
             .summary
-            .contains("Generalized from 4 episodes"));
-        assert_eq!(semantic_mems[0].consolidated_from.len(), 4);
+            .contains("Generalized from 3 episodes"));
+        assert_eq!(semantic_mems[0].consolidated_from.len(), 3);
 
-        // Check the episodic memories were marked consolidated with schema_id = None
-        for i in 1..=4u64 {
-            let m = store.get_memory(i).unwrap();
+        // Check the consolidated episodic memories have schema_id = None
+        let consolidated_ids = &result.consolidated_episode_ids;
+        for &mid in consolidated_ids {
+            let m = store.get_memory(mid).unwrap();
             assert_eq!(m.consolidation_status, ConsolidationStatus::Consolidated);
             assert_eq!(
                 m.schema_id, None,
                 "Episodic memories consolidated into Semantic must NOT have schema_id set"
             );
         }
+
+        // The leftover (4th) episodic memory should still be Active
+        let leftover: Vec<&Memory> = all
+            .iter()
+            .filter(|m| {
+                m.tier == MemoryTier::Episodic
+                    && m.consolidation_status == ConsolidationStatus::Active
+            })
+            .collect();
+        assert_eq!(
+            leftover.len(),
+            1,
+            "1 leftover episodic should remain active"
+        );
     }
 
     #[test]
@@ -549,6 +848,9 @@ mod tests {
             semantic_threshold: 3,
             post_consolidation_decay: 0.3,
             archive_after_consolidation: false,
+            // Use ExactFingerprint so all 3 semantics (same fingerprint) group together
+            schema_grouping_mode: SchemaGroupingMode::ExactFingerprint,
+            ..Default::default()
         };
 
         let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
@@ -612,55 +914,42 @@ mod tests {
             semantic_threshold: 3,
             post_consolidation_decay: 0.3,
             archive_after_consolidation: false,
+            // With chunking: 9 episodics / threshold 3 = 3 full chunks, capped at max_semantics_per_bucket_per_pass=3
+            schema_grouping_mode: SchemaGroupingMode::ExactFingerprint,
+            ..Default::default()
         };
 
         let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
 
-        // Create 3 batches of 3 episodic memories (9 total), same goal bucket
+        // Create 9 episodic memories, same goal bucket
         for i in 1..=9u64 {
-            let mem = make_episodic_memory(i, 42, EpisodeOutcome::Success);
+            let mut mem = make_episodic_memory(i, 42, EpisodeOutcome::Success);
+            mem.formed_at = 1000 + i;
             store.store_consolidated_memory(mem);
         }
 
         let mut engine = ConsolidationEngine::new(config.clone(), 100);
 
-        // Phase 1: Episodic -> Semantic
+        // Single pass: Phase 1 creates 3 semantics, Phase 2 immediately creates a schema from them
         let result = engine.run_consolidation(&mut store);
-        assert_eq!(result.semantic_created, 1, "Should create 1 semantic from 9 episodics");
-
-        // All episodic memories: consolidated, schema_id = None
-        for i in 1..=9u64 {
-            let m = store.get_memory(i).unwrap();
-            assert_eq!(m.consolidation_status, ConsolidationStatus::Consolidated);
-            assert_eq!(m.schema_id, None, "After Phase 1, episodic schema_id must be None");
-        }
-
-        // The semantic memory should be active with schema_id = None
-        let all = store.list_all_memories();
-        let semantics: Vec<&Memory> = all.iter().filter(|m| m.tier == MemoryTier::Semantic).collect();
-        assert_eq!(semantics.len(), 1);
-        assert_eq!(semantics[0].schema_id, None);
-        assert_eq!(semantics[0].consolidation_status, ConsolidationStatus::Active);
-
-        // Now add 2 more semantic memories manually so we have 3 total for Schema consolidation
-        for i in 200..202u64 {
-            let mut mem = make_episodic_memory(i, 42, EpisodeOutcome::Success);
-            mem.tier = MemoryTier::Semantic;
-            mem.summary = format!("Semantic memory {}", i);
-            mem.consolidated_from = vec![i * 10, i * 10 + 1];
-            store.store_consolidated_memory(mem);
-        }
-
-        // Phase 2: Semantic -> Schema
-        let result2 = engine.run_consolidation(&mut store);
-        assert_eq!(result2.schema_created, 1, "Should create 1 schema");
+        assert_eq!(
+            result.semantic_created, 3,
+            "Should create 3 semantics from 9 episodics (3 chunks of 3)"
+        );
+        assert_eq!(
+            result.schema_created, 1,
+            "Should create 1 schema from 3 semantics in same pass"
+        );
 
         let all = store.list_all_memories();
-        let schemas: Vec<&Memory> = all.iter().filter(|m| m.tier == MemoryTier::Schema).collect();
+        let schemas: Vec<&Memory> = all
+            .iter()
+            .filter(|m| m.tier == MemoryTier::Schema)
+            .collect();
         assert_eq!(schemas.len(), 1);
         let schema_id = schemas[0].id;
 
-        // All 3 semantic memories should now have schema_id = Some(schema_id)
+        // All 3 semantic memories should have schema_id set (consolidated in same pass)
         for sem in all.iter().filter(|m| m.tier == MemoryTier::Semantic) {
             assert_eq!(sem.consolidation_status, ConsolidationStatus::Consolidated);
             assert_eq!(
@@ -670,8 +959,9 @@ mod tests {
             );
         }
 
-        // Episodic memories must still have schema_id = None
+        // Episodic memories: consolidated, but schema_id must remain None
         for ep in all.iter().filter(|m| m.tier == MemoryTier::Episodic) {
+            assert_eq!(ep.consolidation_status, ConsolidationStatus::Consolidated);
             assert_eq!(
                 ep.schema_id, None,
                 "Episodic memories must never get schema_id set"
@@ -688,6 +978,7 @@ mod tests {
             semantic_threshold: 3,
             post_consolidation_decay: 0.3,
             archive_after_consolidation: false,
+            ..Default::default()
         };
 
         let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
@@ -697,7 +988,7 @@ mod tests {
         let shared_bucket = 777u64;
         for i in 1..=4u64 {
             let ctx = EventContext {
-                fingerprint: 1000 + i, // Each has a unique fingerprint
+                fingerprint: 1000 + i,         // Each has a unique fingerprint
                 goal_bucket_id: shared_bucket, // But same goal bucket
                 ..Default::default()
             };
@@ -731,12 +1022,16 @@ mod tests {
         let mut engine = ConsolidationEngine::new(config, 100);
         let result = engine.run_consolidation(&mut store);
 
-        // All 4 should consolidate into 1 semantic despite different fingerprints
+        // With chunking: 4 episodics / threshold 3 = 1 full chunk of 3
         assert_eq!(
             result.semantic_created, 1,
             "Memories with same goal_bucket_id but different fingerprints must consolidate"
         );
-        assert_eq!(result.consolidated_episode_ids.len(), 4);
+        assert_eq!(
+            result.consolidated_episode_ids.len(),
+            3,
+            "Only 1 full chunk of 3 processed"
+        );
     }
 
     #[test]
@@ -748,6 +1043,7 @@ mod tests {
             semantic_threshold: 3,
             post_consolidation_decay: 0.3,
             archive_after_consolidation: false,
+            ..Default::default()
         };
 
         let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
@@ -771,4 +1067,202 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_multi_semantic_and_schema_in_one_run() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+            max_semantics_per_bucket_per_pass: 3,
+            schema_grouping_mode: SchemaGroupingMode::ExactFingerprint,
+            ..Default::default()
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // 9 episodics with same goal bucket -> 3 semantics (3 chunks of 3) -> 1 schema
+        for i in 1..=9u64 {
+            let mut mem = make_episodic_memory(i, 42, EpisodeOutcome::Success);
+            mem.formed_at = 1000 + i;
+            store.store_consolidated_memory(mem);
+        }
+
+        let mut engine = ConsolidationEngine::new(config, 100);
+        let result = engine.run_consolidation(&mut store);
+
+        assert_eq!(
+            result.semantic_created, 3,
+            "9 episodics / 3 threshold = 3 semantics"
+        );
+        assert_eq!(
+            result.consolidated_episode_ids.len(),
+            9,
+            "All 9 episodics consumed"
+        );
+        assert_eq!(
+            result.schema_created, 1,
+            "3 semantics >= threshold 3 = 1 schema"
+        );
+        assert_eq!(
+            result.consolidated_semantic_ids.len(),
+            3,
+            "All 3 semantics consumed"
+        );
+
+        let all = store.list_all_memories();
+        let schemas: Vec<&Memory> = all
+            .iter()
+            .filter(|m| m.tier == MemoryTier::Schema)
+            .collect();
+        assert_eq!(schemas.len(), 1);
+    }
+
+    fn make_semantic_with_embedding(
+        id: MemoryId,
+        goal_bucket: u64,
+        fingerprint: u64,
+        embedding: Vec<f32>,
+    ) -> Memory {
+        let ctx = EventContext {
+            fingerprint,
+            goal_bucket_id: goal_bucket,
+            ..Default::default()
+        };
+
+        Memory {
+            id,
+            agent_id: 1,
+            session_id: 0,
+            episode_id: 0,
+            summary: format!("Semantic memory {}", id),
+            takeaway: format!("Pattern {}", id),
+            causal_note: String::new(),
+            summary_embedding: embedding,
+            tier: MemoryTier::Semantic,
+            consolidated_from: vec![id * 10, id * 10 + 1],
+            schema_id: None,
+            consolidation_status: ConsolidationStatus::Active,
+            context: ctx,
+            key_events: Vec::new(),
+            strength: 0.8,
+            relevance_score: 0.7,
+            formed_at: 1000 + id,
+            last_accessed: 1000 + id,
+            access_count: 0,
+            outcome: EpisodeOutcome::Success,
+            memory_type: MemoryType::Semantic,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_embedding_schema_grouping_centroid() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+            schema_grouping_mode: SchemaGroupingMode::EmbeddingCentroid,
+            schema_similarity_threshold: 0.80,
+            ..Default::default()
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // 3 semantics with similar embeddings but DIFFERENT fingerprints
+        // These should cluster via embedding similarity, NOT fingerprint
+        let emb1 = vec![1.0, 0.0, 0.0];
+        let emb2 = vec![0.98, 0.1, 0.0]; // cosine ~0.995 with emb1
+        let emb3 = vec![0.95, 0.15, 0.0]; // cosine ~0.988 with emb1
+
+        store.store_consolidated_memory(make_semantic_with_embedding(50, 42, 1000, emb1));
+        store.store_consolidated_memory(make_semantic_with_embedding(51, 42, 2000, emb2));
+        store.store_consolidated_memory(make_semantic_with_embedding(52, 42, 3000, emb3));
+
+        let mut engine = ConsolidationEngine::new(config, 200);
+        let result = engine.run_consolidation(&mut store);
+
+        assert_eq!(
+            result.schema_created, 1,
+            "Similar embeddings should form 1 schema via centroid clustering"
+        );
+        assert_eq!(result.consolidated_semantic_ids.len(), 3);
+
+        let all = store.list_all_memories();
+        let schemas: Vec<&Memory> = all
+            .iter()
+            .filter(|m| m.tier == MemoryTier::Schema)
+            .collect();
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(
+            schemas[0].metadata.get("grouping_mode").unwrap(),
+            "EmbeddingCentroid"
+        );
+        assert_eq!(schemas[0].metadata.get("member_count").unwrap(), "3");
+    }
+
+    #[test]
+    fn test_embedding_schema_grouping_mutual() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+            schema_grouping_mode: SchemaGroupingMode::EmbeddingMutual,
+            schema_similarity_threshold: 0.80,
+            ..Default::default()
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // 3 semantics with similar embeddings but different fingerprints
+        let emb1 = vec![1.0, 0.0, 0.0];
+        let emb2 = vec![0.98, 0.1, 0.0];
+        let emb3 = vec![0.95, 0.15, 0.0];
+
+        store.store_consolidated_memory(make_semantic_with_embedding(50, 42, 1000, emb1));
+        store.store_consolidated_memory(make_semantic_with_embedding(51, 42, 2000, emb2));
+        store.store_consolidated_memory(make_semantic_with_embedding(52, 42, 3000, emb3));
+
+        let mut engine = ConsolidationEngine::new(config, 200);
+        let result = engine.run_consolidation(&mut store);
+
+        assert_eq!(
+            result.schema_created, 1,
+            "Similar embeddings should form 1 schema via mutual clustering"
+        );
+        assert_eq!(result.consolidated_semantic_ids.len(), 3);
+
+        let all = store.list_all_memories();
+        let schemas: Vec<&Memory> = all
+            .iter()
+            .filter(|m| m.tier == MemoryTier::Schema)
+            .collect();
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(
+            schemas[0].metadata.get("grouping_mode").unwrap(),
+            "EmbeddingMutual"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_helper() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        assert!((cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
+
+        let c = vec![0.0, 1.0, 0.0];
+        assert!((cosine_similarity(&a, &c)).abs() < 1e-6);
+
+        // Empty
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0], &[1.0, 2.0]), 0.0);
+    }
 }

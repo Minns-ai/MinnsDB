@@ -95,7 +95,7 @@ fn insert_sorted_unique(v: &mut Vec<NodeId>, x: NodeId) -> bool {
         Err(i) => {
             v.insert(i, x);
             true
-        }
+        },
     }
 }
 
@@ -105,7 +105,7 @@ fn remove_sorted(v: &mut Vec<NodeId>, x: NodeId) -> bool {
         Ok(i) => {
             v.remove(i);
             true
-        }
+        },
         Err(_) => false,
     }
 }
@@ -221,7 +221,7 @@ impl RedbGraphStore {
                 let value = serde_json::from_slice(&bytes)
                     .map_err(|e| GraphStoreError::Serialization(e.to_string()))?;
                 Ok(Some(value))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -421,7 +421,11 @@ impl RedbGraphStore {
 
         // Forward adjacency (from -> neighbors)
         {
-            let mut neighbors = partition.forward_edges.get(&from).cloned().unwrap_or_default();
+            let mut neighbors = partition
+                .forward_edges
+                .get(&from)
+                .cloned()
+                .unwrap_or_default();
             let changed = remove_sorted(&mut neighbors, to);
             if changed {
                 let fwd_key = make_adjacency_forward_key(bucket, from);
@@ -443,7 +447,11 @@ impl RedbGraphStore {
 
         // Reverse adjacency (to -> predecessors)
         {
-            let mut preds = partition.reverse_edges.get(&to).cloned().unwrap_or_default();
+            let mut preds = partition
+                .reverse_edges
+                .get(&to)
+                .cloned()
+                .unwrap_or_default();
             let changed = remove_sorted(&mut preds, from);
             if changed {
                 let rev_key = make_adjacency_reverse_key(bucket, to);
@@ -983,7 +991,7 @@ impl GraphStore for RedbGraphStore {
 mod tests {
     use super::*;
     use crate::graph_store::{GraphEdgeType, GraphNodeType};
-    use agent_db_storage::{RedbConfig, RedbBackend};
+    use agent_db_storage::{RedbBackend, RedbConfig};
     use tempfile::TempDir;
 
     fn create_test_store() -> (RedbGraphStore, TempDir) {
@@ -1029,16 +1037,14 @@ mod tests {
         let bucket = 1;
 
         for id in [100u64, 101u64, 102u64] {
-            store.add_node(bucket, create_test_node(id, bucket)).unwrap();
+            store
+                .add_node(bucket, create_test_node(id, bucket))
+                .unwrap();
         }
 
         // 102 -> 100, 100 -> 101
-        store
-            .add_edge(bucket, create_test_edge(102, 100))
-            .unwrap();
-        store
-            .add_edge(bucket, create_test_edge(100, 101))
-            .unwrap();
+        store.add_edge(bucket, create_test_edge(102, 100)).unwrap();
+        store.add_edge(bucket, create_test_edge(100, 101)).unwrap();
 
         store.delete_node(bucket, 100).unwrap();
 
@@ -1311,7 +1317,9 @@ mod tests {
         let bucket = 1;
 
         // Create a star graph with center 100
-        store.add_node(bucket, create_test_node(100, bucket)).unwrap();
+        store
+            .add_node(bucket, create_test_node(100, bucket))
+            .unwrap();
         for i in 101..105 {
             store.add_node(bucket, create_test_node(i, bucket)).unwrap();
             store.add_edge(bucket, create_test_edge(100, i)).unwrap();
@@ -1404,7 +1412,9 @@ mod tests {
         let bucket = 1;
 
         // Create a node with many sequential neighbors (good compression case)
-        store.add_node(bucket, create_test_node(100, bucket)).unwrap();
+        store
+            .add_node(bucket, create_test_node(100, bucket))
+            .unwrap();
         for i in 200..300 {
             store.add_node(bucket, create_test_node(i, bucket)).unwrap();
             store.add_edge(bucket, create_test_edge(100, i)).unwrap();
@@ -1427,7 +1437,9 @@ mod tests {
 
         // Nodes: 100, 101, 102
         for id in [100u64, 101u64, 102u64] {
-            store.add_node(bucket, create_test_node(id, bucket)).unwrap();
+            store
+                .add_node(bucket, create_test_node(id, bucket))
+                .unwrap();
         }
 
         // 100 -> 101 and 102 -> 100

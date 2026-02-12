@@ -41,7 +41,13 @@ pub trait MemoryStore: Send + Sync {
     /// Mark a memory as consolidated, linking it to a higher-tier memory and applying decay.
     /// When `into_tier` is `Schema`, sets `schema_id = Some(into_id)`.
     /// When `into_tier` is `Semantic`, leaves `schema_id` unchanged (None).
-    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, into_tier: crate::memory::MemoryTier, decay: f32);
+    fn mark_consolidated(
+        &mut self,
+        memory_id: MemoryId,
+        into_id: MemoryId,
+        into_tier: crate::memory::MemoryTier,
+        decay: f32,
+    );
     /// Schema-first retrieval: returns Schema > Semantic > Episodic, preferring higher tiers
     fn retrieve_hierarchical(
         &mut self,
@@ -120,8 +126,15 @@ impl MemoryStore for InMemoryMemoryStore {
         self.inner.store_direct(memory);
     }
 
-    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, into_tier: crate::memory::MemoryTier, decay: f32) {
-        self.inner.mark_consolidated(memory_id, into_id, into_tier, decay);
+    fn mark_consolidated(
+        &mut self,
+        memory_id: MemoryId,
+        into_id: MemoryId,
+        into_tier: crate::memory::MemoryTier,
+        decay: f32,
+    ) {
+        self.inner
+            .mark_consolidated(memory_id, into_id, into_tier, decay);
     }
 
     fn retrieve_hierarchical(
@@ -724,7 +737,13 @@ impl MemoryStore for RedbMemoryStore {
         self.cache_memory(memory);
     }
 
-    fn mark_consolidated(&mut self, memory_id: MemoryId, into_id: MemoryId, into_tier: crate::memory::MemoryTier, decay: f32) {
+    fn mark_consolidated(
+        &mut self,
+        memory_id: MemoryId,
+        into_id: MemoryId,
+        into_tier: crate::memory::MemoryTier,
+        decay: f32,
+    ) {
         // Update in cache or load from redb
         if let Some(entry) = self.memory_cache.get_mut(&memory_id) {
             entry.memory.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
@@ -922,7 +941,11 @@ impl StrategyStore for InMemoryStrategyStore {
     }
 
     fn list_all_strategies(&self) -> Vec<Strategy> {
-        self.inner.list_all_strategies().into_iter().cloned().collect()
+        self.inner
+            .list_all_strategies()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -1364,9 +1387,7 @@ impl StrategyStore for RedbStrategyStore {
             {
                 let _ = self.delete_strategy(&strategy);
             } else {
-                let _ = self
-                    .backend
-                    .delete("strategy_records", id.to_be_bytes());
+                let _ = self.backend.delete("strategy_records", id.to_be_bytes());
             }
         }
 

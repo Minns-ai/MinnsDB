@@ -71,10 +71,10 @@ impl ClaimType {
     /// After `half_life` seconds the temporal weight drops to 0.5.
     pub fn half_life_secs(&self) -> f64 {
         match self {
-            ClaimType::Intention => 3.0 * 86_400.0,   // 3 days
-            ClaimType::Belief => 14.0 * 86_400.0,     // 14 days
+            ClaimType::Intention => 3.0 * 86_400.0,    // 3 days
+            ClaimType::Belief => 14.0 * 86_400.0,      // 14 days
             ClaimType::Preference => 30.0 * 86_400.0,  // 30 days
-            ClaimType::Capability => 180.0 * 86_400.0,  // 180 days
+            ClaimType::Capability => 180.0 * 86_400.0, // 180 days
             ClaimType::Fact => 365.0 * 86_400.0,       // 365 days
         }
     }
@@ -156,7 +156,6 @@ pub struct DerivedClaim {
     pub metadata: HashMap<String, String>,
 
     // ── New fields (P0 upgrade) ──────────────────────────────────────────
-
     /// Semantic type of this claim (Preference, Fact, Belief, …)
     #[serde(default)]
     pub claim_type: ClaimType,
@@ -465,12 +464,18 @@ mod tests {
 
     #[test]
     fn test_claim_type_from_str_loose() {
-        assert_eq!(ClaimType::from_str_loose("preference"), ClaimType::Preference);
+        assert_eq!(
+            ClaimType::from_str_loose("preference"),
+            ClaimType::Preference
+        );
         assert_eq!(ClaimType::from_str_loose("Fact"), ClaimType::Fact);
         assert_eq!(ClaimType::from_str_loose("BELIEF"), ClaimType::Belief);
         assert_eq!(ClaimType::from_str_loose("intention"), ClaimType::Intention);
         assert_eq!(ClaimType::from_str_loose("intent"), ClaimType::Intention);
-        assert_eq!(ClaimType::from_str_loose("capability"), ClaimType::Capability);
+        assert_eq!(
+            ClaimType::from_str_loose("capability"),
+            ClaimType::Capability
+        );
         assert_eq!(ClaimType::from_str_loose("unknown"), ClaimType::Fact); // default
     }
 

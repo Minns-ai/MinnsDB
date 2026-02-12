@@ -233,6 +233,14 @@ pub struct PlaybookStep {
     /// Recovery instruction if this step fails
     #[serde(default)]
     pub recovery: String,
+
+    /// Unique identifier for this step (for non-linear playbook navigation)
+    #[serde(default)]
+    pub step_id: String,
+
+    /// ID of the step to execute after this one (overrides sequential ordering)
+    #[serde(default)]
+    pub next_step_id: Option<String>,
 }
 
 /// A branch in a playbook step
@@ -242,6 +250,9 @@ pub struct PlaybookBranch {
     pub condition: String,
     /// What to do when this condition is met
     pub action: String,
+    /// ID of the step to jump to when this branch is taken
+    #[serde(default)]
+    pub next_step_id: Option<String>,
 }
 
 /// A single reasoning step in a strategy
@@ -2102,8 +2113,7 @@ impl StrategyExtractor {
             .strategies
             .values()
             .filter(|s| {
-                let hours_since_use =
-                    (now.saturating_sub(s.last_used) / hour_ns) as f32;
+                let hours_since_use = (now.saturating_sub(s.last_used) / hour_ns) as f32;
 
                 // Remove if BOTH low confidence and low support
                 let weak = s.confidence < min_confidence && s.support_count < min_support;
@@ -2184,7 +2194,11 @@ impl StrategyExtractor {
                     let b_words: HashSet<&str> = b.action_hint.split_whitespace().collect();
                     let intersection = a_words.intersection(&b_words).count() as f32;
                     let union = a_words.union(&b_words).count() as f32;
-                    let jaccard = if union > 0.0 { intersection / union } else { 0.0 };
+                    let jaccard = if union > 0.0 {
+                        intersection / union
+                    } else {
+                        0.0
+                    };
 
                     if jaccard >= 0.70 {
                         // Merge weaker into stronger
@@ -2228,13 +2242,15 @@ impl StrategyExtractor {
                 if let Some(ids) = self.agent_strategies.get_mut(&victim_strategy.agent_id) {
                     ids.retain(|sid| *sid != victim);
                 }
-                if let Some(ids) =
-                    self.goal_bucket_index.get_mut(&victim_strategy.goal_bucket_id)
+                if let Some(ids) = self
+                    .goal_bucket_index
+                    .get_mut(&victim_strategy.goal_bucket_id)
                 {
                     ids.retain(|sid| *sid != victim);
                 }
-                if let Some(ids) =
-                    self.behavior_index.get_mut(&victim_strategy.behavior_signature)
+                if let Some(ids) = self
+                    .behavior_index
+                    .get_mut(&victim_strategy.behavior_signature)
                 {
                     ids.retain(|sid| *sid != victim);
                 }
@@ -2246,7 +2262,10 @@ impl StrategyExtractor {
         }
 
         if merged > 0 {
-            tracing::info!("Strategy merge: combined {} near-duplicate strategies", merged);
+            tracing::info!(
+                "Strategy merge: combined {} near-duplicate strategies",
+                merged
+            );
         }
         merged
     }
@@ -2645,6 +2664,7 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
                             branches.push(PlaybookBranch {
                                 condition: "If this pattern appears".to_string(),
                                 action: format!("Skip '{}' and use alternative", action_name),
+                                next_step_id: None,
                             });
                         }
                     },
@@ -2657,6 +2677,8 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
                     skip_if: String::new(),
                     branches,
                     recovery,
+                    step_id: String::new(),
+                    next_step_id: None,
                 });
                 step_num += 1;
             },
@@ -2670,6 +2692,8 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
                     skip_if: "No input available".to_string(),
                     branches: Vec::new(),
                     recovery: String::new(),
+                    step_id: String::new(),
+                    next_step_id: None,
                 });
                 step_num += 1;
             },
@@ -2683,6 +2707,8 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
                     skip_if: String::new(),
                     branches: Vec::new(),
                     recovery: String::new(),
+                    step_id: String::new(),
+                    next_step_id: None,
                 });
                 step_num += 1;
             },
@@ -2694,6 +2720,8 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
                     skip_if: String::new(),
                     branches: Vec::new(),
                     recovery: String::new(),
+                    step_id: String::new(),
+                    next_step_id: None,
                 });
                 step_num += 1;
             },
@@ -2827,11 +2855,7 @@ mod tests {
             },
         ];
 
-        let ctx = EventContext::new(
-            Default::default(),
-            goals.clone(),
-            Default::default(),
-        );
+        let ctx = EventContext::new(Default::default(), goals.clone(), Default::default());
 
         let strategy_bucket = compute_goal_bucket_id_from_ids(&[10, 3]);
 

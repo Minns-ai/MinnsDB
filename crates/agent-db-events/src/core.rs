@@ -1088,12 +1088,16 @@ mod tests {
         );
 
         // Different fingerprints (env differs)
-        assert_ne!(ctx_a.fingerprint, ctx_b.fingerprint,
-            "Different environments must produce different fingerprints");
+        assert_ne!(
+            ctx_a.fingerprint, ctx_b.fingerprint,
+            "Different environments must produce different fingerprints"
+        );
 
         // Same goal_bucket_id (goals are identical)
-        assert_eq!(ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
-            "Same goals must produce same goal_bucket_id regardless of environment");
+        assert_eq!(
+            ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
+            "Same goals must produce same goal_bucket_id regardless of environment"
+        );
         assert_ne!(ctx_a.goal_bucket_id, 0, "goal_bucket_id should be computed");
     }
 
@@ -1125,8 +1129,10 @@ mod tests {
             ResourceState::default(),
         );
 
-        assert_ne!(ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
-            "Different goal sets must produce different goal_bucket_ids");
+        assert_ne!(
+            ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
+            "Different goal sets must produce different goal_bucket_ids"
+        );
     }
 
     #[test]
@@ -1150,12 +1156,16 @@ mod tests {
         let ctx_b = make_ctx(0.9);
 
         // goal_bucket_id should be the same (priority is excluded from bucket hash)
-        assert_eq!(ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
-            "goal_bucket_id must not change when only priority differs");
+        assert_eq!(
+            ctx_a.goal_bucket_id, ctx_b.goal_bucket_id,
+            "goal_bucket_id must not change when only priority differs"
+        );
 
         // But fingerprints differ (priority IS included in fingerprint)
-        assert_ne!(ctx_a.fingerprint, ctx_b.fingerprint,
-            "fingerprint should differ when priority changes");
+        assert_ne!(
+            ctx_a.fingerprint, ctx_b.fingerprint,
+            "fingerprint should differ when priority changes"
+        );
     }
 
     fn create_test_context() -> EventContext {

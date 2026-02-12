@@ -106,10 +106,11 @@ pub async fn persist_graph(
 ) -> Result<Json<GraphPersistResponse>, ApiError> {
     info!("Force-persisting graph state to disk");
 
-    let (nodes_persisted, edges_persisted) =
-        state.engine.persist_graph_state().await.map_err(|e| {
-            ApiError::Internal(format!("Graph persistence failed: {}", e))
-        })?;
+    let (nodes_persisted, edges_persisted) = state
+        .engine
+        .persist_graph_state()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Graph persistence failed: {}", e)))?;
 
     Ok(Json(GraphPersistResponse {
         success: true,

@@ -97,20 +97,18 @@ impl Graph {
         // Auto-link to NER entities attached to the claim (with proper labels)
         for entity in &claim.entities {
             // Find or create concept node for entity, using the NER label
-            let concept_type =
-                crate::structures::ConceptType::from_ner_label(&entity.label);
+            let concept_type = crate::structures::ConceptType::from_ner_label(&entity.label);
 
-            let entity_node_id =
-                if let Some(node) = self.get_concept_node(&entity.text) {
-                    node.id
-                } else {
-                    let new_node = GraphNode::new(NodeType::Concept {
-                        concept_name: entity.text.clone(),
-                        concept_type,
-                        confidence: claim.confidence,
-                    });
-                    self.add_node(new_node)
-                };
+            let entity_node_id = if let Some(node) = self.get_concept_node(&entity.text) {
+                node.id
+            } else {
+                let new_node = GraphNode::new(NodeType::Concept {
+                    concept_name: entity.text.clone(),
+                    concept_type,
+                    confidence: claim.confidence,
+                });
+                self.add_node(new_node)
+            };
 
             // Link claim to entity
             self.link_claim_to_entity(claim.id, entity_node_id, 0.9);
@@ -125,18 +123,16 @@ impl Graph {
                         continue;
                     }
 
-                    let entity_node_id =
-                        if let Some(node) = self.get_concept_node(entity_name) {
-                            node.id
-                        } else {
-                            let new_node = GraphNode::new(NodeType::Concept {
-                                concept_name: entity_name.to_string(),
-                                concept_type:
-                                    crate::structures::ConceptType::ContextualAssociation,
-                                confidence: claim.confidence,
-                            });
-                            self.add_node(new_node)
-                        };
+                    let entity_node_id = if let Some(node) = self.get_concept_node(entity_name) {
+                        node.id
+                    } else {
+                        let new_node = GraphNode::new(NodeType::Concept {
+                            concept_name: entity_name.to_string(),
+                            concept_type: crate::structures::ConceptType::ContextualAssociation,
+                            confidence: claim.confidence,
+                        });
+                        self.add_node(new_node)
+                    };
 
                     self.link_claim_to_entity(claim.id, entity_node_id, 0.9);
                 }
@@ -726,7 +722,10 @@ impl GraphEngine {
                 crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
             })?;
 
-        debug!("Found {} candidate claims for re-ranking", similar_ids.len());
+        debug!(
+            "Found {} candidate claims for re-ranking",
+            similar_ids.len()
+        );
 
         // Retrieve full claims and compute temporally-weighted retrieval score
         let mut results: Vec<(crate::claims::DerivedClaim, f32)> = Vec::new();

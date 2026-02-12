@@ -89,20 +89,20 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
                 let outcome_str = match outcome {
                     ActionOutcome::Success { result } => {
                         format!("succeeded: {}", truncate_value(result, 120))
-                    }
+                    },
                     ActionOutcome::Failure { error, .. } => {
                         format!("failed: {}", truncate_str(error, 120))
-                    }
+                    },
                     ActionOutcome::Partial { result, issues } => {
                         format!(
                             "partial: {} (issues: {:?})",
                             truncate_value(result, 80),
                             issues
                         )
-                    }
+                    },
                 };
                 actions.push(format!("'{}' {}", action_name, outcome_str));
-            }
+            },
             EventType::Observation {
                 observation_type,
                 data,
@@ -117,10 +117,12 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
                     confidence * 100.0,
                     truncate_value(data, 150)
                 ));
-            }
-            EventType::Context { text, context_type, .. } => {
+            },
+            EventType::Context {
+                text, context_type, ..
+            } => {
                 context_texts.push(format!("[{}] {}", context_type, truncate_str(text, 200)));
-            }
+            },
             EventType::Communication {
                 message_type,
                 sender,
@@ -134,8 +136,8 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
                     recipient,
                     truncate_value(content, 150)
                 ));
-            }
-            _ => {} // Cognitive & Learning are internal machinery, skip for narrative
+            },
+            _ => {}, // Cognitive & Learning are internal machinery, skip for narrative
         }
     }
 
@@ -209,17 +211,17 @@ pub fn synthesize_causal_note(episode: &Episode, events: &[Event]) -> String {
                 ActionOutcome::Success { .. } => {
                     successes += 1;
                     last_success_action = action_name.clone();
-                }
+                },
                 ActionOutcome::Failure { error, .. } => {
                     failures += 1;
                     last_failure_error = error.clone();
-                }
+                },
                 ActionOutcome::Partial { issues, .. } => {
                     causes.push(format!(
                         "Action '{}' partially succeeded with issues: {:?}",
                         action_name, issues
                     ));
-                }
+                },
             }
         }
     }
@@ -247,10 +249,13 @@ pub fn synthesize_causal_note(episode: &Episode, events: &[Event]) -> String {
                     ));
                 }
             }
-        }
+        },
         EpisodeOutcome::Failure => {
             if !last_failure_error.is_empty() {
-                causes.push(format!("Failed because: {}", truncate_str(&last_failure_error, 200)));
+                causes.push(format!(
+                    "Failed because: {}",
+                    truncate_str(&last_failure_error, 200)
+                ));
             } else {
                 causes.push("Episode ended in failure without a clear action error".to_string());
             }
@@ -260,16 +265,16 @@ pub fn synthesize_causal_note(episode: &Episode, events: &[Event]) -> String {
                     successes
                 ));
             }
-        }
+        },
         EpisodeOutcome::Partial => {
             causes.push(format!(
                 "Partial: {} action(s) succeeded, {} failed",
                 successes, failures
             ));
-        }
+        },
         EpisodeOutcome::Interrupted => {
             causes.push("Episode was interrupted before completion".to_string());
-        }
+        },
     }
 
     if episode.prediction_error > 0.3 {
@@ -306,12 +311,12 @@ pub fn synthesize_takeaway(episode: &Episode, events: &[Event]) -> String {
                 (EpisodeOutcome::Success, ActionOutcome::Success { .. }) => {
                     pivotal_action = Some((action_name, action_out));
                     break;
-                }
+                },
                 (EpisodeOutcome::Failure, ActionOutcome::Failure { .. }) => {
                     pivotal_action = Some((action_name, action_out));
                     break;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -350,14 +355,20 @@ pub fn synthesize_takeaway(episode: &Episode, events: &[Event]) -> String {
             episode.significance * 100.0
         ),
         (EpisodeOutcome::Failure, _) => {
-            format!("Failed '{}' — review approach for this context to avoid repeating.", goal_str)
-        }
+            format!(
+                "Failed '{}' — review approach for this context to avoid repeating.",
+                goal_str
+            )
+        },
         (EpisodeOutcome::Partial, _) => format!(
             "Partially completed '{}' — some actions succeeded, others need improvement.",
             goal_str
         ),
         (EpisodeOutcome::Interrupted, _) => {
-            format!("'{}' was interrupted — retry when context is stable.", goal_str)
-        }
+            format!(
+                "'{}' was interrupted — retry when context is stable.",
+                goal_str
+            )
+        },
     }
 }
