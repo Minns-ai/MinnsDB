@@ -733,7 +733,7 @@ fn test_redb_goal_bucket_index() {
     assert_ne!(shared_bucket, 0, "goal_bucket_id should be computed");
 
     for i in 1..=3u64 {
-        let mut ctx = EventContext::new(
+        let ctx = EventContext::new(
             EnvironmentState {
                 variables: {
                     let mut v = HashMap::new();
