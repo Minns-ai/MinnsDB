@@ -390,18 +390,7 @@ pub struct LearningMetrics {
     pub average_edge_weight: f32,
 }
 
-/// Helper trait to add node_count and edge_count to Graph
-impl Graph {
-    /// Get node count
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
-    }
-
-    /// Get edge count
-    pub fn edge_count(&self) -> usize {
-        self.edges.len()
-    }
-}
+// node_count() and edge_count() are defined in structures.rs
 
 // Graph cloning removed to avoid expensive analytics copies.
 

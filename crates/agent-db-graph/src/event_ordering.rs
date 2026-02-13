@@ -43,6 +43,12 @@ pub struct OrderingConfig {
 
     /// Maximum clock skew tolerance (milliseconds)
     pub max_clock_skew_ms: u64,
+
+    /// Maximum entries in the global timeline BTreeMap
+    pub max_global_timeline_size: usize,
+
+    /// Maximum entries in the processed_event_ids set
+    pub max_processed_ids_size: usize,
 }
 
 impl Default for OrderingConfig {
@@ -54,6 +60,8 @@ impl Default for OrderingConfig {
             watermark_window_ms: 5000, // 5 second watermark window
             strict_causality: true,
             max_clock_skew_ms: 10000, // 10 second clock skew tolerance
+            max_global_timeline_size: 10_000,
+            max_processed_ids_size: 100_000,
         }
     }
 }
@@ -445,6 +453,24 @@ impl EventOrderingEngine {
 
             global_buffer.last_processed_timestamp =
                 global_buffer.last_processed_timestamp.max(event.timestamp);
+        }
+
+        // Evict oldest timeline entries when over cap
+        let timeline_cap = self.config.max_global_timeline_size;
+        while global_buffer.timeline.len() > timeline_cap {
+            global_buffer.timeline.pop_first();
+        }
+
+        // Clear processed_event_ids when over cap (old events won't be reprocessed)
+        if global_buffer.processed_event_ids.len() > self.config.max_processed_ids_size {
+            // Collect remaining IDs from timeline, then rebuild the set
+            let remaining_ids: Vec<EventId> = global_buffer
+                .timeline
+                .values()
+                .flat_map(|evs| evs.iter().map(|ev| ev.id))
+                .collect();
+            global_buffer.processed_event_ids.clear();
+            global_buffer.processed_event_ids.extend(remaining_ids);
         }
     }
 

@@ -36,6 +36,12 @@ pub struct InferenceConfig {
 
     /// Maximum events to consider in batch processing
     pub batch_size: usize,
+
+    /// Maximum entries in the context similarity cache (cleared when exceeded)
+    pub max_context_cache_size: usize,
+
+    /// Maximum temporal patterns to keep (lowest-confidence pruned when exceeded)
+    pub max_temporal_patterns: usize,
 }
 
 /// Statistics about inference operations
@@ -104,6 +110,8 @@ impl Default for InferenceConfig {
             temporal_decay_factor: 0.95,
             context_similarity_threshold: 0.7,
             batch_size: 1000,
+            max_context_cache_size: 10_000,
+            max_temporal_patterns: 1_000,
         }
     }
 }
@@ -271,6 +279,19 @@ impl GraphInference {
     /// Get contextual associations
     pub fn get_contextual_associations(&self) -> &[ContextualAssociation] {
         &self.contextual_associations
+    }
+
+    /// Enforce bounded caps on context_similarity_cache and temporal_patterns.
+    /// Called from the maintenance loop as a safety net.
+    pub fn enforce_memory_caps(&mut self) {
+        if self.context_similarity_cache.len() > self.config.max_context_cache_size {
+            self.context_similarity_cache.clear();
+        }
+        if self.temporal_patterns.len() > self.config.max_temporal_patterns {
+            self.temporal_patterns
+                .sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+            self.temporal_patterns.truncate(self.config.max_temporal_patterns * 4 / 5);
+        }
     }
 
     // Private helper methods
@@ -925,6 +946,13 @@ impl GraphInference {
             }
         }
 
+        // Prune lowest-confidence patterns when over cap (remove bottom 20%)
+        if self.temporal_patterns.len() > self.config.max_temporal_patterns {
+            self.temporal_patterns
+                .sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+            self.temporal_patterns.truncate(self.config.max_temporal_patterns * 4 / 5);
+        }
+
         Ok(())
     }
 
@@ -1076,6 +1104,11 @@ impl GraphInference {
 
         // Cache result
         self.context_similarity_cache.insert(cache_key, similarity);
+
+        // Clear cache entirely when over cap (simple O(1), rebuilds lazily)
+        if self.context_similarity_cache.len() > self.config.max_context_cache_size {
+            self.context_similarity_cache.clear();
+        }
 
         similarity
     }

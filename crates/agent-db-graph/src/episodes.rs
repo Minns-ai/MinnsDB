@@ -109,6 +109,9 @@ pub struct EpisodeDetectorConfig {
 
     /// Late event correction window (nanoseconds)
     pub late_event_window_ns: u64,
+
+    /// Maximum completed episodes to keep in memory (ring-buffer cap)
+    pub max_completed_episodes: usize,
 }
 
 impl Default for EpisodeDetectorConfig {
@@ -120,6 +123,7 @@ impl Default for EpisodeDetectorConfig {
             min_events_per_episode: 3,
             consolidation_interval_ns: 3_600_000_000_000, // 1 hour
             late_event_window_ns: 5_000_000_000,          // 5 seconds
+            max_completed_episodes: 5_000,
         }
     }
 }
@@ -466,6 +470,7 @@ impl EpisodeDetector {
                 episode.outcome
             );
             self.completed_episodes.push(episode.clone());
+            self.enforce_completed_episodes_cap();
         } else {
             tracing::info!(
                 "EpisodeDetector discarded episode_id={} events={} significance={:.3} min_events={} min_sig={:.3}",
@@ -846,6 +851,7 @@ impl EpisodeDetector {
 
                 if episode.significance >= self.config.min_significance_threshold {
                     self.completed_episodes.push(episode);
+                    self.enforce_completed_episodes_cap();
                     return Some(episode_id);
                 }
             }
@@ -875,6 +881,15 @@ impl EpisodeDetector {
             .iter()
             .filter(|e| e.agent_id == agent_id)
             .collect()
+    }
+
+    /// Enforce the completed_episodes cap by draining oldest entries
+    fn enforce_completed_episodes_cap(&mut self) {
+        let cap = self.config.max_completed_episodes;
+        if self.completed_episodes.len() > cap {
+            let excess = self.completed_episodes.len() - cap;
+            self.completed_episodes.drain(..excess);
+        }
     }
 }
 

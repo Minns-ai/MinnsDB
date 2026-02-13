@@ -436,6 +436,90 @@ impl ClaimStore {
         self.index.read().map(|idx| idx.entries.len()).unwrap_or(0)
     }
 
+    /// Enforce a cap on the in-memory vector index.
+    ///
+    /// When the index exceeds `max_size`, the oldest claims (by `created_at`)
+    /// are moved to `Dormant` status, removing them from the search index.
+    /// Returns the number of claims evicted.
+    pub fn enforce_vector_index_cap(&self, max_size: usize) -> Result<usize> {
+        let current_size = self.vector_index_size();
+        if current_size <= max_size {
+            return Ok(0);
+        }
+
+        // Collect all active claim IDs with their created_at timestamps
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(CLAIMS_TABLE)?;
+
+        let mut active_claims: Vec<(ClaimId, u64)> = Vec::new(); // (id, created_at)
+        for item in table.iter()? {
+            let (id_guard, value) = item?;
+            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            if claim.status == ClaimStatus::Active && !claim.embedding.is_empty() {
+                active_claims.push((id_guard.value(), claim.created_at));
+            }
+        }
+        drop(table);
+        drop(read_txn);
+
+        // Sort by created_at ascending (oldest first)
+        active_claims.sort_by_key(|&(_, created_at)| created_at);
+
+        // Evict oldest until we're at cap
+        let to_evict = active_claims.len().saturating_sub(max_size);
+        let mut evicted = 0usize;
+        for &(claim_id, _) in active_claims.iter().take(to_evict) {
+            self.update_status(claim_id, ClaimStatus::Dormant)?;
+            evicted += 1;
+        }
+
+        if evicted > 0 {
+            info!(
+                "Vector index cap enforced: evicted {} claims (was {}, cap {})",
+                evicted, current_size, max_size
+            );
+        }
+
+        Ok(evicted)
+    }
+
+    /// Delete all claims in non-active terminal states (Dormant, Rejected, Superseded)
+    /// from the persistent store to reclaim disk space.
+    /// Returns the number of claims purged.
+    pub fn purge_inactive_claims(&self) -> Result<usize> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(CLAIMS_TABLE)?;
+
+        let mut to_purge: Vec<ClaimId> = Vec::new();
+        for item in table.iter()? {
+            let (id_guard, value) = item?;
+            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            match claim.status {
+                ClaimStatus::Dormant | ClaimStatus::Rejected | ClaimStatus::Superseded => {
+                    to_purge.push(id_guard.value());
+                },
+                _ => {},
+            }
+        }
+        drop(table);
+        drop(read_txn);
+
+        let count = to_purge.len();
+        if count > 0 {
+            let write_txn = self.db.begin_write()?;
+            {
+                let mut table = write_txn.open_table(CLAIMS_TABLE)?;
+                for cid in &to_purge {
+                    table.remove(*cid)?;
+                }
+            }
+            write_txn.commit()?;
+            info!("Purged {} inactive claims from disk", count);
+        }
+
+        Ok(count)
+    }
+
     /// Expire all active claims whose `expires_at` is in the past.
     ///
     /// Returns the number of claims that were moved to `Dormant`.

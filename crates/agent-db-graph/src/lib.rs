@@ -128,11 +128,14 @@ pub use indexing::{IndexManager, IndexStats, IndexType, PropertyIndex};
 // Phase 5B: Graph Persistence
 pub use compression::{CompressedAdjacencyList, CompressionStats};
 pub use graph_store::{
-    BucketInfo, GraphEdge as PersistentGraphEdge, GraphEdgeType as PersistentGraphEdgeType,
-    GraphNode as PersistentGraphNode, GraphNodeType as PersistentGraphNodeType, GraphPath,
-    GraphStore, GraphStoreError, InMemoryGraphStore, Subgraph,
+    BucketInfo, EvictionTier, GraphPath, GraphStore, GraphStoreError, InMemoryGraphStore,
+    NodeHeader, Subgraph,
 };
 pub use redb_graph_store::RedbGraphStore;
+
+// Graph Pruning (streaming, bounded)
+pub mod graph_pruning;
+pub use graph_pruning::{GraphPruner, GraphPruningConfig, PruneResult};
 
 // Semantic Memory
 pub use claims::{

@@ -32,6 +32,13 @@ pub struct MaintenanceConfig {
 
     /// Cosine similarity above which we check for contradiction.
     pub claim_contradiction_threshold: f32,
+
+    // ── Claim store caps (enforced in the maintenance loop) ──
+    /// Maximum embeddings to keep in the in-memory vector index (0 = unlimited).
+    pub max_vector_index_size: usize,
+
+    /// Whether to purge inactive (Dormant/Rejected/Superseded) claims from disk.
+    pub purge_inactive_claims: bool,
 }
 
 impl Default for MaintenanceConfig {
@@ -43,6 +50,8 @@ impl Default for MaintenanceConfig {
             strategy_max_stale_hours: 72.0, // 3 days
             claim_dedup_threshold: 0.92,
             claim_contradiction_threshold: 0.85,
+            max_vector_index_size: 50_000,
+            purge_inactive_claims: true,
         }
     }
 }
@@ -52,6 +61,18 @@ impl Default for MaintenanceConfig {
 pub struct MaintenanceResult {
     pub memories_decayed: bool,
     pub strategies_pruned: usize,
+    /// Number of graph nodes merged during pruning.
+    pub graph_nodes_merged: usize,
+    /// Number of graph nodes deleted during pruning.
+    pub graph_nodes_deleted: usize,
+    /// Number of graph node headers scanned during pruning.
+    pub graph_headers_scanned: usize,
+    /// Whether graph pruning stopped early due to budget exhaustion.
+    pub graph_pruning_stopped_early: bool,
+    /// Number of transition episodes cleaned up.
+    pub transition_episodes_cleaned: usize,
+    /// Number of weak transitions pruned.
+    pub transition_entries_pruned_pass: bool,
 }
 
 // ── Negation detection for claim contradiction ─────────────────────────────

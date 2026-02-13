@@ -2,55 +2,87 @@
 //
 // Provides trait-based abstraction for storing graph nodes and edges in persistent storage.
 // Implementation uses goal-bucket partitioning for semantic sharding and efficient memory management.
+//
+// Types are unified with structures.rs — GraphNode/GraphEdge/NodeType/EdgeType are the
+// single source of truth. NodeHeader provides a lightweight scoring record (~40 bytes)
+// for streaming importance scoring without full deserialization.
 
-use crate::structures::{GoalBucketId, NodeId};
+use crate::structures::{EdgeId, GoalBucketId, NodeId};
+use agent_db_core::types::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Graph node metadata
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GraphNode {
-    pub id: NodeId,
-    pub node_type: GraphNodeType,
-    pub label: String,
-    pub context_hash: u64,
-    pub created_at: u64,
-    pub properties: serde_json::Value,
+// Re-export structures.rs types so downstream can `use graph_store::{GraphNode, ..}`
+pub use crate::structures::{EdgeType, GraphEdge, GraphNode, NodeType};
+
+// ============================================================================
+// NodeHeader — lightweight scoring record
+// ============================================================================
+
+/// Eviction tier determines how aggressively a node can be evicted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum EvictionTier {
+    /// Never evict: Agent, Goal
+    Protected = 0,
+    /// Evict only under heavy pressure: Strategy, Memory, Tool
+    Important = 1,
+    /// Normal eviction: Concept, Claim
+    Standard = 2,
+    /// Evict first: Context, Episode, Event, Result
+    Ephemeral = 3,
 }
 
-/// Types of nodes in the event graph
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum GraphNodeType {
-    Event,
-    Action,
-    Observation,
-    Cognitive,
-    Communication,
-    Learning,
-    Context,
-    Pattern,
+/// Lightweight scoring record (~40 bytes) that avoids full node deserialization.
+///
+/// Stored alongside full nodes in the cold store; scanned during pruning
+/// to determine importance without loading the full `GraphNode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeHeader {
+    pub node_id: NodeId,
+    pub node_type_discriminant: u8,
+    pub signal: f32,
+    pub tier: EvictionTier,
+    pub degree: u32,
+    pub updated_at: Timestamp,
+    pub created_at: Timestamp,
+    pub goal_bucket: GoalBucketId,
 }
 
-/// Edge metadata connecting two nodes
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GraphEdge {
-    pub from: NodeId,
-    pub to: NodeId,
-    pub edge_type: GraphEdgeType,
-    pub weight: f32,
-    pub confidence: f32,
-    pub created_at: u64,
-}
+impl NodeHeader {
+    /// Build a header from a full node.
+    pub fn from_node(node: &GraphNode, bucket: GoalBucketId) -> Self {
+        Self {
+            node_id: node.id,
+            node_type_discriminant: node.node_type.discriminant(),
+            signal: node.node_type.signal(),
+            tier: node.node_type.eviction_tier(),
+            degree: node.degree,
+            updated_at: node.updated_at,
+            created_at: node.created_at,
+            goal_bucket: bucket,
+        }
+    }
 
-/// Types of edges in the event graph
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum GraphEdgeType {
-    Causality,   // A caused B
-    Temporal,    // A happened before B
-    Similarity,  // A is similar to B
-    Containment, // A contains B (episode contains events)
-    Reference,   // A references B (context reference)
-    Transition,  // State transition A → B
+    /// Compute importance score (higher = more important, keep in RAM longer).
+    ///
+    /// Formula: `signal * tier_boost * recency_factor * degree_factor`
+    pub fn score(&self, now: Timestamp) -> f32 {
+        let tier_boost = match self.tier {
+            EvictionTier::Protected => 100.0,
+            EvictionTier::Important => 10.0,
+            EvictionTier::Standard => 1.0,
+            EvictionTier::Ephemeral => 0.1,
+        };
+
+        // Recency: exponential decay over time (nanosecond timestamps)
+        let age_ns = now.saturating_sub(self.updated_at) as f64;
+        let age_hours = age_ns / 3_600_000_000_000.0;
+        let recency = (-age_hours / 168.0).exp() as f32; // half-life ~1 week
+
+        let degree_factor = 1.0 + (self.degree as f32).ln().max(0.0);
+
+        self.signal * tier_boost * recency * degree_factor
+    }
 }
 
 /// Path through the graph
@@ -84,11 +116,10 @@ pub struct BucketInfo {
 /// Trait for persistent graph storage
 ///
 /// Provides operations for storing and querying graph structure with goal-bucket partitioning.
-/// Implementations should support:
-/// - Node and edge CRUD operations
-/// - Partition loading/unloading for memory management
-/// - Efficient neighbor queries (forward and reverse)
-/// - Graph traversal operations
+/// All types are from `structures.rs` — no separate persistence-layer types.
+///
+/// Edge operations use `EdgeId` for multi-edge support (multiple edges between
+/// the same pair of nodes with different EdgeTypes).
 pub trait GraphStore: Send + Sync {
     // ============================================================================
     // Node Operations
@@ -105,8 +136,11 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Option<GraphNode>, GraphStoreError>;
 
     /// Delete a node (and all its edges)
-    fn delete_node(&mut self, bucket: GoalBucketId, node_id: NodeId)
-        -> Result<(), GraphStoreError>;
+    fn delete_node(
+        &mut self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<(), GraphStoreError>;
 
     /// Check if a node exists
     fn has_node(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<bool, GraphStoreError>;
@@ -115,26 +149,24 @@ pub trait GraphStore: Send + Sync {
     fn get_all_nodes(&self, bucket: GoalBucketId) -> Result<Vec<GraphNode>, GraphStoreError>;
 
     // ============================================================================
-    // Edge Operations
+    // Edge Operations (EdgeId-based for multi-edge support)
     // ============================================================================
 
     /// Add an edge between two nodes
     fn add_edge(&mut self, bucket: GoalBucketId, edge: GraphEdge) -> Result<(), GraphStoreError>;
 
-    /// Get edge metadata
+    /// Get edge by EdgeId
     fn get_edge(
         &self,
         bucket: GoalBucketId,
-        from: NodeId,
-        to: NodeId,
+        edge_id: EdgeId,
     ) -> Result<Option<GraphEdge>, GraphStoreError>;
 
-    /// Delete an edge
+    /// Delete an edge by EdgeId
     fn delete_edge(
         &mut self,
         bucket: GoalBucketId,
-        from: NodeId,
-        to: NodeId,
+        edge_id: EdgeId,
     ) -> Result<(), GraphStoreError>;
 
     /// Get all outgoing neighbors (forward adjacency)
@@ -164,6 +196,27 @@ pub trait GraphStore: Send + Sync {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<Vec<GraphEdge>, GraphStoreError>;
+
+    // ============================================================================
+    // Header Operations (for streaming scoring)
+    // ============================================================================
+
+    /// Store a node header for fast scoring
+    fn store_header(
+        &mut self,
+        bucket: GoalBucketId,
+        header: NodeHeader,
+    ) -> Result<(), GraphStoreError>;
+
+    /// Scan headers across all buckets (bounded by limit)
+    fn scan_headers(&self, limit: usize) -> Result<Vec<NodeHeader>, GraphStoreError>;
+
+    /// Delete a node header
+    fn delete_header(
+        &mut self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<(), GraphStoreError>;
 
     // ============================================================================
     // Partition Operations
@@ -262,8 +315,8 @@ pub enum GraphStoreError {
     #[error("Node not found: bucket={0}, node_id={1}")]
     NodeNotFound(GoalBucketId, NodeId),
 
-    #[error("Edge not found: bucket={0}, from={1}, to={2}")]
-    EdgeNotFound(GoalBucketId, NodeId, NodeId),
+    #[error("Edge not found: bucket={0}, edge_id={1}")]
+    EdgeNotFound(GoalBucketId, EdgeId),
 
     #[error("Partition not found: {0}")]
     PartitionNotFound(GoalBucketId),
@@ -281,12 +334,20 @@ pub enum GraphStoreError {
     ConstraintViolation(String),
 }
 
-/// In-memory implementation for testing
+// ============================================================================
+// In-memory implementation for testing
+// ============================================================================
+
+/// In-memory implementation of GraphStore for testing.
+///
+/// Stores structures.rs types directly. Edges are keyed by EdgeId
+/// with forward/reverse adjacency lists tracking EdgeIds.
 pub struct InMemoryGraphStore {
     nodes: HashMap<(GoalBucketId, NodeId), GraphNode>,
-    forward_edges: HashMap<(GoalBucketId, NodeId), Vec<NodeId>>,
-    reverse_edges: HashMap<(GoalBucketId, NodeId), Vec<NodeId>>,
-    edge_metadata: HashMap<(GoalBucketId, NodeId, NodeId), GraphEdge>,
+    edges: HashMap<(GoalBucketId, EdgeId), GraphEdge>,
+    forward_edges: HashMap<(GoalBucketId, NodeId), Vec<EdgeId>>,
+    reverse_edges: HashMap<(GoalBucketId, NodeId), Vec<EdgeId>>,
+    headers: HashMap<(GoalBucketId, NodeId), NodeHeader>,
     loaded_partitions: std::collections::HashSet<GoalBucketId>,
 }
 
@@ -294,9 +355,10 @@ impl InMemoryGraphStore {
     pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
+            edges: HashMap::new(),
             forward_edges: HashMap::new(),
             reverse_edges: HashMap::new(),
-            edge_metadata: HashMap::new(),
+            headers: HashMap::new(),
             loaded_partitions: std::collections::HashSet::new(),
         }
     }
@@ -328,8 +390,34 @@ impl GraphStore for InMemoryGraphStore {
         node_id: NodeId,
     ) -> Result<(), GraphStoreError> {
         self.nodes.remove(&(bucket, node_id));
-        self.forward_edges.remove(&(bucket, node_id));
-        self.reverse_edges.remove(&(bucket, node_id));
+
+        // Remove all outgoing edges
+        if let Some(edge_ids) = self.forward_edges.remove(&(bucket, node_id)) {
+            for eid in &edge_ids {
+                if let Some(edge) = self.edges.remove(&(bucket, *eid)) {
+                    // Clean up reverse adjacency of the target
+                    if let Some(rev) = self.reverse_edges.get_mut(&(bucket, edge.target)) {
+                        rev.retain(|e| e != eid);
+                    }
+                }
+            }
+        }
+
+        // Remove all incoming edges
+        if let Some(edge_ids) = self.reverse_edges.remove(&(bucket, node_id)) {
+            for eid in &edge_ids {
+                if let Some(edge) = self.edges.remove(&(bucket, *eid)) {
+                    // Clean up forward adjacency of the source
+                    if let Some(fwd) = self.forward_edges.get_mut(&(bucket, edge.source)) {
+                        fwd.retain(|e| e != eid);
+                    }
+                }
+            }
+        }
+
+        // Remove header
+        self.headers.remove(&(bucket, node_id));
+
         Ok(())
     }
 
@@ -347,21 +435,24 @@ impl GraphStore for InMemoryGraphStore {
     }
 
     fn add_edge(&mut self, bucket: GoalBucketId, edge: GraphEdge) -> Result<(), GraphStoreError> {
+        let edge_id = edge.id;
+        let source = edge.source;
+        let target = edge.target;
+
         // Add to forward adjacency
         self.forward_edges
-            .entry((bucket, edge.from))
+            .entry((bucket, source))
             .or_default()
-            .push(edge.to);
+            .push(edge_id);
 
         // Add to reverse adjacency
         self.reverse_edges
-            .entry((bucket, edge.to))
+            .entry((bucket, target))
             .or_default()
-            .push(edge.from);
+            .push(edge_id);
 
         // Store edge metadata
-        self.edge_metadata
-            .insert((bucket, edge.from, edge.to), edge);
+        self.edges.insert((bucket, edge_id), edge);
 
         Ok(())
     }
@@ -369,30 +460,27 @@ impl GraphStore for InMemoryGraphStore {
     fn get_edge(
         &self,
         bucket: GoalBucketId,
-        from: NodeId,
-        to: NodeId,
+        edge_id: EdgeId,
     ) -> Result<Option<GraphEdge>, GraphStoreError> {
-        Ok(self.edge_metadata.get(&(bucket, from, to)).cloned())
+        Ok(self.edges.get(&(bucket, edge_id)).cloned())
     }
 
     fn delete_edge(
         &mut self,
         bucket: GoalBucketId,
-        from: NodeId,
-        to: NodeId,
+        edge_id: EdgeId,
     ) -> Result<(), GraphStoreError> {
-        // Remove from forward adjacency
-        if let Some(neighbors) = self.forward_edges.get_mut(&(bucket, from)) {
-            neighbors.retain(|&n| n != to);
-        }
+        if let Some(edge) = self.edges.remove(&(bucket, edge_id)) {
+            // Remove from forward adjacency
+            if let Some(fwd) = self.forward_edges.get_mut(&(bucket, edge.source)) {
+                fwd.retain(|e| *e != edge_id);
+            }
 
-        // Remove from reverse adjacency
-        if let Some(preds) = self.reverse_edges.get_mut(&(bucket, to)) {
-            preds.retain(|&n| n != from);
+            // Remove from reverse adjacency
+            if let Some(rev) = self.reverse_edges.get_mut(&(bucket, edge.target)) {
+                rev.retain(|e| *e != edge_id);
+            }
         }
-
-        // Remove metadata
-        self.edge_metadata.remove(&(bucket, from, to));
 
         Ok(())
     }
@@ -402,11 +490,19 @@ impl GraphStore for InMemoryGraphStore {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<Vec<NodeId>, GraphStoreError> {
-        Ok(self
+        let edge_ids = self
             .forward_edges
             .get(&(bucket, node_id))
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+
+        let mut neighbors: Vec<NodeId> = edge_ids
+            .iter()
+            .filter_map(|eid| self.edges.get(&(bucket, *eid)).map(|e| e.target))
+            .collect();
+        neighbors.sort();
+        neighbors.dedup();
+        Ok(neighbors)
     }
 
     fn get_predecessors(
@@ -414,11 +510,19 @@ impl GraphStore for InMemoryGraphStore {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<Vec<NodeId>, GraphStoreError> {
-        Ok(self
+        let edge_ids = self
             .reverse_edges
             .get(&(bucket, node_id))
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+
+        let mut preds: Vec<NodeId> = edge_ids
+            .iter()
+            .filter_map(|eid| self.edges.get(&(bucket, *eid)).map(|e| e.source))
+            .collect();
+        preds.sort();
+        preds.dedup();
+        Ok(preds)
     }
 
     fn get_outgoing_edges(
@@ -426,10 +530,15 @@ impl GraphStore for InMemoryGraphStore {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<Vec<GraphEdge>, GraphStoreError> {
-        let neighbors = self.get_neighbors(bucket, node_id)?;
-        Ok(neighbors
+        let edge_ids = self
+            .forward_edges
+            .get(&(bucket, node_id))
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(edge_ids
             .iter()
-            .filter_map(|&to| self.edge_metadata.get(&(bucket, node_id, to)).cloned())
+            .filter_map(|eid| self.edges.get(&(bucket, *eid)).cloned())
             .collect())
     }
 
@@ -438,11 +547,43 @@ impl GraphStore for InMemoryGraphStore {
         bucket: GoalBucketId,
         node_id: NodeId,
     ) -> Result<Vec<GraphEdge>, GraphStoreError> {
-        let preds = self.get_predecessors(bucket, node_id)?;
-        Ok(preds
+        let edge_ids = self
+            .reverse_edges
+            .get(&(bucket, node_id))
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(edge_ids
             .iter()
-            .filter_map(|&from| self.edge_metadata.get(&(bucket, from, node_id)).cloned())
+            .filter_map(|eid| self.edges.get(&(bucket, *eid)).cloned())
             .collect())
+    }
+
+    fn store_header(
+        &mut self,
+        bucket: GoalBucketId,
+        header: NodeHeader,
+    ) -> Result<(), GraphStoreError> {
+        self.headers.insert((bucket, header.node_id), header);
+        Ok(())
+    }
+
+    fn scan_headers(&self, limit: usize) -> Result<Vec<NodeHeader>, GraphStoreError> {
+        Ok(self
+            .headers
+            .values()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    fn delete_header(
+        &mut self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<(), GraphStoreError> {
+        self.headers.remove(&(bucket, node_id));
+        Ok(())
     }
 
     fn load_partition(&mut self, bucket: GoalBucketId) -> Result<(), GraphStoreError> {
@@ -465,16 +606,16 @@ impl GraphStore for InMemoryGraphStore {
     fn get_partition_stats(&self, bucket: GoalBucketId) -> Result<BucketInfo, GraphStoreError> {
         let node_count = self.nodes.keys().filter(|(b, _)| *b == bucket).count() as u64;
         let edge_count = self
-            .edge_metadata
+            .edges
             .keys()
-            .filter(|(b, _, _)| *b == bucket)
+            .filter(|(b, _)| *b == bucket)
             .count() as u64;
 
         Ok(BucketInfo {
             bucket_id: bucket,
             node_count,
             edge_count,
-            size_bytes: 0, // Not tracked in memory implementation
+            size_bytes: 0,
             last_modified: 0,
         })
     }
@@ -601,12 +742,14 @@ impl GraphStore for InMemoryGraphStore {
             visited.insert(current);
 
             if current == target {
-                // Found a path, construct GraphPath
+                // Collect edges for this path
                 let mut edges = Vec::new();
                 let mut total_weight = 0.0;
 
                 for window in current_path.windows(2) {
-                    if let Some(edge) = store.get_edge(bucket, window[0], window[1])? {
+                    // Find an edge between window[0] and window[1]
+                    let outgoing = store.get_outgoing_edges(bucket, window[0])?;
+                    if let Some(edge) = outgoing.into_iter().find(|e| e.target == window[1]) {
                         total_weight += edge.weight;
                         edges.push(edge);
                     }
@@ -673,7 +816,7 @@ impl GraphStore for InMemoryGraphStore {
             }
 
             for edge in self.get_outgoing_edges(bucket, node_id)? {
-                if node_ids.contains(&edge.to) {
+                if node_ids.contains(&edge.target) {
                     edges.push(edge);
                 }
             }
@@ -691,63 +834,62 @@ impl GraphStore for InMemoryGraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structures::{EdgeType, NodeType};
+
+    fn make_test_node(id: NodeId) -> GraphNode {
+        GraphNode {
+            id,
+            node_type: NodeType::Event {
+                event_id: id as u128,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            },
+            created_at: 1000 + id,
+            updated_at: 1000 + id,
+            properties: std::collections::HashMap::new(),
+            degree: 0,
+        }
+    }
+
+    fn make_test_edge(id: EdgeId, source: NodeId, target: NodeId) -> GraphEdge {
+        GraphEdge {
+            id,
+            source,
+            target,
+            edge_type: EdgeType::Causality {
+                strength: 0.8,
+                lag_ms: 100,
+            },
+            weight: 1.0,
+            created_at: 2000,
+            updated_at: 2000,
+            observation_count: 1,
+            confidence: 0.9,
+            properties: std::collections::HashMap::new(),
+        }
+    }
 
     #[test]
     fn test_add_and_get_node() {
         let mut store = InMemoryGraphStore::new();
 
-        let node = GraphNode {
-            id: 100,
-            node_type: GraphNodeType::Event,
-            label: "test_event".to_string(),
-            context_hash: 12345,
-            created_at: 1000,
-            properties: serde_json::json!({"test": "value"}),
-        };
-
+        let node = make_test_node(100);
         store.add_node(42, node.clone()).unwrap();
 
         let retrieved = store.get_node(42, 100).unwrap();
-        assert_eq!(retrieved, Some(node));
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().id, 100);
     }
 
     #[test]
     fn test_add_and_get_edge() {
         let mut store = InMemoryGraphStore::new();
 
-        // Add nodes first
-        let node1 = GraphNode {
-            id: 100,
-            node_type: GraphNodeType::Event,
-            label: "event1".to_string(),
-            context_hash: 1,
-            created_at: 1000,
-            properties: serde_json::json!({}),
-        };
+        store.add_node(42, make_test_node(100)).unwrap();
+        store.add_node(42, make_test_node(200)).unwrap();
 
-        let node2 = GraphNode {
-            id: 200,
-            node_type: GraphNodeType::Event,
-            label: "event2".to_string(),
-            context_hash: 2,
-            created_at: 2000,
-            properties: serde_json::json!({}),
-        };
-
-        store.add_node(42, node1).unwrap();
-        store.add_node(42, node2).unwrap();
-
-        // Add edge
-        let edge = GraphEdge {
-            from: 100,
-            to: 200,
-            edge_type: GraphEdgeType::Causality,
-            weight: 1.0,
-            confidence: 0.95,
-            created_at: 1500,
-        };
-
-        store.add_edge(42, edge.clone()).unwrap();
+        let edge = make_test_edge(1, 100, 200);
+        store.add_edge(42, edge).unwrap();
 
         // Check neighbors
         let neighbors = store.get_neighbors(42, 100).unwrap();
@@ -756,75 +898,69 @@ mod tests {
         // Check predecessors
         let preds = store.get_predecessors(42, 200).unwrap();
         assert_eq!(preds, vec![100]);
+
+        // Check get_edge by EdgeId
+        let retrieved = store.get_edge(42, 1).unwrap();
+        assert!(retrieved.is_some());
+    }
+
+    #[test]
+    fn test_delete_node_cleans_edges() {
+        let mut store = InMemoryGraphStore::new();
+
+        store.add_node(1, make_test_node(100)).unwrap();
+        store.add_node(1, make_test_node(101)).unwrap();
+        store.add_node(1, make_test_node(102)).unwrap();
+
+        store.add_edge(1, make_test_edge(1, 100, 101)).unwrap();
+        store.add_edge(1, make_test_edge(2, 102, 100)).unwrap();
+
+        store.delete_node(1, 100).unwrap();
+
+        // No dangling edges
+        assert!(store.get_edge(1, 1).unwrap().is_none());
+        assert!(store.get_edge(1, 2).unwrap().is_none());
+
+        // No dangling adjacency
+        let n102 = store.get_neighbors(1, 102).unwrap();
+        assert!(!n102.contains(&100));
+
+        let p101 = store.get_predecessors(1, 101).unwrap();
+        assert!(!p101.contains(&100));
+    }
+
+    #[test]
+    fn test_header_operations() {
+        let mut store = InMemoryGraphStore::new();
+
+        let node = make_test_node(100);
+        let header = NodeHeader::from_node(&node, 42);
+        store.store_header(42, header.clone()).unwrap();
+
+        let headers = store.scan_headers(100).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].node_id, 100);
+
+        store.delete_header(42, 100).unwrap();
+        let headers = store.scan_headers(100).unwrap();
+        assert_eq!(headers.len(), 0);
     }
 
     #[test]
     fn test_traverse_bfs() {
         let mut store = InMemoryGraphStore::new();
 
-        // Create a simple graph: 1 → 2 → 3
-        //                           ↓
-        //                           4
+        // 1 → 2 → 3, 2 → 4
         for i in 1..=4 {
-            store
-                .add_node(
-                    42,
-                    GraphNode {
-                        id: i,
-                        node_type: GraphNodeType::Event,
-                        label: format!("node{}", i),
-                        context_hash: i,
-                        created_at: i * 1000,
-                        properties: serde_json::json!({}),
-                    },
-                )
-                .unwrap();
+            store.add_node(42, make_test_node(i)).unwrap();
         }
 
-        store
-            .add_edge(
-                42,
-                GraphEdge {
-                    from: 1,
-                    to: 2,
-                    edge_type: GraphEdgeType::Causality,
-                    weight: 1.0,
-                    confidence: 1.0,
-                    created_at: 1000,
-                },
-            )
-            .unwrap();
-
-        store
-            .add_edge(
-                42,
-                GraphEdge {
-                    from: 2,
-                    to: 3,
-                    edge_type: GraphEdgeType::Causality,
-                    weight: 1.0,
-                    confidence: 1.0,
-                    created_at: 2000,
-                },
-            )
-            .unwrap();
-
-        store
-            .add_edge(
-                42,
-                GraphEdge {
-                    from: 2,
-                    to: 4,
-                    edge_type: GraphEdgeType::Causality,
-                    weight: 1.0,
-                    confidence: 1.0,
-                    created_at: 2500,
-                },
-            )
-            .unwrap();
+        store.add_edge(42, make_test_edge(1, 1, 2)).unwrap();
+        store.add_edge(42, make_test_edge(2, 2, 3)).unwrap();
+        store.add_edge(42, make_test_edge(3, 2, 4)).unwrap();
 
         let visited = store.traverse_bfs(42, 1, 2).unwrap();
-        assert_eq!(visited.len(), 4); // Should visit all nodes within depth 2
+        assert_eq!(visited.len(), 4);
         assert!(visited.contains(&1));
         assert!(visited.contains(&2));
         assert!(visited.contains(&3));

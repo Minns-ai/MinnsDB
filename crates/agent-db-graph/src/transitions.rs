@@ -139,4 +139,61 @@ impl TransitionModel {
     pub fn config(&self) -> &TransitionModelConfig {
         &self.config
     }
+
+    /// Number of tracked episodes.
+    pub fn episode_count(&self) -> usize {
+        self.episode_outcomes.len()
+    }
+
+    /// Remove the oldest episodes, keeping only `keep` most recent.
+    ///
+    /// Episodes are ordered by ID (lower = older). For each removed episode,
+    /// the corresponding transition counts are decremented.
+    pub fn cleanup_oldest_episodes(&mut self, keep: usize) {
+        if self.episode_outcomes.len() <= keep {
+            return;
+        }
+
+        // Sort episode IDs ascending (oldest first)
+        let mut episode_ids: Vec<EpisodeId> = self.episode_outcomes.keys().copied().collect();
+        episode_ids.sort();
+
+        let to_remove = episode_ids.len() - keep;
+        for &ep_id in episode_ids.iter().take(to_remove) {
+            let outcome = self.episode_outcomes.remove(&ep_id);
+            let transitions = self.episode_transitions.remove(&ep_id);
+            let bucket = self.episode_goal_bucket.remove(&ep_id);
+
+            // Decrement counts for removed episode's transitions
+            if let (Some(out), Some(keys), Some(bucket_id)) = (outcome, transitions, bucket) {
+                if let Some(bucket_map) = self.buckets.get_mut(&bucket_id) {
+                    for key in &keys {
+                        if let Some(stats) = bucket_map.get_mut(key) {
+                            stats.count = stats.count.saturating_sub(1);
+                            if out {
+                                stats.success_count = stats.success_count.saturating_sub(1);
+                            } else {
+                                stats.failure_count = stats.failure_count.saturating_sub(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove transition entries whose total count is below `min_count`.
+    ///
+    /// Also removes empty bucket maps after pruning.
+    pub fn prune_weak_transitions(&mut self, min_count: u64) {
+        let bucket_ids: Vec<u64> = self.buckets.keys().copied().collect();
+        for bucket_id in bucket_ids {
+            if let Some(bucket_map) = self.buckets.get_mut(&bucket_id) {
+                bucket_map.retain(|_, stats| stats.count >= min_count);
+            }
+        }
+
+        // Remove empty buckets
+        self.buckets.retain(|_, map| !map.is_empty());
+    }
 }

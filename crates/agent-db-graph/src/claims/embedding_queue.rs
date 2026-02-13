@@ -14,9 +14,12 @@ struct EmbeddingJob {
     result_tx: Option<tokio::sync::oneshot::Sender<Result<()>>>,
 }
 
+/// Default bounded channel capacity for the embedding queue
+const DEFAULT_EMBEDDING_QUEUE_CAPACITY: usize = 1_000;
+
 /// Async queue for embedding generation
 pub struct EmbeddingQueue {
-    sender: mpsc::UnboundedSender<EmbeddingJob>,
+    sender: mpsc::Sender<EmbeddingJob>,
 }
 
 impl EmbeddingQueue {
@@ -26,7 +29,7 @@ impl EmbeddingQueue {
         claim_store: Arc<ClaimStore>,
         workers: usize,
     ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel::<EmbeddingJob>();
+        let (tx, rx) = mpsc::channel::<EmbeddingJob>(DEFAULT_EMBEDDING_QUEUE_CAPACITY);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
         info!(
@@ -109,7 +112,7 @@ impl EmbeddingQueue {
         Ok(())
     }
 
-    /// Submit a claim for embedding generation
+    /// Submit a claim for embedding generation (blocks if queue is full)
     pub async fn generate_embedding(&self, claim: DerivedClaim) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -118,19 +121,20 @@ impl EmbeddingQueue {
                 claim,
                 result_tx: Some(tx),
             })
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to send embedding job: {}", e))?;
 
         rx.await
             .map_err(|e| anyhow::anyhow!("Failed to receive embedding result: {}", e))?
     }
 
-    /// Submit embedding generation without waiting for result
+    /// Submit embedding generation without waiting for result (drops if queue full)
     pub fn generate_embedding_async(&self, claim: DerivedClaim) {
-        if let Err(e) = self.sender.send(EmbeddingJob {
+        if let Err(e) = self.sender.try_send(EmbeddingJob {
             claim,
             result_tx: None,
         }) {
-            warn!("Failed to send async embedding job: {}", e);
+            warn!("Embedding queue full or closed, dropping job: {}", e);
         }
     }
 

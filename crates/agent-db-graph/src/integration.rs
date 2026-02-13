@@ -36,7 +36,7 @@ use agent_db_events::core::LearningEvent;
 use agent_db_events::{Event, EventType};
 use agent_db_storage::{table_names, BatchOperation, RedbBackend, RedbConfig, StorageEngine};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -189,6 +189,23 @@ pub struct GraphEngineConfig {
     // ========== Maintenance ==========
     /// Configuration for the periodic background maintenance loop
     pub maintenance_config: crate::maintenance::MaintenanceConfig,
+
+    // ========== Graph Pruning ==========
+    /// Configuration for streaming graph pruning (merge/delete dead nodes)
+    pub pruning_config: crate::graph_pruning::GraphPruningConfig,
+
+    /// Maximum transition episodes to keep in memory
+    pub max_transition_episodes: usize,
+
+    /// Minimum transition count to survive pruning
+    pub min_transition_count: u64,
+
+    // ========== Bounded Memory Caps ==========
+    /// Maximum events to keep in the in-memory event_store (ring-buffer cap)
+    pub max_event_store_size: usize,
+
+    /// Maximum age (seconds) for decision traces before TTL eviction
+    pub max_decision_trace_age_secs: u64,
 }
 
 /// Results from graph operations
@@ -252,6 +269,9 @@ pub struct GraphEngine {
     /// Event storage for episode processing
     pub(crate) event_store: Arc<RwLock<HashMap<agent_db_core::types::EventId, Event>>>,
 
+    /// Insertion order for event_store ring-buffer eviction
+    pub(crate) event_store_order: Arc<RwLock<VecDeque<agent_db_core::types::EventId>>>,
+
     /// Learning decision traces keyed by query_id (lock-free with DashMap for performance)
     pub(crate) decision_traces: Arc<dashmap::DashMap<String, DecisionTrace>>,
 
@@ -260,6 +280,9 @@ pub struct GraphEngine {
 
     /// Redb backend for graph persistence (shared with memory/strategy stores)
     pub(crate) redb_backend: Option<Arc<RedbBackend>>,
+
+    /// Unified graph store (cold / source of truth) using structures.rs types
+    pub(crate) graph_store: Option<Arc<RwLock<crate::redb_graph_store::RedbGraphStore>>>,
 
     /// Configuration
     pub(crate) config: GraphEngineConfig,
@@ -385,6 +408,13 @@ impl Default for GraphEngineConfig {
             consolidation_interval: 10, // Run consolidation every 10 episodes
             // Maintenance
             maintenance_config: crate::maintenance::MaintenanceConfig::default(),
+            // Graph pruning
+            pruning_config: crate::graph_pruning::GraphPruningConfig::default(),
+            max_transition_episodes: 10_000,
+            min_transition_count: 2,
+            // Bounded memory caps
+            max_event_store_size: 50_000,
+            max_decision_trace_age_secs: 3600, // 1 hour
         }
     }
 }
@@ -723,6 +753,18 @@ impl GraphEngine {
             Some(Arc::new(engine))
         };
 
+        // Initialize RedbGraphStore alongside the existing backend
+        let graph_store = if let Some(ref backend) = redb_backend {
+            let store = crate::redb_graph_store::RedbGraphStore::new(
+                backend.clone(),
+                8, // max loaded partitions
+            );
+            tracing::info!("RedbGraphStore initialized for unified graph persistence");
+            Some(Arc::new(RwLock::new(store)))
+        } else {
+            None
+        };
+
         let engine = Self {
             inference,
             traversal,
@@ -733,9 +775,11 @@ impl GraphEngine {
             strategy_store,
             transition_model,
             event_store: Arc::new(RwLock::new(HashMap::new())),
+            event_store_order: Arc::new(RwLock::new(VecDeque::new())),
             decision_traces: Arc::new(dashmap::DashMap::new()),
             storage: None,
             redb_backend,
+            graph_store,
             config,
             stats: Arc::new(RwLock::new(GraphEngineStats::default())),
             event_buffer: Arc::new(RwLock::new(Vec::new())),
@@ -838,10 +882,21 @@ impl GraphEngine {
             errors: Vec::new(),
         };
 
-        // Store event for episode processing
+        // Store event for episode processing (ring-buffer capped)
         {
             let mut store = self.event_store.write().await;
+            let mut order = self.event_store_order.write().await;
             store.insert(event.id, event.clone());
+            order.push_back(event.id);
+            // Evict oldest events when over cap
+            let cap = self.config.max_event_store_size;
+            while store.len() > cap {
+                if let Some(old_id) = order.pop_front() {
+                    store.remove(&old_id);
+                } else {
+                    break;
+                }
+            }
         }
 
         // Extract NER features if semantic memory is enabled
@@ -1895,6 +1950,129 @@ impl GraphEngine {
 
                 if pruned > 0 {
                     tracing::info!("Maintenance: pruned {} strategies", pruned);
+                }
+
+                // 3. Graph pruning (streaming, bounded, via RedbGraphStore)
+                if let Some(ref graph_store) = engine.graph_store {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64;
+
+                    let pruner = crate::graph_pruning::GraphPruner::new(
+                        engine.config.pruning_config.clone(),
+                    );
+
+                    let mut store = graph_store.write().await;
+                    let mut inference = engine.inference.write().await;
+                    let graph = inference.graph_mut();
+
+                    match pruner.prune_full_graph(graph, &mut store, now) {
+                        Ok(result) => {
+                            if result.nodes_merged > 0 || result.nodes_deleted > 0 {
+                                tracing::info!(
+                                    "Maintenance: graph pruning merged={} deleted={} scanned={} stopped_early={}",
+                                    result.nodes_merged,
+                                    result.nodes_deleted,
+                                    result.total_headers_scanned,
+                                    result.stopped_early,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Graph pruning failed: {}", e);
+                        }
+                    }
+                }
+
+                // 4. Transition model cleanup
+                {
+                    let mut tm = engine.transition_model.write().await;
+                    let ep_count_before = tm.episode_count();
+                    tm.cleanup_oldest_episodes(engine.config.max_transition_episodes);
+                    let ep_cleaned = ep_count_before - tm.episode_count();
+
+                    tm.prune_weak_transitions(engine.config.min_transition_count);
+
+                    if ep_cleaned > 0 {
+                        tracing::info!(
+                            "Maintenance: transition cleanup episodes_removed={}",
+                            ep_cleaned,
+                        );
+                    }
+                }
+
+                // 5. Event store ring-buffer eviction (safety net)
+                {
+                    let mut store = engine.event_store.write().await;
+                    let mut order = engine.event_store_order.write().await;
+                    let cap = engine.config.max_event_store_size;
+                    let mut evicted = 0usize;
+                    while store.len() > cap {
+                        if let Some(old_id) = order.pop_front() {
+                            store.remove(&old_id);
+                            evicted += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if evicted > 0 {
+                        tracing::info!("Maintenance: event_store evicted {} entries", evicted);
+                    }
+                }
+
+                // 6. Decision trace TTL sweep
+                {
+                    let max_age = std::time::Duration::from_secs(engine.config.max_decision_trace_age_secs);
+                    let before = engine.decision_traces.len();
+                    engine.decision_traces.retain(|_, trace| {
+                        trace.last_updated.elapsed() < max_age
+                    });
+                    let swept = before - engine.decision_traces.len();
+                    if swept > 0 {
+                        tracing::info!("Maintenance: decision_traces TTL swept {} stale entries", swept);
+                    }
+                }
+
+                // 7. Inference memory caps (context cache + temporal patterns)
+                {
+                    let mut inf = engine.inference.write().await;
+                    inf.enforce_memory_caps();
+                }
+
+                // 8. Claim store maintenance (expire stale, cap vector index, purge disk)
+                if let Some(ref claim_store) = engine.claim_store {
+                    // Expire claims past their TTL
+                    match claim_store.expire_stale_claims() {
+                        Ok(expired) if expired > 0 => {
+                            tracing::info!("Maintenance: expired {} stale claims", expired);
+                        },
+                        Err(e) => {
+                            tracing::warn!("Maintenance: claim expiry failed: {}", e);
+                        },
+                        _ => {},
+                    }
+
+                    // Enforce vector index cap
+                    let max_idx = mc.max_vector_index_size;
+                    if max_idx > 0 {
+                        if let Err(e) = claim_store.enforce_vector_index_cap(max_idx) {
+                            tracing::warn!("Maintenance: vector index cap failed: {}", e);
+                        }
+                    }
+
+                    // Purge inactive claims from disk
+                    if mc.purge_inactive_claims {
+                        match claim_store.purge_inactive_claims() {
+                            Ok(purged) if purged > 0 => {
+                                tracing::info!("Maintenance: purged {} inactive claims from disk", purged);
+                            },
+                            Err(e) => {
+                                tracing::warn!("Maintenance: claim purge failed: {}", e);
+                            },
+                            _ => {},
+                        }
+                    }
                 }
 
                 tracing::debug!("Maintenance pass complete");

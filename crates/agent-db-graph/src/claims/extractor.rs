@@ -16,9 +16,12 @@ struct ClaimExtractionJob {
     result_tx: tokio::sync::oneshot::Sender<Result<ClaimExtractionResult>>,
 }
 
+/// Default bounded channel capacity for the claim extraction queue
+const DEFAULT_EXTRACTION_QUEUE_CAPACITY: usize = 500;
+
 /// Async queue for claim extraction
 pub struct ClaimExtractionQueue {
-    sender: mpsc::UnboundedSender<ClaimExtractionJob>,
+    sender: mpsc::Sender<ClaimExtractionJob>,
 }
 
 impl ClaimExtractionQueue {
@@ -30,7 +33,7 @@ impl ClaimExtractionQueue {
         workers: usize,
         config: ClaimExtractionConfig,
     ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(DEFAULT_EXTRACTION_QUEUE_CAPACITY);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
         info!("Starting claim extraction queue with {} workers", workers);
@@ -445,7 +448,7 @@ impl ClaimExtractionQueue {
         Ok(())
     }
 
-    /// Submit a claim extraction request
+    /// Submit a claim extraction request (blocks if queue is full)
     pub async fn extract(&self, request: ClaimExtractionRequest) -> Result<ClaimExtractionResult> {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -454,24 +457,25 @@ impl ClaimExtractionQueue {
                 request,
                 result_tx: tx,
             })
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to send claim extraction job: {}", e))?;
 
         rx.await
             .map_err(|e| anyhow::anyhow!("Failed to receive claim extraction result: {}", e))?
     }
 
-    /// Submit extraction without waiting for result
+    /// Submit extraction without waiting for result (drops if queue full)
     pub fn extract_async(
         &self,
         request: ClaimExtractionRequest,
     ) -> tokio::sync::oneshot::Receiver<Result<ClaimExtractionResult>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        if let Err(e) = self.sender.send(ClaimExtractionJob {
+        if let Err(e) = self.sender.try_send(ClaimExtractionJob {
             request,
             result_tx: tx,
         }) {
-            warn!("Failed to send async claim extraction job: {}", e);
+            warn!("Claim extraction queue full or closed, dropping job: {}", e);
         }
 
         rx

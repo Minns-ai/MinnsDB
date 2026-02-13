@@ -179,6 +179,72 @@ pub enum GoalStatus {
     Paused,
 }
 
+impl NodeType {
+    /// Numeric discriminant for compact header storage.
+    pub fn discriminant(&self) -> u8 {
+        match self {
+            NodeType::Agent { .. } => 0,
+            NodeType::Event { .. } => 1,
+            NodeType::Context { .. } => 2,
+            NodeType::Concept { .. } => 3,
+            NodeType::Goal { .. } => 4,
+            NodeType::Episode { .. } => 5,
+            NodeType::Memory { .. } => 6,
+            NodeType::Strategy { .. } => 7,
+            NodeType::Tool { .. } => 8,
+            NodeType::Result { .. } => 9,
+            NodeType::Claim { .. } => 10,
+        }
+    }
+
+    /// Importance signal for this node type (0.0–1.0).
+    /// Higher = more important to keep in memory.
+    pub fn signal(&self) -> f32 {
+        match self {
+            NodeType::Agent { .. } => 1.0,
+            NodeType::Goal { priority, .. } => 0.8 + (*priority * 0.2).min(0.2),
+            NodeType::Strategy { .. } => 0.7,
+            NodeType::Memory { .. } => 0.6,
+            NodeType::Tool { .. } => 0.6,
+            NodeType::Concept { confidence, .. } => 0.4 + (*confidence * 0.3),
+            NodeType::Claim { confidence, .. } => 0.3 + (*confidence * 0.3),
+            NodeType::Episode { .. } => 0.2,
+            NodeType::Event { significance, .. } => 0.1 + (*significance * 0.2),
+            NodeType::Context { .. } => 0.15,
+            NodeType::Result { .. } => 0.1,
+        }
+    }
+
+    /// Eviction tier for hot/cold cache management.
+    pub fn eviction_tier(&self) -> crate::graph_store::EvictionTier {
+        use crate::graph_store::EvictionTier;
+        match self {
+            NodeType::Agent { .. } | NodeType::Goal { .. } => EvictionTier::Protected,
+            NodeType::Strategy { .. } | NodeType::Memory { .. } | NodeType::Tool { .. } => {
+                EvictionTier::Important
+            },
+            NodeType::Concept { .. } | NodeType::Claim { .. } => EvictionTier::Standard,
+            NodeType::Context { .. }
+            | NodeType::Episode { .. }
+            | NodeType::Event { .. }
+            | NodeType::Result { .. } => EvictionTier::Ephemeral,
+        }
+    }
+
+    /// Derive the goal bucket for storage partitioning.
+    /// Agent-scoped nodes use agent_id; global nodes use 0.
+    pub fn goal_bucket(&self) -> GoalBucketId {
+        match self {
+            NodeType::Agent { agent_id, .. }
+            | NodeType::Episode { agent_id, .. }
+            | NodeType::Memory { agent_id, .. }
+            | NodeType::Strategy { agent_id, .. } => *agent_id,
+            NodeType::Event { event_id, .. } => (*event_id % 1024) as GoalBucketId,
+            _ => 0, // Context, Concept, Goal, Tool, Result, Claim → default bucket
+        }
+    }
+}
+
 /// Graph edge representing relationships between nodes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdge {
@@ -983,5 +1049,403 @@ impl Graph {
         self.concept_index
             .get(concept_name)
             .and_then(|&node_id| self.nodes.get(&node_id))
+    }
+
+    /// Get node count
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Get edge count
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Get all node IDs
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        self.nodes.keys().copied().collect()
+    }
+
+    // ========================================================================
+    // remove_node — clean removal from all indices + edges + BM25
+    // ========================================================================
+
+    /// Remove a node and all its incident edges from the graph.
+    ///
+    /// Cleans up: nodes map, type_index, all 11 specialized indices,
+    /// bm25_index, outgoing edges, incoming edges, adjacency lists,
+    /// degree updates on neighbors, and stats.
+    pub fn remove_node(&mut self, node_id: NodeId) -> Option<GraphNode> {
+        let node = self.nodes.remove(&node_id)?;
+
+        // Remove from type index
+        let type_name = node.type_name();
+        if let Some(set) = self.type_index.get_mut(&type_name) {
+            set.remove(&node_id);
+            if set.is_empty() {
+                self.type_index.remove(&type_name);
+            }
+        }
+
+        // Remove from specialized indices
+        match &node.node_type {
+            NodeType::Agent { agent_id, .. } => {
+                self.agent_index.remove(agent_id);
+            },
+            NodeType::Event { event_id, .. } => {
+                self.event_index.remove(event_id);
+            },
+            NodeType::Context { context_hash, .. } => {
+                self.context_index.remove(context_hash);
+            },
+            NodeType::Goal { goal_id, .. } => {
+                self.goal_index.remove(goal_id);
+            },
+            NodeType::Episode { episode_id, .. } => {
+                self.episode_index.remove(episode_id);
+            },
+            NodeType::Memory { memory_id, .. } => {
+                self.memory_index.remove(memory_id);
+            },
+            NodeType::Strategy { strategy_id, .. } => {
+                self.strategy_index.remove(strategy_id);
+            },
+            NodeType::Tool { tool_name, .. } => {
+                self.tool_index.remove(tool_name);
+            },
+            NodeType::Result { result_key, .. } => {
+                self.result_index.remove(result_key);
+            },
+            NodeType::Claim { claim_id, .. } => {
+                self.claim_index.remove(claim_id);
+            },
+            NodeType::Concept { concept_name, .. } => {
+                self.concept_index.remove(concept_name);
+            },
+        }
+
+        // Remove from BM25 index
+        self.bm25_index.remove_document(node_id);
+
+        // Collect edge IDs to remove (outgoing + incoming)
+        let outgoing_edge_ids = self.adjacency_out.remove(&node_id).unwrap_or_default();
+        let incoming_edge_ids = self.adjacency_in.remove(&node_id).unwrap_or_default();
+
+        // Remove outgoing edges and update targets' incoming adjacency + degree
+        for edge_id in &outgoing_edge_ids {
+            if let Some(edge) = self.edges.remove(edge_id) {
+                if edge.target != node_id {
+                    if let Some(in_list) = self.adjacency_in.get_mut(&edge.target) {
+                        in_list.retain(|&eid| eid != *edge_id);
+                    }
+                    if let Some(target) = self.nodes.get_mut(&edge.target) {
+                        target.degree = target.degree.saturating_sub(1);
+                    }
+                }
+            }
+        }
+
+        // Remove incoming edges and update sources' outgoing adjacency + degree
+        for edge_id in &incoming_edge_ids {
+            if let Some(edge) = self.edges.remove(edge_id) {
+                if edge.source != node_id {
+                    if let Some(out_list) = self.adjacency_out.get_mut(&edge.source) {
+                        out_list.retain(|&eid| eid != *edge_id);
+                    }
+                    if let Some(source) = self.nodes.get_mut(&edge.source) {
+                        source.degree = source.degree.saturating_sub(1);
+                    }
+                }
+            }
+        }
+
+        self.update_stats();
+        Some(node)
+    }
+
+    // ========================================================================
+    // merge_nodes — merge absorbed into survivor
+    // ========================================================================
+
+    /// Merge two nodes of the same type variant. The survivor keeps its data
+    /// with a signal boost; all edges from the absorbed node are redirected
+    /// to the survivor (strengthening existing, skipping self-loops).
+    /// Returns the updated survivor node.
+    pub fn merge_nodes(
+        &mut self,
+        survivor_id: NodeId,
+        absorbed_id: NodeId,
+    ) -> Result<GraphNode, String> {
+        // Verify both exist
+        if !self.nodes.contains_key(&survivor_id) {
+            return Err(format!("Survivor node {} not found", survivor_id));
+        }
+        if !self.nodes.contains_key(&absorbed_id) {
+            return Err(format!("Absorbed node {} not found", absorbed_id));
+        }
+
+        // Same variant check
+        {
+            let survivor = &self.nodes[&survivor_id];
+            let absorbed = &self.nodes[&absorbed_id];
+            if std::mem::discriminant(&survivor.node_type)
+                != std::mem::discriminant(&absorbed.node_type)
+            {
+                return Err(format!(
+                    "Cannot merge different node types: {} vs {}",
+                    survivor.type_name(),
+                    absorbed.type_name()
+                ));
+            }
+        }
+
+        // Collect absorbed edges before mutation
+        let absorbed_out = self.adjacency_out.get(&absorbed_id).cloned().unwrap_or_default();
+        let absorbed_in = self.adjacency_in.get(&absorbed_id).cloned().unwrap_or_default();
+
+        // Redirect outgoing edges: absorbed -> X becomes survivor -> X
+        // First pass: gather info we need (targets, weights, existing edges)
+        let mut out_redirects: Vec<(EdgeId, NodeId, f32)> = Vec::new(); // (edge_id, target, weight)
+        for edge_id in &absorbed_out {
+            if let Some(edge) = self.edges.get(edge_id) {
+                let target = edge.target;
+                if target == survivor_id || target == absorbed_id {
+                    continue;
+                }
+                out_redirects.push((*edge_id, target, edge.weight));
+            }
+        }
+
+        for (edge_id, target, weight) in out_redirects {
+            // Check if survivor already has an edge to this target
+            let existing_eid = self
+                .adjacency_out
+                .get(&survivor_id)
+                .and_then(|ids| {
+                    ids.iter().find(|&&eid| {
+                        self.edges
+                            .get(&eid)
+                            .map_or(false, |e| e.target == target)
+                    })
+                })
+                .copied();
+
+            if let Some(existing_eid) = existing_eid {
+                // Strengthen existing edge
+                if let Some(existing_edge) = self.edges.get_mut(&existing_eid) {
+                    existing_edge.strengthen(weight * 0.5);
+                }
+            } else {
+                // Redirect edge to survivor
+                if let Some(edge) = self.edges.get_mut(&edge_id) {
+                    edge.source = survivor_id;
+                }
+                self.adjacency_out
+                    .entry(survivor_id)
+                    .or_default()
+                    .push(edge_id);
+            }
+        }
+
+        // Redirect incoming edges: X -> absorbed becomes X -> survivor
+        let mut in_redirects: Vec<(EdgeId, NodeId, f32)> = Vec::new();
+        for edge_id in &absorbed_in {
+            if let Some(edge) = self.edges.get(edge_id) {
+                let source = edge.source;
+                if source == survivor_id || source == absorbed_id {
+                    continue;
+                }
+                in_redirects.push((*edge_id, source, edge.weight));
+            }
+        }
+
+        for (edge_id, source, weight) in in_redirects {
+            // Check if survivor already has an incoming edge from this source
+            let existing_eid = self
+                .adjacency_in
+                .get(&survivor_id)
+                .and_then(|ids| {
+                    ids.iter().find(|&&eid| {
+                        self.edges
+                            .get(&eid)
+                            .map_or(false, |e| e.source == source)
+                    })
+                })
+                .copied();
+
+            if let Some(existing_eid) = existing_eid {
+                // Strengthen existing edge
+                if let Some(existing_edge) = self.edges.get_mut(&existing_eid) {
+                    existing_edge.strengthen(weight * 0.5);
+                }
+            } else {
+                // Redirect edge to survivor
+                if let Some(edge) = self.edges.get_mut(&edge_id) {
+                    edge.target = survivor_id;
+                }
+                self.adjacency_in
+                    .entry(survivor_id)
+                    .or_default()
+                    .push(edge_id);
+            }
+        }
+
+        // Boost survivor's signal via properties
+        if let Some(survivor) = self.nodes.get_mut(&survivor_id) {
+            let current_boost = survivor
+                .properties
+                .get("merge_boost")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            survivor.properties.insert(
+                "merge_boost".to_string(),
+                serde_json::Value::from(current_boost + 0.1),
+            );
+            survivor.touch();
+        }
+
+        // Remove absorbed node (this cleans up all remaining references)
+        self.remove_node(absorbed_id);
+
+        // Update survivor degree
+        if let Some(survivor) = self.nodes.get_mut(&survivor_id) {
+            let out_count = self.adjacency_out.get(&survivor_id).map_or(0, |v| v.len());
+            let in_count = self.adjacency_in.get(&survivor_id).map_or(0, |v| v.len());
+            survivor.degree = (out_count + in_count) as u32;
+        }
+
+        Ok(self.nodes[&survivor_id].clone())
+    }
+
+    // ========================================================================
+    // insert_existing_node / insert_existing_edge — preserves original IDs
+    // ========================================================================
+
+    /// Insert a node preserving its original ID. Updates all indices.
+    /// Advances next_node_id if needed.
+    pub fn insert_existing_node(&mut self, node: GraphNode) {
+        let node_id = node.id;
+
+        // Update type index
+        let type_name = node.type_name();
+        self.type_index
+            .entry(type_name)
+            .or_default()
+            .insert(node_id);
+
+        // Update specialized indices
+        match &node.node_type {
+            NodeType::Agent { agent_id, .. } => {
+                self.agent_index.insert(*agent_id, node_id);
+            },
+            NodeType::Event { event_id, .. } => {
+                self.event_index.insert(*event_id, node_id);
+            },
+            NodeType::Context { context_hash, .. } => {
+                self.context_index.insert(*context_hash, node_id);
+            },
+            NodeType::Goal { goal_id, .. } => {
+                self.goal_index.insert(*goal_id, node_id);
+            },
+            NodeType::Episode { episode_id, .. } => {
+                self.episode_index.insert(*episode_id, node_id);
+            },
+            NodeType::Memory { memory_id, .. } => {
+                self.memory_index.insert(*memory_id, node_id);
+            },
+            NodeType::Strategy { strategy_id, .. } => {
+                self.strategy_index.insert(*strategy_id, node_id);
+            },
+            NodeType::Tool { tool_name, .. } => {
+                self.tool_index.insert(tool_name.clone(), node_id);
+            },
+            NodeType::Result { result_key, .. } => {
+                self.result_index.insert(result_key.clone(), node_id);
+            },
+            NodeType::Claim { claim_id, .. } => {
+                self.claim_index.insert(*claim_id, node_id);
+            },
+            NodeType::Concept { concept_name, .. } => {
+                self.concept_index.insert(concept_name.clone(), node_id);
+            },
+        }
+
+        // BM25 indexing
+        let mut text_parts = Vec::new();
+        match &node.node_type {
+            NodeType::Claim { claim_text, .. } => text_parts.push(claim_text.as_str()),
+            NodeType::Goal { description, .. } => text_parts.push(description.as_str()),
+            NodeType::Strategy { name, .. } => text_parts.push(name.as_str()),
+            NodeType::Result { summary, .. } => text_parts.push(summary.as_str()),
+            NodeType::Concept { concept_name, .. } => text_parts.push(concept_name.as_str()),
+            NodeType::Tool { tool_name, .. } => text_parts.push(tool_name.as_str()),
+            NodeType::Episode { outcome, .. } => text_parts.push(outcome.as_str()),
+            _ => {},
+        }
+        for (key, value) in &node.properties {
+            let key_lower = key.to_lowercase();
+            if key_lower.contains("text")
+                || key_lower.contains("description")
+                || key_lower.contains("content")
+                || key_lower.contains("name")
+                || key_lower.contains("summary")
+                || key_lower == "data"
+            {
+                if let Some(text) = value.as_str() {
+                    text_parts.push(text);
+                }
+            }
+        }
+        if !text_parts.is_empty() {
+            let combined = text_parts.join(" ");
+            self.bm25_index.index_document(node_id, &combined);
+        }
+
+        // Initialize adjacency if needed
+        self.adjacency_out.entry(node_id).or_default();
+        self.adjacency_in.entry(node_id).or_default();
+
+        // Advance next_node_id past this ID
+        if node_id >= self.next_node_id {
+            self.next_node_id = node_id + 1;
+        }
+
+        self.nodes.insert(node_id, node);
+        self.update_stats();
+    }
+
+    /// Insert an edge preserving its original ID. Both endpoints must exist.
+    /// Advances next_edge_id if needed.
+    pub fn insert_existing_edge(&mut self, edge: GraphEdge) -> Option<EdgeId> {
+        if !self.nodes.contains_key(&edge.source) || !self.nodes.contains_key(&edge.target) {
+            return None;
+        }
+
+        let edge_id = edge.id;
+
+        self.adjacency_out
+            .entry(edge.source)
+            .or_default()
+            .push(edge_id);
+        self.adjacency_in
+            .entry(edge.target)
+            .or_default()
+            .push(edge_id);
+
+        if let Some(source) = self.nodes.get_mut(&edge.source) {
+            source.degree += 1;
+        }
+        if let Some(target) = self.nodes.get_mut(&edge.target) {
+            target.degree += 1;
+        }
+
+        if edge_id >= self.next_edge_id {
+            self.next_edge_id = edge_id + 1;
+        }
+
+        self.edges.insert(edge_id, edge);
+        self.update_stats();
+
+        Some(edge_id)
     }
 }
