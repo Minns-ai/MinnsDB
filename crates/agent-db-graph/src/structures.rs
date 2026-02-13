@@ -1231,7 +1231,7 @@ impl Graph {
                 .get(&survivor_id)
                 .and_then(|ids| {
                     ids.iter()
-                        .find(|&&eid| self.edges.get(&eid).map_or(false, |e| e.target == target))
+                        .find(|&&eid| self.edges.get(&eid).is_some_and(|e| e.target == target))
                 })
                 .copied();
 
@@ -1271,7 +1271,7 @@ impl Graph {
                 .get(&survivor_id)
                 .and_then(|ids| {
                     ids.iter()
-                        .find(|&&eid| self.edges.get(&eid).map_or(false, |e| e.source == source))
+                        .find(|&&eid| self.edges.get(&eid).is_some_and(|e| e.source == source))
                 })
                 .copied();
 
