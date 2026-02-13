@@ -41,7 +41,7 @@ enum KeyType {
     EdgeMeta = 0x04,         // Edge metadata by EdgeId
     #[allow(dead_code)]
     BucketCatalog = 0x05, // Partition statistics
-    HeaderMeta = 0x06,    // NodeHeader for fast scoring
+    HeaderMeta = 0x06,       // NodeHeader for fast scoring
 }
 
 /// Build hierarchical key: [TypeByte][GoalBucket(8)][NodeID(8)]
@@ -896,8 +896,7 @@ impl GraphStore for RedbGraphStore {
 
     fn scan_headers(&self, limit: usize) -> Result<Vec<NodeHeader>, GraphStoreError> {
         let prefix = vec![KeyType::HeaderMeta as u8];
-        let results =
-            self.scan_prefix_json::<Vec<u8>, NodeHeader>(TABLE_GRAPH_NODES, prefix)?;
+        let results = self.scan_prefix_json::<Vec<u8>, NodeHeader>(TABLE_GRAPH_NODES, prefix)?;
 
         Ok(results
             .into_iter()
@@ -1261,9 +1260,7 @@ mod tests {
 
         // Add nodes
         for i in 100..105 {
-            store
-                .add_node(bucket, create_test_node(i, bucket))
-                .unwrap();
+            store.add_node(bucket, create_test_node(i, bucket)).unwrap();
         }
 
         // Add edges: 100 -> 101 -> 102 -> 103 -> 104
@@ -1343,9 +1340,7 @@ mod tests {
 
         store.get_node(2, 200).unwrap();
 
-        store
-            .add_node(5, create_test_node(500, 5))
-            .unwrap();
+        store.add_node(5, create_test_node(500, 5)).unwrap();
         assert_eq!(store.loaded_partitions.len(), 3);
         assert!(store.loaded_partitions.contains_key(&2));
         assert!(store.loaded_partitions.contains_key(&5));
@@ -1367,9 +1362,7 @@ mod tests {
 
             let bucket = 1;
             for i in 100..105 {
-                store
-                    .add_node(bucket, create_test_node(i, bucket))
-                    .unwrap();
+                store.add_node(bucket, create_test_node(i, bucket)).unwrap();
             }
 
             for (eid, i) in (100..104).enumerate() {
@@ -1412,9 +1405,7 @@ mod tests {
         let bucket = 1;
 
         for i in 100..105 {
-            store
-                .add_node(bucket, create_test_node(i, bucket))
-                .unwrap();
+            store.add_node(bucket, create_test_node(i, bucket)).unwrap();
         }
 
         store
@@ -1446,9 +1437,7 @@ mod tests {
         let bucket = 1;
 
         for i in 100..104 {
-            store
-                .add_node(bucket, create_test_node(i, bucket))
-                .unwrap();
+            store.add_node(bucket, create_test_node(i, bucket)).unwrap();
         }
 
         for (eid, i) in (100..103).enumerate() {
@@ -1475,9 +1464,7 @@ mod tests {
             .add_node(bucket, create_test_node(100, bucket))
             .unwrap();
         for (eid, i) in (101..105).enumerate() {
-            store
-                .add_node(bucket, create_test_node(i, bucket))
-                .unwrap();
+            store.add_node(bucket, create_test_node(i, bucket)).unwrap();
             store
                 .add_edge(bucket, create_test_edge(eid as u64 + 1, 100, i))
                 .unwrap();

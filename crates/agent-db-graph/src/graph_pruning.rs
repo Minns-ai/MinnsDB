@@ -160,7 +160,9 @@ impl GraphPruner {
         // Phase 0: Stream NodeHeaders and score them
         let headers = store
             .scan_headers(self.config.max_nodes_scanned_per_pass)
-            .map_err(|e| crate::error::GraphError::OperationError(format!("scan_headers: {}", e)))?;
+            .map_err(|e| {
+                crate::error::GraphError::OperationError(format!("scan_headers: {}", e))
+            })?;
 
         budget.consume(headers.len());
         result.total_headers_scanned = headers.len();
@@ -279,10 +281,7 @@ impl GraphPruner {
         let mut inverted: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for (cand_id, neighbors) in &candidate_neighbors {
             for &neighbor in neighbors {
-                inverted
-                    .entry(neighbor)
-                    .or_default()
-                    .push(*cand_id);
+                inverted.entry(neighbor).or_default().push(*cand_id);
             }
         }
 
@@ -290,7 +289,8 @@ impl GraphPruner {
         // For each neighbor that has multiple candidates pointing to it,
         // those candidates share that neighbor → potential merge
         let mut merge_pairs: Vec<(NodeId, NodeId, f32)> = Vec::new();
-        let mut seen_pairs: std::collections::HashSet<(NodeId, NodeId)> = std::collections::HashSet::new();
+        let mut seen_pairs: std::collections::HashSet<(NodeId, NodeId)> =
+            std::collections::HashSet::new();
 
         for (cand_id, neighbors) in &candidate_neighbors {
             if merge_pairs.len() >= self.config.max_merges_per_pass * 2 {
@@ -342,7 +342,8 @@ impl GraphPruner {
                 };
 
                 let union_size = {
-                    let mut all: std::collections::HashSet<NodeId> = cand_neigh.iter().copied().collect();
+                    let mut all: std::collections::HashSet<NodeId> =
+                        cand_neigh.iter().copied().collect();
                     all.extend(partner_neigh.iter().copied());
                     all.len()
                 };
@@ -361,15 +362,13 @@ impl GraphPruner {
         }
 
         // Sort by similarity descending (merge most similar first)
-        merge_pairs.sort_by(|a, b| {
-            b.2.partial_cmp(&a.2)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        merge_pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         merge_pairs.truncate(self.config.max_merges_per_pass);
 
         // Step 4: Execute merges
         let mut merged_count = 0;
-        let mut already_merged: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut already_merged: std::collections::HashSet<NodeId> =
+            std::collections::HashSet::new();
 
         for (node_a, node_b, _similarity) in &merge_pairs {
             if budget.exhausted() {
@@ -407,8 +406,7 @@ impl GraphPruner {
                     if let Some(s_node) = graph.get_node(survivor) {
                         let bucket = s_node.node_type.goal_bucket();
                         let _ = store.add_node(bucket, s_node.clone());
-                        let _ =
-                            store.store_header(bucket, NodeHeader::from_node(s_node, bucket));
+                        let _ = store.store_header(bucket, NodeHeader::from_node(s_node, bucket));
                         budget.consume(2);
                     }
 
@@ -425,11 +423,11 @@ impl GraphPruner {
 
                     already_merged.insert(absorbed);
                     merged_count += 1;
-                }
+                },
                 Err(_) => {
                     // Nodes might not both be in RAM — skip
                     continue;
-                }
+                },
             }
         }
 
@@ -494,7 +492,9 @@ mod tests {
             .unwrap()
             .as_nanos() as Timestamp;
 
-        let result = pruner.prune_full_graph(&mut graph, &mut store, now).unwrap();
+        let result = pruner
+            .prune_full_graph(&mut graph, &mut store, now)
+            .unwrap();
         assert_eq!(result.nodes_merged, 0);
         assert_eq!(result.nodes_deleted, 0);
         assert_eq!(result.total_headers_scanned, 0);
@@ -540,7 +540,9 @@ mod tests {
             .unwrap()
             .as_nanos() as Timestamp;
 
-        let result = pruner.prune_full_graph(&mut graph, &mut store, now).unwrap();
+        let result = pruner
+            .prune_full_graph(&mut graph, &mut store, now)
+            .unwrap();
 
         // Protected node should NOT be deleted
         assert_eq!(result.nodes_deleted, 0);
@@ -589,7 +591,9 @@ mod tests {
             .unwrap()
             .as_nanos() as Timestamp;
 
-        let result = pruner.prune_full_graph(&mut graph, &mut store, now).unwrap();
+        let result = pruner
+            .prune_full_graph(&mut graph, &mut store, now)
+            .unwrap();
 
         assert_eq!(result.nodes_deleted, 1);
         assert!(graph.get_node(node_id).is_none());
@@ -639,7 +643,9 @@ mod tests {
             .unwrap()
             .as_nanos() as Timestamp;
 
-        let result = pruner.prune_full_graph(&mut graph, &mut store, now).unwrap();
+        let result = pruner
+            .prune_full_graph(&mut graph, &mut store, now)
+            .unwrap();
         assert!(result.stopped_early);
     }
 }

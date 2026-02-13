@@ -136,11 +136,8 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Option<GraphNode>, GraphStoreError>;
 
     /// Delete a node (and all its edges)
-    fn delete_node(
-        &mut self,
-        bucket: GoalBucketId,
-        node_id: NodeId,
-    ) -> Result<(), GraphStoreError>;
+    fn delete_node(&mut self, bucket: GoalBucketId, node_id: NodeId)
+        -> Result<(), GraphStoreError>;
 
     /// Check if a node exists
     fn has_node(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<bool, GraphStoreError>;
@@ -163,11 +160,8 @@ pub trait GraphStore: Send + Sync {
     ) -> Result<Option<GraphEdge>, GraphStoreError>;
 
     /// Delete an edge by EdgeId
-    fn delete_edge(
-        &mut self,
-        bucket: GoalBucketId,
-        edge_id: EdgeId,
-    ) -> Result<(), GraphStoreError>;
+    fn delete_edge(&mut self, bucket: GoalBucketId, edge_id: EdgeId)
+        -> Result<(), GraphStoreError>;
 
     /// Get all outgoing neighbors (forward adjacency)
     fn get_neighbors(
@@ -569,12 +563,7 @@ impl GraphStore for InMemoryGraphStore {
     }
 
     fn scan_headers(&self, limit: usize) -> Result<Vec<NodeHeader>, GraphStoreError> {
-        Ok(self
-            .headers
-            .values()
-            .take(limit)
-            .cloned()
-            .collect())
+        Ok(self.headers.values().take(limit).cloned().collect())
     }
 
     fn delete_header(
@@ -605,11 +594,7 @@ impl GraphStore for InMemoryGraphStore {
 
     fn get_partition_stats(&self, bucket: GoalBucketId) -> Result<BucketInfo, GraphStoreError> {
         let node_count = self.nodes.keys().filter(|(b, _)| *b == bucket).count() as u64;
-        let edge_count = self
-            .edges
-            .keys()
-            .filter(|(b, _)| *b == bucket)
-            .count() as u64;
+        let edge_count = self.edges.keys().filter(|(b, _)| *b == bucket).count() as u64;
 
         Ok(BucketInfo {
             bucket_id: bucket,

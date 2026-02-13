@@ -1978,10 +1978,10 @@ impl GraphEngine {
                                     result.stopped_early,
                                 );
                             }
-                        }
+                        },
                         Err(e) => {
                             tracing::warn!("Graph pruning failed: {}", e);
-                        }
+                        },
                     }
                 }
 
@@ -2023,14 +2023,18 @@ impl GraphEngine {
 
                 // 6. Decision trace TTL sweep
                 {
-                    let max_age = std::time::Duration::from_secs(engine.config.max_decision_trace_age_secs);
+                    let max_age =
+                        std::time::Duration::from_secs(engine.config.max_decision_trace_age_secs);
                     let before = engine.decision_traces.len();
-                    engine.decision_traces.retain(|_, trace| {
-                        trace.last_updated.elapsed() < max_age
-                    });
+                    engine
+                        .decision_traces
+                        .retain(|_, trace| trace.last_updated.elapsed() < max_age);
                     let swept = before - engine.decision_traces.len();
                     if swept > 0 {
-                        tracing::info!("Maintenance: decision_traces TTL swept {} stale entries", swept);
+                        tracing::info!(
+                            "Maintenance: decision_traces TTL swept {} stale entries",
+                            swept
+                        );
                     }
                 }
 
@@ -2065,7 +2069,10 @@ impl GraphEngine {
                     if mc.purge_inactive_claims {
                         match claim_store.purge_inactive_claims() {
                             Ok(purged) if purged > 0 => {
-                                tracing::info!("Maintenance: purged {} inactive claims from disk", purged);
+                                tracing::info!(
+                                    "Maintenance: purged {} inactive claims from disk",
+                                    purged
+                                );
                             },
                             Err(e) => {
                                 tracing::warn!("Maintenance: claim purge failed: {}", e);

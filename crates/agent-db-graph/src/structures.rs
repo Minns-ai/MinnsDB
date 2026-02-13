@@ -1200,8 +1200,16 @@ impl Graph {
         }
 
         // Collect absorbed edges before mutation
-        let absorbed_out = self.adjacency_out.get(&absorbed_id).cloned().unwrap_or_default();
-        let absorbed_in = self.adjacency_in.get(&absorbed_id).cloned().unwrap_or_default();
+        let absorbed_out = self
+            .adjacency_out
+            .get(&absorbed_id)
+            .cloned()
+            .unwrap_or_default();
+        let absorbed_in = self
+            .adjacency_in
+            .get(&absorbed_id)
+            .cloned()
+            .unwrap_or_default();
 
         // Redirect outgoing edges: absorbed -> X becomes survivor -> X
         // First pass: gather info we need (targets, weights, existing edges)
@@ -1222,11 +1230,8 @@ impl Graph {
                 .adjacency_out
                 .get(&survivor_id)
                 .and_then(|ids| {
-                    ids.iter().find(|&&eid| {
-                        self.edges
-                            .get(&eid)
-                            .map_or(false, |e| e.target == target)
-                    })
+                    ids.iter()
+                        .find(|&&eid| self.edges.get(&eid).map_or(false, |e| e.target == target))
                 })
                 .copied();
 
@@ -1265,11 +1270,8 @@ impl Graph {
                 .adjacency_in
                 .get(&survivor_id)
                 .and_then(|ids| {
-                    ids.iter().find(|&&eid| {
-                        self.edges
-                            .get(&eid)
-                            .map_or(false, |e| e.source == source)
-                    })
+                    ids.iter()
+                        .find(|&&eid| self.edges.get(&eid).map_or(false, |e| e.source == source))
                 })
                 .copied();
 
