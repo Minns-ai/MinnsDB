@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             watermark_window_ms: 2000,
             strict_causality: true,
             max_clock_skew_ms: 5000,
+            ..OrderingConfig::default()
         },
         ..GraphEngineConfig::default()
     };

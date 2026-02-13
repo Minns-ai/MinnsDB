@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             watermark_window_ms: 3000,
             strict_causality: true,
             max_clock_skew_ms: 10000,
+            ..OrderingConfig::default()
         },
         scoped_inference_config: ScopedInferenceConfig {
             enable_cross_scope_patterns: true,
