@@ -71,6 +71,14 @@ pub struct Episode {
     /// Salience score: combination of surprise, outcome importance, and goal relevance (0.0 to 1.0)
     /// Used to prioritize which episodes to replay and consolidate into semantic memory
     pub salience_score: f32,
+
+    /// Timestamp of the last event added to this episode
+    /// Used for time-gap episode end detection
+    pub last_event_timestamp: Option<Timestamp>,
+
+    /// Count of consecutive outcome events (Success/Failure) at the tail of the episode
+    /// Resets to 0 when a non-outcome event is added
+    pub consecutive_outcome_count: u32,
 }
 
 /// Outcome of an episode
@@ -112,18 +120,34 @@ pub struct EpisodeDetectorConfig {
 
     /// Maximum completed episodes to keep in memory (ring-buffer cap)
     pub max_completed_episodes: usize,
+
+    /// Cognitive event types that can start a new episode
+    pub episode_start_types: Vec<CognitiveType>,
+
+    /// Minimum events before an outcome (Success/Failure) can end the episode
+    pub min_events_before_outcome_end: usize,
+
+    /// Significance threshold that alone qualifies an episode for storage (OR gate)
+    pub high_significance_override: f32,
 }
 
 impl Default for EpisodeDetectorConfig {
     fn default() -> Self {
         Self {
-            min_significance_threshold: 0.3,
+            min_significance_threshold: 0.25,
             context_shift_threshold: 0.4,
             max_time_gap_ns: 3_600_000_000_000, // 1 hour
-            min_events_per_episode: 3,
+            min_events_per_episode: 2,
             consolidation_interval_ns: 3_600_000_000_000, // 1 hour
             late_event_window_ns: 5_000_000_000,          // 5 seconds
             max_completed_episodes: 5_000,
+            episode_start_types: vec![
+                CognitiveType::GoalFormation,
+                CognitiveType::Planning,
+                CognitiveType::LearningUpdate,
+            ],
+            min_events_before_outcome_end: 2,
+            high_significance_override: 0.5,
         }
     }
 }
@@ -215,6 +239,23 @@ impl EpisodeDetector {
 
             // Track latest context snapshot for memory formation
             episode.context = event.context.clone();
+
+            // Track last event timestamp for time-gap detection
+            episode.last_event_timestamp = Some(event.timestamp);
+
+            // Track consecutive outcome events for smarter episode end conditions
+            let is_outcome = matches!(
+                &event.event_type,
+                EventType::Action {
+                    outcome: ActionOutcome::Success { .. } | ActionOutcome::Failure { .. },
+                    ..
+                }
+            );
+            if is_outcome {
+                episode.consecutive_outcome_count += 1;
+            } else {
+                episode.consecutive_outcome_count = 0;
+            }
         }
 
         // Check if this event should end the episode
@@ -263,10 +304,10 @@ impl EpisodeDetector {
             return true;
         }
 
-        // Check for episode start triggers
+        // Check for episode start triggers using configurable types
         match &event.event_type {
             EventType::Cognitive { process_type, .. } => {
-                matches!(process_type, CognitiveType::GoalFormation)
+                self.config.episode_start_types.contains(process_type)
             },
             _ => false,
         }
@@ -278,13 +319,18 @@ impl EpisodeDetector {
             return true;
         }
 
-        // Check for goal completion
+        // Check for goal completion — but only if the episode has enough events
+        // This prevents premature truncation of multi-step retry patterns
         if let EventType::Action {
             outcome: ActionOutcome::Success { .. } | ActionOutcome::Failure { .. },
             ..
         } = &event.event_type
         {
-            return true;
+            let enough_events = episode.events.len() >= self.config.min_events_before_outcome_end;
+            let consecutive_outcome = self.is_consecutive_outcome_event(episode, event);
+            if enough_events || consecutive_outcome {
+                return true;
+            }
         }
 
         // Check for significant context shift
@@ -301,6 +347,15 @@ impl EpisodeDetector {
         }
 
         false
+    }
+
+    /// Check if the previous event in the episode was also an outcome event
+    /// (prevents infinite episodes by ending on second consecutive outcome)
+    fn is_consecutive_outcome_event(&self, episode: &Episode, _current_event: &Event) -> bool {
+        // The current event is an outcome event (checked by caller).
+        // consecutive_outcome_count was already incremented in process_event().
+        // If count >= 2, this is at least the second consecutive outcome.
+        episode.consecutive_outcome_count >= 2
     }
 
     /// Check if there's a significant context shift
@@ -406,7 +461,14 @@ impl EpisodeDetector {
             prediction_error: 0.0,
             self_judged_quality: None,
             salience_score: 0.0,
+            last_event_timestamp: Some(event.timestamp),
+            consecutive_outcome_count: 0,
         };
+
+        // Bootstrap consolidation timer on first episode for this agent
+        self.last_consolidation
+            .entry(event.agent_id)
+            .or_insert(event.timestamp);
 
         self.active_episodes.insert(event.agent_id, episode);
     }
@@ -439,6 +501,8 @@ impl EpisodeDetector {
                     self_judged_quality: None,
                     salience_score: 0.0,
                     context: end_event.context.clone(),
+                    last_event_timestamp: Some(end_event.timestamp),
+                    consecutive_outcome_count: 0,
                 }
             });
 
@@ -456,11 +520,11 @@ impl EpisodeDetector {
             episode.significance = self.config.min_significance_threshold;
         }
 
-        // Only store if meets minimum criteria (or feedback explicitly ends the episode)
-        if (episode.events.len() >= self.config.min_events_per_episode
-            && episode.significance >= self.config.min_significance_threshold)
-            || Self::is_feedback_event(end_event)
-        {
+        // Store if: enough events OR high significance OR feedback
+        let enough_events = episode.events.len() >= self.config.min_events_per_episode;
+        let high_significance = episode.significance >= self.config.high_significance_override;
+        let has_feedback = Self::is_feedback_event(end_event);
+        if enough_events || high_significance || has_feedback {
             tracing::info!(
                 "EpisodeDetector completed episode_id={} agent_id={} events={} significance={:.3} outcome={:?}",
                 episode.id,
@@ -657,18 +721,27 @@ impl EpisodeDetector {
         significance += novelty_significance;
 
         // 6) Event type importance (baseline behavior)
-        if let EventType::Cognitive { process_type, .. } = &event.event_type {
-            if matches!(process_type, CognitiveType::GoalFormation) {
-                significance += 0.15;
-            }
-        }
-
-        if let EventType::Action { outcome, .. } = &event.event_type {
-            match outcome {
+        match &event.event_type {
+            EventType::Cognitive { process_type, .. } => match process_type {
+                CognitiveType::GoalFormation => significance += 0.15,
+                CognitiveType::Planning => significance += 0.1,
+                CognitiveType::Reasoning => significance += 0.08,
+                CognitiveType::LearningUpdate => significance += 0.12,
+                CognitiveType::MemoryRetrieval => {},
+            },
+            EventType::Action { outcome, .. } => match outcome {
                 ActionOutcome::Success { .. } => significance += 0.10,
-                ActionOutcome::Failure { .. } => significance += 0.12, // Failures slightly more memorable
+                ActionOutcome::Failure { .. } => significance += 0.12,
                 _ => {},
-            }
+            },
+            EventType::Communication { .. } => significance += 0.05,
+            EventType::Observation { confidence, .. } => {
+                if *confidence > 0.7 {
+                    significance += 0.08;
+                }
+            },
+            EventType::Learning { .. } => significance += 0.1,
+            EventType::Context { .. } => {},
         }
 
         // Normalize to [0.0, 1.0]
@@ -812,10 +885,8 @@ impl EpisodeDetector {
     }
 
     /// Get the timestamp of the last event in an episode
-    fn get_last_event_timestamp(&self, _episode: &Episode) -> Option<Timestamp> {
-        // In a real implementation, we'd look up the last event's timestamp
-        // For now, return None as we'd need access to the event storage
-        None
+    fn get_last_event_timestamp(&self, episode: &Episode) -> Option<Timestamp> {
+        episode.last_event_timestamp
     }
 
     /// Check if periodic consolidation should happen
@@ -823,6 +894,7 @@ impl EpisodeDetector {
         if let Some(&last_time) = self.last_consolidation.get(&agent_id) {
             current_time.saturating_sub(last_time) >= self.config.consolidation_interval_ns
         } else {
+            // No consolidation record yet — bootstrap will be set in start_episode
             false
         }
     }

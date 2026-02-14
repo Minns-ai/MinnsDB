@@ -161,7 +161,7 @@ pub enum ActionOutcome {
 }
 
 /// Types of cognitive processes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CognitiveType {
     GoalFormation,
     Planning,

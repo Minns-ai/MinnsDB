@@ -2217,8 +2217,14 @@ impl GraphEngine {
 
     /// Process episode for strategy extraction
     async fn process_episode_for_strategy(&self, episode: &Episode) -> GraphResult<()> {
-        // Only extract from successful episodes
-        if episode.outcome != Some(EpisodeOutcome::Success) {
+        // Extract strategies from Success and Failure episodes
+        // Failure episodes produce Constraint strategies (what NOT to do)
+        // Partial outcomes are too ambiguous for reliable strategy extraction
+        let dominated_outcome = match &episode.outcome {
+            Some(EpisodeOutcome::Success) | Some(EpisodeOutcome::Failure) => true,
+            _ => false,
+        };
+        if !dominated_outcome {
             tracing::info!(
                 "Strategy extraction skipped episode_id={} outcome={:?}",
                 episode.id,

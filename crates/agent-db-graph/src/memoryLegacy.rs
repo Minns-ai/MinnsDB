@@ -1377,6 +1377,8 @@ mod tests {
             prediction_error: 0.0,
             self_judged_quality: None,
             salience_score: 0.5,
+            last_event_timestamp: Some(current_timestamp()),
+            consecutive_outcome_count: 0,
         }
     }
 

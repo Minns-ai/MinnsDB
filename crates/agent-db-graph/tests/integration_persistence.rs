@@ -112,6 +112,8 @@ fn create_test_episode(id: u64, agent_id: AgentId, outcome: EpisodeOutcome) -> E
         prediction_error: 0.1,
         self_judged_quality: Some(0.9),
         salience_score: 0.85,
+        last_event_timestamp: Some(2000),
+        consecutive_outcome_count: 0,
     }
 }
 
