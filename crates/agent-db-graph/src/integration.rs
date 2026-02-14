@@ -2220,7 +2220,10 @@ impl GraphEngine {
         // Extract strategies from Success and Failure episodes
         // Failure episodes produce Constraint strategies (what NOT to do)
         // Partial outcomes are too ambiguous for reliable strategy extraction
-        let dominated_outcome = matches!(&episode.outcome, Some(EpisodeOutcome::Success) | Some(EpisodeOutcome::Failure));
+        let dominated_outcome = matches!(
+            &episode.outcome,
+            Some(EpisodeOutcome::Success) | Some(EpisodeOutcome::Failure)
+        );
         if !dominated_outcome {
             tracing::info!(
                 "Strategy extraction skipped episode_id={} outcome={:?}",
