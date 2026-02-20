@@ -34,6 +34,19 @@ pub trait EmbeddingClient: Send + Sync {
     /// Generate embedding for text
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse>;
 
+    /// Generate embeddings for a batch of texts.
+    ///
+    /// Default implementation falls back to sequential `embed()` calls.
+    /// Implementations should override this for providers that support
+    /// batch requests (e.g. OpenAI allows up to 2048 inputs per request).
+    async fn embed_batch(&self, requests: Vec<EmbeddingRequest>) -> Result<Vec<EmbeddingResponse>> {
+        let mut responses = Vec::with_capacity(requests.len());
+        for req in requests {
+            responses.push(self.embed(req).await?);
+        }
+        Ok(responses)
+    }
+
     /// Get embedding dimensionality
     fn dimensions(&self) -> usize;
 
@@ -123,6 +136,95 @@ impl EmbeddingClient for OpenAiEmbeddingClient {
             model: self.model.clone(),
             tokens_used,
         })
+    }
+
+    async fn embed_batch(&self, requests: Vec<EmbeddingRequest>) -> Result<Vec<EmbeddingResponse>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        const MAX_BATCH: usize = 2048;
+        let mut all_responses = Vec::with_capacity(requests.len());
+
+        for chunk in requests.chunks(MAX_BATCH) {
+            let input_texts: Vec<String> = chunk
+                .iter()
+                .map(|r| {
+                    if let Some(ctx) = &r.context {
+                        format!("{}\n\n{}", ctx, r.text)
+                    } else {
+                        r.text.clone()
+                    }
+                })
+                .collect();
+
+            debug!(
+                "Generating OpenAI batch embeddings for {} texts",
+                input_texts.len()
+            );
+
+            let response = self
+                .client
+                .post("https://api.openai.com/v1/embeddings")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({
+                    "model": self.model,
+                    "input": input_texts,
+                }))
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await?;
+                return Err(anyhow::anyhow!(
+                    "OpenAI API batch error {}: {}",
+                    status,
+                    body
+                ));
+            }
+
+            let json: serde_json::Value = response.json().await?;
+            let tokens_used = json["usage"]["total_tokens"].as_u64().unwrap_or(0);
+            let data = json["data"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Missing data array in OpenAI batch response"))?;
+
+            // Sort by index to preserve input order
+            let mut indexed: Vec<(usize, Vec<f32>)> = data
+                .iter()
+                .map(|item| {
+                    let idx = item["index"].as_u64().unwrap_or(0) as usize;
+                    let emb: Vec<f32> =
+                        serde_json::from_value(item["embedding"].clone()).unwrap_or_default();
+                    (idx, emb)
+                })
+                .collect();
+            indexed.sort_by_key(|(idx, _)| *idx);
+
+            let per_item_tokens = if chunk.len() > 0 {
+                tokens_used / chunk.len() as u64
+            } else {
+                0
+            };
+
+            for (_idx, embedding) in indexed {
+                all_responses.push(EmbeddingResponse {
+                    embedding,
+                    model: self.model.clone(),
+                    tokens_used: per_item_tokens,
+                });
+            }
+
+            info!(
+                "Generated batch of {} embeddings, {} total tokens",
+                chunk.len(),
+                tokens_used
+            );
+        }
+
+        Ok(all_responses)
     }
 
     fn dimensions(&self) -> usize {
@@ -230,6 +332,18 @@ impl EmbeddingClient for MockEmbeddingClient {
     }
 }
 
+/// Distance metric for vector search
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DistanceMetric {
+    /// Cosine similarity (default, range [-1, 1])
+    #[default]
+    Cosine,
+    /// Euclidean distance normalized to [0, 1] via 1/(1+dist)
+    Euclidean,
+    /// Manhattan distance normalized to [0, 1] via 1/(1+dist)
+    Manhattan,
+}
+
 /// Vector similarity utilities
 pub struct VectorSimilarity;
 
@@ -269,6 +383,34 @@ impl VectorSimilarity {
             .map(|(x, y)| (x - y).powi(2))
             .sum::<f32>()
             .sqrt()
+    }
+
+    /// Calculate Manhattan (L1) distance between two vectors
+    pub fn manhattan_distance(a: &[f32], b: &[f32]) -> f32 {
+        if a.len() != b.len() {
+            return f32::INFINITY;
+        }
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+    }
+
+    /// Compute similarity between two vectors using the specified metric.
+    ///
+    /// All metrics are normalized to [0, 1] where 1 = identical.
+    /// - Cosine: `(cosine_similarity + 1) / 2` mapped from [-1,1] to [0,1]
+    /// - Euclidean: `1 / (1 + euclidean_distance)`
+    /// - Manhattan: `1 / (1 + manhattan_distance)`
+    pub fn compute(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
+        match metric {
+            DistanceMetric::Cosine => Self::cosine_similarity(a, b),
+            DistanceMetric::Euclidean => {
+                let dist = Self::euclidean_distance(a, b);
+                1.0 / (1.0 + dist)
+            },
+            DistanceMetric::Manhattan => {
+                let dist = Self::manhattan_distance(a, b);
+                1.0 / (1.0 + dist)
+            },
+        }
     }
 
     /// Normalize a vector to unit length (L2 normalization)
@@ -365,5 +507,67 @@ mod tests {
         assert_eq!(results[0].0, 0); // Index 0 should be most similar
         assert!(results[0].1 > 0.99); // Nearly 1.0 similarity
         assert_eq!(results[1].0, 1); // Index 1 should be second
+    }
+
+    #[test]
+    fn test_manhattan_distance() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        // |1-0| + |0-1| + |0-0| = 2.0
+        assert!((VectorSimilarity::manhattan_distance(&a, &b) - 2.0).abs() < 0.001);
+
+        // Identical → 0
+        assert!((VectorSimilarity::manhattan_distance(&a, &a)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_compute_with_all_metrics() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+
+        // Identical vectors should give max similarity for all metrics
+        assert!((VectorSimilarity::compute(&a, &b, DistanceMetric::Cosine) - 1.0).abs() < 0.001);
+        assert!((VectorSimilarity::compute(&a, &b, DistanceMetric::Euclidean) - 1.0).abs() < 0.001);
+        assert!((VectorSimilarity::compute(&a, &b, DistanceMetric::Manhattan) - 1.0).abs() < 0.001);
+
+        // Orthogonal vectors
+        let c = vec![0.0, 1.0, 0.0];
+        let cos_sim = VectorSimilarity::compute(&a, &c, DistanceMetric::Cosine);
+        assert!(cos_sim.abs() < 0.001); // 0.0 for orthogonal
+
+        // Euclidean: distance = sqrt(2), sim = 1/(1+sqrt(2)) ≈ 0.414
+        let euc_sim = VectorSimilarity::compute(&a, &c, DistanceMetric::Euclidean);
+        assert!((euc_sim - 1.0 / (1.0 + 2.0_f32.sqrt())).abs() < 0.001);
+
+        // Manhattan: distance = 2, sim = 1/(1+2) = 0.333
+        let man_sim = VectorSimilarity::compute(&a, &c, DistanceMetric::Manhattan);
+        assert!((man_sim - 1.0 / 3.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn test_mock_embed_batch_fallback() {
+        let client = MockEmbeddingClient::new(384);
+        let requests = vec![
+            EmbeddingRequest {
+                text: "First".to_string(),
+                context: None,
+            },
+            EmbeddingRequest {
+                text: "Second".to_string(),
+                context: None,
+            },
+            EmbeddingRequest {
+                text: "Third".to_string(),
+                context: None,
+            },
+        ];
+
+        let responses = client.embed_batch(requests).await.unwrap();
+        assert_eq!(responses.len(), 3);
+        for resp in &responses {
+            assert_eq!(resp.embedding.len(), 384);
+        }
+        // Different inputs should give different embeddings
+        assert_ne!(responses[0].embedding, responses[1].embedding);
     }
 }

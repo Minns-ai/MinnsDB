@@ -4,7 +4,7 @@
 
 use agent_db_core::types::{AgentId, ContextHash, SessionId};
 use agent_db_events::core::{Event, EventContext};
-use agent_db_storage::{RedbBackend, StorageResult};
+use agent_db_storage::{BatchOperation, RedbBackend, StorageResult};
 use std::sync::Arc;
 
 use crate::episodes::Episode;
@@ -58,6 +58,27 @@ pub trait MemoryStore: Send + Sync {
     ) -> Vec<Memory> {
         // Default: fall back to flat retrieval, implementations can override
         self.retrieve_by_context_similar(context, limit, min_similarity, agent_id, None)
+    }
+
+    // ========== Batch Operations ==========
+    /// Store multiple consolidated memories in a single atomic transaction.
+    /// Default: falls back to individual calls.
+    fn store_consolidated_memories_batch(&mut self, memories: Vec<Memory>) {
+        for m in memories {
+            self.store_consolidated_memory(m);
+        }
+    }
+
+    /// Mark multiple memories as consolidated in a single atomic transaction.
+    /// Each tuple: (memory_id, into_id, into_tier, decay).
+    /// Default: falls back to individual calls.
+    fn mark_consolidated_batch(
+        &mut self,
+        batch: Vec<(MemoryId, MemoryId, crate::memory::MemoryTier, f32)>,
+    ) {
+        for (mid, into_id, tier, decay) in batch {
+            self.mark_consolidated(mid, into_id, tier, decay);
+        }
     }
 }
 
@@ -282,32 +303,62 @@ impl RedbMemoryStore {
 
     /// Persist a memory to redb
     fn persist_memory(&self, memory: &Memory) -> StorageResult<()> {
-        // Store main record
-        self.backend
-            .put("memory_records", memory.id.to_be_bytes(), memory)?;
+        let ops = self.persist_memory_ops(memory)?;
+        self.backend.write_batch(ops)
+    }
 
-        // Index by context fingerprint: (context_fingerprint, memory_id) -> ()
+    /// Build the batch operations needed to persist a memory (record + indexes)
+    /// without committing them. Callers can accumulate multiple sets of ops and
+    /// flush once via `backend.write_batch()`.
+    fn persist_memory_ops(&self, memory: &Memory) -> StorageResult<Vec<BatchOperation>> {
+        let mut ops = Vec::with_capacity(4);
+
+        // Main record
+        let value =
+            bincode::serialize(memory).map_err(agent_db_storage::StorageError::Serialization)?;
+        ops.push(BatchOperation::Put {
+            table_name: "memory_records".to_string(),
+            key: memory.id.to_be_bytes().to_vec(),
+            value,
+        });
+
+        // Index by context fingerprint
         let mut context_key = Vec::with_capacity(16);
         context_key.extend_from_slice(&memory.context.fingerprint.to_be_bytes());
         context_key.extend_from_slice(&memory.id.to_be_bytes());
-        self.backend.put("mem_by_context_hash", context_key, &())?;
+        ops.push(BatchOperation::Put {
+            table_name: "mem_by_context_hash".to_string(),
+            key: context_key,
+            value: bincode::serialize(&())
+                .map_err(agent_db_storage::StorageError::Serialization)?,
+        });
 
-        // Index by agent: (agent_id, memory_id) -> ()
+        // Index by agent
         let mut agent_key = Vec::with_capacity(16);
         agent_key.extend_from_slice(&memory.agent_id.to_be_bytes());
         agent_key.extend_from_slice(&memory.id.to_be_bytes());
-        self.backend.put("mem_by_bucket", agent_key, &())?;
+        ops.push(BatchOperation::Put {
+            table_name: "mem_by_bucket".to_string(),
+            key: agent_key,
+            value: bincode::serialize(&())
+                .map_err(agent_db_storage::StorageError::Serialization)?,
+        });
 
-        // Index by goal bucket: (goal_bucket_id, memory_id) -> ()
+        // Index by goal bucket
         let goal_bucket = memory.context.goal_bucket_id;
         if goal_bucket != 0 {
             let mut gb_key = Vec::with_capacity(16);
             gb_key.extend_from_slice(&goal_bucket.to_be_bytes());
             gb_key.extend_from_slice(&memory.id.to_be_bytes());
-            self.backend.put("mem_by_goal_bucket", gb_key, &())?;
+            ops.push(BatchOperation::Put {
+                table_name: "mem_by_goal_bucket".to_string(),
+                key: gb_key,
+                value: serde_json::to_vec(&())
+                    .map_err(|e| agent_db_storage::StorageError::DatabaseError(e.to_string()))?,
+            });
         }
 
-        Ok(())
+        Ok(ops)
     }
 
     /// Delete a memory from redb
@@ -837,6 +888,94 @@ impl MemoryStore for RedbMemoryStore {
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().take(limit).map(|(_, m)| m).collect()
     }
+
+    fn store_consolidated_memories_batch(&mut self, memories: Vec<Memory>) {
+        let mut all_ops: Vec<BatchOperation> = Vec::new();
+
+        for memory in &memories {
+            let id = memory.id;
+            if id >= self.next_memory_id {
+                self.next_memory_id = id + 1;
+            }
+            match self.persist_memory_ops(memory) {
+                Ok(ops) => all_ops.extend(ops),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to build ops for consolidated memory {}: {:?}",
+                        id,
+                        e
+                    );
+                },
+            }
+        }
+
+        // Single atomic write for all memories
+        if !all_ops.is_empty() {
+            if let Err(e) = self.backend.write_batch(all_ops) {
+                tracing::error!("Failed to batch-persist consolidated memories: {:?}", e);
+            }
+        }
+
+        // Cache them all after successful persist
+        for memory in memories {
+            self.cache_memory(memory);
+        }
+    }
+
+    fn mark_consolidated_batch(
+        &mut self,
+        batch: Vec<(MemoryId, MemoryId, crate::memory::MemoryTier, f32)>,
+    ) {
+        let mut all_ops: Vec<BatchOperation> = Vec::new();
+        let mut updated_memories: Vec<Memory> = Vec::new();
+
+        for (memory_id, into_id, into_tier, decay) in batch {
+            let memory = if let Some(entry) = self.memory_cache.get_mut(&memory_id) {
+                entry.memory.consolidation_status =
+                    crate::memory::ConsolidationStatus::Consolidated;
+                if into_tier == crate::memory::MemoryTier::Schema {
+                    entry.memory.schema_id = Some(into_id);
+                }
+                entry.memory.strength *= decay;
+                Some(entry.memory.clone())
+            } else {
+                self.load_memory(memory_id).map(|mut m| {
+                    m.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
+                    if into_tier == crate::memory::MemoryTier::Schema {
+                        m.schema_id = Some(into_id);
+                    }
+                    m.strength *= decay;
+                    m
+                })
+            };
+
+            if let Some(mem) = memory {
+                match self.persist_memory_ops(&mem) {
+                    Ok(ops) => all_ops.extend(ops),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to build ops for mark_consolidated {}: {:?}",
+                            memory_id,
+                            e
+                        );
+                    },
+                }
+                updated_memories.push(mem);
+            }
+        }
+
+        // Single atomic write
+        if !all_ops.is_empty() {
+            if let Err(e) = self.backend.write_batch(all_ops) {
+                tracing::error!("Failed to batch-persist mark_consolidated: {:?}", e);
+            }
+        }
+
+        // Cache updated memories
+        for mem in updated_memories {
+            self.cache_memory(mem);
+        }
+    }
 }
 
 pub trait StrategyStore: Send + Sync {
@@ -1085,17 +1224,36 @@ impl RedbStrategyStore {
 
     /// Persist a strategy to redb
     fn persist_strategy(&self, strategy: &Strategy) -> StorageResult<()> {
-        // Store main record
-        self.backend
-            .put("strategy_records", strategy.id.to_be_bytes(), strategy)?;
+        let ops = self.persist_strategy_ops(strategy)?;
+        self.backend.write_batch(ops)
+    }
 
-        // Index by goal bucket: (goal_bucket_id, strategy_id) → empty
+    /// Build batch operations for persisting a strategy (record + indexes)
+    /// without committing. Allows callers to accumulate ops and flush once.
+    fn persist_strategy_ops(&self, strategy: &Strategy) -> StorageResult<Vec<BatchOperation>> {
+        let mut ops = Vec::with_capacity(4);
+
+        // Main record
+        let value =
+            bincode::serialize(strategy).map_err(agent_db_storage::StorageError::Serialization)?;
+        ops.push(BatchOperation::Put {
+            table_name: "strategy_records".to_string(),
+            key: strategy.id.to_be_bytes().to_vec(),
+            value,
+        });
+
+        // Index by goal bucket
         let mut bucket_key = Vec::with_capacity(16);
         bucket_key.extend_from_slice(&strategy.goal_bucket_id.to_be_bytes());
         bucket_key.extend_from_slice(&strategy.id.to_be_bytes());
-        self.backend.put("strategy_by_bucket", bucket_key, &())?;
+        ops.push(BatchOperation::Put {
+            table_name: "strategy_by_bucket".to_string(),
+            key: bucket_key,
+            value: bincode::serialize(&())
+                .map_err(agent_db_storage::StorageError::Serialization)?,
+        });
 
-        // Index by behavior signature: (signature_hash, strategy_id) → empty
+        // Index by behavior signature
         let signature_hash = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -1106,21 +1264,26 @@ impl RedbStrategyStore {
         let mut signature_key = Vec::with_capacity(16);
         signature_key.extend_from_slice(&signature_hash.to_be_bytes());
         signature_key.extend_from_slice(&strategy.id.to_be_bytes());
-        self.backend
-            .put("strategy_by_signature", signature_key, &())?;
+        ops.push(BatchOperation::Put {
+            table_name: "strategy_by_signature".to_string(),
+            key: signature_key,
+            value: bincode::serialize(&())
+                .map_err(agent_db_storage::StorageError::Serialization)?,
+        });
 
-        // Index by agent: using strategy_by_bucket with agent_id as first key
+        // Index by agent
         let mut agent_key = Vec::with_capacity(16);
         agent_key.extend_from_slice(&strategy.agent_id.to_be_bytes());
         agent_key.extend_from_slice(&strategy.id.to_be_bytes());
-        // Reuse strategy_feature_postings for agent index (optimized reuse of tables)
-        self.backend.put(
-            "strategy_feature_postings",
-            agent_key,
-            &strategy.quality_score,
-        )?;
+        let quality_bytes = bincode::serialize(&strategy.quality_score)
+            .map_err(agent_db_storage::StorageError::Serialization)?;
+        ops.push(BatchOperation::Put {
+            table_name: "strategy_feature_postings".to_string(),
+            key: agent_key,
+            value: quality_bytes,
+        });
 
-        Ok(())
+        Ok(ops)
     }
 
     /// Delete a strategy from redb

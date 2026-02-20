@@ -9,6 +9,22 @@ use std::hash::{Hash, Hasher};
 
 use crate::episodes::EpisodeId;
 
+/// Metadata key for positive outcome count on a claim.
+pub const META_POSITIVE_OUTCOMES: &str = "_positive_outcomes";
+/// Metadata key for negative outcome count on a claim.
+pub const META_NEGATIVE_OUTCOMES: &str = "_negative_outcomes";
+/// Metadata key for exponential moving average Q-value on a claim.
+pub const META_Q_VALUE: &str = "_q_value";
+
+/// Minimum number of outcomes before Q-value scoring kicks in.
+/// Below this threshold, Bayesian `(pos+1)/(total+2)` is used (stable, prior-dominated).
+/// At and above, the EMA Q-value takes over (responsive to distribution shift).
+pub const Q_KICK_IN: u32 = 5;
+
+/// Learning rate for EMA Q-value updates: `Q = Q + α(r − Q)`.
+/// 0.3 means each new outcome contributes 30% and prior history 70%.
+pub const Q_ALPHA: f32 = 0.3;
+
 pub type ClaimId = u64;
 pub type ThreadId = String;
 
@@ -63,6 +79,8 @@ pub enum ClaimType {
     Intention,
     /// System/agent ability — "The system supports X", "Agent can Y"
     Capability,
+    /// Negative lesson — "Don't do X", learned from repeated failures
+    Avoidance,
 }
 
 impl ClaimType {
@@ -76,6 +94,7 @@ impl ClaimType {
             ClaimType::Preference => 30.0 * 86_400.0,  // 30 days
             ClaimType::Capability => 180.0 * 86_400.0, // 180 days
             ClaimType::Fact => 365.0 * 86_400.0,       // 365 days
+            ClaimType::Avoidance => 14.0 * 86_400.0,   // 14 days (same as Belief)
         }
     }
 
@@ -87,6 +106,7 @@ impl ClaimType {
             "belief" => ClaimType::Belief,
             "intention" | "intent" => ClaimType::Intention,
             "capability" => ClaimType::Capability,
+            "avoidance" | "avoid" | "negative" | "constraint" => ClaimType::Avoidance,
             _ => ClaimType::Fact, // default
         }
     }
@@ -100,6 +120,7 @@ impl std::fmt::Display for ClaimType {
             ClaimType::Belief => write!(f, "Belief"),
             ClaimType::Intention => write!(f, "Intention"),
             ClaimType::Capability => write!(f, "Capability"),
+            ClaimType::Avoidance => write!(f, "Avoidance"),
         }
     }
 }
@@ -378,16 +399,102 @@ impl DerivedClaim {
         weight as f32
     }
 
-    /// Compute a retrieval score that blends similarity with temporal freshness.
+    /// Compute a retrieval score that blends similarity with temporal freshness
+    /// and outcome history.
     ///
-    /// `score = similarity * (alpha + (1 - alpha) * temporal_weight)`
+    /// `base = similarity * (alpha + (1 - alpha) * temporal_weight)`
+    /// `multiplier = 0.6 + 0.8 * outcome_score`  (maps [0..1] → [0.6..1.4])
+    /// `score = base * multiplier`
     ///
     /// With alpha = 0.6 a perfect-similarity claim that is ancient still gets 0.6,
-    /// while a fresh one gets 1.0.
+    /// while a fresh one gets 1.0. Claims with no outcomes get multiplier = 1.0
+    /// (neutral). All-positive → 1.4 (40% boost). All-negative → 0.6 (40% penalty).
     pub fn retrieval_score(&self, similarity: f32) -> f32 {
         const ALPHA: f32 = 0.6;
         let tw = self.temporal_weight();
-        similarity * (ALPHA + (1.0 - ALPHA) * tw)
+        let base = similarity * (ALPHA + (1.0 - ALPHA) * tw);
+        let multiplier = 0.6 + 0.8 * self.outcome_score();
+        base * multiplier
+    }
+
+    /// Number of positive outcomes recorded for this claim.
+    pub fn positive_outcomes(&self) -> u32 {
+        self.metadata
+            .get(META_POSITIVE_OUTCOMES)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Number of negative outcomes recorded for this claim.
+    pub fn negative_outcomes(&self) -> u32 {
+        self.metadata
+            .get(META_NEGATIVE_OUTCOMES)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Total outcomes (positive + negative).
+    pub fn total_outcomes(&self) -> u32 {
+        self.positive_outcomes() + self.negative_outcomes()
+    }
+
+    /// Record an outcome (success or failure) for this claim.
+    ///
+    /// Updates both the lifetime counters (for auditability) and the EMA
+    /// Q-value (for responsive scoring once enough evidence accumulates).
+    pub fn record_outcome(&mut self, success: bool) {
+        // Update lifetime counters (lossless)
+        let key = if success {
+            META_POSITIVE_OUTCOMES
+        } else {
+            META_NEGATIVE_OUTCOMES
+        };
+        let current: u32 = self
+            .metadata
+            .get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        self.metadata
+            .insert(key.to_string(), (current + 1).to_string());
+
+        // Update EMA Q-value: Q = Q + α(r − Q)
+        let r = if success { 1.0_f32 } else { 0.0 };
+        let q_old = self.q_value();
+        let q_new = q_old + Q_ALPHA * (r - q_old);
+        self.metadata
+            .insert(META_Q_VALUE.to_string(), format!("{:.6}", q_new));
+    }
+
+    /// Current EMA Q-value (exponential moving average of outcomes).
+    /// Starts at 0.5 (neutral prior), updated on each `record_outcome`.
+    pub fn q_value(&self) -> f32 {
+        self.metadata
+            .get(META_Q_VALUE)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.5)
+    }
+
+    /// Piecewise outcome score ∈ [0.0, 1.0].
+    ///
+    /// **Below `Q_KICK_IN` outcomes:** Bayesian `(positive + 1) / (total + 2)`.
+    /// Stable, prior-dominated, resistant to noise from small samples.
+    ///
+    /// **At or above `Q_KICK_IN` outcomes:** EMA Q-value.
+    /// Responsive to distribution shift — recent outcomes weighted exponentially
+    /// higher than old ones via learning rate `Q_ALPHA`.
+    ///
+    /// The Q-value accumulates from outcome #1 but is not *read* until
+    /// the threshold, giving the EMA time to warm up.
+    pub fn outcome_score(&self) -> f32 {
+        if self.total_outcomes() < Q_KICK_IN {
+            // Phase 1: Conservative Bayesian
+            let pos = self.positive_outcomes() as f32;
+            let total = self.total_outcomes() as f32;
+            (pos + 1.0) / (total + 2.0)
+        } else {
+            // Phase 2: Responsive Q-value
+            self.q_value()
+        }
     }
 }
 
@@ -566,5 +673,293 @@ mod tests {
         assert!(claim.subject_entity.is_none());
         assert!(claim.expires_at.is_none());
         assert!(claim.superseded_by.is_none());
+    }
+
+    // ── P0: Outcome tracking tests ───────────────────────────────────────
+
+    #[test]
+    fn test_outcome_counters_default_zero() {
+        let claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(claim.positive_outcomes(), 0);
+        assert_eq!(claim.negative_outcomes(), 0);
+        assert_eq!(claim.total_outcomes(), 0);
+    }
+
+    #[test]
+    fn test_record_outcome_increments() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.record_outcome(true);
+        claim.record_outcome(true);
+        claim.record_outcome(false);
+        assert_eq!(claim.positive_outcomes(), 2);
+        assert_eq!(claim.negative_outcomes(), 1);
+        assert_eq!(claim.total_outcomes(), 3);
+    }
+
+    #[test]
+    fn test_outcome_score_bayesian_phase() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        // No outcomes → Bayesian (0+1)/(0+2) = 0.5
+        assert!((claim.outcome_score() - 0.5).abs() < 0.001);
+
+        // 3 positive → still in Bayesian phase (< Q_KICK_IN=5)
+        // (3+1)/(3+2) = 0.8
+        claim.record_outcome(true);
+        claim.record_outcome(true);
+        claim.record_outcome(true);
+        assert!((claim.outcome_score() - 0.8).abs() < 0.001);
+
+        // Reset for negative test
+        let mut claim2 = DerivedClaim::new(
+            2,
+            "Test2".to_string(),
+            vec![EvidenceSpan::new(0, 5, "Test2")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        // 3 negative → still Bayesian: (0+1)/(3+2) = 0.2
+        claim2.record_outcome(false);
+        claim2.record_outcome(false);
+        claim2.record_outcome(false);
+        assert!((claim2.outcome_score() - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_outcome_score_q_phase_kicks_in() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        // Record Q_KICK_IN (5) positive outcomes to cross into Q phase
+        for _ in 0..5 {
+            claim.record_outcome(true);
+        }
+        assert_eq!(claim.total_outcomes(), 5);
+        // Now in Q phase — Q has been accumulating via EMA
+        let q = claim.outcome_score();
+        // After 5 consecutive successes, Q should be well above 0.5
+        assert!(q > 0.7, "Q after 5 successes should be >0.7, got {}", q);
+    }
+
+    #[test]
+    fn test_q_adapts_faster_than_bayesian_on_shift() {
+        // Simulate distribution shift: 10 successes then 5 failures
+        let mut claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        for _ in 0..10 {
+            claim.record_outcome(true);
+        }
+        let score_before_shift = claim.outcome_score();
+
+        // Now 5 failures (environment changed)
+        for _ in 0..5 {
+            claim.record_outcome(false);
+        }
+        let score_after_shift = claim.outcome_score();
+
+        // Q should drop substantially — faster than Bayesian would
+        // Bayesian would give: (10+1)/(15+2) = 0.647
+        // Q (EMA) should be much lower since recent outcomes are all failures
+        assert!(
+            score_after_shift < 0.5,
+            "Q should drop below 0.5 after 5 consecutive failures following shift, got {}",
+            score_after_shift
+        );
+        assert!(
+            score_after_shift < score_before_shift - 0.3,
+            "Q should drop substantially: before={}, after={}",
+            score_before_shift,
+            score_after_shift
+        );
+    }
+
+    #[test]
+    fn test_q_value_stored_in_metadata() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        // Initial Q = 0.5 (neutral default)
+        assert!((claim.q_value() - 0.5).abs() < 0.001);
+
+        // After one success: Q = 0.5 + 0.3*(1.0 - 0.5) = 0.65
+        claim.record_outcome(true);
+        assert!((claim.q_value() - 0.65).abs() < 0.001);
+
+        // After one failure: Q = 0.65 + 0.3*(0.0 - 0.65) = 0.455
+        claim.record_outcome(false);
+        assert!((claim.q_value() - 0.455).abs() < 0.001);
+    }
+
+    // ── P1: Outcome-aware retrieval scoring tests ────────────────────────
+
+    #[test]
+    fn test_retrieval_score_neutral_no_outcomes() {
+        // Fresh claim with no outcomes should behave identically to old formula
+        let claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        // outcome_score = 0.5, multiplier = 0.6 + 0.8*0.5 = 1.0
+        let score = claim.retrieval_score(1.0);
+        // Fresh claim: tw ≈ 1.0, base ≈ 1.0, multiplier = 1.0
+        assert!(score > 0.99, "neutral score should be ~1.0, got {}", score);
+    }
+
+    #[test]
+    fn test_retrieval_score_positive_boosts() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        let neutral_score = claim.retrieval_score(1.0);
+
+        // Add positive outcomes
+        for _ in 0..10 {
+            claim.record_outcome(true);
+        }
+        let boosted_score = claim.retrieval_score(1.0);
+        assert!(
+            boosted_score > neutral_score,
+            "positive outcomes should boost score: {} > {}",
+            boosted_score,
+            neutral_score
+        );
+    }
+
+    #[test]
+    fn test_retrieval_score_negative_penalizes() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        let neutral_score = claim.retrieval_score(1.0);
+
+        // Add negative outcomes
+        for _ in 0..10 {
+            claim.record_outcome(false);
+        }
+        let penalized_score = claim.retrieval_score(1.0);
+        assert!(
+            penalized_score < neutral_score,
+            "negative outcomes should penalize score: {} < {}",
+            penalized_score,
+            neutral_score
+        );
+    }
+
+    // ── P2: ClaimType::Avoidance tests ───────────────────────────────────
+
+    #[test]
+    fn test_avoidance_half_life() {
+        assert_eq!(
+            ClaimType::Avoidance.half_life_secs(),
+            ClaimType::Belief.half_life_secs(),
+            "Avoidance should have same half-life as Belief (14 days)"
+        );
+    }
+
+    #[test]
+    fn test_avoidance_from_str_loose() {
+        assert_eq!(ClaimType::from_str_loose("avoidance"), ClaimType::Avoidance);
+        assert_eq!(ClaimType::from_str_loose("avoid"), ClaimType::Avoidance);
+        assert_eq!(ClaimType::from_str_loose("negative"), ClaimType::Avoidance);
+        assert_eq!(
+            ClaimType::from_str_loose("constraint"),
+            ClaimType::Avoidance
+        );
+    }
+
+    #[test]
+    fn test_avoidance_display() {
+        assert_eq!(ClaimType::Avoidance.to_string(), "Avoidance");
     }
 }

@@ -113,8 +113,8 @@ pub use structures::{
     GraphNode, GraphStats, InteractionType, NodeId, NodeType,
 };
 pub use traversal::{
-    ActionSuggestion, CommunityAlgorithm, GraphQuery, GraphTraversal, PathConstraint, QueryResult,
-    QueryStats,
+    ActionSuggestion, BfsIter, CommunityAlgorithm, DfsIter, DijkstraIter, GraphQuery,
+    GraphTraversal, PathConstraint, QueryResult, QueryStats,
 };
 
 // New advanced graph features
@@ -129,7 +129,7 @@ pub use indexing::{IndexManager, IndexStats, IndexType, PropertyIndex};
 pub use compression::{CompressedAdjacencyList, CompressionStats};
 pub use graph_store::{
     BucketInfo, EvictionTier, GraphPath, GraphStore, GraphStoreError, InMemoryGraphStore,
-    NodeHeader, Subgraph,
+    NodeFilter, NodeHeader, Subgraph, NODE_HEADER_BYTES,
 };
 pub use redb_graph_store::RedbGraphStore;
 

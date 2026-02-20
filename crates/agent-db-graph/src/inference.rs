@@ -14,6 +14,7 @@ use agent_db_events::core::MetadataValue;
 use agent_db_events::{ActionOutcome, Event, EventContext, EventType};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::num::NonZeroUsize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for inference algorithms
@@ -93,8 +94,9 @@ pub struct GraphInference {
     /// Temporal buffer for causal analysis
     temporal_buffer: VecDeque<Event>,
 
-    /// Context similarity cache
-    context_similarity_cache: HashMap<(ContextHash, ContextHash), f32>,
+    /// Context similarity cache — bounded LRU, evicts least-recently-used
+    /// entries automatically so we never need a manual `.clear()`.
+    context_similarity_cache: lru::LruCache<(ContextHash, ContextHash), f32>,
 
     /// Detected patterns
     temporal_patterns: Vec<TemporalPattern>,
@@ -130,14 +132,16 @@ impl GraphInference {
 
     /// Create inference engine with custom configuration
     pub fn with_config(config: InferenceConfig) -> Self {
+        let cache_cap = NonZeroUsize::new(config.max_context_cache_size)
+            .unwrap_or(NonZeroUsize::new(10_000).unwrap());
         Self {
             graph: Graph::new(),
-            config,
             stats: InferenceStats::default(),
             temporal_buffer: VecDeque::new(),
-            context_similarity_cache: HashMap::new(),
+            context_similarity_cache: lru::LruCache::new(cache_cap),
             temporal_patterns: Vec::new(),
             contextual_associations: Vec::new(),
+            config,
         }
     }
 
@@ -281,11 +285,15 @@ impl GraphInference {
         &self.contextual_associations
     }
 
-    /// Enforce bounded caps on context_similarity_cache and temporal_patterns.
+    /// Enforce bounded caps on caches and temporal_patterns.
     /// Called from the maintenance loop as a safety net.
+    /// The LRU cache self-evicts, so we only resize it here if the
+    /// configured cap changed at runtime.
     pub fn enforce_memory_caps(&mut self) {
-        if self.context_similarity_cache.len() > self.config.max_context_cache_size {
-            self.context_similarity_cache.clear();
+        let desired_cap = NonZeroUsize::new(self.config.max_context_cache_size)
+            .unwrap_or(NonZeroUsize::new(10_000).unwrap());
+        if self.context_similarity_cache.cap() != desired_cap {
+            self.context_similarity_cache.resize(desired_cap);
         }
         if self.temporal_patterns.len() > self.config.max_temporal_patterns {
             self.temporal_patterns.sort_by(|a, b| {
@@ -1086,7 +1094,7 @@ impl GraphInference {
         };
 
         if let Some(&cached) = self.context_similarity_cache.get(&cache_key) {
-            return cached;
+            return cached; // LRU promotes this entry on access
         }
 
         // Calculate similarity
@@ -1110,13 +1118,8 @@ impl GraphInference {
             similarity += 0.3; // Simplified - would compare environment variables
         }
 
-        // Cache result
-        self.context_similarity_cache.insert(cache_key, similarity);
-
-        // Clear cache entirely when over cap (simple O(1), rebuilds lazily)
-        if self.context_similarity_cache.len() > self.config.max_context_cache_size {
-            self.context_similarity_cache.clear();
-        }
+        // Cache result — LRU evicts least-recently-used entry if at capacity
+        self.context_similarity_cache.put(cache_key, similarity);
 
         similarity
     }

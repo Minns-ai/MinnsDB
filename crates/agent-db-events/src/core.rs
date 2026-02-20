@@ -140,6 +140,16 @@ pub enum LearningEvent {
         query_id: String,
         success: bool,
     },
+    ClaimRetrieved {
+        query_id: String,
+        #[serde_as(as = "Vec<IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>>")]
+        claim_ids: Vec<u64>,
+    },
+    ClaimUsed {
+        query_id: String,
+        #[serde_as(as = "IfIsHumanReadable<PickFirst<(_, DisplayFromStr)>>")]
+        claim_id: u64,
+    },
 }
 
 /// Outcome of an action event

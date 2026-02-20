@@ -14,7 +14,11 @@
       "Bash(ls:*)",
       "Bash(cargo clippy:*)",
       "Bash(find:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:openreview.net)",
+      "WebSearch",
+      "WebFetch(domain:example.com)"
     ]
   }
 }

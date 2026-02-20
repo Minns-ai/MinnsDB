@@ -138,10 +138,14 @@ impl EmbeddingQueue {
         }
     }
 
-    /// Process all claims that need embeddings
+    /// Process all claims that need embeddings using batch API.
+    ///
+    /// Collects up to `batch_size` claims and sends them in a single
+    /// `embed_batch()` call for much higher throughput.
     pub async fn process_pending_embeddings(
         &self,
         claim_store: &ClaimStore,
+        embedding_client: &dyn super::embeddings::EmbeddingClient,
         batch_size: usize,
     ) -> Result<usize> {
         debug!("Processing pending embeddings (batch_size={})", batch_size);
@@ -154,13 +158,51 @@ impl EmbeddingQueue {
             return Ok(0);
         }
 
-        info!("Found {} claims needing embeddings", count);
+        info!("Found {} claims needing embeddings, sending batch", count);
 
-        // Submit all claims for embedding generation
+        // Build batch request
+        let requests: Vec<super::embeddings::EmbeddingRequest> = claims
+            .iter()
+            .map(|c| super::embeddings::EmbeddingRequest {
+                text: c.claim_text.clone(),
+                context: None,
+            })
+            .collect();
+
+        // Single batch call
+        let responses = embedding_client.embed_batch(requests).await?;
+
+        // Zip responses with claims and update store
+        let mut updated = 0usize;
+        for (claim, response) in claims.iter().zip(responses.into_iter()) {
+            if let Err(e) = claim_store.update_embedding(claim.id, response.embedding) {
+                error!("Failed to update embedding for claim {}: {}", claim.id, e);
+            } else {
+                updated += 1;
+            }
+        }
+
+        info!(
+            "Batch embedding complete: {}/{} claims updated",
+            updated, count
+        );
+        Ok(updated)
+    }
+
+    /// Process pending embeddings using the old sequential approach (one-at-a-time via queue workers).
+    pub async fn process_pending_embeddings_queued(
+        &self,
+        claim_store: &ClaimStore,
+        batch_size: usize,
+    ) -> Result<usize> {
+        let claims = claim_store.get_claims_needing_embeddings(batch_size)?;
+        let count = claims.len();
+        if count == 0 {
+            return Ok(0);
+        }
         for claim in claims {
             self.generate_embedding_async(claim);
         }
-
         Ok(count)
     }
 }
@@ -217,14 +259,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_pending_embeddings() {
+    async fn test_process_pending_embeddings_batch() {
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("claims.redb");
 
         let client = Arc::new(MockEmbeddingClient::new(384));
         let store = Arc::new(ClaimStore::new(&store_path).unwrap());
 
-        let queue = EmbeddingQueue::new(client, store.clone(), 2);
+        let queue = EmbeddingQueue::new(client.clone(), store.clone(), 2);
 
         // Create multiple claims without embeddings
         for i in 1..=5 {
@@ -232,15 +274,48 @@ mod tests {
             store.store(&claim).unwrap();
         }
 
-        // Process pending embeddings
-        let count = queue.process_pending_embeddings(&store, 10).await.unwrap();
+        // Process pending embeddings via batch API
+        let count = queue
+            .process_pending_embeddings(&store, &*client, 10)
+            .await
+            .unwrap();
         assert_eq!(count, 5);
 
-        // Wait a bit for async processing
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Verify all claims now have embeddings
+        // Verify all claims now have embeddings (batch is synchronous, no sleep needed)
         let claims_needing = store.get_claims_needing_embeddings(10).unwrap();
         assert_eq!(claims_needing.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_batch_embed_20_claims() {
+        let dir = tempdir().unwrap();
+        let store_path = dir.path().join("claims.redb");
+
+        let client = Arc::new(MockEmbeddingClient::new(384));
+        let store = Arc::new(ClaimStore::new(&store_path).unwrap());
+
+        let queue = EmbeddingQueue::new(client.clone(), store.clone(), 1);
+
+        // Store 20 claims without embeddings
+        for i in 1..=20 {
+            let claim = create_test_claim(i, &format!("Batch claim number {}", i));
+            store.store(&claim).unwrap();
+        }
+
+        let count = queue
+            .process_pending_embeddings(&store, &*client, 100)
+            .await
+            .unwrap();
+        assert_eq!(count, 20);
+
+        // All 20 should have embeddings now
+        let remaining = store.get_claims_needing_embeddings(100).unwrap();
+        assert_eq!(remaining.len(), 0);
+
+        // Verify embeddings are correct dimension
+        for i in 1..=20u64 {
+            let claim = store.get(i).unwrap().unwrap();
+            assert_eq!(claim.embedding.len(), 384);
+        }
     }
 }

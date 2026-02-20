@@ -48,6 +48,9 @@ pub struct NodeHeader {
     pub goal_bucket: GoalBucketId,
 }
 
+/// Fixed binary size of a NodeHeader (42 bytes).
+pub const NODE_HEADER_BYTES: usize = 42;
+
 impl NodeHeader {
     /// Build a header from a full node.
     pub fn from_node(node: &GraphNode, bucket: GoalBucketId) -> Self {
@@ -82,6 +85,83 @@ impl NodeHeader {
         let degree_factor = 1.0 + (self.degree as f32).ln().max(0.0);
 
         self.signal * tier_boost * recency * degree_factor
+    }
+
+    // ====================================================================
+    // Fixed-layout binary serialization (42 bytes, zero-alloc decode)
+    // ====================================================================
+    // Layout (little-endian):
+    //   [0.. 8)  node_id       : u64
+    //   [8.. 9)  type_disc     : u8
+    //   [9..13)  signal        : f32
+    //   [13..14) tier          : u8
+    //   [14..18) degree        : u32
+    //   [18..26) updated_at    : u64
+    //   [26..34) created_at    : u64
+    //   [34..42) goal_bucket   : u64
+
+    /// Serialize to a fixed 42-byte binary layout.
+    pub fn to_bytes(&self) -> [u8; NODE_HEADER_BYTES] {
+        let mut buf = [0u8; NODE_HEADER_BYTES];
+        buf[0..8].copy_from_slice(&self.node_id.to_le_bytes());
+        buf[8] = self.node_type_discriminant;
+        buf[9..13].copy_from_slice(&self.signal.to_le_bytes());
+        buf[13] = self.tier as u8;
+        buf[14..18].copy_from_slice(&self.degree.to_le_bytes());
+        buf[18..26].copy_from_slice(&self.updated_at.to_le_bytes());
+        buf[26..34].copy_from_slice(&self.created_at.to_le_bytes());
+        buf[34..42].copy_from_slice(&self.goal_bucket.to_le_bytes());
+        buf
+    }
+
+    /// Deserialize from the fixed 42-byte binary layout.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < NODE_HEADER_BYTES {
+            return None;
+        }
+        Some(Self {
+            node_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            node_type_discriminant: bytes[8],
+            signal: f32::from_le_bytes(bytes[9..13].try_into().ok()?),
+            tier: match bytes[13] {
+                0 => EvictionTier::Protected,
+                1 => EvictionTier::Important,
+                2 => EvictionTier::Standard,
+                _ => EvictionTier::Ephemeral,
+            },
+            degree: u32::from_le_bytes(bytes[14..18].try_into().ok()?),
+            updated_at: u64::from_le_bytes(bytes[18..26].try_into().ok()?),
+            created_at: u64::from_le_bytes(bytes[26..34].try_into().ok()?),
+            goal_bucket: u64::from_le_bytes(bytes[34..42].try_into().ok()?),
+        })
+    }
+
+    /// Compute importance score directly from raw bytes without constructing
+    /// a full `NodeHeader`. Reads only the 4 scoring fields:
+    /// `signal(4B) + tier(1B) + degree(4B) + updated_at(8B)` = 17 bytes.
+    ///
+    /// Returns `Some((node_id, score))` or `None` if bytes are too short.
+    pub fn score_from_bytes(bytes: &[u8], now: Timestamp) -> Option<(NodeId, f32)> {
+        if bytes.len() < NODE_HEADER_BYTES {
+            return None;
+        }
+        let node_id = u64::from_le_bytes(bytes[0..8].try_into().ok()?);
+        let signal = f32::from_le_bytes(bytes[9..13].try_into().ok()?);
+        let tier_boost = match bytes[13] {
+            0 => 100.0f32,
+            1 => 10.0,
+            2 => 1.0,
+            _ => 0.1,
+        };
+        let degree = u32::from_le_bytes(bytes[14..18].try_into().ok()?);
+        let updated_at = u64::from_le_bytes(bytes[18..26].try_into().ok()?);
+
+        let age_ns = now.saturating_sub(updated_at) as f64;
+        let age_hours = age_ns / 3_600_000_000_000.0;
+        let recency = (-age_hours / 168.0).exp() as f32;
+        let degree_factor = 1.0 + (degree as f32).ln().max(0.0);
+
+        Some((node_id, signal * tier_boost * recency * degree_factor))
     }
 }
 
@@ -295,6 +375,31 @@ pub trait GraphStore: Send + Sync {
         }
         Ok(())
     }
+
+    /// Scan nodes with a push-down filter.
+    ///
+    /// The default implementation loads all nodes and filters in Rust.
+    /// Persistent stores (like `RedbGraphStore`) override this to scan
+    /// the compact `NodeHeader` index first, only deserializing nodes
+    /// that pass the filter.
+    fn scan_nodes_filtered(
+        &self,
+        bucket: GoalBucketId,
+        filter: &NodeFilter,
+        limit: usize,
+    ) -> Result<Vec<GraphNode>, GraphStoreError> {
+        // Default: brute-force — load all, filter, truncate
+        let all = self.get_all_nodes(bucket)?;
+        let filtered: Vec<GraphNode> = all
+            .into_iter()
+            .filter(|node| {
+                let header = NodeHeader::from_node(node, bucket);
+                filter.matches_header(&header)
+            })
+            .take(limit)
+            .collect();
+        Ok(filtered)
+    }
 }
 
 /// Errors that can occur during graph storage operations
@@ -326,6 +431,78 @@ pub enum GraphStoreError {
 
     #[error("Graph constraint violation: {0}")]
     ConstraintViolation(String),
+}
+
+// ============================================================================
+// Push-down filters — pre-filter at the storage layer using NodeHeader
+// ============================================================================
+
+/// Push-down filter for storage-layer node scanning.
+///
+/// Instead of loading all nodes and filtering in Rust, these filters are
+/// evaluated against the compact 42-byte `NodeHeader`, skipping full
+/// deserialization for non-matching nodes. This reduces I/O and
+/// deserialization work by up to 99% for selective queries.
+#[derive(Debug, Clone)]
+pub enum NodeFilter {
+    /// Filter by node type discriminant (matches `NodeHeader.node_type_discriminant`)
+    ByTypeDiscriminant(u8),
+    /// Filter by updated_at >= timestamp
+    UpdatedAfter(Timestamp),
+    /// Filter by degree >= threshold
+    MinDegree(u32),
+    /// Filter by eviction tier (exact match)
+    ByTier(EvictionTier),
+    /// Filter by minimum signal strength
+    MinSignal(f32),
+    /// Logical AND: all sub-filters must match
+    All(Vec<NodeFilter>),
+    /// Logical OR: any sub-filter must match
+    Any(Vec<NodeFilter>),
+}
+
+impl NodeFilter {
+    /// Evaluate this filter against a `NodeHeader` (42 bytes, zero-alloc).
+    pub fn matches_header(&self, header: &NodeHeader) -> bool {
+        match self {
+            NodeFilter::ByTypeDiscriminant(d) => header.node_type_discriminant == *d,
+            NodeFilter::UpdatedAfter(ts) => header.updated_at >= *ts,
+            NodeFilter::MinDegree(min) => header.degree >= *min,
+            NodeFilter::ByTier(tier) => header.tier == *tier,
+            NodeFilter::MinSignal(min) => header.signal >= *min,
+            NodeFilter::All(filters) => filters.iter().all(|f| f.matches_header(header)),
+            NodeFilter::Any(filters) => filters.iter().any(|f| f.matches_header(header)),
+        }
+    }
+
+    /// Evaluate this filter directly against raw header bytes without
+    /// constructing a full `NodeHeader`. Uses the fixed binary layout:
+    ///   [0..8) node_id, [8) type_disc, [9..13) signal, [13) tier,
+    ///   [14..18) degree, [18..26) updated_at, [26..34) created_at,
+    ///   [34..42) goal_bucket
+    pub fn matches_bytes(&self, bytes: &[u8]) -> bool {
+        if bytes.len() < NODE_HEADER_BYTES {
+            return false;
+        }
+        match self {
+            NodeFilter::ByTypeDiscriminant(d) => bytes[8] == *d,
+            NodeFilter::UpdatedAfter(ts) => {
+                let updated = u64::from_le_bytes(bytes[18..26].try_into().unwrap_or([0; 8]));
+                updated >= *ts
+            },
+            NodeFilter::MinDegree(min) => {
+                let degree = u32::from_le_bytes(bytes[14..18].try_into().unwrap_or([0; 4]));
+                degree >= *min
+            },
+            NodeFilter::ByTier(tier) => bytes[13] == *tier as u8,
+            NodeFilter::MinSignal(min) => {
+                let signal = f32::from_le_bytes(bytes[9..13].try_into().unwrap_or([0; 4]));
+                signal >= *min
+            },
+            NodeFilter::All(filters) => filters.iter().all(|f| f.matches_bytes(bytes)),
+            NodeFilter::Any(filters) => filters.iter().any(|f| f.matches_bytes(bytes)),
+        }
+    }
 }
 
 // ============================================================================

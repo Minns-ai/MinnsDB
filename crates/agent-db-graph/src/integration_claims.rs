@@ -489,6 +489,18 @@ impl GraphEngine {
                             query_id, success
                         )
                     },
+                    LearningEvent::ClaimRetrieved {
+                        query_id,
+                        claim_ids,
+                    } => {
+                        format!(
+                            "Learning: retrieved claims {:?} for query '{}'",
+                            claim_ids, query_id
+                        )
+                    },
+                    LearningEvent::ClaimUsed { query_id, claim_id } => {
+                        format!("Learning: used claim {} for query '{}'", claim_id, query_id)
+                    },
                 }
             },
 
@@ -657,8 +669,17 @@ impl GraphEngine {
             },
         };
 
+        let embedding_client = match &self.embedding_client {
+            Some(c) => c,
+            None => {
+                return Err(crate::GraphError::InvalidOperation(
+                    "Embedding client not initialized".to_string(),
+                ));
+            },
+        };
+
         let count = embedding_queue
-            .process_pending_embeddings(claim_store, batch_size)
+            .process_pending_embeddings(claim_store, &**embedding_client, batch_size)
             .await
             .map_err(|e| {
                 crate::GraphError::OperationError(format!("Failed to process embeddings: {}", e))

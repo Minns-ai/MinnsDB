@@ -224,6 +224,8 @@ pub(crate) struct DecisionTrace {
     memory_used: Vec<u64>,
     strategy_ids: Vec<u64>,
     strategy_used: Vec<u64>,
+    claim_ids: Vec<u64>,
+    claims_used: Vec<u64>,
     last_updated: std::time::Instant,
 }
 
@@ -1142,6 +1144,8 @@ impl GraphEngine {
                             memory_used: Vec::new(),
                             strategy_ids: Vec::new(),
                             strategy_used: Vec::new(),
+                            claim_ids: Vec::new(),
+                            claims_used: Vec::new(),
                             last_updated: now,
                         });
                 trace.memory_ids = memory_ids.clone();
@@ -1165,6 +1169,8 @@ impl GraphEngine {
                             memory_used: Vec::new(),
                             strategy_ids: Vec::new(),
                             strategy_used: Vec::new(),
+                            claim_ids: Vec::new(),
+                            claims_used: Vec::new(),
                             last_updated: now,
                         });
                 if !trace.memory_used.contains(memory_id) {
@@ -1190,6 +1196,8 @@ impl GraphEngine {
                             memory_used: Vec::new(),
                             strategy_ids: Vec::new(),
                             strategy_used: Vec::new(),
+                            claim_ids: Vec::new(),
+                            claims_used: Vec::new(),
                             last_updated: now,
                         });
                 trace.strategy_ids = strategy_ids.clone();
@@ -1213,6 +1221,8 @@ impl GraphEngine {
                             memory_used: Vec::new(),
                             strategy_ids: Vec::new(),
                             strategy_used: Vec::new(),
+                            claim_ids: Vec::new(),
+                            claims_used: Vec::new(),
                             last_updated: now,
                         });
                 if !trace.strategy_used.contains(strategy_id) {
@@ -1223,6 +1233,53 @@ impl GraphEngine {
                     "Learning telemetry strategy_used query_id={} strategy_id={}",
                     query_id,
                     strategy_id
+                );
+            },
+            LearningEvent::ClaimRetrieved {
+                query_id,
+                claim_ids,
+            } => {
+                let mut trace =
+                    self.decision_traces
+                        .entry(query_id.clone())
+                        .or_insert(DecisionTrace {
+                            memory_ids: Vec::new(),
+                            memory_used: Vec::new(),
+                            strategy_ids: Vec::new(),
+                            strategy_used: Vec::new(),
+                            claim_ids: Vec::new(),
+                            claims_used: Vec::new(),
+                            last_updated: now,
+                        });
+                trace.claim_ids = claim_ids.clone();
+                trace.last_updated = now;
+                tracing::info!(
+                    "Learning telemetry claim_retrieved query_id={} count={}",
+                    query_id,
+                    claim_ids.len()
+                );
+            },
+            LearningEvent::ClaimUsed { query_id, claim_id } => {
+                let mut trace =
+                    self.decision_traces
+                        .entry(query_id.clone())
+                        .or_insert(DecisionTrace {
+                            memory_ids: Vec::new(),
+                            memory_used: Vec::new(),
+                            strategy_ids: Vec::new(),
+                            strategy_used: Vec::new(),
+                            claim_ids: Vec::new(),
+                            claims_used: Vec::new(),
+                            last_updated: now,
+                        });
+                if !trace.claims_used.contains(claim_id) {
+                    trace.claims_used.push(*claim_id);
+                }
+                trace.last_updated = now;
+                tracing::info!(
+                    "Learning telemetry claim_used query_id={} claim_id={}",
+                    query_id,
+                    claim_id
                 );
             },
             LearningEvent::Outcome { query_id, success } => {
@@ -1269,6 +1326,68 @@ impl GraphEngine {
                     success,
                     updated
                 );
+            }
+        }
+
+        if !trace.claims_used.is_empty() {
+            if let Some(ref claim_store) = self.claim_store {
+                for claim_id in &trace.claims_used {
+                    match claim_store.record_outcome(*claim_id, success) {
+                        Ok(Some(updated)) => {
+                            tracing::info!(
+                                "Learning outcome applied to claim_id={} success={} pos={} neg={}",
+                                claim_id,
+                                success,
+                                updated.positive_outcomes(),
+                                updated.negative_outcomes()
+                            );
+                            // Avoidance generation: if failure AND >= 2 negative outcomes
+                            if !success && updated.negative_outcomes() >= 2 {
+                                let avoidance_text = format!(
+                                    "Avoid relying on: {} — this has led to repeated failures",
+                                    updated.claim_text
+                                );
+                                let mut avoidance = crate::claims::types::DerivedClaim::new(
+                                    claim_store.next_id().unwrap_or(0),
+                                    avoidance_text,
+                                    updated.supporting_evidence.clone(),
+                                    0.5,
+                                    updated.embedding.clone(),
+                                    updated.source_event_id,
+                                    updated.episode_id,
+                                    updated.thread_id.clone(),
+                                    updated.user_id.clone(),
+                                    updated.workspace_id.clone(),
+                                );
+                                avoidance.claim_type = crate::claims::types::ClaimType::Avoidance;
+                                avoidance.entities = updated.entities.clone();
+                                if let Err(e) = claim_store.store(&avoidance) {
+                                    tracing::warn!(
+                                        "Failed to store avoidance claim for claim_id={}: {}",
+                                        claim_id,
+                                        e
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "Generated avoidance claim id={} from repeatedly-failing claim_id={}",
+                                        avoidance.id,
+                                        claim_id
+                                    );
+                                }
+                            }
+                        },
+                        Ok(None) => {
+                            tracing::warn!("Claim not found for outcome: claim_id={}", claim_id);
+                        },
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to record outcome for claim_id={}: {}",
+                                claim_id,
+                                e
+                            );
+                        },
+                    }
+                }
             }
         }
 
@@ -1937,15 +2056,20 @@ impl GraphEngine {
                 ticker.tick().await;
                 tracing::debug!("Maintenance pass starting");
 
-                // 1. Memory decay
-                engine.memory_store.write().await.apply_decay();
-
-                // 2. Strategy pruning
+                // 1 & 2. Memory decay + strategy pruning run concurrently
+                // (they hold independent RwLock-guarded stores)
                 let mc = &engine.config.maintenance_config;
-                let pruned = engine.strategy_store.write().await.prune_strategies(
-                    mc.strategy_min_confidence,
-                    mc.strategy_min_support,
-                    mc.strategy_max_stale_hours,
+                let ((), pruned) = tokio::join!(
+                    async {
+                        engine.memory_store.write().await.apply_decay();
+                    },
+                    async {
+                        engine.strategy_store.write().await.prune_strategies(
+                            mc.strategy_min_confidence,
+                            mc.strategy_min_support,
+                            mc.strategy_max_stale_hours,
+                        )
+                    },
                 );
 
                 if pruned > 0 {

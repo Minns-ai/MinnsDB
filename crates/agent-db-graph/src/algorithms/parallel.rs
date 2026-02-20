@@ -1,15 +1,19 @@
 //! Parallel graph processing algorithms
 //!
-//! Note: Parallel features require Rust 1.80+ (rayon dependency)
-//! This module is currently compiled in sequential mode for compatibility.
-//! To enable parallel processing, uncomment rayon in Cargo.toml and upgrade Rust.
+//! Uses rayon for data-parallel execution across available CPU cores.
+//! Algorithms that are embarrassingly parallel (BFS from multiple sources,
+//! PageRank iterations, degree/centrality computations, batch event processing)
+//! use `.par_iter()` for automatic work-stealing across the rayon thread pool.
 //!
-//! Target: 4-8x speedup on multi-core CPUs when enabled
+//! Inherently sequential phases (Union-Find merge, BFS frontier expansion)
+//! remain sequential to preserve correctness.
 
 use crate::structures::{Graph, NodeId};
+use crate::traversal::{edge_cost, BfsIter};
 use crate::GraphResult;
-// use rayon::prelude::*;  // Requires Rust 1.80+
-use std::collections::{HashMap, HashSet, VecDeque};
+use rayon::prelude::*;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 
 /// Parallel graph algorithm implementations
 pub struct ParallelGraphAlgorithms;
@@ -28,34 +32,11 @@ impl ParallelGraphAlgorithms {
         starts: Vec<NodeId>,
         max_depth: u32,
     ) -> GraphResult<HashMap<NodeId, u32>> {
-        // Run BFS from each start in parallel
+        // Run BFS from each start in parallel using the lazy BfsIter.
+        // Each rayon task gets its own iterator — no shared mutable state.
         let results: Vec<HashMap<NodeId, u32>> = starts
-            .iter()
-            .map(|&start| {
-                let mut distances = HashMap::new();
-                let mut queue = VecDeque::new();
-                let mut visited = HashSet::new();
-
-                queue.push_back((start, 0));
-                visited.insert(start);
-                distances.insert(start, 0);
-
-                while let Some((current, depth)) = queue.pop_front() {
-                    if depth >= max_depth {
-                        continue;
-                    }
-
-                    for neighbor in graph.get_neighbors(current) {
-                        if !visited.contains(&neighbor) {
-                            visited.insert(neighbor);
-                            distances.insert(neighbor, depth + 1);
-                            queue.push_back((neighbor, depth + 1));
-                        }
-                    }
-                }
-
-                distances
-            })
+            .par_iter()
+            .map(|&start| BfsIter::new(graph, start, max_depth).collect())
             .collect();
 
         // Merge results: take minimum distance for each node
@@ -94,7 +75,7 @@ impl ParallelGraphAlgorithms {
         for _ in 0..iterations {
             // Parallel update of all nodes
             let new_values: Vec<(NodeId, f32)> = nodes
-                .iter()
+                .par_iter()
                 .map(|&node_id| {
                     // Base rank (random jump probability)
                     let mut rank = (1.0 - damping_factor) / n;
@@ -147,7 +128,7 @@ impl ParallelGraphAlgorithms {
         }
 
         let centrality: HashMap<NodeId, f32> = nodes
-            .iter()
+            .par_iter()
             .map(|&node_id| {
                 let degree = graph.get_neighbors(node_id).len() as f32;
                 let normalized = degree / (n - 1.0);
@@ -158,57 +139,75 @@ impl ParallelGraphAlgorithms {
         Ok(centrality)
     }
 
-    /// Parallel shortest paths from one source to multiple targets
+    /// Parallel weighted shortest paths from one source to multiple targets.
+    ///
+    /// Uses Dijkstra's algorithm with actual edge costs derived from edge
+    /// metadata (strength, confidence, similarity, etc.) so that stronger
+    /// relationships produce shorter paths.  Path reconstruction for each
+    /// target is parallelised with rayon.
     pub fn parallel_shortest_paths(
         &self,
         graph: &Graph,
         source: NodeId,
         targets: Vec<NodeId>,
     ) -> GraphResult<HashMap<NodeId, Vec<NodeId>>> {
-        // First, run single-source shortest path to get distances
-        let mut queue = VecDeque::new();
-        let mut distances: HashMap<NodeId, u32> = HashMap::new();
-        let mut predecessors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        // --- single-source Dijkstra ------------------------------------------
+        let mut dist: HashMap<NodeId, f32> = HashMap::new();
+        let mut predecessors: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut heap = BinaryHeap::new();
 
-        queue.push_back(source);
-        distances.insert(source, 0);
+        dist.insert(source, 0.0);
+        heap.push(DijkstraEntry {
+            cost: 0.0,
+            node: source,
+        });
 
-        while let Some(current) = queue.pop_front() {
-            let current_dist = distances[&current];
+        while let Some(DijkstraEntry { cost, node }) = heap.pop() {
+            // Skip if we already found a cheaper route
+            if let Some(&best) = dist.get(&node) {
+                if cost > best {
+                    continue;
+                }
+            }
 
-            for neighbor in graph.get_neighbors(current) {
-                if let std::collections::hash_map::Entry::Vacant(e) = distances.entry(neighbor) {
-                    e.insert(current_dist + 1);
-                    predecessors.insert(neighbor, vec![current]);
-                    queue.push_back(neighbor);
-                } else if distances[&neighbor] == current_dist + 1 {
-                    predecessors.entry(neighbor).or_default().push(current);
+            for edge in graph.get_edges_from(node) {
+                let next = edge.target;
+                let next_cost = cost + edge_cost(edge);
+
+                let is_better = match dist.get(&next) {
+                    Some(&d) => next_cost < d,
+                    None => true,
+                };
+
+                if is_better {
+                    dist.insert(next, next_cost);
+                    predecessors.insert(next, node);
+                    heap.push(DijkstraEntry {
+                        cost: next_cost,
+                        node: next,
+                    });
                 }
             }
         }
 
-        // Parallel path reconstruction for each target
+        // --- parallel path reconstruction ------------------------------------
         let paths: HashMap<NodeId, Vec<NodeId>> = targets
-            .iter()
+            .par_iter()
             .filter_map(|&target| {
-                if !distances.contains_key(&target) {
+                if !dist.contains_key(&target) {
                     return None;
                 }
 
-                // Reconstruct path
                 let mut path = vec![target];
                 let mut current = target;
 
                 while current != source {
-                    if let Some(preds) = predecessors.get(&current) {
-                        if preds.is_empty() {
-                            return None;
-                        }
-                        // Take first predecessor (one of potentially many shortest paths)
-                        current = preds[0];
-                        path.push(current);
-                    } else {
-                        return None;
+                    match predecessors.get(&current) {
+                        Some(&prev) => {
+                            current = prev;
+                            path.push(current);
+                        },
+                        None => return None,
                     }
                 }
 
@@ -278,7 +277,7 @@ impl ParallelGraphAlgorithms {
         let nodes = graph.get_all_node_ids();
 
         let results: HashMap<NodeId, f32> = nodes
-            .iter()
+            .par_iter()
             .map(|&node_id| {
                 let value = compute_fn(graph, node_id);
                 (node_id, value)
@@ -299,7 +298,7 @@ impl ParallelGraphAlgorithms {
         F: Fn(EventId) -> ProcessResult + Sync + Send,
     {
         let results: Vec<ProcessResult> = events
-            .iter()
+            .par_iter()
             .map(|&event_id| process_fn(event_id))
             .collect();
 
@@ -313,7 +312,7 @@ impl ParallelGraphAlgorithms {
 
         // Parallel degree calculation
         let degrees: HashMap<NodeId, f32> = nodes
-            .iter()
+            .par_iter()
             .map(|&node_id| {
                 let degree = graph.get_node_degree(node_id);
                 (node_id, degree)
@@ -321,7 +320,11 @@ impl ParallelGraphAlgorithms {
             .collect();
 
         // Parallel edge weight sum
-        let total_weight: f32 = graph.get_all_edges().iter().map(|edge| edge.weight).sum();
+        let total_weight: f32 = graph
+            .get_all_edges()
+            .par_iter()
+            .map(|edge| edge.weight)
+            .sum();
 
         Ok(CommunityPrepData {
             node_degrees: degrees,
@@ -333,6 +336,31 @@ impl ParallelGraphAlgorithms {
 impl Default for ParallelGraphAlgorithms {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Priority queue entry for Dijkstra's algorithm (min-heap via reversed Ord).
+#[derive(Debug, Clone, PartialEq)]
+struct DijkstraEntry {
+    cost: f32,
+    node: NodeId,
+}
+
+impl Eq for DijkstraEntry {}
+
+impl Ord for DijkstraEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .cost
+            .partial_cmp(&self.cost)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| self.node.cmp(&other.node))
+    }
+}
+
+impl PartialOrd for DijkstraEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -526,5 +554,103 @@ mod tests {
         assert_eq!(distances[&n2], 1);
         assert_eq!(distances[&n3], 2);
         assert_eq!(distances[&n4], 3);
+    }
+
+    #[test]
+    fn test_parallel_shortest_paths_dijkstra() {
+        let mut graph = Graph::new();
+
+        // Build a diamond graph:
+        //
+        //       n1
+        //      /   \
+        //    n2     n3
+        //      \   /
+        //       n4
+        //
+        // n1->n2 high strength (low cost)
+        // n2->n4 high strength (low cost)
+        // n1->n3 low strength  (high cost)
+        // n3->n4 low strength  (high cost)
+        //
+        // Dijkstra should prefer n1->n2->n4 over n1->n3->n4.
+
+        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 1,
+            event_type: "test".to_string(),
+            significance: 0.5,
+        }));
+        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 2,
+            event_type: "test".to_string(),
+            significance: 0.5,
+        }));
+        let n3 = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 3,
+            event_type: "test".to_string(),
+            significance: 0.5,
+        }));
+        let n4 = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 4,
+            event_type: "test".to_string(),
+            significance: 0.5,
+        }));
+
+        // Cheap route: n1 -> n2 -> n4  (strength 0.95 => cost 0.05 each)
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n2,
+            EdgeType::Causality {
+                strength: 0.95,
+                lag_ms: 10,
+            },
+            0.95,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n2,
+            n4,
+            EdgeType::Causality {
+                strength: 0.95,
+                lag_ms: 10,
+            },
+            0.95,
+        ));
+
+        // Expensive route: n1 -> n3 -> n4  (strength 0.2 => cost 0.8 each)
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n3,
+            EdgeType::Causality {
+                strength: 0.2,
+                lag_ms: 500,
+            },
+            0.2,
+        ));
+        graph.add_edge(GraphEdge::new(
+            n3,
+            n4,
+            EdgeType::Causality {
+                strength: 0.2,
+                lag_ms: 500,
+            },
+            0.2,
+        ));
+
+        let alg = ParallelGraphAlgorithms::new();
+        let paths = alg
+            .parallel_shortest_paths(&graph, n1, vec![n4, n2, n3])
+            .unwrap();
+
+        // n1 -> n4 should go through n2 (cheaper), not n3
+        let path_to_n4 = &paths[&n4];
+        assert_eq!(path_to_n4, &vec![n1, n2, n4]);
+
+        // n1 -> n2 is a direct edge
+        let path_to_n2 = &paths[&n2];
+        assert_eq!(path_to_n2, &vec![n1, n2]);
+
+        // n1 -> n3 is a direct edge
+        let path_to_n3 = &paths[&n3];
+        assert_eq!(path_to_n3, &vec![n1, n3]);
     }
 }

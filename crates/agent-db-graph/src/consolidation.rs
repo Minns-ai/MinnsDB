@@ -109,6 +109,10 @@ impl ConsolidationEngine {
         let episodic = Self::filter_tier(&all_memories, &MemoryTier::Episodic);
         let grouped = Self::group_by_goal_bucket(&episodic);
 
+        // Collect all Phase 1 operations, then flush in batch
+        let mut phase1_memories: Vec<Memory> = Vec::new();
+        let mut phase1_marks: Vec<(MemoryId, MemoryId, MemoryTier, f32)> = Vec::new();
+
         for (goal_bucket_id, memories) in &grouped {
             // Only active, non-consolidated episodic memories
             let mut eligible: Vec<&Memory> = memories
@@ -137,25 +141,37 @@ impl ConsolidationEngine {
                 let semantic_id = semantic.id;
                 let episode_ids: Vec<MemoryId> = chunk.iter().map(|m| m.id).collect();
 
-                store.store_consolidated_memory(semantic);
+                phase1_memories.push(semantic);
 
                 for &mid in &episode_ids {
-                    store.mark_consolidated(
+                    phase1_marks.push((
                         mid,
                         semantic_id,
                         MemoryTier::Semantic,
                         self.config.post_consolidation_decay,
-                    );
+                    ));
                 }
                 result.consolidated_episode_ids.extend(episode_ids);
                 result.semantic_created += 1;
             }
         }
 
+        // Single atomic batch write for all Phase 1 operations
+        if !phase1_memories.is_empty() {
+            store.store_consolidated_memories_batch(phase1_memories);
+        }
+        if !phase1_marks.is_empty() {
+            store.mark_consolidated_batch(phase1_marks);
+        }
+
         // --- Phase 2: Semantic → Schema ---
         let all_memories = store.list_all_memories();
         let semantics = Self::filter_tier(&all_memories, &MemoryTier::Semantic);
         let sem_grouped = Self::group_by_goal_bucket(&semantics);
+
+        // Collect all Phase 2 operations, then flush in batch
+        let mut phase2_memories: Vec<Memory> = Vec::new();
+        let mut phase2_marks: Vec<(MemoryId, MemoryId, MemoryTier, f32)> = Vec::new();
 
         for (goal_bucket_id, memories) in &sem_grouped {
             let eligible: Vec<&Memory> = memories
@@ -213,19 +229,27 @@ impl ConsolidationEngine {
                 let schema_id = schema.id;
                 let sem_ids: Vec<MemoryId> = group.iter().map(|m| m.id).collect();
 
-                store.store_consolidated_memory(schema);
+                phase2_memories.push(schema);
 
                 for &mid in &sem_ids {
-                    store.mark_consolidated(
+                    phase2_marks.push((
                         mid,
                         schema_id,
                         MemoryTier::Schema,
                         self.config.post_consolidation_decay,
-                    );
+                    ));
                 }
                 result.consolidated_semantic_ids.extend(sem_ids);
                 result.schema_created += 1;
             }
+        }
+
+        // Single atomic batch write for all Phase 2 operations
+        if !phase2_memories.is_empty() {
+            store.store_consolidated_memories_batch(phase2_memories);
+        }
+        if !phase2_marks.is_empty() {
+            store.mark_consolidated_batch(phase2_marks);
         }
 
         result

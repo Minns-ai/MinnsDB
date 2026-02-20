@@ -5,7 +5,9 @@
 //! embeddings from disk so that `find_similar` never touches redb.
 
 use super::types::*;
+use crate::indexing::Bm25Index;
 use anyhow::Result;
+use crossbeam::queue::SegQueue;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
 use std::sync::RwLock;
@@ -16,6 +18,9 @@ const CLAIM_COUNTER: TableDefinition<&str, u64> = TableDefinition::new("claim_co
 
 // ── In-memory vector index ──────────────────────────────────────────────────
 
+/// Threshold: when the index has >= this many entries, HNSW kicks in.
+const HNSW_THRESHOLD: usize = 1000;
+
 /// Entry in the in-memory vector index.
 /// Embeddings are pre-normalized to unit length so cosine similarity = dot product.
 struct VectorEntry {
@@ -23,16 +28,51 @@ struct VectorEntry {
     embedding: Vec<f32>,
 }
 
-/// Flat vector index kept in RAM.  All embeddings are L2-normalized on insert
-/// so `find_similar` only needs a dot-product scan (no sqrt / magnitude).
+/// Point wrapper for instant-distance HNSW.
+/// Stores a normalized embedding; distance = 1 - dot_product (cosine distance).
+#[derive(Clone)]
+struct HnswPoint(Vec<f32>);
+
+impl instant_distance::Point for HnswPoint {
+    fn distance(&self, other: &Self) -> f32 {
+        // Cosine distance = 1 - dot_product (both are L2-normalized)
+        let dot: f32 = self.0.iter().zip(other.0.iter()).map(|(a, b)| a * b).sum();
+        1.0 - dot
+    }
+}
+
+/// Flat vector index kept in RAM with optional HNSW acceleration.
+///
+/// Below `HNSW_THRESHOLD` entries the flat `entries` vec is the source of truth
+/// and search is a brute-force dot-product scan.  Above the threshold the HNSW
+/// graph owns the embeddings and `entries` is cleared to avoid doubling memory.
 struct VectorIndex {
+    /// Flat entries — used for brute-force search when below HNSW threshold.
+    /// Cleared (memory freed) once HNSW is built so embeddings aren't stored twice.
     entries: Vec<VectorEntry>,
+    /// HNSW graph; owns embeddings + claim IDs when built.
+    /// `None` when below threshold.
+    hnsw: Option<instant_distance::HnswMap<HnswPoint, ClaimId>>,
+    /// Set to true whenever entries change, requiring HNSW rebuild.
+    hnsw_dirty: bool,
 }
 
 impl VectorIndex {
     fn new() -> Self {
         Self {
             entries: Vec::new(),
+            hnsw: None,
+            hnsw_dirty: false,
+        }
+    }
+
+    /// Number of indexed embeddings.
+    fn len(&self) -> usize {
+        if self.hnsw.is_some() && self.entries.is_empty() {
+            // HNSW is the source of truth — count its values
+            self.hnsw.as_ref().map(|h| h.values.len()).unwrap_or(0)
+        } else {
+            self.entries.len()
         }
     }
 
@@ -54,20 +94,104 @@ impl VectorIndex {
         } else {
             self.entries.push(VectorEntry { id, embedding });
         }
+        self.hnsw_dirty = true;
     }
 
     /// Remove an entry by id.
     fn remove(&mut self, id: ClaimId) {
         self.entries.retain(|e| e.id != id);
+        self.hnsw_dirty = true;
     }
 
-    /// Dot-product scan.  `query` must already be L2-normalized.
+    /// Borrow the raw entries for metric-generic scans.
+    fn entries(&self) -> &[VectorEntry] {
+        &self.entries
+    }
+
+    /// Rebuild HNSW graph from current entries, then free the flat vec.
+    ///
+    /// After this call `entries` is empty and `hnsw` owns the data.
+    /// This is called inside `apply_pending` (write-locked) so searches
+    /// never see the intermediate state.
+    fn rebuild_hnsw(&mut self) {
+        if self.entries.len() < HNSW_THRESHOLD {
+            self.hnsw = None;
+            self.hnsw_dirty = false;
+            return;
+        }
+
+        let points: Vec<HnswPoint> = self
+            .entries
+            .iter()
+            .map(|e| HnswPoint(e.embedding.clone()))
+            .collect();
+        let values: Vec<ClaimId> = self.entries.iter().map(|e| e.id).collect();
+
+        let hnsw_map = instant_distance::Builder::default()
+            .ef_construction(100)
+            .ef_search(50)
+            .build(points, values);
+
+        self.hnsw = Some(hnsw_map);
+        // Free the flat entries — HNSW now owns all embedding data
+        self.entries = Vec::new();
+        self.hnsw_dirty = false;
+    }
+
+    /// Materialise the flat entries from the HNSW graph.
+    ///
+    /// Called when the HNSW graph is dirty (mutations happened) and needs
+    /// rebuilding, or when we need the flat entries for a non-cosine scan.
+    fn materialise_entries_from_hnsw(&mut self) {
+        if let Some(ref hnsw) = self.hnsw {
+            if self.entries.is_empty() {
+                self.entries = hnsw
+                    .iter()
+                    .map(|(_, point)| {
+                        // We need the claim id too — stored in values at same index
+                        // iter yields (PointId, &HnswPoint)
+                        VectorEntry {
+                            id: 0, // placeholder, filled below
+                            embedding: point.0.clone(),
+                        }
+                    })
+                    .collect();
+                // Fix up IDs from values vec
+                for (i, entry) in self.entries.iter_mut().enumerate() {
+                    entry.id = hnsw.values[i];
+                }
+            }
+        }
+    }
+
+    /// Read-only search.  HNSW must already be up-to-date (via `apply_pending`).
+    /// `query` must already be L2-normalized.
     fn find_similar(
         &self,
         query_normalized: &[f32],
         top_k: usize,
         min_similarity: f32,
     ) -> Vec<(ClaimId, f32)> {
+        // Use HNSW path if available
+        if let Some(ref hnsw) = self.hnsw {
+            let query_point = HnswPoint(query_normalized.to_vec());
+            let mut search = instant_distance::Search::default();
+            let results: Vec<(ClaimId, f32)> = hnsw
+                .search(&query_point, &mut search)
+                .take(top_k)
+                .filter_map(|item| {
+                    let similarity = 1.0 - item.distance;
+                    if similarity >= min_similarity {
+                        Some((*item.value, similarity))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            return results;
+        }
+
+        // Brute-force path (below HNSW_THRESHOLD)
         let mut results: Vec<(ClaimId, f32)> = self
             .entries
             .iter()
@@ -94,6 +218,39 @@ impl VectorIndex {
     }
 }
 
+// ── Pending index update buffer ──────────────────────────────────────────────
+
+/// A deferred index update, pushed to a lock-free queue and batch-applied later.
+///
+/// Only stores the claim ID — embedding/text are re-read from redb at
+/// apply time to avoid cloning large embedding vectors into the queue.
+enum PendingIndexUpdate {
+    Upsert { claim_id: ClaimId },
+    Remove { claim_id: ClaimId },
+}
+
+/// Lock-free queue of pending index updates.
+struct PendingBuffer {
+    queue: SegQueue<PendingIndexUpdate>,
+}
+
+impl PendingBuffer {
+    fn new() -> Self {
+        Self {
+            queue: SegQueue::new(),
+        }
+    }
+
+    fn push(&self, update: PendingIndexUpdate) {
+        self.queue.push(update);
+    }
+
+    /// Returns true if the queue is non-empty (best-effort, no synchronization).
+    fn has_pending(&self) -> bool {
+        !self.queue.is_empty()
+    }
+}
+
 // ── ClaimStore ──────────────────────────────────────────────────────────────
 
 /// Persistent store for derived claims backed by redb with an in-memory
@@ -102,6 +259,10 @@ pub struct ClaimStore {
     db: Database,
     /// In-memory vector index (pre-normalized embeddings, dot-product scan).
     index: RwLock<VectorIndex>,
+    /// In-memory BM25 index for keyword search over claim texts.
+    bm25_index: RwLock<Bm25Index>,
+    /// Lock-free queue of pending index updates, batch-applied before search.
+    pending: PendingBuffer,
 }
 
 impl ClaimStore {
@@ -122,8 +283,9 @@ impl ClaimStore {
         }
         write_txn.commit()?;
 
-        // Load existing embeddings into in-memory index
+        // Load existing embeddings and text into in-memory indexes
         let mut index = VectorIndex::new();
+        let mut bm25 = Bm25Index::new();
         {
             let read_txn = db.begin_read()?;
             let table = read_txn.open_table(CLAIMS_TABLE)?;
@@ -131,9 +293,12 @@ impl ClaimStore {
             for item in table.iter()? {
                 let (id_guard, value) = item?;
                 let claim: DerivedClaim = bincode::deserialize(value.value())?;
-                if claim.status == ClaimStatus::Active && !claim.embedding.is_empty() {
-                    index.upsert(id_guard.value(), claim.embedding);
-                    loaded += 1;
+                if claim.status == ClaimStatus::Active {
+                    bm25.index_document(id_guard.value(), &claim.claim_text);
+                    if !claim.embedding.is_empty() {
+                        index.upsert(id_guard.value(), claim.embedding);
+                        loaded += 1;
+                    }
                 }
             }
             if loaded > 0 {
@@ -144,11 +309,22 @@ impl ClaimStore {
             }
         }
 
+        // Build HNSW eagerly if we loaded enough entries.
+        // Without this, read-only workloads would brute-force scan forever
+        // because apply_pending() (which normally triggers rebuild) returns
+        // early when the pending queue is empty.
+        if index.hnsw_dirty && index.entries.len() >= HNSW_THRESHOLD {
+            index.rebuild_hnsw();
+            info!("Built HNSW index at startup ({} entries)", index.len());
+        }
+
         info!("Claim store initialized successfully");
 
         Ok(Self {
             db,
             index: RwLock::new(index),
+            bm25_index: RwLock::new(bm25),
+            pending: PendingBuffer::new(),
         })
     }
 
@@ -168,11 +344,10 @@ impl ClaimStore {
         }
         write_txn.commit()?;
 
-        // Update in-memory vector index
-        if claim.status == ClaimStatus::Active && !claim.embedding.is_empty() {
-            if let Ok(mut idx) = self.index.write() {
-                idx.upsert(claim.id, claim.embedding.clone());
-            }
+        // Queue index update (lock-free push, batch-applied before search)
+        if claim.status == ClaimStatus::Active {
+            self.pending
+                .push(PendingIndexUpdate::Upsert { claim_id: claim.id });
         }
 
         debug!("Successfully stored claim {}", claim.id);
@@ -253,11 +428,9 @@ impl ClaimStore {
                 table.insert(claim_id, serialized.as_slice())?;
                 debug!("Updated claim {} status to {:?}", claim_id, status);
 
-                // Update vector index: remove if no longer active
+                // Queue index removal if no longer active
                 if status != ClaimStatus::Active {
-                    if let Ok(mut idx) = self.index.write() {
-                        idx.remove(claim_id);
-                    }
+                    self.pending.push(PendingIndexUpdate::Remove { claim_id });
                 }
             }
         }
@@ -287,6 +460,41 @@ impl ClaimStore {
         Ok(())
     }
 
+    /// Record an outcome (success/failure) for a claim.
+    ///
+    /// Returns the updated claim, or `None` if the claim was not found.
+    /// Follows the same read-modify-write-commit pattern as `add_support`.
+    pub fn record_outcome(&self, claim_id: ClaimId, success: bool) -> Result<Option<DerivedClaim>> {
+        let write_txn = self.db.begin_write()?;
+        let result = {
+            let mut table = write_txn.open_table(CLAIMS_TABLE)?;
+            let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
+                let claim: DerivedClaim = bincode::deserialize(value.value())?;
+                Some(claim)
+            } else {
+                None
+            };
+
+            if let Some(mut claim) = maybe_claim {
+                claim.record_outcome(success);
+                let serialized = bincode::serialize(&claim)?;
+                table.insert(claim_id, serialized.as_slice())?;
+                debug!(
+                    "Recorded {} outcome for claim {} (pos={}, neg={})",
+                    if success { "positive" } else { "negative" },
+                    claim_id,
+                    claim.positive_outcomes(),
+                    claim.negative_outcomes()
+                );
+                Some(claim)
+            } else {
+                None
+            }
+        };
+        write_txn.commit()?;
+        Ok(result)
+    }
+
     /// Delete a claim
     pub fn delete(&self, claim_id: ClaimId) -> Result<()> {
         let write_txn = self.db.begin_write()?;
@@ -296,10 +504,8 @@ impl ClaimStore {
         }
         write_txn.commit()?;
 
-        // Remove from in-memory index
-        if let Ok(mut idx) = self.index.write() {
-            idx.remove(claim_id);
-        }
+        // Queue index removal (lock-free push)
+        self.pending.push(PendingIndexUpdate::Remove { claim_id });
 
         debug!("Deleted claim {}", claim_id);
         Ok(())
@@ -336,6 +542,103 @@ impl ClaimStore {
         Ok(claims)
     }
 
+    /// Drain the pending update queue and batch-apply all mutations to the
+    /// vector index and BM25 index.  Called automatically before search.
+    ///
+    /// Claim data is re-read from redb so that `PendingIndexUpdate` only
+    /// carries a lightweight `ClaimId` (no cloned embeddings / text).
+    /// HNSW is rebuilt here (under the write lock) so that `find_similar`
+    /// only ever needs a **read lock**.
+    pub fn apply_pending(&self) {
+        if !self.pending.has_pending() {
+            return;
+        }
+
+        // Drain IDs from the lock-free queue
+        let mut upsert_ids = Vec::new();
+        let mut remove_ids = Vec::new();
+        while let Some(update) = self.pending.queue.pop() {
+            match update {
+                PendingIndexUpdate::Upsert { claim_id } => upsert_ids.push(claim_id),
+                PendingIndexUpdate::Remove { claim_id } => remove_ids.push(claim_id),
+            }
+        }
+
+        if upsert_ids.is_empty() && remove_ids.is_empty() {
+            return;
+        }
+
+        // One read-txn to fetch all claim data needed for the upserts
+        let mut upsert_data: Vec<(ClaimId, Vec<f32>, String)> =
+            Vec::with_capacity(upsert_ids.len());
+        if !upsert_ids.is_empty() {
+            if let Ok(read_txn) = self.db.begin_read() {
+                if let Ok(table) = read_txn.open_table(CLAIMS_TABLE) {
+                    for cid in &upsert_ids {
+                        if let Ok(Some(value)) = table.get(*cid) {
+                            if let Ok(claim) = bincode::deserialize::<DerivedClaim>(value.value()) {
+                                if claim.status == ClaimStatus::Active {
+                                    upsert_data.push((claim.id, claim.embedding, claim.claim_text));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Single write-lock acquisition for vector index
+        if let Ok(mut idx) = self.index.write() {
+            // Materialise flat entries from HNSW if needed for mutation
+            if idx.hnsw.is_some()
+                && idx.entries.is_empty()
+                && (!upsert_data.is_empty() || !remove_ids.is_empty())
+            {
+                idx.materialise_entries_from_hnsw();
+            }
+
+            for &cid in &remove_ids {
+                idx.remove(cid);
+            }
+            for (cid, embedding, _) in &upsert_data {
+                if !embedding.is_empty() {
+                    idx.upsert(*cid, embedding.clone());
+                }
+            }
+
+            // Rebuild HNSW if dirty (frees flat entries after build)
+            if idx.hnsw_dirty && idx.entries.len() >= HNSW_THRESHOLD {
+                idx.rebuild_hnsw();
+            } else if idx.hnsw_dirty && idx.entries.len() < HNSW_THRESHOLD {
+                // Dropped below threshold — discard stale HNSW
+                idx.hnsw = None;
+                idx.hnsw_dirty = false;
+            }
+        }
+
+        // Single write-lock acquisition for BM25 index
+        if let Ok(mut bm25) = self.bm25_index.write() {
+            for &cid in &remove_ids {
+                bm25.remove_document(cid);
+            }
+            for (cid, _, text) in &upsert_data {
+                bm25.index_document(*cid, text);
+            }
+        }
+
+        debug!(
+            "Applied {} pending index updates ({} upserts, {} removes)",
+            upsert_data.len() + remove_ids.len(),
+            upsert_data.len(),
+            remove_ids.len()
+        );
+    }
+
+    /// Number of pending (not yet applied) index updates.
+    pub fn pending_count(&self) -> usize {
+        self.pending.queue.len()
+    }
+
     /// Find similar claims using the in-memory vector index.
     ///
     /// This is a dot-product scan over pre-normalized embeddings — no disk I/O,
@@ -348,6 +651,9 @@ impl ClaimStore {
         top_k: usize,
         min_similarity: f32,
     ) -> Result<Vec<(ClaimId, f32)>> {
+        // Apply pending updates for consistency
+        self.apply_pending();
+
         // Normalize query to unit length so dot product = cosine similarity
         let mut query_norm = query_embedding.to_vec();
         let mag: f32 = query_norm.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -366,6 +672,85 @@ impl ClaimStore {
         debug!(
             "Found {} similar claims (top_k={}, min_similarity={}) via in-memory index",
             results.len(),
+            top_k,
+            min_similarity
+        );
+
+        Ok(results)
+    }
+
+    /// Find similar claims using the specified distance metric.
+    ///
+    /// Works like `find_similar()` but allows choosing between Cosine (default),
+    /// Euclidean, or Manhattan distance metrics.
+    pub fn find_similar_with_metric(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        min_similarity: f32,
+        metric: super::embeddings::DistanceMetric,
+    ) -> Result<Vec<(ClaimId, f32)>> {
+        use super::embeddings::{DistanceMetric, VectorSimilarity};
+
+        // For Cosine, delegate to the optimized pre-normalized path
+        // (find_similar calls apply_pending internally)
+        if metric == DistanceMetric::Cosine {
+            return self.find_similar(query_embedding, top_k, min_similarity);
+        }
+
+        // Apply pending updates for consistency
+        self.apply_pending();
+
+        // For other metrics, do a full scan using VectorSimilarity::compute()
+        let idx = self
+            .index
+            .read()
+            .map_err(|e| anyhow::anyhow!("Vector index read lock poisoned: {}", e))?;
+
+        // When HNSW is active, entries is empty — scan HNSW points instead
+        let mut results: Vec<(ClaimId, f32)> = if idx.entries().is_empty() {
+            if let Some(ref hnsw) = idx.hnsw {
+                hnsw.iter()
+                    .enumerate()
+                    .filter_map(|(i, (_, point))| {
+                        if point.0.len() != query_embedding.len() {
+                            return None;
+                        }
+                        let sim = VectorSimilarity::compute(query_embedding, &point.0, metric);
+                        if sim >= min_similarity {
+                            Some((hnsw.values[i], sim))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            idx.entries()
+                .iter()
+                .filter_map(|entry| {
+                    if entry.embedding.len() != query_embedding.len() {
+                        return None;
+                    }
+                    let sim = VectorSimilarity::compute(query_embedding, &entry.embedding, metric);
+                    if sim >= min_similarity {
+                        Some((entry.id, sim))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(top_k);
+
+        debug!(
+            "Found {} similar claims (metric={:?}, top_k={}, min_similarity={}) via in-memory index",
+            results.len(),
+            metric,
             top_k,
             min_similarity
         );
@@ -395,11 +780,9 @@ impl ClaimStore {
                     claim.embedding.len()
                 );
 
-                // Update in-memory vector index
+                // Queue index update (lock-free push)
                 if claim.status == ClaimStatus::Active {
-                    if let Ok(mut idx) = self.index.write() {
-                        idx.upsert(claim_id, embedding);
-                    }
+                    self.pending.push(PendingIndexUpdate::Upsert { claim_id });
                 }
             }
         }
@@ -431,9 +814,16 @@ impl ClaimStore {
         Ok(claims)
     }
 
+    /// Access the BM25 index (for hybrid search).
+    pub fn bm25_index(&self) -> &RwLock<Bm25Index> {
+        &self.bm25_index
+    }
+
     /// Number of embeddings in the in-memory vector index.
+    /// Applies pending updates first for consistency.
     pub fn vector_index_size(&self) -> usize {
-        self.index.read().map(|idx| idx.entries.len()).unwrap_or(0)
+        self.apply_pending();
+        self.index.read().map(|idx| idx.len()).unwrap_or(0)
     }
 
     /// Enforce a cap on the in-memory vector index.
@@ -766,5 +1156,151 @@ mod tests {
 
         store.update_status(1, ClaimStatus::Dormant).unwrap();
         assert_eq!(store.vector_index_size(), 0);
+    }
+
+    // ── P3: Multi-metric tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_find_similar_with_metric_cosine_backward_compat() {
+        let dir = tempdir().unwrap();
+        let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+        let mut c = create_test_claim(1, "metric test");
+        c.embedding = vec![1.0, 0.0, 0.0];
+        store.store(&c).unwrap();
+
+        let r1 = store.find_similar(&[1.0, 0.0, 0.0], 5, 0.5).unwrap();
+        let r2 = store
+            .find_similar_with_metric(
+                &[1.0, 0.0, 0.0],
+                5,
+                0.5,
+                super::super::embeddings::DistanceMetric::Cosine,
+            )
+            .unwrap();
+        // Both should return the same claim with the same score
+        assert_eq!(r1.len(), r2.len());
+        assert_eq!(r1[0].0, r2[0].0);
+        assert!((r1[0].1 - r2[0].1).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_find_similar_euclidean_metric() {
+        let dir = tempdir().unwrap();
+        let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+        let mut c1 = create_test_claim(1, "close");
+        c1.embedding = vec![1.0, 0.0, 0.0];
+        store.store(&c1).unwrap();
+
+        let mut c2 = create_test_claim(2, "far");
+        c2.embedding = vec![0.0, 0.0, 1.0];
+        store.store(&c2).unwrap();
+
+        let results = store
+            .find_similar_with_metric(
+                &[1.0, 0.0, 0.0],
+                5,
+                0.0,
+                super::super::embeddings::DistanceMetric::Euclidean,
+            )
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        // c1 should be first (closer to query)
+        assert_eq!(results[0].0, 1);
+        assert!(results[0].1 > results[1].1);
+    }
+
+    // ── P5: Pending buffer tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_pending_buffer_store_and_apply() {
+        let dir = tempdir().unwrap();
+        let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+        // Store 5 claims — they go to pending queue
+        for i in 1..=5 {
+            let mut c = create_test_claim(i, &format!("Pending claim {}", i));
+            c.embedding = vec![1.0, 0.0, 0.0];
+            store.store(&c).unwrap();
+        }
+
+        // Pending count should be 5 (not yet applied)
+        assert!(store.pending_count() >= 5);
+
+        // After apply_pending, index should have 5 entries
+        store.apply_pending();
+        assert_eq!(store.vector_index_size(), 5);
+        assert_eq!(store.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_search_auto_applies_pending() {
+        let dir = tempdir().unwrap();
+        let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+        let mut c = create_test_claim(1, "Auto apply test");
+        c.embedding = vec![1.0, 0.0, 0.0];
+        store.store(&c).unwrap();
+
+        // Search should auto-apply pending updates and find the claim
+        let results = store.find_similar(&[1.0, 0.0, 0.0], 5, 0.5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 1);
+    }
+
+    // ── P3: record_outcome tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_record_outcome_persists() {
+        let dir = tempdir().unwrap();
+        let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+        let claim = create_test_claim(1, "Outcome test");
+        store.store(&claim).unwrap();
+
+        // Record outcomes
+        let updated = store.record_outcome(1, true).unwrap();
+        assert!(updated.is_some());
+        let updated = updated.unwrap();
+        assert_eq!(updated.positive_outcomes(), 1);
+        assert_eq!(updated.negative_outcomes(), 0);
+
+        store.record_outcome(1, false).unwrap();
+        store.record_outcome(1, true).unwrap();
+
+        // Verify persisted via fresh read
+        let claim = store.get(1).unwrap().unwrap();
+        assert_eq!(claim.positive_outcomes(), 2);
+        assert_eq!(claim.negative_outcomes(), 1);
+        assert_eq!(claim.total_outcomes(), 3);
+    }
+
+    #[test]
+    fn test_record_outcome_nonexistent_returns_none() {
+        let dir = tempdir().unwrap();
+        let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+        let result = store.record_outcome(999, true).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_bm25_index_populated_via_pending() {
+        let dir = tempdir().unwrap();
+        let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+        let mut c = create_test_claim(1, "The quick brown fox jumps");
+        c.embedding = vec![1.0, 0.0, 0.0];
+        store.store(&c).unwrap();
+
+        // Apply pending to populate BM25
+        store.apply_pending();
+
+        // BM25 should find the claim
+        let bm25 = store.bm25_index().read().unwrap();
+        let results = bm25.search("quick fox", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 1);
     }
 }

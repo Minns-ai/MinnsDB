@@ -124,11 +124,52 @@ impl EventBuffer {
         Ok(())
     }
 
-    /// Add multiple events in batch
+    /// Add multiple events in batch (atomic: all-or-nothing).
+    ///
+    /// Checks capacity for the entire batch upfront. Either all events are
+    /// accepted or none are — no partial insertion. When `drop_on_full` is
+    /// enabled, the oldest events are evicted to make room for the full batch.
     pub fn add_batch(&mut self, events: Vec<Event>) -> DatabaseResult<()> {
-        for event in events {
-            self.add(event)?;
+        let batch_len = events.len();
+
+        // Trigger auto-flush if size threshold would be exceeded
+        if let Some(auto_size) = self.config.auto_flush_size {
+            if self.events.len() + batch_len >= auto_size {
+                self.flush();
+            }
         }
+
+        // Check if the batch fits at all (even an empty buffer can't hold it)
+        if batch_len > self.capacity {
+            return Err(DatabaseError::ResourceExhausted(format!(
+                "Batch size {} exceeds buffer capacity {}",
+                batch_len, self.capacity
+            )));
+        }
+
+        let available = self.capacity - self.events.len();
+
+        if batch_len > available {
+            if self.config.drop_on_full {
+                // Evict exactly enough old events to fit the batch
+                let to_drop = batch_len - available;
+                let actually_dropped = to_drop.min(self.events.len());
+                self.events.drain(..actually_dropped);
+                self.stats.total_dropped += actually_dropped as u64;
+            } else {
+                return Err(DatabaseError::ResourceExhausted(format!(
+                    "Batch of {} events would exceed buffer capacity {} (current: {})",
+                    batch_len,
+                    self.capacity,
+                    self.events.len()
+                )));
+            }
+        }
+
+        // Bulk insert — at this point we know there's room for all events
+        self.events.extend(events);
+        self.stats.total_added += batch_len as u64;
+
         Ok(())
     }
 
@@ -392,6 +433,21 @@ impl RingEventBuffer {
     /// Get capacity
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Add multiple events in batch.
+    ///
+    /// For the ring buffer, all events are always accepted (ring semantics).
+    /// Overwrites the oldest events if the batch exceeds remaining capacity.
+    /// Returns the number of events that were overwritten.
+    pub fn add_batch(&mut self, events: Vec<Event>) -> usize {
+        let mut overwritten = 0usize;
+        for event in events {
+            if self.add(event).is_some() {
+                overwritten += 1;
+            }
+        }
+        overwritten
     }
 
     /// Get statistics

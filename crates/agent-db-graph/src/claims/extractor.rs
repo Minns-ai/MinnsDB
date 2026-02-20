@@ -166,9 +166,9 @@ impl ClaimExtractionQueue {
                         e_sent.insert(ent.text.clone());
                     }
 
-                    // keep sentences where E_claim ∩ E_sent[i] is non-empty
-                    let overlap_entities: HashSet<_> = e_claim.intersection(&e_sent).collect();
-                    if !overlap_entities.is_empty() {
+                    // keep sentences where any claim entity fuzzy-matches a sentence entity
+                    let has_overlap = e_claim.iter().any(|ce| e_sent.iter().any(|se| entities_match_fuzzy(ce, se)));
+                    if has_overlap {
                         candidate_sentences.push((i, sent.clone(), 1.0)); // Initial score 1.0 for entity overlap
                     }
                 }
@@ -243,8 +243,7 @@ impl ClaimExtractionQueue {
                     for ent in &sent.entities {
                         e_evidence.insert(ent.text.clone());
                     }
-                    let intersection_count = e_claim.intersection(&e_evidence).count() as f32;
-                    let overlap = intersection_count / (e_claim.len().max(1) as f32);
+                    let overlap = jaccard_similarity(&e_claim, &e_evidence);
 
                     // exact_entity_presence: Check if entities in claim are literally in sentence
                     let mut missing_entities = Vec::new();
@@ -482,6 +481,33 @@ impl ClaimExtractionQueue {
     }
 }
 
+// ── Fuzzy entity matching ─────────────────────────────────────────────────────
+
+/// Jaccard similarity between two string sets: |A∩B| / |A∪B|.
+/// Returns 0.0 when both sets are empty.
+fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let intersection = a.iter().filter(|x| b.contains(*x)).count();
+    let union = a.len() + b.len() - intersection;
+    if union == 0 {
+        return 0.0;
+    }
+    intersection as f32 / union as f32
+}
+
+/// Fuzzy entity matching: returns true if normalized forms have
+/// Jaro-Winkler similarity >= 0.85.
+fn entities_match_fuzzy(a: &str, b: &str) -> bool {
+    let na = normalize_entity(a);
+    let nb = normalize_entity(b);
+    if na == nb {
+        return true;
+    }
+    strsim::jaro_winkler(&na, &nb) >= 0.85
+}
+
 // ── Entity resolution ────────────────────────────────────────────────────────
 
 /// Normalize an entity string for deduplication.
@@ -578,5 +604,36 @@ mod tests {
     fn test_normalize_entity_empty() {
         assert_eq!(normalize_entity(""), "");
         assert_eq!(normalize_entity("   "), "");
+    }
+
+    #[test]
+    fn test_entities_match_fuzzy_close_names() {
+        // "John" vs "Jon" — normalized: "john" vs "jon"
+        assert!(entities_match_fuzzy("John", "Jon"));
+        // Identical after normalization
+        assert!(entities_match_fuzzy("OpenAI", "openai"));
+        // Very different strings should not match
+        assert!(!entities_match_fuzzy("Apple", "Microsoft"));
+    }
+
+    #[test]
+    fn test_jaccard_similarity_basic() {
+        let a: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let b: HashSet<String> = ["b", "c"].iter().map(|s| s.to_string()).collect();
+        let sim = jaccard_similarity(&a, &b);
+        // intersection = {b} = 1, union = {a,b,c} = 3 → 1/3
+        assert!((sim - 1.0 / 3.0).abs() < 0.001);
+
+        // Identical sets → 1.0
+        let sim2 = jaccard_similarity(&a, &a);
+        assert!((sim2 - 1.0).abs() < 0.001);
+
+        // Disjoint sets → 0.0
+        let c: HashSet<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
+        assert!((jaccard_similarity(&a, &c)).abs() < 0.001);
+
+        // Both empty → 0.0
+        let empty: HashSet<String> = HashSet::new();
+        assert!((jaccard_similarity(&empty, &empty)).abs() < 0.001);
     }
 }
