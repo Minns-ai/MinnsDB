@@ -517,10 +517,7 @@ impl RedbGraphStore {
         visited.insert(current);
 
         if current == target {
-            let total_weight: f32 = path_edges
-                .iter()
-                .map(crate::traversal::edge_cost)
-                .sum();
+            let total_weight: f32 = path_edges.iter().map(crate::traversal::edge_cost).sum();
             results.push(GraphPath {
                 nodes: path_nodes.clone(),
                 edges: path_edges.clone(),
@@ -611,10 +608,7 @@ impl RedbGraphStore {
         visited.insert(current);
 
         if current == target {
-            let total_weight: f32 = path_edges
-                .iter()
-                .map(crate::traversal::edge_cost)
-                .sum();
+            let total_weight: f32 = path_edges.iter().map(crate::traversal::edge_cost).sum();
             results.push(GraphPath {
                 nodes: path_nodes.clone(),
                 edges: path_edges.clone(),
