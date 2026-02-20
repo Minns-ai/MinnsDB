@@ -203,7 +203,7 @@ impl EmbeddingClient for OpenAiEmbeddingClient {
                 .collect();
             indexed.sort_by_key(|(idx, _)| *idx);
 
-            let per_item_tokens = if chunk.len() > 0 {
+            let per_item_tokens = if !chunk.is_empty() {
                 tokens_used / chunk.len() as u64
             } else {
                 0

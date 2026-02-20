@@ -724,35 +724,33 @@ impl GraphTraversal {
                         }
                     }
                 }
-            } else {
-                if let Some(PathEntry { node_id: u, cost }) = bwd_heap.pop() {
-                    if cost > *bwd_dist.get(&u).unwrap_or(&f32::INFINITY) {
-                        continue;
-                    }
-                    bwd_settled.insert(u);
+            } else if let Some(PathEntry { node_id: u, cost }) = bwd_heap.pop() {
+                if cost > *bwd_dist.get(&u).unwrap_or(&f32::INFINITY) {
+                    continue;
+                }
+                bwd_settled.insert(u);
 
-                    // Check if forward search has already settled this node
-                    if let Some(&fwd_cost) = fwd_dist.get(&u) {
-                        let total = cost + fwd_cost;
-                        if total < best_cost {
-                            best_cost = total;
-                            meeting_node = Some(u);
-                        }
+                // Check if forward search has already settled this node
+                if let Some(&fwd_cost) = fwd_dist.get(&u) {
+                    let total = cost + fwd_cost;
+                    if total < best_cost {
+                        best_cost = total;
+                        meeting_node = Some(u);
                     }
+                }
 
-                    // Backward: traverse incoming edges
-                    for &v in graph.get_incoming_neighbors(u).iter() {
-                        let w = edge_cost_between(graph, v, u);
-                        let new_d = cost + w;
-                        if new_d < *bwd_dist.get(&v).unwrap_or(&f32::INFINITY) {
-                            bwd_dist.insert(v, new_d);
-                            bwd_from.insert(v, u);
-                            if !bwd_settled.contains(&v) {
-                                bwd_heap.push(PathEntry {
-                                    node_id: v,
-                                    cost: new_d,
-                                });
-                            }
+                // Backward: traverse incoming edges
+                for &v in graph.get_incoming_neighbors(u).iter() {
+                    let w = edge_cost_between(graph, v, u);
+                    let new_d = cost + w;
+                    if new_d < *bwd_dist.get(&v).unwrap_or(&f32::INFINITY) {
+                        bwd_dist.insert(v, new_d);
+                        bwd_from.insert(v, u);
+                        if !bwd_settled.contains(&v) {
+                            bwd_heap.push(PathEntry {
+                                node_id: v,
+                                cost: new_d,
+                            });
                         }
                     }
                 }
@@ -963,10 +961,10 @@ impl GraphTraversal {
                 }
 
                 // Constraint: AvoidEdgeTypes
-                if !avoid_edge_types.is_empty() {
-                    if avoid_edge_types.contains(&edge_type_name(&edge.edge_type)) {
-                        continue;
-                    }
+                if !avoid_edge_types.is_empty()
+                    && avoid_edge_types.contains(&edge_type_name(&edge.edge_type))
+                {
+                    continue;
                 }
 
                 // Constraint: MinEdgeWeight
@@ -1455,7 +1453,7 @@ impl GraphTraversal {
                         (w.min(1.0), count)
                     } else {
                         // Multi-hop: convert cost back to probability (cost ≈ 1 - p)
-                        ((1.0 - cost).max(0.01).min(1.0), 0)
+                        ((1.0 - cost).clamp(0.01, 1.0), 0)
                     };
 
                     let hops = if cost < 0.001 {
@@ -1516,7 +1514,7 @@ impl GraphTraversal {
 
                         let success_probability = self
                             .get_edge_weight_between(graph, context_node_id, node_id)
-                            .unwrap_or_else(|| (1.0 - cost).max(0.01).min(1.0));
+                            .unwrap_or_else(|| (1.0 - cost).clamp(0.01, 1.0));
 
                         let evidence_count =
                             self.count_pattern_occurrences(graph, context_node_id, node_id)?;

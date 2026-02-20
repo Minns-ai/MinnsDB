@@ -2,7 +2,7 @@
 ## EventGraphDB — Experiential Learning System for Autonomous AI Agents
 
 **Document Classification:** Patent-Level Technical Disclosure
-**Date:** 2026-02-19 (updated: claim outcome feedback loop)
+**Date:** 2026-02-19 (updated: hierarchical predictive coding architecture)
 **System:** EventGraphDB v1.0
 **Crate Under Analysis:** `agent-db-graph` (core learning engine)
 
@@ -29,9 +29,10 @@
 17. [Storage Architecture (Hot/Cold LRU + Persistent B+Tree)](#17-storage-architecture)
 18. [Background Maintenance Engine](#18-background-maintenance-engine)
 19. [Claim Outcome Feedback Loop](#19-claim-outcome-feedback-loop)
-20. [Appendix A: Fully Populated Strategy Example (Before & After LLM Distillation)](#appendix-a)
-21. [Appendix B: Embedding Gap Analysis](#appendix-b)
-22. [Appendix C: Prior Art Comparison & Architectural Differentiation](#appendix-c)
+20. [Hierarchical Predictive Coding Engine](#20-hierarchical-predictive-coding-engine)
+21. [Appendix A: Fully Populated Strategy Example (Before & After LLM Distillation)](#appendix-a)
+22. [Appendix B: Embedding Gap Analysis](#appendix-b)
+23. [Appendix C: Prior Art Comparison & Architectural Differentiation](#appendix-c)
 
 ---
 
@@ -1439,6 +1440,433 @@ The feedback loop has several desirable convergence properties:
 
 ---
 
+## 20. Hierarchical Predictive Coding Engine {#20-hierarchical-predictive-coding-engine}
+
+### 20.1 Motivation & Neuroscience Foundation
+
+Sections 4–5 describe EventGraphDB's three-tier memory hierarchy (Episodic → Semantic → Schema) with **bottom-up** consolidation: raw events form episodes, episodes generalize into semantic patterns, and semantic patterns distill into abstract schemas. This is half of the brain's memory architecture.
+
+In biological neural systems, **each cortical layer also generates top-down predictions** about the layer below it. Learning is driven not by the data itself but by **prediction errors** — the mismatch between what a higher layer expected and what it actually observed. This is the **predictive coding** framework (Rao & Ballard, 1999; Friston, 2005).
+
+Key neuroscience findings that motivate this design:
+
+- **Small prediction errors** → edit/reinforce existing memories (reconsolidation)
+- **Large prediction errors** → create entirely new episodic memories (surprise-driven encoding)
+- **Precision weighting** → reliable signals drive larger updates than noisy ones
+- **~80% of cortical computation** is top-down prediction, not bottom-up processing
+- Hippocampal replay generates **fictive prediction errors** that train the neocortex offline
+
+### 20.2 Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                PREDICTIVE CODING ENGINE                      │
+│            (Python / GPU co-processor service)               │
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │ Schema Layer (L2) — Abstract generative model     │       │
+│  │   predicts ──▶ expected Semantic patterns         │       │
+│  │   ◀── PE from Semantic layer (bottom-up)          │       │
+│  │   Model: Lightweight Transformer encoder          │       │
+│  └────────────────────┬─────────────────────────────┘       │
+│                       │ top-down predictions                 │
+│                       ▼                                      │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │ Semantic Layer (L1) — Pattern generative model    │       │
+│  │   predicts ──▶ expected Episodic outcomes         │       │
+│  │   ◀── PE from Episodic layer (bottom-up)          │       │
+│  │   Model: MLP with attention over context          │       │
+│  └────────────────────┬─────────────────────────────┘       │
+│                       │ top-down predictions                 │
+│                       ▼                                      │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │ Episodic Layer (L0) — Ground truth from events    │       │
+│  │   No prediction (leaf layer)                      │       │
+│  │   Emits PE = |actual - predicted_by_L1|           │       │
+│  └──────────────────────────────────────────────────┘       │
+│                                                              │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │ gRPC / IPC Interface ◀──▶ Rust core (redb)       │       │
+│  └──────────────────────────────────────────────────┘       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The predictive coding engine runs as a **GPU co-processor** alongside the Rust core. The Rust side owns storage, retrieval, and the event pipeline. The Python/GPU side owns the generative models that produce top-down predictions and compute prediction errors.
+
+### 20.3 Inter-Process Architecture (Rust ↔ Python)
+
+The Rust core and Python GPU process communicate via a lightweight IPC channel:
+
+```
+┌──────────────────────┐         ┌────────────────────────┐
+│  Rust Core (redb)    │  gRPC   │  Python GPU Service     │
+│                      │◀───────▶│                        │
+│  • Event ingestion   │         │  • Predictive models   │
+│  • Claim storage     │         │  • PE computation      │
+│  • HNSW index        │         │  • Precision tracking  │
+│  • Retrieval scoring │         │  • Model updates       │
+│  • Consolidation     │         │  • Replay generation   │
+│    decisions         │         │                        │
+└──────────────────────┘         └────────────────────────┘
+
+Protocol:
+  Rust → Python:  PredictionRequest { layer, claim_embedding, context, metadata }
+  Python → Rust:  PredictionResponse { prediction_error, precision, action }
+
+Actions:
+  CONSOLIDATE  — PE is low, higher layer already understands this
+  RETAIN       — PE is medium, keep as-is, update model
+  PROMOTE      — PE is high, this is genuinely novel, promote to next tier
+  PRUNE        — precision is high AND PE is near-zero, redundant memory
+```
+
+**Why Python + GPU instead of pure Rust?**
+
+The generative models at each layer require neural network inference (matrix multiplications, attention, gradient updates). While Rust ML frameworks exist (burn, candle, tch-rs), the Python ecosystem provides:
+
+- **PyTorch** with mature GPU kernels (CUDA/ROCm/Metal)
+- **Pre-trained model zoo** — CLIP, sentence-transformers, small LLMs for schema generation
+- **Fast iteration** — model architecture changes without recompiling the Rust core
+- **Existing tooling** — TensorBoard, Weights & Biases for monitoring prediction error convergence
+
+The Rust core remains the system of record. The Python service is stateless (can be restarted without data loss) and advisory (the Rust side makes final consolidation decisions based on PE signals).
+
+### 20.4 Layer-by-Layer Prediction Models
+
+#### 20.4.1 Semantic → Episodic Prediction (L1 → L0)
+
+**What it predicts:** Given a semantic claim (generalized pattern), predict the expected outcome of the next episodic instance matching that pattern.
+
+**Model architecture:**
+
+```
+Input:
+  semantic_claim_embedding    (768-dim, from claim store)
+  context_embedding           (768-dim, from current episode context)
+  temporal_features           (8-dim: time_of_day, day_of_week, recency, etc.)
+  historical_outcome_stats    (4-dim: success_rate, variance, trend, n_outcomes)
+
+Model:
+  concat(all inputs) → Linear(1548, 512) → GELU → Linear(512, 256) → GELU
+  → Prediction head: Linear(256, 1) → sigmoid  (predicted success probability)
+  → Precision head:  Linear(256, 1) → softplus (predicted precision/confidence)
+
+Output:
+  predicted_success: f32       (0.0 to 1.0)
+  predicted_precision: f32     (> 0, higher = more confident)
+```
+
+**Prediction error computation:**
+
+```
+PE_episodic = |actual_outcome - predicted_success|
+weighted_PE = PE_episodic × predicted_precision
+
+IF weighted_PE < τ_low (0.15):
+    → CONSOLIDATE: this episode is well-predicted, safe to merge into semantic
+ELIF weighted_PE > τ_high (0.70):
+    → PROMOTE: this is highly surprising, create/update semantic pattern
+ELSE:
+    → RETAIN: keep as episodic, update L1 model
+```
+
+**Training:** Online SGD after each episode outcome. Loss = MSE(predicted_success, actual_outcome) + calibration_loss(predicted_precision, observed_PE_variance).
+
+#### 20.4.2 Schema → Semantic Prediction (L2 → L1)
+
+**What it predicts:** Given an abstract schema (rule/principle), predict the distribution of semantic patterns that should exist beneath it.
+
+**Model architecture:**
+
+```
+Input:
+  schema_embedding           (768-dim)
+  domain_context             (768-dim, e.g., "ATS applications" or "API integration")
+
+Model:
+  Transformer encoder (2 layers, 4 heads, d_model=256)
+  Input: [schema_token, context_token, K learnable query tokens]
+
+  Output per query token:
+    → predicted_claim_embedding (768-dim, via linear projection)
+    → predicted_confidence_range (2-dim: min, max)
+    → predicted_success_rate (1-dim)
+    → predicted_count (1-dim: how many semantic claims expected)
+
+Output:
+  K predicted semantic claim prototypes
+  aggregate statistics (expected success rate, expected count, confidence bounds)
+```
+
+**Prediction error computation:**
+
+```
+actual_semantic_claims = claim_store.query_by_parent_schema(schema_id)
+
+// Distributional PE: compare predicted prototypes to actual claims
+PE_schema = mean(min_distance(predicted_prototypes, actual_claim_embeddings))
+         + |predicted_count - actual_count| / max(predicted_count, 1)
+         + |predicted_success_rate - actual_mean_success_rate|
+
+IF PE_schema < τ_low (0.20):
+    → Schema is accurate, semantic claims beneath it are redundant
+    → Consider PRUNING semantic claims that are fully captured by schema
+ELIF PE_schema > τ_high (0.60):
+    → Schema is stale or too simplistic
+    → Trigger schema REFINEMENT (split, update, or create sub-schemas)
+ELSE:
+    → Schema partially accurate, update L2 model
+```
+
+**Training:** Batch update during maintenance windows (§18). Collects all schema→semantic pairs, trains for N epochs with cosine-annealing LR schedule.
+
+### 20.5 Precision-Weighted Learning
+
+Each claim accumulates a **precision** estimate — the inverse variance of its prediction errors over time:
+
+```
+Metadata keys (stored in existing HashMap<String, String>):
+  _pe_running_mean     — exponential moving average of PE
+  _pe_running_var      — exponential moving average of PE²  (for variance)
+  _precision           — 1.0 / max(pe_running_var, ε)
+
+Update rule (after each outcome):
+  pe_mean_new = (1 - β) × pe_mean_old + β × current_PE
+  pe_var_new  = (1 - β) × pe_var_old  + β × (current_PE - pe_mean_new)²
+  precision   = 1.0 / max(pe_var_new, 0.01)
+
+  where β = 0.2 (precision EMA rate)
+```
+
+**Effect on retrieval scoring** (extends §19.4):
+
+```
+retrieval_score = base × outcome_multiplier × precision_multiplier
+
+where:
+  base               = similarity × (0.6 + 0.4 × temporal_weight)
+  outcome_multiplier = 0.6 + 0.8 × outcome_score           // [0.6, 1.4]
+  precision_multiplier = 0.7 + 0.3 × min(precision / 10, 1) // [0.7, 1.0]
+```
+
+**Effect on Q-value learning rate** (extends §19.3):
+
+```
+adaptive_alpha = Q_ALPHA × min(precision / 5.0, 2.0)    // [0, 0.6]
+
+// High precision (reliable claim) → learns faster (up to 2× Q_ALPHA)
+// Low precision (noisy claim) → learns slower (approaches 0)
+```
+
+### 20.6 PE-Gated Consolidation
+
+The existing consolidation engine (§5) uses time-based thresholds to promote memories up the hierarchy. Predictive coding replaces this with **PE-gated consolidation**:
+
+```
+ALGORITHM: PE-Gated Consolidation Pass
+
+FOR each episodic claim E:
+    1. Query L1 model: predicted_outcome = L1.predict(E.context, E.parent_semantic)
+    2. Compute PE = |E.actual_outcome - predicted_outcome|
+    3. Weight by precision: weighted_PE = PE × L1.precision(E.context)
+
+    IF weighted_PE < τ_consolidate (0.15):
+        // L1 already understands this experience
+        IF E.age > min_age_for_consolidation:
+            Merge E into parent semantic claim (update stats, don't create new)
+            Mark E for pruning
+
+    ELIF weighted_PE > τ_surprise (0.70):
+        // This is genuinely novel — L1 can't predict it
+        IF similar_high_PE_episodes_count(E) >= 3:
+            // Pattern of surprises → create new semantic claim
+            Promote E to new Semantic claim
+            Retrain L1 to accommodate new pattern
+        ELSE:
+            // Isolated surprise — keep as episodic, wait for more evidence
+            Tag E as "high_PE_anomaly"
+            Retain in episodic tier
+
+    ELSE:
+        // Medium PE — L1 partially understands
+        Update L1 model with this example (online SGD)
+        Retain E in episodic tier
+
+FOR each semantic claim S:
+    1. Query L2 model: predicted_distribution = L2.predict(S.parent_schema)
+    2. Compute PE_schema (distributional mismatch, see §20.4.2)
+
+    IF PE_schema > τ_schema_drift (0.60):
+        // Schema is stale — trigger refinement
+        IF S represents a consistent sub-pattern not in schema:
+            Propose schema split or sub-schema creation
+        ELSE:
+            Flag schema for re-distillation (§7)
+```
+
+### 20.7 Predictive Replay (Offline Learning)
+
+During maintenance windows (§18), the predictive coding engine performs **predictive replay** — analogous to hippocampal replay during sleep:
+
+```
+ALGORITHM: Predictive Replay
+
+1. Sample N claims from the store, prioritized by:
+   - High PE (most informative for model training)
+   - Recent access (likely relevant to current tasks)
+   - Low precision (model is uncertain, needs more training)
+
+2. For each sampled claim:
+   a. Generate L1 prediction (semantic → episodic)
+   b. Compute current PE against stored outcome
+   c. Compare to previous PE for this claim
+
+   IF current_PE < previous_PE × 0.5:
+       // Model has learned this — reduce replay priority
+       claim.replay_priority *= 0.8
+   ELIF current_PE > previous_PE:
+       // Model is getting WORSE on this claim — flag anomaly
+       claim.anomaly_flag = true
+       claim.replay_priority *= 1.5
+
+   d. Update model weights via gradient step (SGD/Adam)
+   e. Store updated PE in claim metadata
+
+3. Aggregate statistics:
+   - mean_PE across all layers (should decrease over time)
+   - precision histogram (should shift rightward over time)
+   - anomaly_count (should remain low)
+
+4. Emit ReplayComplete event with statistics for monitoring
+```
+
+### 20.8 Active Information Seeking
+
+When prediction error is high for a particular context, the agent has a **quantified measure of its own ignorance**. This enables active inference — the agent can act to reduce uncertainty rather than just maximize reward:
+
+```
+ALGORITHM: Uncertainty-Driven Claim Retrieval
+
+Input: query context C, top-K candidate claims
+
+1. Standard retrieval: rank claims by retrieval_score (§19.4 + §20.5)
+2. For each candidate claim, compute expected PE:
+   expected_PE = L1.predict_uncertainty(claim, C)
+
+3. Compute information gain for each claim:
+   info_gain = expected_PE × (1 - claim.precision)
+   // High expected PE + low precision = maximum learning opportunity
+
+4. Final score blends exploitation and exploration:
+   score = (1 - ε) × retrieval_score + ε × info_gain
+
+   where ε adapts based on overall system confidence:
+   ε = max(0.05, 0.3 × (1 - mean_precision_across_claims))
+   // High overall precision → low ε (exploit)
+   // Low overall precision  → high ε (explore)
+
+5. Return top-K by final score
+```
+
+This replaces the epsilon-greedy proposal in Appendix C.5 with a principled, precision-aware exploration mechanism derived from the free energy principle.
+
+### 20.9 Neural Network Specifications
+
+#### 20.9.1 L1 Model (Semantic → Episodic)
+
+| Property | Value |
+|---|---|
+| Architecture | 3-layer MLP with residual connections |
+| Input dimension | 1548 (768 + 768 + 8 + 4) |
+| Hidden dimensions | 512, 256 |
+| Output | success_probability (1), precision (1) |
+| Parameters | ~1.1M |
+| Activation | GELU |
+| Training | Online SGD, lr=1e-3 with cosine decay |
+| Inference latency | < 1ms on GPU, < 5ms on CPU |
+| Framework | PyTorch (CUDA/ROCm/Metal) |
+
+#### 20.9.2 L2 Model (Schema → Semantic)
+
+| Property | Value |
+|---|---|
+| Architecture | 2-layer Transformer encoder + linear heads |
+| Input dimension | 768 × 2 (schema + context) + K query tokens |
+| d_model | 256 |
+| Heads | 4 |
+| Query tokens (K) | 8 (predicted semantic prototypes) |
+| Parameters | ~2.4M |
+| Training | Batch, during maintenance, Adam lr=5e-4 |
+| Inference latency | < 5ms on GPU, < 20ms on CPU |
+| Framework | PyTorch (CUDA/ROCm/Metal) |
+
+#### 20.9.3 Deployment Options
+
+| Configuration | L1 | L2 | Use Case |
+|---|---|---|---|
+| GPU co-processor | CUDA inference | CUDA inference + training | Production, high-throughput agents |
+| CPU-only | ONNX Runtime | ONNX Runtime | Edge deployment, single-agent |
+| Cloud offload | API call to inference service | API call | Multi-agent fleet, shared models |
+| Disabled | Fall back to Q-value only (§19) | Fall back to time-based consolidation (§5) | Minimal deployment, no GPU available |
+
+The system degrades gracefully: without the Python GPU service, the Rust core continues to operate using the existing Q-value / Bayesian outcome tracking (§19). The predictive coding engine is an **enhancement layer**, not a hard dependency.
+
+### 20.10 Training Data Pipeline
+
+```
+Events (Rust core)
+    │
+    ▼
+LearningEvent::Outcome { success, reward }
+    │
+    ├──▶ Rust: update Q-value, counters (existing §19 path)
+    │
+    └──▶ Python: training example for L1/L2
+         │
+         Format:  TrainingExample {
+             claim_id: u64,
+             claim_embedding: [f32; 768],
+             context_embedding: [f32; 768],
+             temporal_features: [f32; 8],
+             outcome: f32,          // 0.0 or 1.0
+             reward: f32,           // continuous signal if available
+             tier: MemoryTier,      // which layer produced this claim
+             parent_id: Option<u64> // parent claim in hierarchy
+         }
+         │
+         ▼
+    Training buffer (ring buffer, 10K examples)
+         │
+         ├──▶ Online update: L1 after each example
+         └──▶ Batch update: L2 every maintenance window
+```
+
+### 20.11 Convergence Properties
+
+1. **PE decreases over time**: As models learn, predictions improve, PE shrinks. This is measurable and serves as the primary health metric for the predictive coding engine.
+
+2. **Precision increases over time**: Reliable claims accumulate high precision, concentrating retrieval on trustworthy knowledge.
+
+3. **Consolidation becomes selective**: Early in learning, most experiences are surprising (high PE) and retained as episodic. As models improve, routine experiences are consolidated efficiently while only genuine novelty stays in the episodic tier.
+
+4. **Graceful cold-start**: With no training data, L1/L2 models output uniform predictions (PE ≈ 0.5 for all claims). This maps to the same behavior as the Bayesian prior in §19 — neutral, neither boosting nor penalizing. As data accumulates past Q_KICK_IN (5 outcomes), the models begin differentiating.
+
+5. **Catastrophic forgetting protection**: The neural models are small (< 5M parameters combined) and trained on a sliding window of recent examples. If models degrade, the Rust-side Q-values and Bayesian counters remain the authoritative signal. The predictive coding engine can be retrained from scratch using historical outcome data stored in redb without losing any information.
+
+### 20.12 Prior Art Differentiation
+
+| System | Memory Hierarchy | Top-Down Prediction | PE-Gated Consolidation | Precision Weighting |
+|---|---|---|---|---|
+| **EventGraphDB (this work)** | 3-tier (Episodic/Semantic/Schema) | Neural generative model per layer | Yes — PE thresholds gate promotion/pruning | Per-claim adaptive precision via PE variance |
+| **MemRL (2024)** | Flat episodic buffer | None | None — all memories equal | None — fixed EMA rate |
+| **ERL (2024)** | 2-tier (Experience/Reflection) | None | Time-based | None |
+| **VERSES AXIOM (2025)** | Hierarchical generative model | Yes (active inference) | Implicit via free energy | Yes (precision on sensory channels) |
+| **Predictive Coding Networks** | Per-layer latent states | Yes (core mechanism) | N/A (continuous signals) | Yes (precision weighting) |
+
+**Key novelty**: EventGraphDB is the first system to apply hierarchical predictive coding to a **persistent, non-parametric knowledge store** (claims in a database) rather than to transient neural activations. The combination of PE-gated consolidation, precision-weighted retrieval, and graceful degradation to non-neural scoring (§19) is novel.
+
+---
+
 ## Appendix A: Fully Populated Strategy Example (Before & After LLM Distillation) {#appendix-a}
 
 ### A.1 Stage 1 Output (Template Synthesis Only)
@@ -1754,24 +2182,18 @@ This would transform avoidance claims from warnings into actionable negative kno
 - `λ → 0`: Pure semantic similarity (exploration — try relevant but unproven memories)
 - `λ → 1`: Pure Q-value exploitation (use what worked before)
 
-**EventGraphDB** has no explicit exploration mechanism. The Bayesian prior `(pos+1)/(total+2)` provides implicit conservatism (new claims start neutral at 0.5), but there is no mechanism to deliberately retrieve low-confidence claims for exploration.
-
-**Gap:** An agent using EventGraphDB will converge to exploiting known-good claims and never discover that a previously-unused claim might be better for the current context. This is acceptable for production stability but limits adaptation to novel scenarios.
-
-**Proposed future work — Epsilon-greedy claim retrieval:**
+**EventGraphDB** addresses exploration via **precision-aware active information seeking** (§20.8). Rather than random epsilon-greedy exploration or a fixed λ blend, the system uses prediction error and precision from the hierarchical predictive coding engine to quantify ignorance and adaptively balance exploration/exploitation:
 
 ```
-With probability ε:
-    Return top-k by similarity only (ignore outcome_score)
-With probability 1-ε:
-    Return top-k by outcome-weighted score (current behavior)
+score = (1 - ε) × retrieval_score + ε × info_gain
+where:
+  info_gain = expected_PE × (1 - precision)
+  ε = max(0.05, 0.3 × (1 - mean_precision_across_claims))
 ```
 
-Or, following MemRL's approach, introduce a tunable blend parameter:
+This is principled exploration derived from the free energy principle: the agent explores where its predictions are most uncertain (high expected PE, low precision) and exploits where its model is reliable. Unlike MemRL's static λ, EventGraphDB's ε adapts automatically as the agent's overall confidence changes — high early exploration that naturally anneals as the system learns.
 
-```
-score = (1 − λ) × similarity_normalized + λ × outcome_score_normalized
-```
+**Fallback** (without GPU predictive coding engine): The Bayesian prior `(pos+1)/(total+2)` provides implicit conservatism (new claims start neutral at 0.5), and the Q-value phase (§19.3) responds to distribution shift. This is less sophisticated but functional without neural models.
 
 ### C.6 Memory Rewriting vs. Re-Ranking
 
@@ -1820,9 +2242,12 @@ These metrics would enable the system to detect when the feedback loop is stagna
 | Outcome-aware retrieval | **Piecewise Bayesian→Q** with multiplicative composition | MemRL: additive Q-value blend with z-norm | **Implemented** — arguably superior for knowledge retrieval (see §C.2) |
 | Credit assignment | Trajectory-level (all claims equal) | HiPER: hierarchical; SPO: segment-level | **High** — differential attribution via retrieval-score weighting |
 | Avoidance/reflection | Template-based avoidance claims | ERL: LLM-generated causal reflections | **Medium** — add optional LLM refinement to avoidance claims |
-| Exploration | None (pure exploitation after outcomes) | MemRL: tunable λ blend | **Medium** — add epsilon-greedy or λ-blend to retrieval |
+| Exploration | Precision-aware active information seeking (§20.8) | MemRL: tunable λ blend | **Designed** — free-energy-principled exploration via PE-driven ε adaptation |
 | Memory rewriting | Re-rank only (text immutable) | MemRL: in-place rewrite | **Intentional divergence** — text immutability is a design choice |
-| Metacognition | None | Position paper: metacognitive planning + evaluation | **Low** — add health metrics for the feedback loop |
+| Metacognition | PE convergence metrics, precision histograms (§20.7, §20.11) | Position paper: metacognitive planning + evaluation | **Designed** — PE trends and precision shifts quantify learning health |
+| Top-down prediction | **Hierarchical predictive coding** with neural generative models per layer (§20) | VERSES AXIOM: active inference; PCNs: per-layer latents | **Designed** — first application to persistent non-parametric knowledge store |
+| PE-gated consolidation | Surprise-driven promotion/pruning (§20.6) | None in MemRL/ERL | **Designed** — novel mechanism, no prior art in agent memory systems |
+| Precision-weighted retrieval | Per-claim adaptive precision from PE variance (§20.5) | None | **Designed** — extends outcome multiplier with reliability signal |
 | Temporal decay | Type-specific half-life (`2^(-age/half_life)`) | Not addressed in MemRL/ERL | **Advantage** — EventGraphDB's temporal decay is more sophisticated |
 | Persistent storage | redb + bincode + HNSW | Typically in-memory only | **Advantage** — production-grade persistence with zero-migration metadata |
 
