@@ -198,7 +198,7 @@ async fn test_export_import_full_roundtrip() -> Result<(), Box<dyn std::error::E
         record_count,
         export_buf.len()
     );
-    assert!(export_buf.len() > 0, "Expected non-empty export");
+    assert!(!export_buf.is_empty(), "Expected non-empty export");
 
     // ================================================================
     // Step 4: Import into a fresh engine
