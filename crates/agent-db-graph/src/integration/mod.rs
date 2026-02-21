@@ -12,6 +12,7 @@
 
 mod constructor;
 mod event_processing;
+mod export_import;
 mod graph_analytics;
 mod graph_building;
 mod lifecycle;
@@ -265,7 +266,10 @@ pub struct GraphEngine {
     /// Event ordering engine for handling concurrent events
     pub(crate) event_ordering: Arc<EventOrderingEngine>,
 
-    /// Scoped inference engine
+    /// Scoped inference engine.
+    /// **Intentionally ephemeral**: scoped inference caches are derived from the
+    /// graph and rebuilt on demand. Persisting them would create staleness issues
+    /// since they depend on the current graph topology.
     pub(crate) scoped_inference: Arc<crate::scoped_inference::ScopedInferenceEngine>,
 
     /// Episode detector - automatically detects episode boundaries
@@ -280,13 +284,20 @@ pub struct GraphEngine {
     /// Transition model - procedural memory spine
     pub(crate) transition_model: Arc<RwLock<TransitionModel>>,
 
-    /// Event storage for episode processing
+    /// Event storage for episode processing.
+    /// **Intentionally ephemeral**: events are transient inputs consumed by the episode
+    /// pipeline. They are ring-buffered and evicted by the maintenance loop, so
+    /// persisting them would add I/O cost with no benefit (episodes capture the
+    /// durable representation of event sequences).
     pub(crate) event_store: Arc<RwLock<HashMap<agent_db_core::types::EventId, Event>>>,
 
     /// Insertion order for event_store ring-buffer eviction
     pub(crate) event_store_order: Arc<RwLock<VecDeque<agent_db_core::types::EventId>>>,
 
-    /// Learning decision traces keyed by query_id (lock-free with DashMap for performance)
+    /// Learning decision traces keyed by query_id (lock-free with DashMap for performance).
+    /// **Intentionally ephemeral**: decision traces are short-lived feedback records
+    /// linking a policy-guide query to its outcome. They expire via TTL sweep and
+    /// exist only to close the reinforcement loop within a single session.
     pub(crate) decision_traces: Arc<dashmap::DashMap<String, DecisionTrace>>,
 
     /// Redb backend for graph persistence (shared with memory/strategy stores)
@@ -385,7 +396,7 @@ impl Default for GraphEngineConfig {
             auto_strategy_extraction: true,
             auto_reinforcement_learning: true,
             batch_size: 100,
-            persistence_interval: 1000,
+            persistence_interval: 50,
             max_graph_size: 1_000_000,
             enable_louvain: true,
             louvain_interval: 1000,

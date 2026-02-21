@@ -405,27 +405,35 @@ mod tests {
         let mut graph = Graph::new();
 
         // Create two separate components
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
-        let n3 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 3,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n4 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 4,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 3,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n4 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 4,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         // Component 1: n1-n2
         graph.add_edge(GraphEdge::new(

@@ -710,6 +710,23 @@ impl MemoryFormation {
         self.memories.values().cloned().collect()
     }
 
+    /// Remove a memory by ID. Returns true if it existed.
+    pub fn remove_memory(&mut self, memory_id: MemoryId) -> bool {
+        if let Some(memory) = self.memories.remove(&memory_id) {
+            // Clean indexes
+            if let Some(ids) = self.agent_memories.get_mut(&memory.agent_id) {
+                ids.retain(|id| *id != memory_id);
+            }
+            if let Some(ids) = self.context_index.get_mut(&memory.context.fingerprint) {
+                ids.retain(|id| *id != memory_id);
+            }
+            self.episode_index.retain(|_, id| *id != memory_id);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Store a pre-built consolidated memory directly (bypasses episode formation)
     pub fn store_direct(&mut self, memory: Memory) {
         let id = memory.id;

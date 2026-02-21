@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::contracts::{AbstractTrace, AbstractTransition};
 use crate::episodes::EpisodeId;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransitionModelConfig {
     pub prior_success: f32,
     pub prior_failure: f32,
@@ -20,7 +20,7 @@ impl Default for TransitionModelConfig {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct TransitionKey {
     state: String,
     action: String,
@@ -37,7 +37,7 @@ impl From<&AbstractTransition> for TransitionKey {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransitionStats {
     pub count: u64,
     pub success_count: u64,
@@ -50,6 +50,15 @@ impl TransitionStats {
         let beta = config.prior_failure + self.failure_count as f32;
         (alpha / (alpha + beta)).clamp(0.0, 1.0)
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TransitionModelSnapshot {
+    buckets: HashMap<u64, HashMap<TransitionKey, TransitionStats>>,
+    episode_transitions: HashMap<EpisodeId, Vec<TransitionKey>>,
+    episode_outcomes: HashMap<EpisodeId, bool>,
+    episode_goal_bucket: HashMap<EpisodeId, u64>,
+    config: TransitionModelConfig,
 }
 
 #[derive(Debug, Default)]
@@ -180,6 +189,31 @@ impl TransitionModel {
                 }
             }
         }
+    }
+
+    /// Serialize the entire model to bytes (MessagePack).
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        let snapshot = TransitionModelSnapshot {
+            buckets: self.buckets.clone(),
+            episode_transitions: self.episode_transitions.clone(),
+            episode_outcomes: self.episode_outcomes.clone(),
+            episode_goal_bucket: self.episode_goal_bucket.clone(),
+            config: self.config.clone(),
+        };
+        rmp_serde::to_vec(&snapshot).map_err(|e| format!("TransitionModel serialize: {}", e))
+    }
+
+    /// Restore model state from bytes, allowing config override.
+    pub fn from_bytes(bytes: &[u8], config: TransitionModelConfig) -> Result<Self, String> {
+        let snapshot: TransitionModelSnapshot = rmp_serde::from_slice(bytes)
+            .map_err(|e| format!("TransitionModel deserialize: {}", e))?;
+        Ok(Self {
+            config,
+            buckets: snapshot.buckets,
+            episode_transitions: snapshot.episode_transitions,
+            episode_outcomes: snapshot.episode_outcomes,
+            episode_goal_bucket: snapshot.episode_goal_bucket,
+        })
     }
 
     /// Remove transition entries whose total count is below `min_count`.

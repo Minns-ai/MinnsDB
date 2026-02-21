@@ -61,6 +61,9 @@ pub fn create_router(state: AppState) -> Router {
             "/api/embeddings/process",
             post(handlers::process_embeddings),
         )
+        // Admin: Export/Import
+        .route("/api/admin/export", post(handlers::export_handler))
+        .route("/api/admin/import", post(handlers::import_handler))
         // Apply middleware
         .layer(CorsLayer::permissive())
         .with_state(state)

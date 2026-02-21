@@ -18,7 +18,7 @@ use std::sync::Arc;
 pub type EpisodeId = u64;
 
 /// Episode represents a coherent sequence of events forming a memorable experience
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Episode {
     /// Unique episode identifier
     pub id: EpisodeId,
@@ -129,6 +129,9 @@ pub struct EpisodeDetectorConfig {
 
     /// Significance threshold that alone qualifies an episode for storage (OR gate)
     pub high_significance_override: f32,
+
+    /// Maximum entries in novelty tracking maps before amortized pruning
+    pub max_novelty_entries: usize,
 }
 
 impl Default for EpisodeDetectorConfig {
@@ -148,6 +151,7 @@ impl Default for EpisodeDetectorConfig {
             ],
             min_events_before_outcome_end: 2,
             high_significance_override: 0.5,
+            max_novelty_entries: 50_000,
         }
     }
 }
@@ -187,7 +191,45 @@ pub enum EpisodeUpdate {
     Corrected(EpisodeId),
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EpisodeDetectorSnapshot {
+    active_episodes: HashMap<AgentId, Episode>,
+    completed_episodes: Vec<Episode>,
+    next_episode_id: EpisodeId,
+    last_consolidation: HashMap<AgentId, Timestamp>,
+    #[serde(default)]
+    seen_contexts: HashMap<ContextHash, u32>,
+    #[serde(default)]
+    seen_event_types: HashMap<String, u32>,
+}
+
 impl EpisodeDetector {
+    /// Serialize detector state to bytes (MessagePack).
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        let snapshot = EpisodeDetectorSnapshot {
+            active_episodes: self.active_episodes.clone(),
+            completed_episodes: self.completed_episodes.clone(),
+            next_episode_id: self.next_episode_id,
+            last_consolidation: self.last_consolidation.clone(),
+            seen_contexts: self.seen_contexts.clone(),
+            seen_event_types: self.seen_event_types.clone(),
+        };
+        rmp_serde::to_vec(&snapshot).map_err(|e| format!("EpisodeDetector serialize: {}", e))
+    }
+
+    /// Restore detector state from bytes (merges into current instance).
+    pub fn restore_from_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let snapshot: EpisodeDetectorSnapshot = rmp_serde::from_slice(bytes)
+            .map_err(|e| format!("EpisodeDetector deserialize: {}", e))?;
+        self.active_episodes = snapshot.active_episodes;
+        self.completed_episodes = snapshot.completed_episodes;
+        self.next_episode_id = snapshot.next_episode_id;
+        self.last_consolidation = snapshot.last_consolidation;
+        self.seen_contexts = snapshot.seen_contexts;
+        self.seen_event_types = snapshot.seen_event_types;
+        Ok(())
+    }
+
     /// Create a new episode detector
     pub fn new(graph: Arc<Graph>, config: EpisodeDetectorConfig) -> Self {
         Self {
@@ -832,6 +874,9 @@ impl EpisodeDetector {
             EventType::Context { context_type, .. } => format!("Context:{}", context_type),
         };
         *self.seen_event_types.entry(event_type_name).or_insert(0) += 1;
+
+        // Amortized pruning when maps grow too large
+        self.prune_novelty_maps();
     }
 
     /// Phase 1 Feature A: Calculate prediction error for an episode
@@ -953,6 +998,47 @@ impl EpisodeDetector {
             .iter()
             .filter(|e| e.agent_id == agent_id)
             .collect()
+    }
+
+    /// Drain and return all completed episodes, clearing the internal buffer.
+    ///
+    /// Use this in the event processing pipeline to consume completed episodes
+    /// and prevent unbounded growth.
+    pub fn drain_completed(&mut self) -> Vec<Episode> {
+        std::mem::take(&mut self.completed_episodes)
+    }
+
+    /// Prune novelty tracking maps when they exceed `max_novelty_entries`.
+    ///
+    /// Uses amortized pruning: only prunes when `len > max_novelty_entries`,
+    /// pruning down to `max_novelty_entries * 3 / 4`. Removes lowest-count
+    /// entries using `select_nth_unstable_by_key` in O(n) average.
+    fn prune_novelty_maps(&mut self) {
+        let max = self.config.max_novelty_entries;
+        let target = max * 3 / 4;
+
+        if self.seen_contexts.len() > max {
+            let mut entries: Vec<(ContextHash, u32)> = self.seen_contexts.drain().collect();
+            if entries.len() > target {
+                let nth = entries.len() - target;
+                entries.select_nth_unstable_by_key(nth, |&(_, count)| count);
+                // Keep the top `target` entries (right partition: nth..)
+                self.seen_contexts = entries[nth..].iter().cloned().collect();
+            } else {
+                self.seen_contexts = entries.into_iter().collect();
+            }
+        }
+
+        if self.seen_event_types.len() > max {
+            let mut entries: Vec<(String, u32)> = self.seen_event_types.drain().collect();
+            if entries.len() > target {
+                let nth = entries.len() - target;
+                entries.select_nth_unstable_by_key(nth, |&(_, count)| count);
+                self.seen_event_types = entries[nth..].iter().cloned().collect();
+            } else {
+                self.seen_event_types = entries.into_iter().collect();
+            }
+        }
     }
 
     /// Enforce the completed_episodes cap by draining oldest entries

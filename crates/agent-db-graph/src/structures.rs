@@ -427,6 +427,9 @@ pub struct Graph {
 
     /// Statistics
     pub(crate) stats: GraphStats,
+
+    /// Maximum number of nodes allowed (enforced at add_node)
+    pub(crate) max_graph_size: usize,
 }
 
 /// Graph statistics for monitoring and optimization
@@ -633,8 +636,13 @@ impl Default for Graph {
 }
 
 impl Graph {
-    /// Create a new empty graph
+    /// Create a new empty graph with default max size (1,000,000 nodes)
     pub fn new() -> Self {
+        Self::with_max_size(1_000_000)
+    }
+
+    /// Create a new empty graph with a specific max node capacity
+    pub fn with_max_size(max_graph_size: usize) -> Self {
         Self {
             nodes: HashMap::new(),
             edges: HashMap::new(),
@@ -656,11 +664,23 @@ impl Graph {
             next_node_id: 1,
             next_edge_id: 1,
             stats: GraphStats::default(),
+            max_graph_size,
         }
     }
 
-    /// Add a node to the graph
-    pub fn add_node(&mut self, mut node: GraphNode) -> NodeId {
+    /// Add a node to the graph.
+    ///
+    /// Returns `GraphError::CapacityExceeded` when `nodes.len() >= max_graph_size`.
+    /// Let the graph pruner free space before retrying.
+    pub fn add_node(&mut self, mut node: GraphNode) -> crate::GraphResult<NodeId> {
+        if self.nodes.len() >= self.max_graph_size {
+            return Err(crate::GraphError::CapacityExceeded(format!(
+                "graph has {} nodes (max {})",
+                self.nodes.len(),
+                self.max_graph_size
+            )));
+        }
+
         let node_id = self.next_node_id;
         self.next_node_id += 1;
 
@@ -768,7 +788,7 @@ impl Graph {
         self.nodes.insert(node_id, node);
         self.update_stats();
 
-        node_id
+        Ok(node_id)
     }
 
     /// Add an edge to the graph

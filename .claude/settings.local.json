@@ -18,7 +18,10 @@
       "WebFetch(domain:arxiv.org)",
       "WebFetch(domain:openreview.net)",
       "WebSearch",
-      "WebFetch(domain:example.com)"
+      "WebFetch(domain:example.com)",
+      "Bash(cargo search:*)",
+      "Bash(git stash:*)",
+      "Bash(git stash pop:*)"
     ]
   }
 }

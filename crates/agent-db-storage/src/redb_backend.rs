@@ -19,10 +19,18 @@
 //! - Operational tables: id_allocator, schema_versions
 
 use crate::{StorageError, StorageResult};
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Error type for `for_each_prefix_raw` that distinguishes storage errors from
+/// callback-initiated early exits.
+#[derive(Debug)]
+pub enum ForEachError<E> {
+    Storage(StorageError),
+    Callback(E),
+}
 
 /// Table definitions (16 total)
 /// Keys and values are stored as bytes (MessagePack serialization)
@@ -244,10 +252,17 @@ impl RedbBackend {
             config.cache_size_bytes / (1024 * 1024)
         );
 
-        Ok(Self {
+        let backend = Self {
             db: Arc::new(db),
             config,
-        })
+        };
+
+        // Check / stamp schema version
+        crate::schema::check_schema_version(&backend).map_err(|e| {
+            StorageError::DatabaseError(format!("Schema version check failed: {}", e))
+        })?;
+
+        Ok(backend)
     }
 
     /// Helper: get table definition constant by name
@@ -557,6 +572,95 @@ impl RedbBackend {
         write_txn
             .commit()
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Put a value with versioned envelope (serialize with versioned msgpack)
+    pub fn put_versioned<K, V>(&self, table_name: &str, key: K, value: &V) -> StorageResult<()>
+    where
+        K: AsRef<[u8]>,
+        V: Serialize,
+    {
+        let value_bytes = crate::versioned::serialize_versioned(value)?;
+        self.put_raw(table_name, key, &value_bytes)
+    }
+
+    /// Get a value with versioned envelope (deserialize versioned-or-legacy msgpack)
+    pub fn get_versioned<K, V>(&self, table_name: &str, key: K) -> StorageResult<Option<V>>
+    where
+        K: AsRef<[u8]>,
+        V: for<'de> Deserialize<'de>,
+    {
+        match self.get_raw(table_name, key)? {
+            Some(bytes) => {
+                let value = crate::versioned::deserialize_versioned(&bytes)?;
+                Ok(Some(value))
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Scan all key-value pairs in a table as raw bytes (no prefix filter).
+    pub fn scan_all_raw(&self, table_name: &str) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        // Reuse scan_prefix_raw with empty prefix to get all entries
+        self.scan_prefix_raw(table_name, &[] as &[u8])
+    }
+
+    /// Return the number of key-value pairs in the given table. O(1).
+    pub fn table_len(&self, table_name: &str) -> StorageResult<u64> {
+        let table_def = Self::get_table_def(table_name)?;
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        let table = read_txn
+            .open_table(table_def)
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        Ok(table
+            .len()
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))?)
+    }
+
+    /// Internal iterator: calls `f(key, value)` for each row whose key starts
+    /// with `prefix`. Borrowed slices — zero allocation per row. Stops early
+    /// when `f` returns `Err(E)`.
+    pub fn for_each_prefix_raw<K, F, E>(
+        &self,
+        table_name: &str,
+        prefix: K,
+        mut f: F,
+    ) -> Result<(), ForEachError<E>>
+    where
+        K: AsRef<[u8]>,
+        F: FnMut(&[u8], &[u8]) -> Result<(), E>,
+    {
+        let table_def = Self::get_table_def(table_name).map_err(ForEachError::Storage)?;
+        let prefix_bytes = prefix.as_ref();
+
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| ForEachError::Storage(StorageError::DatabaseError(e.to_string())))?;
+
+        let table = read_txn
+            .open_table(table_def)
+            .map_err(|e| ForEachError::Storage(StorageError::DatabaseError(e.to_string())))?;
+
+        let iter = table
+            .range(prefix_bytes..)
+            .map_err(|e| ForEachError::Storage(StorageError::DatabaseError(e.to_string())))?;
+
+        for item in iter {
+            let (key, value) = item
+                .map_err(|e| ForEachError::Storage(StorageError::DatabaseError(e.to_string())))?;
+
+            if !key.value().starts_with(prefix_bytes) {
+                break;
+            }
+
+            f(key.value(), value.value()).map_err(ForEachError::Callback)?;
+        }
 
         Ok(())
     }

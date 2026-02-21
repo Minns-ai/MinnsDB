@@ -41,13 +41,96 @@ impl GraphEngine {
             tracing::info!("NER extraction queue will drain on drop");
         }
 
-        // 3. Persist graph state to redb before shutdown
-        if self.redb_backend.is_some() {
-            match self.persist_graph_state().await {
-                Ok((n, e)) => {
-                    tracing::info!("Graph persisted on shutdown: {} nodes, {} edges", n, e)
+        // 3. BUG 11 fix: Flush dirty memory/strategy caches before graph persistence
+        {
+            self.memory_store.write().await.flush_cache();
+            self.strategy_store.write().await.flush_cache();
+        }
+
+        // 4. BUG 3 fix: Persist transition model (with version envelope)
+        if let Some(ref backend) = self.redb_backend {
+            let tm = self.transition_model.read().await;
+            match tm.to_bytes() {
+                Ok(bytes) => {
+                    let wrapped = agent_db_storage::wrap_versioned(
+                        agent_db_storage::CURRENT_DATA_VERSION,
+                        &bytes,
+                    );
+                    if let Err(e) =
+                        backend.put_raw(table_names::TRANSITION_STATS, b"__model__", &wrapped)
+                    {
+                        tracing::warn!("Failed to persist transition model: {:?}", e);
+                    } else {
+                        tracing::info!("Transition model persisted ({} bytes)", bytes.len());
+                    }
                 },
-                Err(e) => tracing::warn!("Failed to persist graph during shutdown: {}", e),
+                Err(e) => tracing::warn!("Failed to serialize transition model: {}", e),
+            }
+        }
+
+        // 5. BUG 4 fix: Persist episode detector (with version envelope)
+        if let Some(ref backend) = self.redb_backend {
+            let ed = self.episode_detector.read().await;
+            match ed.to_bytes() {
+                Ok(bytes) => {
+                    let wrapped = agent_db_storage::wrap_versioned(
+                        agent_db_storage::CURRENT_DATA_VERSION,
+                        &bytes,
+                    );
+                    if let Err(e) =
+                        backend.put_raw(table_names::EPISODE_CATALOG, b"__detector__", &wrapped)
+                    {
+                        tracing::warn!("Failed to persist episode detector: {:?}", e);
+                    } else {
+                        tracing::info!("Episode detector persisted ({} bytes)", bytes.len());
+                    }
+                },
+                Err(e) => tracing::warn!("Failed to serialize episode detector: {}", e),
+            }
+        }
+
+        // 6. BUG 12 fix: Persist consolidation counter (with version envelope)
+        if let Some(ref backend) = self.redb_backend {
+            let counter = *self.episodes_since_consolidation.read().await;
+            let counter_bytes = counter.to_be_bytes();
+            let wrapped = agent_db_storage::wrap_versioned(
+                agent_db_storage::CURRENT_DATA_VERSION,
+                &counter_bytes,
+            );
+            if let Err(e) = backend.put_raw(
+                table_names::ID_ALLOCATOR,
+                b"consolidation_counter",
+                &wrapped,
+            ) {
+                tracing::warn!("Failed to persist consolidation counter: {:?}", e);
+            }
+        }
+
+        // 7. BUG 9 fix: Persist graph state with retry (3 attempts, 100ms delay)
+        if self.redb_backend.is_some() {
+            let mut last_err = None;
+            for attempt in 1..=3u32 {
+                match self.persist_graph_state().await {
+                    Ok((n, e)) => {
+                        tracing::info!("Graph persisted on shutdown: {} nodes, {} edges", n, e);
+                        last_err = None;
+                        break;
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to persist graph during shutdown (attempt {}): {}",
+                            attempt,
+                            e
+                        );
+                        last_err = Some(e);
+                        if attempt < 3 {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        }
+                    },
+                }
+            }
+            if let Some(e) = last_err {
+                tracing::error!("Graph persistence failed after 3 attempts: {}", e);
             }
         }
 

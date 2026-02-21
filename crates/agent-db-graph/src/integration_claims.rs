@@ -32,7 +32,7 @@ impl Graph {
             source_event_id: claim.source_event_id,
         });
 
-        let claim_node_id = self.add_node(claim_node);
+        let claim_node_id = self.add_node(claim_node).ok()?;
 
         debug!(
             "Created claim node {} for claim {} (confidence: {})",
@@ -100,18 +100,20 @@ impl Graph {
             let concept_type = crate::structures::ConceptType::from_ner_label(&entity.label);
 
             let entity_node_id = if let Some(node) = self.get_concept_node(&entity.text) {
-                node.id
+                Some(node.id)
             } else {
                 let new_node = GraphNode::new(NodeType::Concept {
                     concept_name: entity.text.clone(),
                     concept_type,
                     confidence: claim.confidence,
                 });
-                self.add_node(new_node)
+                self.add_node(new_node).ok()
             };
 
             // Link claim to entity
-            self.link_claim_to_entity(claim.id, entity_node_id, 0.9);
+            if let Some(eid) = entity_node_id {
+                self.link_claim_to_entity(claim.id, eid, 0.9);
+            }
         }
 
         // Backward-compat: if no structured entities, fall back to metadata
@@ -124,17 +126,19 @@ impl Graph {
                     }
 
                     let entity_node_id = if let Some(node) = self.get_concept_node(entity_name) {
-                        node.id
+                        Some(node.id)
                     } else {
                         let new_node = GraphNode::new(NodeType::Concept {
                             concept_name: entity_name.to_string(),
                             concept_type: crate::structures::ConceptType::ContextualAssociation,
                             confidence: claim.confidence,
                         });
-                        self.add_node(new_node)
+                        self.add_node(new_node).ok()
                     };
 
-                    self.link_claim_to_entity(claim.id, entity_node_id, 0.9);
+                    if let Some(eid) = entity_node_id {
+                        self.link_claim_to_entity(claim.id, eid, 0.9);
+                    }
                 }
             }
         }
@@ -269,7 +273,7 @@ mod tests {
             event_type: "Context".to_string(),
             significance: 0.8,
         });
-        let _event_node_id = graph.add_node(event_node);
+        let _event_node_id = graph.add_node(event_node).unwrap();
 
         // Create and add claim
         let claim = create_test_claim(1, 123, "Test claim");
@@ -296,7 +300,7 @@ mod tests {
             event_type: "Context".to_string(),
             significance: 0.8,
         });
-        graph.add_node(event_node);
+        graph.add_node(event_node).unwrap();
 
         let claim = create_test_claim(1, 123, "John works at Google");
         graph.add_claim_node(&claim);
@@ -306,7 +310,7 @@ mod tests {
             concept_type: crate::structures::ConceptType::ContextualAssociation,
             confidence: 0.9,
         });
-        let concept_node_id = graph.add_node(concept_node);
+        let concept_node_id = graph.add_node(concept_node).unwrap();
 
         // Link claim to entity
         let edge_id = graph.link_claim_to_entity(1, concept_node_id, 0.95);
@@ -327,7 +331,7 @@ mod tests {
             event_type: "Context".to_string(),
             significance: 0.8,
         });
-        graph.add_node(event_node);
+        graph.add_node(event_node).unwrap();
 
         let claim = create_test_claim(1, 123, "Test claim with evidence");
         graph.add_claim_node(&claim);

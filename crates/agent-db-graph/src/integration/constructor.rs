@@ -24,9 +24,9 @@ impl GraphEngine {
             config
         };
 
-        let inference = Arc::new(RwLock::new(GraphInference::with_config(
-            config.inference_config.clone(),
-        )));
+        let mut inf_config = config.inference_config.clone();
+        inf_config.max_graph_size = config.max_graph_size;
+        let inference = Arc::new(RwLock::new(GraphInference::with_config(inf_config)));
 
         let traversal = Arc::new(RwLock::new(GraphTraversal::new()));
 
@@ -389,6 +389,82 @@ impl GraphEngine {
             Err(e) => {
                 tracing::warn!("Failed to restore graph state (starting fresh): {}", e);
             },
+        }
+
+        // BUG 3 fix: Restore transition model from redb (version-aware)
+        if let Some(ref backend) = engine.redb_backend {
+            match backend.get_raw(table_names::TRANSITION_STATS, b"__model__") {
+                Ok(Some(raw)) => {
+                    let (_version, bytes) = agent_db_storage::unwrap_versioned(&raw);
+                    match TransitionModel::from_bytes(bytes, TransitionModelConfig::default()) {
+                        Ok(restored) => {
+                            let ep_count = restored.episode_count();
+                            *engine.transition_model.write().await = restored;
+                            tracing::info!(
+                                "Restored transition model from disk ({} episodes)",
+                                ep_count
+                            );
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to deserialize transition model (starting fresh): {}",
+                                e
+                            );
+                        },
+                    }
+                },
+                Ok(None) => {},
+                Err(e) => {
+                    tracing::warn!("Failed to read transition model from redb: {:?}", e);
+                },
+            }
+        }
+
+        // BUG 4 fix: Restore episode detector from redb (version-aware)
+        if let Some(ref backend) = engine.redb_backend {
+            match backend.get_raw(table_names::EPISODE_CATALOG, b"__detector__") {
+                Ok(Some(raw)) => {
+                    let (_version, bytes) = agent_db_storage::unwrap_versioned(&raw);
+                    let mut ed = engine.episode_detector.write().await;
+                    match ed.restore_from_bytes(bytes) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "Restored episode detector from disk (active={}, completed={})",
+                                ed.get_active_episode(0).is_some() as u32, // just log something
+                                ed.get_completed_episodes().len()
+                            );
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to deserialize episode detector (starting fresh): {}",
+                                e
+                            );
+                        },
+                    }
+                },
+                Ok(None) => {},
+                Err(e) => {
+                    tracing::warn!("Failed to read episode detector from redb: {:?}", e);
+                },
+            }
+        }
+
+        // BUG 12 fix: Restore consolidation counter from redb (version-aware)
+        if let Some(ref backend) = engine.redb_backend {
+            match backend.get_raw(table_names::ID_ALLOCATOR, b"consolidation_counter") {
+                Ok(Some(raw)) => {
+                    let (_version, bytes) = agent_db_storage::unwrap_versioned(&raw);
+                    if bytes.len() == 8 {
+                        let counter = u64::from_be_bytes(bytes.try_into().unwrap());
+                        *engine.episodes_since_consolidation.write().await = counter;
+                        tracing::info!("Restored consolidation counter from disk: {}", counter);
+                    }
+                },
+                Ok(None) => {},
+                Err(e) => {
+                    tracing::warn!("Failed to read consolidation counter from redb: {:?}", e);
+                },
+            }
         }
 
         Ok(engine)

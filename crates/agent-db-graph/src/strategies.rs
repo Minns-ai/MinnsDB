@@ -2146,6 +2146,44 @@ impl StrategyExtractor {
         }
 
         if !to_remove.is_empty() {
+            // Clean accumulator maps: collect surviving (agent_id, goal_bucket_id) pairs
+            let surviving_keys: std::collections::HashSet<(AgentId, u64)> = self
+                .strategies
+                .values()
+                .map(|s| (s.agent_id, s.goal_bucket_id))
+                .collect();
+
+            // Remove entries from context_counts whose (agent_id, goal_bucket_id) is gone
+            self.context_counts.retain(|&(agent_id, bucket_id, _), _| {
+                surviving_keys.contains(&(agent_id, bucket_id))
+            });
+
+            // Remove entries from goal_bucket_counts whose key is gone
+            self.goal_bucket_counts
+                .retain(|key, _| surviving_keys.contains(key));
+
+            // Remove entries from motif_stats_by_bucket whose key is gone
+            self.motif_stats_by_bucket
+                .retain(|key, _| surviving_keys.contains(key));
+
+            // Remove entries from episode_cache_by_bucket whose key is gone
+            self.episode_cache_by_bucket
+                .retain(|key, _| surviving_keys.contains(key));
+
+            // Cap episode_outcomes at 10,000 entries (trim oldest by episode_id)
+            if self.episode_outcomes.len() > 10_000 {
+                let mut ids: Vec<EpisodeId> = self.episode_outcomes.keys().copied().collect();
+                ids.sort_unstable();
+                let cutoff = ids[ids.len() - 10_000];
+                self.episode_outcomes.retain(|&id, _| id >= cutoff);
+            }
+
+            // Clean context_index: remove pruned strategy IDs from vectors, drop empty vectors
+            self.context_index.retain(|_, ids| {
+                ids.retain(|id| self.strategies.contains_key(id));
+                !ids.is_empty()
+            });
+
             tracing::info!(
                 "Strategy pruning removed {} weak/stale strategies",
                 to_remove.len()

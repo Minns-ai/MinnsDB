@@ -393,21 +393,27 @@ mod tests {
         let mut graph = Graph::new();
 
         // Create a simple graph
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n3 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 3,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 3,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         graph.add_edge(GraphEdge::new(
             n1,
@@ -447,21 +453,27 @@ mod tests {
     fn test_parallel_degree_centrality() {
         let mut graph = Graph::new();
 
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n3 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 3,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 3,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         // n1 connected to both n2 and n3
         graph.add_edge(GraphEdge::new(
@@ -495,26 +507,34 @@ mod tests {
     fn test_parallel_multi_source_bfs() {
         let mut graph = Graph::new();
 
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n3 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 3,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n4 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 4,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 3,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n4 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 4,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         graph.add_edge(GraphEdge::new(
             n1,
@@ -575,26 +595,34 @@ mod tests {
         //
         // Dijkstra should prefer n1->n2->n4 over n1->n3->n4.
 
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n3 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 3,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n4 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 4,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 3,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n4 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 4,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         // Cheap route: n1 -> n2 -> n4  (strength 0.95 => cost 0.05 each)
         graph.add_edge(GraphEdge::new(

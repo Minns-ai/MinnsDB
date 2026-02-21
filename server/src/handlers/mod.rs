@@ -3,6 +3,7 @@
 pub mod analytics;
 pub mod claims;
 pub mod events;
+pub mod export_import;
 pub mod graph;
 pub mod health;
 pub mod memories;
@@ -13,6 +14,7 @@ pub mod strategies;
 pub use analytics::*;
 pub use claims::*;
 pub use events::*;
+pub use export_import::*;
 pub use graph::*;
 pub use health::*;
 pub use memories::*;

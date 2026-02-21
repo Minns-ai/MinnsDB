@@ -60,7 +60,7 @@ impl Default for ConsolidationConfig {
             episodic_threshold: 3,
             semantic_threshold: 3,
             post_consolidation_decay: 0.3,
-            archive_after_consolidation: false,
+            archive_after_consolidation: true,
             max_semantics_per_bucket_per_pass: 3,
             schema_grouping_mode: SchemaGroupingMode::default(),
             schema_similarity_threshold: 0.80,
@@ -82,6 +82,8 @@ pub struct ConsolidationResult {
     pub consolidated_episode_ids: Vec<MemoryId>,
     /// IDs of semantic memories that were consolidated into schemas
     pub consolidated_semantic_ids: Vec<MemoryId>,
+    /// Number of source episodes deleted (when archive_after_consolidation = true)
+    pub episodes_deleted: usize,
 }
 
 /// The Consolidation Engine that runs the hierarchy pipeline.
@@ -157,11 +159,18 @@ impl ConsolidationEngine {
         }
 
         // Single atomic batch write for all Phase 1 operations
+        // Correct ordering: higher-tier writes MUST succeed before source deletion
         if !phase1_memories.is_empty() {
             store.store_consolidated_memories_batch(phase1_memories);
         }
         if !phase1_marks.is_empty() {
             store.mark_consolidated_batch(phase1_marks);
+        }
+
+        // Delete consolidated episodic sources when archive_after_consolidation = true
+        if self.config.archive_after_consolidation && !result.consolidated_episode_ids.is_empty() {
+            let deleted = store.delete_memories_batch(result.consolidated_episode_ids.clone());
+            result.episodes_deleted += deleted;
         }
 
         // --- Phase 2: Semantic → Schema ---
@@ -245,11 +254,18 @@ impl ConsolidationEngine {
         }
 
         // Single atomic batch write for all Phase 2 operations
+        // Correct ordering: higher-tier writes MUST succeed before source deletion
         if !phase2_memories.is_empty() {
             store.store_consolidated_memories_batch(phase2_memories);
         }
         if !phase2_marks.is_empty() {
             store.mark_consolidated_batch(phase2_marks);
+        }
+
+        // Delete consolidated semantic sources when archive_after_consolidation = true
+        if self.config.archive_after_consolidation && !result.consolidated_semantic_ids.is_empty() {
+            let deleted = store.delete_memories_batch(result.consolidated_semantic_ids.clone());
+            result.episodes_deleted += deleted;
         }
 
         result

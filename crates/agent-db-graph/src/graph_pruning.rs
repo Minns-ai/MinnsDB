@@ -527,7 +527,7 @@ mod tests {
             agent_type: "test".to_string(),
             capabilities: vec![],
         });
-        let node_id = graph.add_node(node.clone());
+        let node_id = graph.add_node(node.clone()).unwrap();
         let bucket = graph.get_node(node_id).unwrap().node_type.goal_bucket();
         let stored_node = graph.get_node(node_id).unwrap().clone();
         store.add_node(bucket, stored_node.clone()).unwrap();
@@ -578,7 +578,7 @@ mod tests {
         node.created_at = 1000; // Very old
         node.updated_at = 1000;
 
-        let node_id = graph.add_node(node);
+        let node_id = graph.add_node(node).unwrap();
         let stored = graph.get_node(node_id).unwrap().clone();
         let bucket = stored.node_type.goal_bucket();
         store.add_node(bucket, stored.clone()).unwrap();
@@ -629,7 +629,7 @@ mod tests {
             });
             node.created_at = 1000;
             node.updated_at = 1000;
-            let nid = graph.add_node(node);
+            let nid = graph.add_node(node).unwrap();
             let stored = graph.get_node(nid).unwrap().clone();
             let bucket = stored.node_type.goal_bucket();
             store.add_node(bucket, stored.clone()).unwrap();

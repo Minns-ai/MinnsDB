@@ -33,6 +33,9 @@ pub mod error {
 
         #[error("Invalid operation: {0}")]
         InvalidOperation(String),
+
+        #[error("Graph capacity exceeded: {0}")]
+        CapacityExceeded(String),
     }
 
     pub type GraphResult<T> = Result<T, GraphError>;
@@ -71,6 +74,10 @@ pub mod claims;
 // 10x/100x: Memory Consolidation + LLM Refinement
 pub mod consolidation;
 pub mod refinement;
+
+// Export/Import (streaming binary v2 format)
+pub mod export;
+pub mod wire_v2;
 
 // Background maintenance (decay, pruning, dedup)
 pub mod maintenance;
@@ -136,6 +143,10 @@ pub use redb_graph_store::RedbGraphStore;
 // Graph Pruning (streaming, bounded)
 pub mod graph_pruning;
 pub use graph_pruning::{GraphPruner, GraphPruningConfig, PruneResult};
+
+// Export/Import
+pub use export::{ExportError, ImportError, ImportMode, ImportStats};
+pub use stores::{build_memory_index_ops, build_strategy_index_ops};
 
 // Semantic Memory
 pub use claims::{

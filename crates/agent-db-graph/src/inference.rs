@@ -43,6 +43,9 @@ pub struct InferenceConfig {
 
     /// Maximum temporal patterns to keep (lowest-confidence pruned when exceeded)
     pub max_temporal_patterns: usize,
+
+    /// Maximum number of graph nodes before CapacityExceeded
+    pub max_graph_size: usize,
 }
 
 /// Statistics about inference operations
@@ -114,6 +117,7 @@ impl Default for InferenceConfig {
             batch_size: 1000,
             max_context_cache_size: 10_000,
             max_temporal_patterns: 1_000,
+            max_graph_size: 1_000_000,
         }
     }
 }
@@ -135,7 +139,7 @@ impl GraphInference {
         let cache_cap = NonZeroUsize::new(config.max_context_cache_size)
             .unwrap_or(NonZeroUsize::new(10_000).unwrap());
         Self {
-            graph: Graph::new(),
+            graph: Graph::with_max_size(config.max_graph_size),
             stats: InferenceStats::default(),
             temporal_buffer: VecDeque::new(),
             context_similarity_cache: lru::LruCache::new(cache_cap),
@@ -329,7 +333,7 @@ impl GraphInference {
                 capabilities: vec!["event_generation".to_string()],
             });
 
-            let node_id = self.graph.add_node(node);
+            let node_id = self.graph.add_node(node)?;
             self.stats.nodes_created += 1;
             Ok(node_id)
         }
@@ -379,7 +383,7 @@ impl GraphInference {
         node.properties
             .insert("goal_ids".to_string(), json!(goal_ids));
 
-        let node_id = self.graph.add_node(node);
+        let node_id = self.graph.add_node(node)?;
         self.stats.nodes_created += 1;
         Ok(node_id)
     }
@@ -408,7 +412,7 @@ impl GraphInference {
                 frequency: 1,
             });
 
-            let node_id = self.graph.add_node(node);
+            let node_id = self.graph.add_node(node)?;
             self.stats.nodes_created += 1;
             Ok(node_id)
         }
@@ -592,7 +596,7 @@ impl GraphInference {
                     .insert("deadline".to_string(), json!(deadline));
             }
 
-            let node_id = self.graph.add_node(node);
+            let node_id = self.graph.add_node(node)?;
             self.stats.nodes_created += 1;
             Ok(node_id)
         }
@@ -619,7 +623,7 @@ impl GraphInference {
                 tool_type: "external".to_string(),
             });
             node.properties.insert("usage_count".to_string(), json!(1));
-            let node_id = self.graph.add_node(node);
+            let node_id = self.graph.add_node(node)?;
             self.stats.nodes_created += 1;
             Ok(node_id)
         }
@@ -641,7 +645,7 @@ impl GraphInference {
             });
             node.properties
                 .insert("summary".to_string(), json!(summary));
-            let node_id = self.graph.add_node(node);
+            let node_id = self.graph.add_node(node)?;
             self.stats.nodes_created += 1;
             Ok(node_id)
         }
@@ -1448,8 +1452,9 @@ impl GraphInference {
                 confidence: pattern.confidence,
             });
 
-            self.graph.add_node(skill_node);
-            consolidated += 1;
+            if let Ok(_) = self.graph.add_node(skill_node) {
+                consolidated += 1;
+            }
         }
 
         Ok(consolidated)

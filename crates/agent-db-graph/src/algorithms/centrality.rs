@@ -438,19 +438,23 @@ mod tests {
         let mut graph = Graph::new();
 
         // Create star graph: node 1 connected to all others
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         let mut other_nodes = Vec::new();
         for i in 2..=5 {
-            let node = graph.add_node(GraphNode::new(NodeType::Event {
-                event_id: i,
-                event_type: "test".to_string(),
-                significance: 0.5,
-            }));
+            let node = graph
+                .add_node(GraphNode::new(NodeType::Event {
+                    event_id: i,
+                    event_type: "test".to_string(),
+                    significance: 0.5,
+                }))
+                .unwrap();
             other_nodes.push(node);
 
             graph.add_edge(GraphEdge::new(
@@ -476,21 +480,27 @@ mod tests {
     fn test_pagerank() {
         let mut graph = Graph::new();
 
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n3 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 3,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 3,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         // n1 -> n2, n1 -> n3, n2 -> n3
         // n3 should have highest PageRank (receives links from both)

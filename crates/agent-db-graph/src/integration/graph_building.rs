@@ -314,12 +314,16 @@ impl GraphEngine {
         }
     }
 
-    pub(super) async fn attach_memory_to_graph(&self, episode: &Episode, memory: &Memory) -> GraphResult<()> {
+    pub(super) async fn attach_memory_to_graph(
+        &self,
+        episode: &Episode,
+        memory: &Memory,
+    ) -> GraphResult<()> {
         let mut inference = self.inference.write().await;
         let graph = inference.graph_mut();
 
-        let episode_node_id = Self::ensure_episode_node(graph, episode);
-        let memory_node_id = Self::ensure_memory_node(graph, memory);
+        let episode_node_id = Self::ensure_episode_node(graph, episode)?;
+        let memory_node_id = Self::ensure_memory_node(graph, memory)?;
 
         Self::add_or_strengthen_association(
             graph,
@@ -349,7 +353,7 @@ impl GraphEngine {
         }
 
         for goal in &episode.context.active_goals {
-            let goal_node_id = Self::ensure_goal_node(graph, goal);
+            let goal_node_id = Self::ensure_goal_node(graph, goal)?;
             Self::add_or_strengthen_association(
                 graph,
                 memory_node_id,
@@ -388,8 +392,8 @@ impl GraphEngine {
         let mut inference = self.inference.write().await;
         let graph = inference.graph_mut();
 
-        let episode_node_id = Self::ensure_episode_node(graph, episode);
-        let strategy_node_id = Self::ensure_strategy_node(graph, strategy);
+        let episode_node_id = Self::ensure_episode_node(graph, episode)?;
+        let strategy_node_id = Self::ensure_strategy_node(graph, strategy)?;
 
         Self::add_or_strengthen_association(
             graph,
@@ -404,7 +408,7 @@ impl GraphEngine {
         );
 
         for goal in &episode.context.active_goals {
-            let goal_node_id = Self::ensure_goal_node(graph, goal);
+            let goal_node_id = Self::ensure_goal_node(graph, goal)?;
             Self::add_or_strengthen_association(
                 graph,
                 strategy_node_id,
@@ -423,7 +427,7 @@ impl GraphEngine {
             .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
             .unwrap_or_default();
         for tool_name in tool_names {
-            let tool_node_id = Self::ensure_tool_node(graph, &tool_name);
+            let tool_node_id = Self::ensure_tool_node(graph, &tool_name)?;
             Self::add_or_strengthen_association(
                 graph,
                 strategy_node_id,
@@ -444,7 +448,7 @@ impl GraphEngine {
         for result_type in result_types {
             let result_key = format!("strategy:{}:{}", strategy.id, result_type);
             let result_node_id =
-                Self::ensure_result_node(graph, &result_key, &result_type, &result_type);
+                Self::ensure_result_node(graph, &result_key, &result_type, &result_type)?;
             Self::add_or_strengthen_association(
                 graph,
                 strategy_node_id,
@@ -460,9 +464,9 @@ impl GraphEngine {
         Ok(())
     }
 
-    fn ensure_episode_node(graph: &mut Graph, episode: &Episode) -> NodeId {
+    fn ensure_episode_node(graph: &mut Graph, episode: &Episode) -> GraphResult<NodeId> {
         if let Some(node) = graph.get_episode_node(episode.id) {
-            node.id
+            Ok(node.id)
         } else {
             let outcome = episode
                 .outcome
@@ -487,9 +491,9 @@ impl GraphEngine {
         }
     }
 
-    fn ensure_memory_node(graph: &mut Graph, memory: &Memory) -> NodeId {
+    fn ensure_memory_node(graph: &mut Graph, memory: &Memory) -> GraphResult<NodeId> {
         if let Some(node) = graph.get_memory_node(memory.id) {
-            node.id
+            Ok(node.id)
         } else {
             let mut node = GraphNode::new(NodeType::Memory {
                 memory_id: memory.id,
@@ -514,9 +518,9 @@ impl GraphEngine {
         }
     }
 
-    fn ensure_strategy_node(graph: &mut Graph, strategy: &Strategy) -> NodeId {
+    fn ensure_strategy_node(graph: &mut Graph, strategy: &Strategy) -> GraphResult<NodeId> {
         if let Some(node) = graph.get_strategy_node(strategy.id) {
-            node.id
+            Ok(node.id)
         } else {
             let mut node = GraphNode::new(NodeType::Strategy {
                 strategy_id: strategy.id,
@@ -561,9 +565,12 @@ impl GraphEngine {
         }
     }
 
-    fn ensure_goal_node(graph: &mut Graph, goal: &agent_db_events::core::Goal) -> NodeId {
+    fn ensure_goal_node(
+        graph: &mut Graph,
+        goal: &agent_db_events::core::Goal,
+    ) -> GraphResult<NodeId> {
         if let Some(node) = graph.get_goal_node(goal.id) {
-            node.id
+            Ok(node.id)
         } else {
             let status = if goal.progress >= 1.0 {
                 GoalStatus::Completed
@@ -586,9 +593,9 @@ impl GraphEngine {
         }
     }
 
-    fn ensure_tool_node(graph: &mut Graph, tool_name: &str) -> NodeId {
+    fn ensure_tool_node(graph: &mut Graph, tool_name: &str) -> GraphResult<NodeId> {
         if let Some(node) = graph.get_tool_node(tool_name) {
-            node.id
+            Ok(node.id)
         } else {
             let mut node = GraphNode::new(NodeType::Tool {
                 tool_name: tool_name.to_string(),
@@ -604,9 +611,9 @@ impl GraphEngine {
         result_key: &str,
         result_type: &str,
         summary: &str,
-    ) -> NodeId {
+    ) -> GraphResult<NodeId> {
         if let Some(node) = graph.get_result_node(result_key) {
-            node.id
+            Ok(node.id)
         } else {
             let mut node = GraphNode::new(NodeType::Result {
                 result_key: result_key.to_string(),

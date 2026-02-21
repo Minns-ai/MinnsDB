@@ -177,7 +177,10 @@ impl GraphEngine {
     }
 
     /// Process episode for reinforcement learning
-    pub(super) async fn process_episode_for_reinforcement(&self, episode: &Episode) -> GraphResult<()> {
+    pub(super) async fn process_episode_for_reinforcement(
+        &self,
+        episode: &Episode,
+    ) -> GraphResult<()> {
         // Determine success/failure
         let success = matches!(episode.outcome, Some(EpisodeOutcome::Success));
 

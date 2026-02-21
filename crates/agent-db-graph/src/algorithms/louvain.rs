@@ -419,38 +419,50 @@ mod tests {
 
         // Create a simple graph with two clear communities
         // Community 1: nodes 1, 2, 3 (highly connected)
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n3 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 3,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 3,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         // Community 2: nodes 4, 5, 6 (highly connected)
-        let n4 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 4,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n5 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 5,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
-        let n6 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 6,
-            event_type: "test".to_string(),
-            significance: 0.5,
-        }));
+        let n4 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 4,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n5 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 5,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n6 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 6,
+                event_type: "test".to_string(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
         // Add edges within communities (strong connections)
         graph.add_edge(GraphEdge::new(

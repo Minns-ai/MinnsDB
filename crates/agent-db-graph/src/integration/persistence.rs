@@ -22,14 +22,68 @@ impl GraphEngine {
             graph.nodes.len() + graph.edges.len() + 1, // +1 for metadata
         );
 
+        // BUG 1 fix: Delete stale nodes/edges from disk that no longer exist in memory.
+        // Without this, deleted nodes resurrect as zombies on restart.
+        {
+            let disk_node_keys = backend
+                .scan_prefix_raw(table_names::GRAPH_NODES, b"n")
+                .unwrap_or_default();
+            let memory_node_ids: std::collections::HashSet<NodeId> =
+                graph.nodes.keys().copied().collect();
+            let mut stale_nodes = 0usize;
+            for (key, _) in disk_node_keys {
+                if key.len() >= 9 {
+                    if let Ok(id_bytes) = key[1..9].try_into() {
+                        let id = u64::from_be_bytes(id_bytes);
+                        if !memory_node_ids.contains(&id) {
+                            ops.push(BatchOperation::Delete {
+                                table_name: table_names::GRAPH_NODES.to_string(),
+                                key,
+                            });
+                            stale_nodes += 1;
+                        }
+                    }
+                }
+            }
+
+            let disk_edge_keys = backend
+                .scan_prefix_raw(table_names::GRAPH_EDGES, b"e")
+                .unwrap_or_default();
+            let memory_edge_ids: std::collections::HashSet<EdgeId> =
+                graph.edges.keys().copied().collect();
+            let mut stale_edges = 0usize;
+            for (key, _) in disk_edge_keys {
+                if key.len() >= 9 {
+                    if let Ok(id_bytes) = key[1..9].try_into() {
+                        let id = u64::from_be_bytes(id_bytes);
+                        if !memory_edge_ids.contains(&id) {
+                            ops.push(BatchOperation::Delete {
+                                table_name: table_names::GRAPH_EDGES.to_string(),
+                                key,
+                            });
+                            stale_edges += 1;
+                        }
+                    }
+                }
+            }
+
+            if stale_nodes > 0 || stale_edges > 0 {
+                tracing::info!(
+                    "persist_graph_state: deleting {} stale nodes, {} stale edges from disk",
+                    stale_nodes,
+                    stale_edges
+                );
+            }
+        }
+
         // Serialize each node: key = "n" + node_id (big-endian)
-        // Uses MessagePack for schema-evolution safety (handles added/removed fields,
+        // Uses versioned MessagePack for schema-evolution safety (handles added/removed fields,
         // serde_json::Value in properties, and new enum variants across upgrades)
         for (id, node) in &graph.nodes {
             let mut key = Vec::with_capacity(9);
             key.push(b'n');
             key.extend_from_slice(&id.to_be_bytes());
-            let value = rmp_serde::to_vec(node).map_err(|e| {
+            let value = agent_db_storage::serialize_versioned(node).map_err(|e| {
                 GraphError::OperationError(format!("Failed to serialize node {}: {}", id, e))
             })?;
             ops.push(BatchOperation::Put {
@@ -44,7 +98,7 @@ impl GraphEngine {
             let mut key = Vec::with_capacity(9);
             key.push(b'e');
             key.extend_from_slice(&id.to_be_bytes());
-            let value = rmp_serde::to_vec(edge).map_err(|e| {
+            let value = agent_db_storage::serialize_versioned(edge).map_err(|e| {
                 GraphError::OperationError(format!("Failed to serialize edge {}: {}", id, e))
             })?;
             ops.push(BatchOperation::Put {
@@ -72,7 +126,7 @@ impl GraphEngine {
             next_edge_id: graph.next_edge_id,
             stats: graph.stats.clone(),
         };
-        let meta_value = rmp_serde::to_vec(&meta).map_err(|e| {
+        let meta_value = agent_db_storage::serialize_versioned(&meta).map_err(|e| {
             GraphError::OperationError(format!("Failed to serialize graph metadata: {}", e))
         })?;
         ops.push(BatchOperation::Put {
@@ -129,7 +183,7 @@ impl GraphEngine {
             .map_err(|e| {
                 GraphError::OperationError(format!("Failed to read graph metadata: {:?}", e))
             })? {
-            Some(bytes) => rmp_serde::from_slice(&bytes).map_err(|e| {
+            Some(bytes) => agent_db_storage::deserialize_versioned(&bytes).map_err(|e| {
                 GraphError::OperationError(format!("Failed to deserialize graph metadata: {}", e))
             })?,
             None => {
@@ -138,40 +192,89 @@ impl GraphEngine {
             },
         };
 
-        // Load all nodes (keys prefixed with 'n')
-        let raw_node_bytes = backend
-            .scan_prefix_raw(table_names::GRAPH_NODES, b"n")
-            .map_err(|e| {
-                GraphError::OperationError(format!("Failed to scan graph nodes: {:?}", e))
-            })?;
-        let mut raw_nodes = Vec::with_capacity(raw_node_bytes.len());
-        for (key, value) in raw_node_bytes {
-            let node: GraphNode = rmp_serde::from_slice(&value).map_err(|e| {
-                GraphError::OperationError(format!("Failed to deserialize graph node: {}", e))
-            })?;
-            raw_nodes.push((key, node));
-        }
-
-        // Load all edges (keys prefixed with 'e')
-        let raw_edge_bytes = backend
-            .scan_prefix_raw(table_names::GRAPH_EDGES, b"e")
-            .map_err(|e| {
-                GraphError::OperationError(format!("Failed to scan graph edges: {:?}", e))
-            })?;
-        let mut raw_edges = Vec::with_capacity(raw_edge_bytes.len());
-        for (key, value) in raw_edge_bytes {
-            let edge: GraphEdge = rmp_serde::from_slice(&value).map_err(|e| {
-                GraphError::OperationError(format!("Failed to deserialize graph edge: {}", e))
-            })?;
-            raw_edges.push((key, edge));
-        }
-
-        let node_count = raw_nodes.len();
-        let edge_count = raw_edges.len();
-
         // Rebuild the graph under the inference write lock
         let mut inference = self.inference.write().await;
         let graph = inference.graph_mut();
+        let max_graph_size = graph.max_graph_size;
+
+        // Streaming load of all nodes (keys prefixed with 'n').
+        // Uses for_each_prefix_raw to avoid materializing a Vec of all (key, value) pairs.
+        // When persisted node count exceeds max_graph_size, we keep only the newest nodes
+        // using a bounded min-heap keyed by created_at.
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        // First pass: stream nodes into a bounded collection
+        let mut all_nodes: Vec<GraphNode> = Vec::new();
+        let mut total_persisted_nodes = 0usize;
+        let mut deser_errors = 0usize;
+        let scan_result: Result<(), agent_db_storage::ForEachError<std::convert::Infallible>> =
+            backend.for_each_prefix_raw(table_names::GRAPH_NODES, b"n".to_vec(), |_key, value| {
+                total_persisted_nodes += 1;
+                match agent_db_storage::deserialize_versioned::<GraphNode>(value) {
+                    Ok(node) => all_nodes.push(node),
+                    Err(e) => {
+                        deser_errors += 1;
+                        tracing::warn!("Skipping corrupt graph node during restore: {}", e);
+                    },
+                }
+                Ok(())
+            });
+        if let Err(e) = scan_result {
+            return Err(GraphError::OperationError(format!(
+                "Failed to stream graph nodes: {:?}",
+                e
+            )));
+        }
+
+        // If we have more nodes than max_graph_size, keep the N newest by created_at
+        if all_nodes.len() > max_graph_size {
+            tracing::warn!(
+                "restore_graph_state: {} persisted nodes exceed max_graph_size {}, keeping newest",
+                all_nodes.len(),
+                max_graph_size
+            );
+            // Use a bounded min-heap of size max_graph_size keyed by created_at
+            let mut heap: BinaryHeap<Reverse<(agent_db_core::types::Timestamp, usize)>> =
+                BinaryHeap::with_capacity(max_graph_size + 1);
+            for (idx, node) in all_nodes.iter().enumerate() {
+                heap.push(Reverse((node.created_at, idx)));
+                if heap.len() > max_graph_size {
+                    heap.pop(); // remove oldest
+                }
+            }
+            let keep_indices: std::collections::HashSet<usize> =
+                heap.into_iter().map(|Reverse((_, idx))| idx).collect();
+            let mut kept = Vec::with_capacity(max_graph_size);
+            for (idx, node) in all_nodes.into_iter().enumerate() {
+                if keep_indices.contains(&idx) {
+                    kept.push(node);
+                }
+            }
+            all_nodes = kept;
+        }
+
+        // Stream edges
+        let mut raw_edges: Vec<GraphEdge> = Vec::new();
+        let edge_scan: Result<(), agent_db_storage::ForEachError<std::convert::Infallible>> =
+            backend.for_each_prefix_raw(table_names::GRAPH_EDGES, b"e".to_vec(), |_key, value| {
+                match agent_db_storage::deserialize_versioned::<GraphEdge>(value) {
+                    Ok(edge) => raw_edges.push(edge),
+                    Err(e) => {
+                        tracing::warn!("Skipping corrupt graph edge during restore: {}", e);
+                    },
+                }
+                Ok(())
+            });
+        if let Err(e) = edge_scan {
+            return Err(GraphError::OperationError(format!(
+                "Failed to stream graph edges: {:?}",
+                e
+            )));
+        }
+
+        let node_count = all_nodes.len();
+        let edge_count = raw_edges.len();
 
         // Clear existing data
         graph.nodes.clear();
@@ -196,8 +299,12 @@ impl GraphEngine {
         graph.claim_index.clear();
         graph.concept_index.clear();
 
+        // Build set of kept node IDs for edge filtering
+        let kept_node_ids: std::collections::HashSet<NodeId> =
+            all_nodes.iter().map(|n| n.id).collect();
+
         // Insert nodes and rebuild indexes
-        for (_key, node) in raw_nodes {
+        for node in all_nodes {
             let node_id = node.id;
 
             // Rebuild type index
@@ -279,16 +386,52 @@ impl GraphEngine {
             graph.nodes.insert(node_id, node);
         }
 
-        // Insert edges
-        for (_key, edge) in raw_edges {
-            graph.edges.insert(edge.id, edge);
+        // Insert edges (only those whose source and target are in kept nodes)
+        for edge in raw_edges {
+            if kept_node_ids.contains(&edge.source) && kept_node_ids.contains(&edge.target) {
+                graph.edges.insert(edge.id, edge);
+            }
         }
+
+        // BUG 8 fix: Validate adjacency lists — remove references to edges that don't exist.
+        {
+            let mut orphan_count = 0usize;
+            for edge_ids in graph.adjacency_out.values_mut() {
+                let before = edge_ids.len();
+                edge_ids.retain(|eid| graph.edges.contains_key(eid));
+                orphan_count += before - edge_ids.len();
+            }
+            for edge_ids in graph.adjacency_in.values_mut() {
+                let before = edge_ids.len();
+                edge_ids.retain(|eid| graph.edges.contains_key(eid));
+                orphan_count += before - edge_ids.len();
+            }
+            if orphan_count > 0 {
+                tracing::warn!(
+                    "restore_graph_state: removed {} orphaned adjacency references",
+                    orphan_count
+                );
+            }
+        }
+
+        // Collect all restored node IDs for property index rebuild (BUG 7 fix).
+        let all_node_ids: Vec<NodeId> = graph.nodes.keys().copied().collect();
 
         tracing::info!(
             "Graph restored from redb: {} nodes, {} edges",
             node_count,
             edge_count
         );
+
+        // Must drop inference write lock before auto_index_nodes (which needs read lock)
+        drop(inference);
+
+        // BUG 7 fix: Rebuild property indexes after restore.
+        if !all_node_ids.is_empty() {
+            if let Err(e) = self.auto_index_nodes(&all_node_ids).await {
+                tracing::warn!("Failed to rebuild property indexes after restore: {}", e);
+            }
+        }
 
         Ok((node_count, edge_count))
     }

@@ -32,9 +32,16 @@ pub mod error {
 }
 
 pub mod redb_backend;
+pub mod schema;
+pub mod versioned;
 pub mod wal;
 
 // Re-export commonly used items
 pub use error::{StorageError, StorageResult};
-pub use redb_backend::{table_names, BatchOperation, RedbBackend, RedbConfig};
+pub use redb_backend::{table_names, BatchOperation, ForEachError, RedbBackend, RedbConfig};
+pub use schema::{check_schema_version, stamp_schema_version, SchemaError, SchemaVersion};
+pub use versioned::{
+    deserialize_versioned, serialize_versioned, unwrap_versioned, wrap_versioned,
+    CURRENT_DATA_VERSION, VERSION_MAGIC,
+};
 pub use wal::{SyncPolicy, WalConfig, WalStats, WriteAheadLog};

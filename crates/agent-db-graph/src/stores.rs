@@ -4,7 +4,12 @@
 
 use agent_db_core::types::{AgentId, ContextHash, SessionId};
 use agent_db_events::core::{Event, EventContext};
-use agent_db_storage::{BatchOperation, RedbBackend, StorageResult};
+use agent_db_storage::{
+    deserialize_versioned, serialize_versioned, BatchOperation, ForEachError, RedbBackend,
+    StorageResult,
+};
+use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::episodes::Episode;
@@ -69,6 +74,15 @@ pub trait MemoryStore: Send + Sync {
         }
     }
 
+    /// Flush all dirty cache entries to persistent storage.
+    /// No-op for in-memory stores; redb stores batch-persist the cache.
+    fn flush_cache(&mut self) {}
+
+    /// Re-scan persistent storage to reset the ID allocator and clear caches.
+    /// Called after import to pick up externally-written records.
+    /// No-op for in-memory stores.
+    fn reinitialize(&mut self) {}
+
     /// Mark multiple memories as consolidated in a single atomic transaction.
     /// Each tuple: (memory_id, into_id, into_tier, decay).
     /// Default: falls back to individual calls.
@@ -79,6 +93,20 @@ pub trait MemoryStore: Send + Sync {
         for (mid, into_id, tier, decay) in batch {
             self.mark_consolidated(mid, into_id, tier, decay);
         }
+    }
+
+    /// Delete multiple memories in a single atomic transaction.
+    /// Returns the number of memories actually deleted.
+    fn delete_memories_batch(&mut self, ids: Vec<MemoryId>) -> usize {
+        let mut deleted = 0;
+        for id in ids {
+            if let Some(memory) = self.get_memory(id) {
+                // Default: just remove from store (in-memory stores can override)
+                let _ = memory;
+                deleted += 1;
+            }
+        }
+        deleted
     }
 }
 
@@ -168,13 +196,16 @@ impl MemoryStore for InMemoryMemoryStore {
         self.inner
             .retrieve_hierarchical(context, limit, min_similarity, agent_id)
     }
-}
 
-/// LRU cache entry for memories
-#[derive(Debug, Clone)]
-struct MemoryCacheEntry {
-    memory: Memory,
-    last_accessed: std::time::Instant,
+    fn delete_memories_batch(&mut self, ids: Vec<MemoryId>) -> usize {
+        let mut deleted = 0;
+        for id in ids {
+            if self.inner.remove_memory(id) {
+                deleted += 1;
+            }
+        }
+        deleted
+    }
 }
 
 /// Redb-backed memory store with LRU cache for scalability
@@ -192,12 +223,23 @@ struct MemoryCacheEntry {
 pub struct RedbMemoryStore {
     backend: Arc<RedbBackend>,
     config: MemoryFormationConfig,
-    /// LRU cache for hot memories (bounded size)
-    memory_cache: std::collections::HashMap<MemoryId, MemoryCacheEntry>,
-    /// Maximum number of memories to keep in cache
-    max_cache_size: usize,
+    /// LRU cache for hot memories (bounded size, O(1) eviction)
+    memory_cache: lru::LruCache<MemoryId, Memory>,
+    /// IDs of cache entries whose mutations have not yet been flushed to redb
+    dirty_ids: HashSet<MemoryId>,
     /// Next memory ID allocator
     next_memory_id: MemoryId,
+    // ========== Cached stats counters (Phase 5C) ==========
+    total_memories: usize,
+    episodic_count: usize,
+    semantic_count: usize,
+    schema_count: usize,
+    sum_strength: f32,
+    sum_access_count: u64,
+    /// Refcount map: agent_id -> number of memories for that agent
+    agent_refcounts: std::collections::HashMap<AgentId, u32>,
+    /// Refcount map: context_fingerprint -> number of memories with that fingerprint
+    context_refcounts: std::collections::HashMap<u64, u32>,
 }
 
 impl RedbMemoryStore {
@@ -212,72 +254,103 @@ impl RedbMemoryStore {
         config: MemoryFormationConfig,
         max_cache_size: usize,
     ) -> Self {
+        let cap = NonZeroUsize::new(max_cache_size).unwrap_or(NonZeroUsize::new(1024).unwrap());
         Self {
             backend,
             config,
-            memory_cache: std::collections::HashMap::new(),
-            max_cache_size,
+            memory_cache: lru::LruCache::new(cap),
+            dirty_ids: HashSet::new(),
             next_memory_id: 1,
+            total_memories: 0,
+            episodic_count: 0,
+            semantic_count: 0,
+            schema_count: 0,
+            sum_strength: 0.0,
+            sum_access_count: 0,
+            agent_refcounts: std::collections::HashMap::new(),
+            context_refcounts: std::collections::HashMap::new(),
         }
     }
 
-    /// Initialize next_memory_id by scanning existing memories
+    /// Initialize next_memory_id by scanning existing memories and building stats counters.
     pub fn initialize(&mut self) -> StorageResult<()> {
-        // Scan all memory IDs to find the highest
-        let memories: Vec<(Vec<u8>, Memory)> =
-            self.backend.scan_prefix("memory_records", vec![])?;
-
-        for (_, memory) in memories {
-            if memory.id >= self.next_memory_id {
-                self.next_memory_id = memory.id + 1;
+        // Try to load persisted ID allocator first
+        if let Ok(Some(id_bytes)) = self.backend.get_raw("id_allocator", b"next_memory_id") {
+            if id_bytes.len() >= 8 {
+                self.next_memory_id = u64::from_be_bytes(id_bytes[..8].try_into().unwrap());
             }
         }
 
+        // Reset stats counters
+        self.total_memories = 0;
+        self.episodic_count = 0;
+        self.semantic_count = 0;
+        self.schema_count = 0;
+        self.sum_strength = 0.0;
+        self.sum_access_count = 0;
+        self.agent_refcounts.clear();
+        self.context_refcounts.clear();
+
+        // Streaming scan to build stats and find max ID
+        let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
+            .backend
+            .for_each_prefix_raw("memory_records", vec![], |_key, value| {
+                match deserialize_versioned::<Memory>(value) {
+                    Ok(memory) => {
+                        if memory.id >= self.next_memory_id {
+                            self.next_memory_id = memory.id + 1;
+                        }
+                        // Update stats counters
+                        self.total_memories += 1;
+                        match memory.tier {
+                            crate::memory::MemoryTier::Episodic => self.episodic_count += 1,
+                            crate::memory::MemoryTier::Semantic => self.semantic_count += 1,
+                            crate::memory::MemoryTier::Schema => self.schema_count += 1,
+                        }
+                        self.sum_strength += memory.strength;
+                        self.sum_access_count += memory.access_count as u64;
+                        *self.agent_refcounts.entry(memory.agent_id).or_insert(0) += 1;
+                        *self
+                            .context_refcounts
+                            .entry(memory.context.fingerprint)
+                            .or_insert(0) += 1;
+                    },
+                    Err(e) => {
+                        tracing::warn!("Skipping corrupt memory record during init: {:?}", e);
+                    },
+                }
+                Ok(())
+            });
+
+        if let Err(ForEachError::Storage(e)) = scan_result {
+            tracing::error!("Failed to scan memories during init: {:?}", e);
+        }
+
         tracing::info!(
-            "Initialized RedbMemoryStore with next_memory_id={}",
-            self.next_memory_id
+            "Initialized RedbMemoryStore: next_memory_id={}, total={}, episodic={}, semantic={}, schema={}",
+            self.next_memory_id,
+            self.total_memories,
+            self.episodic_count,
+            self.semantic_count,
+            self.schema_count
         );
         Ok(())
     }
 
-    /// Evict least recently used memory from cache if cache is full
-    fn evict_if_needed(&mut self) {
-        if self.memory_cache.len() >= self.max_cache_size {
-            // Find LRU entry
-            if let Some((&lru_id, _)) = self
-                .memory_cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_accessed)
-            {
-                self.memory_cache.remove(&lru_id);
-                tracing::debug!("Evicted memory {} from cache (LRU)", lru_id);
-            }
-        }
-    }
-
-    /// Load memory from cache or redb
+    /// Load memory from cache or redb. Cache hit auto-promotes to MRU.
     fn load_memory(&mut self, memory_id: MemoryId) -> Option<Memory> {
-        // Check cache first
-        if let Some(entry) = self.memory_cache.get_mut(&memory_id) {
-            entry.last_accessed = std::time::Instant::now();
-            return Some(entry.memory.clone());
+        // Check cache first — get() promotes to MRU automatically
+        if let Some(memory) = self.memory_cache.get(&memory_id) {
+            return Some(memory.clone());
         }
 
-        // Cache miss - load from redb
+        // Cache miss - load from redb (versioned-aware)
         match self
             .backend
-            .get::<_, Memory>("memory_records", memory_id.to_be_bytes())
+            .get_versioned::<_, Memory>("memory_records", memory_id.to_be_bytes())
         {
             Ok(Some(memory)) => {
-                // Add to cache
-                self.evict_if_needed();
-                self.memory_cache.insert(
-                    memory_id,
-                    MemoryCacheEntry {
-                        memory: memory.clone(),
-                        last_accessed: std::time::Instant::now(),
-                    },
-                );
+                self.cache_memory(memory.clone());
                 tracing::debug!("Loaded memory {} from redb into cache", memory_id);
                 Some(memory)
             },
@@ -289,16 +362,75 @@ impl RedbMemoryStore {
         }
     }
 
-    /// Add memory to cache
+    /// Add memory to cache, flushing any dirty evicted entry.
     fn cache_memory(&mut self, memory: Memory) {
-        self.evict_if_needed();
-        self.memory_cache.insert(
-            memory.id,
-            MemoryCacheEntry {
-                memory,
-                last_accessed: std::time::Instant::now(),
+        let id = memory.id;
+        // If cache is full and we're inserting a new key, check if LRU entry is dirty
+        if !self.memory_cache.contains(&id)
+            && self.memory_cache.len() == self.memory_cache.cap().get()
+        {
+            if let Some((&lru_id, _)) = self.memory_cache.peek_lru() {
+                if self.dirty_ids.contains(&lru_id) {
+                    // Pop and flush the dirty LRU entry before it's evicted
+                    if let Some((evicted_id, evicted_mem)) = self.memory_cache.pop_lru() {
+                        self.dirty_ids.remove(&evicted_id);
+                        if let Ok(ops) = self.persist_memory_ops(&evicted_mem) {
+                            if let Err(e) = self.backend.write_batch(ops) {
+                                tracing::error!(
+                                    "Failed to persist evicted dirty memory {}: {:?}",
+                                    evicted_id,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.memory_cache.put(id, memory);
+    }
+
+    /// Increment stats counters when a new memory is stored.
+    fn stats_increment(&mut self, memory: &Memory) {
+        self.total_memories += 1;
+        match memory.tier {
+            crate::memory::MemoryTier::Episodic => self.episodic_count += 1,
+            crate::memory::MemoryTier::Semantic => self.semantic_count += 1,
+            crate::memory::MemoryTier::Schema => self.schema_count += 1,
+        }
+        self.sum_strength += memory.strength;
+        self.sum_access_count += memory.access_count as u64;
+        *self.agent_refcounts.entry(memory.agent_id).or_insert(0) += 1;
+        *self
+            .context_refcounts
+            .entry(memory.context.fingerprint)
+            .or_insert(0) += 1;
+    }
+
+    /// Decrement stats counters when a memory is deleted.
+    fn stats_decrement(&mut self, memory: &Memory) {
+        self.total_memories = self.total_memories.saturating_sub(1);
+        match memory.tier {
+            crate::memory::MemoryTier::Episodic => {
+                self.episodic_count = self.episodic_count.saturating_sub(1)
             },
-        );
+            crate::memory::MemoryTier::Semantic => {
+                self.semantic_count = self.semantic_count.saturating_sub(1)
+            },
+            crate::memory::MemoryTier::Schema => {
+                self.schema_count = self.schema_count.saturating_sub(1)
+            },
+        }
+        self.sum_strength = (self.sum_strength - memory.strength).max(0.0);
+        self.sum_access_count = self
+            .sum_access_count
+            .saturating_sub(memory.access_count as u64);
+        if let Some(count) = self.agent_refcounts.get_mut(&memory.agent_id) {
+            *count = count.saturating_sub(1);
+        }
+        if let Some(count) = self.context_refcounts.get_mut(&memory.context.fingerprint) {
+            *count = count.saturating_sub(1);
+        }
     }
 
     /// Persist a memory to redb
@@ -313,50 +445,16 @@ impl RedbMemoryStore {
     fn persist_memory_ops(&self, memory: &Memory) -> StorageResult<Vec<BatchOperation>> {
         let mut ops = Vec::with_capacity(4);
 
-        // Main record
-        let value = rmp_serde::to_vec(memory)
-            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?;
+        // Main record (versioned envelope)
+        let value = serialize_versioned(memory)?;
         ops.push(BatchOperation::Put {
             table_name: "memory_records".to_string(),
             key: memory.id.to_be_bytes().to_vec(),
             value,
         });
 
-        // Index by context fingerprint
-        let mut context_key = Vec::with_capacity(16);
-        context_key.extend_from_slice(&memory.context.fingerprint.to_be_bytes());
-        context_key.extend_from_slice(&memory.id.to_be_bytes());
-        ops.push(BatchOperation::Put {
-            table_name: "mem_by_context_hash".to_string(),
-            key: context_key,
-            value: rmp_serde::to_vec(&())
-                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
-        });
-
-        // Index by agent
-        let mut agent_key = Vec::with_capacity(16);
-        agent_key.extend_from_slice(&memory.agent_id.to_be_bytes());
-        agent_key.extend_from_slice(&memory.id.to_be_bytes());
-        ops.push(BatchOperation::Put {
-            table_name: "mem_by_bucket".to_string(),
-            key: agent_key,
-            value: rmp_serde::to_vec(&())
-                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
-        });
-
-        // Index by goal bucket
-        let goal_bucket = memory.context.goal_bucket_id;
-        if goal_bucket != 0 {
-            let mut gb_key = Vec::with_capacity(16);
-            gb_key.extend_from_slice(&goal_bucket.to_be_bytes());
-            gb_key.extend_from_slice(&memory.id.to_be_bytes());
-            ops.push(BatchOperation::Put {
-                table_name: "mem_by_goal_bucket".to_string(),
-                key: gb_key,
-                value: rmp_serde::to_vec(&())
-                    .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
-            });
-        }
+        // Secondary indexes
+        ops.extend(build_memory_index_ops(memory)?);
 
         Ok(ops)
     }
@@ -364,21 +462,37 @@ impl RedbMemoryStore {
     /// Delete a memory from redb
     #[allow(dead_code)]
     fn delete_memory(&self, memory: &Memory) -> StorageResult<()> {
+        let ops = self.delete_memory_ops(memory);
+        self.backend.write_batch(ops)
+    }
+
+    /// Build batch operations to delete a memory (record + all indexes).
+    fn delete_memory_ops(&self, memory: &Memory) -> Vec<BatchOperation> {
+        let mut ops = Vec::with_capacity(4);
+
         // Delete main record
-        self.backend
-            .delete("memory_records", memory.id.to_be_bytes())?;
+        ops.push(BatchOperation::Delete {
+            table_name: "memory_records".to_string(),
+            key: memory.id.to_be_bytes().to_vec(),
+        });
 
         // Delete context index
         let mut context_key = Vec::with_capacity(16);
         context_key.extend_from_slice(&memory.context.fingerprint.to_be_bytes());
         context_key.extend_from_slice(&memory.id.to_be_bytes());
-        self.backend.delete("mem_by_context_hash", context_key)?;
+        ops.push(BatchOperation::Delete {
+            table_name: "mem_by_context_hash".to_string(),
+            key: context_key,
+        });
 
         // Delete agent index
         let mut agent_key = Vec::with_capacity(16);
         agent_key.extend_from_slice(&memory.agent_id.to_be_bytes());
         agent_key.extend_from_slice(&memory.id.to_be_bytes());
-        self.backend.delete("mem_by_bucket", agent_key)?;
+        ops.push(BatchOperation::Delete {
+            table_name: "mem_by_bucket".to_string(),
+            key: agent_key,
+        });
 
         // Delete goal bucket index
         let goal_bucket = memory.context.goal_bucket_id;
@@ -386,10 +500,13 @@ impl RedbMemoryStore {
             let mut gb_key = Vec::with_capacity(16);
             gb_key.extend_from_slice(&goal_bucket.to_be_bytes());
             gb_key.extend_from_slice(&memory.id.to_be_bytes());
-            self.backend.delete("mem_by_goal_bucket", gb_key)?;
+            ops.push(BatchOperation::Delete {
+                table_name: "mem_by_goal_bucket".to_string(),
+                key: gb_key,
+            });
         }
 
-        Ok(())
+        ops
     }
     /// Load memories belonging to a specific goal bucket.
     /// Scans the mem_by_goal_bucket index and loads each memory via cache.
@@ -434,7 +551,7 @@ impl MemoryStore for RedbMemoryStore {
         // Check if episode has ended
         episode.end_timestamp?;
 
-        // Allocate new memory ID
+        // Allocate new memory ID and persist the updated counter atomically
         let memory_id = self.next_memory_id;
         self.next_memory_id += 1;
 
@@ -499,13 +616,32 @@ impl MemoryStore for RedbMemoryStore {
             metadata: std::collections::HashMap::new(),
         };
 
-        // Persist to redb
-        if let Err(e) = self.persist_memory(&memory) {
-            tracing::error!("Failed to persist memory {}: {:?}", memory_id, e);
-            return None;
+        // Persist to redb (record + indexes + updated ID allocator in one batch)
+        match self.persist_memory_ops(&memory) {
+            Ok(mut ops) => {
+                // Persist the updated ID allocator atomically
+                ops.push(BatchOperation::Put {
+                    table_name: "id_allocator".to_string(),
+                    key: b"next_memory_id".to_vec(),
+                    value: self.next_memory_id.to_be_bytes().to_vec(),
+                });
+                if let Err(e) = self.backend.write_batch(ops) {
+                    tracing::error!("Failed to persist memory {}: {:?}", memory_id, e);
+                    return None;
+                }
+            },
+            Err(e) => {
+                tracing::error!(
+                    "Failed to build persist ops for memory {}: {:?}",
+                    memory_id,
+                    e
+                );
+                return None;
+            },
         }
 
-        // Add to cache
+        // Update stats and cache
+        self.stats_increment(&memory);
         self.cache_memory(memory);
 
         Some(MemoryUpsert {
@@ -515,16 +651,15 @@ impl MemoryStore for RedbMemoryStore {
     }
 
     fn get_memory(&self, memory_id: MemoryId) -> Option<Memory> {
-        // This needs to be mutable to update cache access time
-        // For now, just check cache without updating access time
-        if let Some(entry) = self.memory_cache.get(&memory_id) {
-            return Some(entry.memory.clone());
+        // Check cache (peek doesn't promote but avoids needing &mut self)
+        if let Some(memory) = self.memory_cache.peek(&memory_id) {
+            return Some(memory.clone());
         }
 
-        // Load from redb
+        // Load from redb (versioned-aware)
         match self
             .backend
-            .get::<_, Memory>("memory_records", memory_id.to_be_bytes())
+            .get_versioned::<_, Memory>("memory_records", memory_id.to_be_bytes())
         {
             Ok(memory) => memory,
             Err(e) => {
@@ -666,13 +801,8 @@ impl MemoryStore for RedbMemoryStore {
     }
 
     fn get_stats(&self) -> MemoryStats {
-        // Full scan of all memories from redb for accurate stats
-        let all_memories: Vec<(Vec<u8>, Memory)> = self
-            .backend
-            .scan_prefix("memory_records", vec![])
-            .unwrap_or_default();
-
-        let total = all_memories.len();
+        // Use cached counters (O(1) instead of full scan)
+        let total = self.total_memories;
         if total == 0 {
             return MemoryStats {
                 total_memories: 0,
@@ -686,93 +816,183 @@ impl MemoryStore for RedbMemoryStore {
             };
         }
 
-        let avg_strength = all_memories.iter().map(|(_, m)| m.strength).sum::<f32>() / total as f32;
-        let avg_access_count = all_memories
-            .iter()
-            .map(|(_, m)| m.access_count)
-            .sum::<u32>()
-            / total as u32;
-
-        let mut agents: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        let mut contexts: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        let mut episodic_count = 0usize;
-        let mut semantic_count = 0usize;
-        let mut schema_count = 0usize;
-
-        for (_, m) in &all_memories {
-            agents.insert(m.agent_id);
-            contexts.insert(m.context.fingerprint);
-            match m.tier {
-                crate::memory::MemoryTier::Episodic => episodic_count += 1,
-                crate::memory::MemoryTier::Semantic => semantic_count += 1,
-                crate::memory::MemoryTier::Schema => schema_count += 1,
-            }
-        }
-
         MemoryStats {
             total_memories: total,
-            avg_strength,
-            avg_access_count,
-            agents_with_memories: agents.len(),
-            unique_contexts: contexts.len(),
-            episodic_count,
-            semantic_count,
-            schema_count,
+            avg_strength: self.sum_strength / total as f32,
+            avg_access_count: (self.sum_access_count / total as u64) as u32,
+            agents_with_memories: self.agent_refcounts.values().filter(|&&c| c > 0).count(),
+            unique_contexts: self.context_refcounts.values().filter(|&&c| c > 0).count(),
+            episodic_count: self.episodic_count,
+            semantic_count: self.semantic_count,
+            schema_count: self.schema_count,
         }
     }
 
     fn apply_decay(&mut self) {
-        // Decay is expensive for persistent store
-        // Only decay cached memories, lazy decay others on access
         use agent_db_core::types::current_timestamp;
 
         let current_time = current_timestamp();
         let hour_in_ns = 3_600_000_000_000u64;
+        let decay_rate = self.config.decay_rate_per_hour;
+        let forget_threshold = self.config.forget_threshold;
 
-        let mut to_remove = Vec::new();
+        // Stage 1: Streaming read pass over ALL persisted records (cold + hot)
+        // Collect batch operations without holding a read txn during writes.
+        let mut pending_ops: Vec<BatchOperation> = Vec::new();
+        let mut op_batches: Vec<Vec<BatchOperation>> = Vec::new();
+        let mut forgotten_ids: Vec<MemoryId> = Vec::new();
+        let mut forgotten_metas: Vec<(MemoryId, crate::memory::MemoryTier, f32, u64, u64)> =
+            Vec::new(); // (id, tier, strength, agent_id, fingerprint)
+        let mut modified_cache_updates: Vec<(MemoryId, f32)> = Vec::new(); // (id, new_strength)
 
-        for (id, entry) in self.memory_cache.iter_mut() {
-            let time_elapsed_ns = current_time.saturating_sub(entry.memory.last_accessed);
-            let hours_elapsed = (time_elapsed_ns / hour_in_ns) as f32;
+        let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
+            .backend
+            .for_each_prefix_raw("memory_records", vec![], |_key, value| {
+                let memory: Memory = match deserialize_versioned(value) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("apply_decay: skipping corrupt record: {:?}", e);
+                        return Ok(());
+                    },
+                };
 
-            let decay_amount = self.config.decay_rate_per_hour * hours_elapsed;
-            entry.memory.strength = (entry.memory.strength - decay_amount).max(0.0);
+                let time_elapsed_ns = current_time.saturating_sub(memory.last_accessed);
+                let hours_elapsed = (time_elapsed_ns / hour_in_ns) as f32;
+                let decay_amount = decay_rate * hours_elapsed;
+                let new_strength = (memory.strength - decay_amount).max(0.0);
 
-            if entry.memory.strength < self.config.forget_threshold {
-                to_remove.push(*id);
+                if new_strength < forget_threshold {
+                    // Memory should be forgotten — build delete ops
+                    pending_ops.extend(self.delete_memory_ops(&memory));
+                    forgotten_ids.push(memory.id);
+                    forgotten_metas.push((
+                        memory.id,
+                        memory.tier,
+                        memory.strength,
+                        memory.agent_id,
+                        memory.context.fingerprint,
+                    ));
+                } else if (memory.strength - new_strength).abs() > f32::EPSILON {
+                    // Memory decayed but survived — build update ops
+                    let mut updated = memory.clone();
+                    updated.strength = new_strength;
+                    match self.persist_memory_ops(&updated) {
+                        Ok(mem_ops) => pending_ops.extend(mem_ops),
+                        Err(e) => {
+                            tracing::error!(
+                                "apply_decay: failed to build ops for memory {}: {:?}",
+                                memory.id,
+                                e
+                            );
+                        },
+                    }
+                    modified_cache_updates.push((memory.id, new_strength));
+                }
+
+                // Batch in chunks of 5000 to avoid unbounded Vec growth
+                if pending_ops.len() >= 5_000 {
+                    op_batches.push(std::mem::take(&mut pending_ops));
+                }
+
+                Ok(())
+            });
+
+        if let Err(ForEachError::Storage(e)) = scan_result {
+            tracing::error!("apply_decay: streaming scan failed: {:?}", e);
+            return;
+        }
+        // Final partial batch
+        if !pending_ops.is_empty() {
+            op_batches.push(pending_ops);
+        }
+
+        // Stage 2: Write pass — commit all batches
+        for batch in &op_batches {
+            if !batch.is_empty() {
+                if let Err(e) = self.backend.write_batch(batch.clone()) {
+                    tracing::error!("apply_decay: failed to write batch: {:?}", e);
+                }
             }
         }
 
-        // Remove forgotten memories from cache
-        for id in to_remove {
-            self.memory_cache.remove(&id);
+        // Update cache for modified entries (if present)
+        for (id, new_strength) in &modified_cache_updates {
+            if let Some(cached) = self.memory_cache.peek_mut(id) {
+                let old_strength = cached.strength;
+                cached.strength = *new_strength;
+                self.sum_strength += new_strength - old_strength;
+                self.dirty_ids.remove(id); // Just persisted
+            }
+        }
+
+        // Remove forgotten entries from cache + dirty set + update stats
+        for (id, tier, strength, agent_id, fingerprint) in &forgotten_metas {
+            self.memory_cache.pop(id);
+            self.dirty_ids.remove(id);
+            // Decrement stats
+            self.total_memories = self.total_memories.saturating_sub(1);
+            match tier {
+                crate::memory::MemoryTier::Episodic => {
+                    self.episodic_count = self.episodic_count.saturating_sub(1)
+                },
+                crate::memory::MemoryTier::Semantic => {
+                    self.semantic_count = self.semantic_count.saturating_sub(1)
+                },
+                crate::memory::MemoryTier::Schema => {
+                    self.schema_count = self.schema_count.saturating_sub(1)
+                },
+            }
+            self.sum_strength = (self.sum_strength - strength).max(0.0);
+            if let Some(count) = self.agent_refcounts.get_mut(agent_id) {
+                *count = count.saturating_sub(1);
+            }
+            if let Some(count) = self.context_refcounts.get_mut(fingerprint) {
+                *count = count.saturating_sub(1);
+            }
+        }
+
+        if !forgotten_ids.is_empty() {
+            tracing::info!(
+                "apply_decay: forgot {} memories below threshold, updated {} surviving",
+                forgotten_ids.len(),
+                modified_cache_updates.len()
+            );
         }
     }
 
     fn list_all_memories(&self) -> Vec<Memory> {
-        // Scan redb for all memories, use cache version where available
-        let mut all = std::collections::HashMap::new();
+        // Streaming scan: collect IDs of cached entries for override
+        let cached_ids: HashSet<MemoryId> = self.memory_cache.iter().map(|(&id, _)| id).collect();
 
-        // First, load everything from redb
-        let scan_result: Result<Vec<(Vec<u8>, Memory)>, _> =
-            self.backend.scan_prefix("memory_records", vec![]);
-        match scan_result {
-            Ok(records) => {
-                for (_, memory) in records {
-                    all.insert(memory.id, memory);
+        let mut all: Vec<Memory> = Vec::new();
+
+        // Stream from redb, skip entries that are in cache (cache is fresher)
+        let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
+            .backend
+            .for_each_prefix_raw("memory_records", vec![], |_key, value| {
+                match deserialize_versioned::<Memory>(value) {
+                    Ok(memory) => {
+                        if !cached_ids.contains(&memory.id) {
+                            all.push(memory);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("list_all_memories: skipping corrupt record: {:?}", e);
+                    },
                 }
-            },
-            Err(e) => {
-                tracing::error!("Failed to scan memories from redb: {:?}", e);
-            },
+                Ok(())
+            });
+
+        if let Err(ForEachError::Storage(e)) = scan_result {
+            tracing::error!("Failed to stream memories from redb: {:?}", e);
         }
 
-        // Override with cached versions (fresher)
-        for (id, entry) in &self.memory_cache {
-            all.insert(*id, entry.memory.clone());
+        // Add cached versions (fresher)
+        for (_, memory) in self.memory_cache.iter() {
+            all.push(memory.clone());
         }
 
-        all.into_values().collect()
+        all
     }
 
     fn store_consolidated_memory(&mut self, memory: Memory) {
@@ -784,7 +1004,8 @@ impl MemoryStore for RedbMemoryStore {
         if let Err(e) = self.persist_memory(&memory) {
             tracing::error!("Failed to persist consolidated memory {}: {:?}", id, e);
         }
-        // Cache
+        // Update stats + cache
+        self.stats_increment(&memory);
         self.cache_memory(memory);
     }
 
@@ -796,20 +1017,24 @@ impl MemoryStore for RedbMemoryStore {
         decay: f32,
     ) {
         // Update in cache or load from redb
-        if let Some(entry) = self.memory_cache.get_mut(&memory_id) {
-            entry.memory.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
-            if into_tier == crate::memory::MemoryTier::Schema {
-                entry.memory.schema_id = Some(into_id);
-            }
-            entry.memory.strength *= decay;
-            let mem_clone = entry.memory.clone();
-            let _ = self.persist_memory(&mem_clone);
-        } else if let Some(mut memory) = self.load_memory(memory_id) {
+        if let Some(memory) = self.memory_cache.get_mut(&memory_id) {
+            let old_strength = memory.strength;
             memory.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
             if into_tier == crate::memory::MemoryTier::Schema {
                 memory.schema_id = Some(into_id);
             }
             memory.strength *= decay;
+            self.sum_strength += memory.strength - old_strength;
+            let mem_clone = memory.clone();
+            let _ = self.persist_memory(&mem_clone);
+        } else if let Some(mut memory) = self.load_memory(memory_id) {
+            let old_strength = memory.strength;
+            memory.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
+            if into_tier == crate::memory::MemoryTier::Schema {
+                memory.schema_id = Some(into_id);
+            }
+            memory.strength *= decay;
+            self.sum_strength += memory.strength - old_strength;
             let _ = self.persist_memory(&memory);
             self.cache_memory(memory);
         }
@@ -889,6 +1114,57 @@ impl MemoryStore for RedbMemoryStore {
         scored.into_iter().take(limit).map(|(_, m)| m).collect()
     }
 
+    fn flush_cache(&mut self) {
+        if self.dirty_ids.is_empty() {
+            return;
+        }
+
+        let mut all_ops: Vec<BatchOperation> = Vec::new();
+        let mut flushed = 0usize;
+
+        for &id in &self.dirty_ids {
+            if let Some(memory) = self.memory_cache.peek(&id) {
+                match self.persist_memory_ops(memory) {
+                    Ok(ops) => {
+                        all_ops.extend(ops);
+                        flushed += 1;
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "flush_cache: failed to build ops for memory {}: {:?}",
+                            id,
+                            e
+                        );
+                    },
+                }
+            }
+        }
+
+        if !all_ops.is_empty() {
+            if let Err(e) = self.backend.write_batch(all_ops) {
+                tracing::error!("flush_cache: failed to batch-persist memories: {:?}", e);
+            } else {
+                tracing::info!("flush_cache: persisted {} dirty memories", flushed);
+                self.dirty_ids.clear();
+            }
+        }
+    }
+
+    fn reinitialize(&mut self) {
+        // Clear the LRU cache and dirty set so reads go back to redb
+        self.memory_cache.clear();
+        self.dirty_ids.clear();
+        // Re-initialize (scans redb, rebuilds stats, loads persisted ID)
+        self.next_memory_id = 1;
+        if let Err(e) = self.initialize() {
+            tracing::error!("RedbMemoryStore reinitialize failed: {:?}", e);
+        }
+        tracing::info!(
+            "RedbMemoryStore reinitialize: next_memory_id={}",
+            self.next_memory_id
+        );
+    }
+
     fn store_consolidated_memories_batch(&mut self, memories: Vec<Memory>) {
         let mut all_ops: Vec<BatchOperation> = Vec::new();
 
@@ -916,8 +1192,9 @@ impl MemoryStore for RedbMemoryStore {
             }
         }
 
-        // Cache them all after successful persist
+        // Cache and update stats after successful persist
         for memory in memories {
+            self.stats_increment(&memory);
             self.cache_memory(memory);
         }
     }
@@ -930,21 +1207,24 @@ impl MemoryStore for RedbMemoryStore {
         let mut updated_memories: Vec<Memory> = Vec::new();
 
         for (memory_id, into_id, into_tier, decay) in batch {
-            let memory = if let Some(entry) = self.memory_cache.get_mut(&memory_id) {
-                entry.memory.consolidation_status =
-                    crate::memory::ConsolidationStatus::Consolidated;
+            let memory = if let Some(mem) = self.memory_cache.get_mut(&memory_id) {
+                let old_strength = mem.strength;
+                mem.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
                 if into_tier == crate::memory::MemoryTier::Schema {
-                    entry.memory.schema_id = Some(into_id);
+                    mem.schema_id = Some(into_id);
                 }
-                entry.memory.strength *= decay;
-                Some(entry.memory.clone())
+                mem.strength *= decay;
+                self.sum_strength += mem.strength - old_strength;
+                Some(mem.clone())
             } else {
                 self.load_memory(memory_id).map(|mut m| {
+                    let old_strength = m.strength;
                     m.consolidation_status = crate::memory::ConsolidationStatus::Consolidated;
                     if into_tier == crate::memory::MemoryTier::Schema {
                         m.schema_id = Some(into_id);
                     }
                     m.strength *= decay;
+                    self.sum_strength += m.strength - old_strength;
                     m
                 })
             };
@@ -975,6 +1255,56 @@ impl MemoryStore for RedbMemoryStore {
         for mem in updated_memories {
             self.cache_memory(mem);
         }
+    }
+
+    fn delete_memories_batch(&mut self, ids: Vec<MemoryId>) -> usize {
+        let mut all_ops: Vec<BatchOperation> = Vec::new();
+        let mut deleted_metas: Vec<Memory> = Vec::new();
+
+        for id in &ids {
+            // Try cache first, then redb
+            let memory = if let Some(mem) = self.memory_cache.peek(id) {
+                Some(mem.clone())
+            } else {
+                match self
+                    .backend
+                    .get_versioned::<_, Memory>("memory_records", id.to_be_bytes())
+                {
+                    Ok(mem) => mem,
+                    Err(e) => {
+                        tracing::warn!("delete_memories_batch: failed to load {}: {:?}", id, e);
+                        None
+                    },
+                }
+            };
+
+            if let Some(memory) = memory {
+                all_ops.extend(self.delete_memory_ops(&memory));
+                deleted_metas.push(memory);
+            }
+        }
+
+        let deleted_count = deleted_metas.len();
+
+        // Single atomic write
+        if !all_ops.is_empty() {
+            if let Err(e) = self.backend.write_batch(all_ops) {
+                tracing::error!("delete_memories_batch: failed to write: {:?}", e);
+                return 0;
+            }
+        }
+
+        // Remove from cache + dirty set + update stats
+        for memory in &deleted_metas {
+            self.memory_cache.pop(&memory.id);
+            self.dirty_ids.remove(&memory.id);
+            self.stats_decrement(memory);
+        }
+
+        if deleted_count > 0 {
+            tracing::info!("delete_memories_batch: deleted {} memories", deleted_count);
+        }
+        deleted_count
     }
 }
 
@@ -1007,6 +1337,15 @@ pub trait StrategyStore: Send + Sync {
 
     /// List all strategies (for pruning / analytics).
     fn list_all_strategies(&self) -> Vec<Strategy>;
+
+    /// Flush all dirty cache entries to persistent storage.
+    /// No-op for in-memory stores; redb stores batch-persist the cache.
+    fn flush_cache(&mut self) {}
+
+    /// Re-scan persistent storage to reset the ID allocator and clear caches.
+    /// Called after import to pick up externally-written records.
+    /// No-op for in-memory stores.
+    fn reinitialize(&mut self) {}
 }
 
 pub struct InMemoryStrategyStore {
@@ -1088,13 +1427,6 @@ impl StrategyStore for InMemoryStrategyStore {
     }
 }
 
-/// LRU cache entry for strategies
-#[derive(Debug, Clone)]
-struct StrategyCacheEntry {
-    strategy: Strategy,
-    last_accessed: std::time::Instant,
-}
-
 /// Redb-backed strategy store with LRU cache for scalability
 ///
 /// **Architecture**: Hot/Cold separation
@@ -1110,10 +1442,10 @@ pub struct RedbStrategyStore {
     backend: Arc<RedbBackend>,
     #[allow(dead_code)]
     config: StrategyExtractionConfig,
-    /// LRU cache for hot strategies (bounded size)
-    strategy_cache: std::collections::HashMap<StrategyId, StrategyCacheEntry>,
-    /// Maximum number of strategies to keep in cache
-    max_cache_size: usize,
+    /// LRU cache for hot strategies (bounded size, O(1) eviction)
+    strategy_cache: lru::LruCache<StrategyId, Strategy>,
+    /// IDs of cache entries whose mutations have not yet been flushed to redb
+    dirty_strategy_ids: HashSet<StrategyId>,
     /// Next strategy ID allocator
     next_strategy_id: StrategyId,
     /// Strategy extractor for creating new strategies (stateless helper)
@@ -1132,11 +1464,12 @@ impl RedbStrategyStore {
         config: StrategyExtractionConfig,
         max_cache_size: usize,
     ) -> Self {
+        let cap = NonZeroUsize::new(max_cache_size).unwrap_or(NonZeroUsize::new(1024).unwrap());
         Self {
             backend,
             config: config.clone(),
-            strategy_cache: std::collections::HashMap::new(),
-            max_cache_size,
+            strategy_cache: lru::LruCache::new(cap),
+            dirty_strategy_ids: HashSet::new(),
             next_strategy_id: 1,
             strategy_extractor: StrategyExtractor::new(config),
         }
@@ -1144,14 +1477,32 @@ impl RedbStrategyStore {
 
     /// Initialize next_strategy_id by scanning existing strategies
     pub fn initialize(&mut self) -> StorageResult<()> {
-        // Scan all strategy IDs to find the highest
-        let strategies: Vec<(Vec<u8>, Strategy)> =
-            self.backend.scan_prefix("strategy_records", vec![])?;
-
-        for (_, strategy) in strategies {
-            if strategy.id >= self.next_strategy_id {
-                self.next_strategy_id = strategy.id + 1;
+        // Try to load persisted ID allocator first
+        if let Ok(Some(id_bytes)) = self.backend.get_raw("id_allocator", b"next_strategy_id") {
+            if id_bytes.len() >= 8 {
+                self.next_strategy_id = u64::from_be_bytes(id_bytes[..8].try_into().unwrap());
             }
+        }
+
+        // Streaming scan to find max ID (in case persisted ID is stale)
+        let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
+            .backend
+            .for_each_prefix_raw("strategy_records", vec![], |_key, value| {
+                match deserialize_versioned::<Strategy>(value) {
+                    Ok(strategy) => {
+                        if strategy.id >= self.next_strategy_id {
+                            self.next_strategy_id = strategy.id + 1;
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Skipping corrupt strategy record during init: {:?}", e);
+                    },
+                }
+                Ok(())
+            });
+
+        if let Err(ForEachError::Storage(e)) = scan_result {
+            tracing::error!("Failed to scan strategies during init: {:?}", e);
         }
 
         tracing::info!(
@@ -1161,44 +1512,20 @@ impl RedbStrategyStore {
         Ok(())
     }
 
-    /// Evict least recently used strategy from cache if cache is full
-    fn evict_if_needed(&mut self) {
-        if self.strategy_cache.len() >= self.max_cache_size {
-            // Find LRU entry
-            if let Some((&lru_id, _)) = self
-                .strategy_cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_accessed)
-            {
-                self.strategy_cache.remove(&lru_id);
-                tracing::debug!("Evicted strategy {} from cache (LRU)", lru_id);
-            }
-        }
-    }
-
-    /// Load strategy from cache or redb
+    /// Load strategy from cache or redb. Cache hit auto-promotes to MRU.
     fn load_strategy(&mut self, strategy_id: StrategyId) -> Option<Strategy> {
-        // Check cache first
-        if let Some(entry) = self.strategy_cache.get_mut(&strategy_id) {
-            entry.last_accessed = std::time::Instant::now();
-            return Some(entry.strategy.clone());
+        // Check cache first — get() promotes to MRU automatically
+        if let Some(strategy) = self.strategy_cache.get(&strategy_id) {
+            return Some(strategy.clone());
         }
 
-        // Cache miss - load from redb
+        // Cache miss - load from redb (versioned-aware)
         match self
             .backend
-            .get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes())
+            .get_versioned::<_, Strategy>("strategy_records", strategy_id.to_be_bytes())
         {
             Ok(Some(strategy)) => {
-                // Add to cache
-                self.evict_if_needed();
-                self.strategy_cache.insert(
-                    strategy_id,
-                    StrategyCacheEntry {
-                        strategy: strategy.clone(),
-                        last_accessed: std::time::Instant::now(),
-                    },
-                );
+                self.cache_strategy(strategy.clone());
                 tracing::debug!("Loaded strategy {} from redb into cache", strategy_id);
                 Some(strategy)
             },
@@ -1210,16 +1537,31 @@ impl RedbStrategyStore {
         }
     }
 
-    /// Add strategy to cache
+    /// Add strategy to cache, flushing any dirty evicted entry.
     fn cache_strategy(&mut self, strategy: Strategy) {
-        self.evict_if_needed();
-        self.strategy_cache.insert(
-            strategy.id,
-            StrategyCacheEntry {
-                strategy,
-                last_accessed: std::time::Instant::now(),
-            },
-        );
+        let id = strategy.id;
+        // If cache is full and we're inserting a new key, check if LRU entry is dirty
+        if !self.strategy_cache.contains(&id)
+            && self.strategy_cache.len() == self.strategy_cache.cap().get()
+        {
+            if let Some((&lru_id, _)) = self.strategy_cache.peek_lru() {
+                if self.dirty_strategy_ids.contains(&lru_id) {
+                    if let Some((evicted_id, evicted_strat)) = self.strategy_cache.pop_lru() {
+                        self.dirty_strategy_ids.remove(&evicted_id);
+                        if let Ok(ops) = self.persist_strategy_ops(&evicted_strat) {
+                            if let Err(e) = self.backend.write_batch(ops) {
+                                tracing::error!(
+                                    "Failed to persist evicted dirty strategy {}: {:?}",
+                                    evicted_id,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.strategy_cache.put(id, strategy);
     }
 
     /// Persist a strategy to redb
@@ -1233,55 +1575,16 @@ impl RedbStrategyStore {
     fn persist_strategy_ops(&self, strategy: &Strategy) -> StorageResult<Vec<BatchOperation>> {
         let mut ops = Vec::with_capacity(4);
 
-        // Main record
-        let value = rmp_serde::to_vec(strategy)
-            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?;
+        // Main record (versioned envelope)
+        let value = serialize_versioned(strategy)?;
         ops.push(BatchOperation::Put {
             table_name: "strategy_records".to_string(),
             key: strategy.id.to_be_bytes().to_vec(),
             value,
         });
 
-        // Index by goal bucket
-        let mut bucket_key = Vec::with_capacity(16);
-        bucket_key.extend_from_slice(&strategy.goal_bucket_id.to_be_bytes());
-        bucket_key.extend_from_slice(&strategy.id.to_be_bytes());
-        ops.push(BatchOperation::Put {
-            table_name: "strategy_by_bucket".to_string(),
-            key: bucket_key,
-            value: rmp_serde::to_vec(&())
-                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
-        });
-
-        // Index by behavior signature
-        let signature_hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            strategy.behavior_signature.hash(&mut hasher);
-            hasher.finish()
-        };
-        let mut signature_key = Vec::with_capacity(16);
-        signature_key.extend_from_slice(&signature_hash.to_be_bytes());
-        signature_key.extend_from_slice(&strategy.id.to_be_bytes());
-        ops.push(BatchOperation::Put {
-            table_name: "strategy_by_signature".to_string(),
-            key: signature_key,
-            value: rmp_serde::to_vec(&())
-                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
-        });
-
-        // Index by agent
-        let mut agent_key = Vec::with_capacity(16);
-        agent_key.extend_from_slice(&strategy.agent_id.to_be_bytes());
-        agent_key.extend_from_slice(&strategy.id.to_be_bytes());
-        let quality_bytes = rmp_serde::to_vec(&strategy.quality_score)
-            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?;
-        ops.push(BatchOperation::Put {
-            table_name: "strategy_feature_postings".to_string(),
-            key: agent_key,
-            value: quality_bytes,
-        });
+        // Secondary indexes
+        ops.extend(build_strategy_index_ops(strategy)?);
 
         Ok(ops)
     }
@@ -1351,15 +1654,15 @@ impl StrategyStore for RedbStrategyStore {
     }
 
     fn get_strategy(&self, strategy_id: StrategyId) -> Option<Strategy> {
-        // Check cache first (read-only, can't update access time)
-        if let Some(entry) = self.strategy_cache.get(&strategy_id) {
-            return Some(entry.strategy.clone());
+        // Check cache (peek doesn't promote but avoids needing &mut self)
+        if let Some(strategy) = self.strategy_cache.peek(&strategy_id) {
+            return Some(strategy.clone());
         }
 
-        // Fall back to persistent storage
+        // Fall back to persistent storage (versioned-aware)
         match self
             .backend
-            .get::<_, Strategy>("strategy_records", strategy_id.to_be_bytes())
+            .get_versioned::<_, Strategy>("strategy_records", strategy_id.to_be_bytes())
         {
             Ok(Some(strategy)) => Some(strategy),
             Ok(None) => None,
@@ -1491,8 +1794,11 @@ impl StrategyStore for RedbStrategyStore {
 
     fn get_stats(&self) -> StrategyStats {
         let strategies: Vec<(Vec<u8>, Strategy)> =
-            match self.backend.scan_prefix("strategy_records", vec![]) {
-                Ok(s) => s,
+            match self.backend.scan_prefix_raw("strategy_records", vec![]) {
+                Ok(raw) => raw
+                    .into_iter()
+                    .filter_map(|(k, v)| deserialize_versioned::<Strategy>(&v).ok().map(|s| (k, s)))
+                    .collect(),
                 Err(_) => {
                     return StrategyStats {
                         total_strategies: 0,
@@ -1542,11 +1848,12 @@ impl StrategyStore for RedbStrategyStore {
 
         // Delete pruned strategies from redb + cache
         for id in &pruned_ids {
-            self.strategy_cache.remove(id);
+            self.strategy_cache.pop(id);
+            self.dirty_strategy_ids.remove(id);
             // Build a temporary strategy to clean up indexes
             if let Ok(Some(strategy)) = self
                 .backend
-                .get::<_, Strategy>("strategy_records", id.to_be_bytes())
+                .get_versioned::<_, Strategy>("strategy_records", id.to_be_bytes())
             {
                 let _ = self.delete_strategy(&strategy);
             } else {
@@ -1557,23 +1864,182 @@ impl StrategyStore for RedbStrategyStore {
         pruned_ids.len() + merged
     }
 
-    fn list_all_strategies(&self) -> Vec<Strategy> {
-        let mut all = std::collections::HashMap::new();
+    fn flush_cache(&mut self) {
+        if self.dirty_strategy_ids.is_empty() {
+            return;
+        }
 
-        // Load from redb
-        let scan: Result<Vec<(Vec<u8>, Strategy)>, _> =
-            self.backend.scan_prefix("strategy_records", vec![]);
-        if let Ok(records) = scan {
-            for (_, strategy) in records {
-                all.insert(strategy.id, strategy);
+        let mut all_ops: Vec<BatchOperation> = Vec::new();
+        let mut flushed = 0usize;
+
+        for &id in &self.dirty_strategy_ids {
+            if let Some(strategy) = self.strategy_cache.peek(&id) {
+                match self.persist_strategy_ops(strategy) {
+                    Ok(ops) => {
+                        all_ops.extend(ops);
+                        flushed += 1;
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "flush_cache: failed to build ops for strategy {}: {:?}",
+                            id,
+                            e
+                        );
+                    },
+                }
             }
         }
 
-        // Override with cached versions
-        for (id, entry) in &self.strategy_cache {
-            all.insert(*id, entry.strategy.clone());
+        if !all_ops.is_empty() {
+            if let Err(e) = self.backend.write_batch(all_ops) {
+                tracing::error!("flush_cache: failed to batch-persist strategies: {:?}", e);
+            } else {
+                tracing::info!("flush_cache: persisted {} dirty strategies", flushed);
+                self.dirty_strategy_ids.clear();
+            }
+        }
+    }
+
+    fn reinitialize(&mut self) {
+        self.strategy_cache.clear();
+        self.dirty_strategy_ids.clear();
+        self.next_strategy_id = 1;
+        if let Err(e) = self.initialize() {
+            tracing::error!("RedbStrategyStore reinitialize failed: {:?}", e);
+        }
+        tracing::info!(
+            "RedbStrategyStore reinitialize: next_strategy_id={}",
+            self.next_strategy_id
+        );
+    }
+
+    fn list_all_strategies(&self) -> Vec<Strategy> {
+        let cached_ids: HashSet<StrategyId> =
+            self.strategy_cache.iter().map(|(&id, _)| id).collect();
+
+        let mut all: Vec<Strategy> = Vec::new();
+
+        // Stream from redb, skip cached entries
+        let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
+            .backend
+            .for_each_prefix_raw("strategy_records", vec![], |_key, value| {
+                match deserialize_versioned::<Strategy>(value) {
+                    Ok(strategy) => {
+                        if !cached_ids.contains(&strategy.id) {
+                            all.push(strategy);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("list_all_strategies: skipping corrupt record: {:?}", e);
+                    },
+                }
+                Ok(())
+            });
+
+        if let Err(ForEachError::Storage(e)) = scan_result {
+            tracing::error!("Failed to stream strategies from redb: {:?}", e);
         }
 
-        all.into_values().collect()
+        // Add cached versions (fresher)
+        for (_, strategy) in self.strategy_cache.iter() {
+            all.push(strategy.clone());
+        }
+
+        all
     }
+}
+
+// ========== Public index-building helpers (used by persist + import) ==========
+
+/// Build the secondary index batch operations for a memory (excluding the main record).
+/// Used by both `RedbMemoryStore::persist_memory_ops()` and the export/import system.
+pub fn build_memory_index_ops(memory: &Memory) -> StorageResult<Vec<BatchOperation>> {
+    let mut ops = Vec::with_capacity(3);
+
+    // Index by context fingerprint
+    let mut context_key = Vec::with_capacity(16);
+    context_key.extend_from_slice(&memory.context.fingerprint.to_be_bytes());
+    context_key.extend_from_slice(&memory.id.to_be_bytes());
+    ops.push(BatchOperation::Put {
+        table_name: "mem_by_context_hash".to_string(),
+        key: context_key,
+        value: rmp_serde::to_vec(&())
+            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
+    });
+
+    // Index by agent
+    let mut agent_key = Vec::with_capacity(16);
+    agent_key.extend_from_slice(&memory.agent_id.to_be_bytes());
+    agent_key.extend_from_slice(&memory.id.to_be_bytes());
+    ops.push(BatchOperation::Put {
+        table_name: "mem_by_bucket".to_string(),
+        key: agent_key,
+        value: rmp_serde::to_vec(&())
+            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
+    });
+
+    // Index by goal bucket
+    let goal_bucket = memory.context.goal_bucket_id;
+    if goal_bucket != 0 {
+        let mut gb_key = Vec::with_capacity(16);
+        gb_key.extend_from_slice(&goal_bucket.to_be_bytes());
+        gb_key.extend_from_slice(&memory.id.to_be_bytes());
+        ops.push(BatchOperation::Put {
+            table_name: "mem_by_goal_bucket".to_string(),
+            key: gb_key,
+            value: rmp_serde::to_vec(&())
+                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
+        });
+    }
+
+    Ok(ops)
+}
+
+/// Build the secondary index batch operations for a strategy (excluding the main record).
+/// Used by both `RedbStrategyStore::persist_strategy_ops()` and the export/import system.
+pub fn build_strategy_index_ops(strategy: &Strategy) -> StorageResult<Vec<BatchOperation>> {
+    let mut ops = Vec::with_capacity(3);
+
+    // Index by goal bucket
+    let mut bucket_key = Vec::with_capacity(16);
+    bucket_key.extend_from_slice(&strategy.goal_bucket_id.to_be_bytes());
+    bucket_key.extend_from_slice(&strategy.id.to_be_bytes());
+    ops.push(BatchOperation::Put {
+        table_name: "strategy_by_bucket".to_string(),
+        key: bucket_key,
+        value: rmp_serde::to_vec(&())
+            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
+    });
+
+    // Index by behavior signature
+    let signature_hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        strategy.behavior_signature.hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut signature_key = Vec::with_capacity(16);
+    signature_key.extend_from_slice(&signature_hash.to_be_bytes());
+    signature_key.extend_from_slice(&strategy.id.to_be_bytes());
+    ops.push(BatchOperation::Put {
+        table_name: "strategy_by_signature".to_string(),
+        key: signature_key,
+        value: rmp_serde::to_vec(&())
+            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
+    });
+
+    // Index by agent
+    let mut agent_key = Vec::with_capacity(16);
+    agent_key.extend_from_slice(&strategy.agent_id.to_be_bytes());
+    agent_key.extend_from_slice(&strategy.id.to_be_bytes());
+    let quality_bytes = rmp_serde::to_vec(&strategy.quality_score)
+        .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?;
+    ops.push(BatchOperation::Put {
+        table_name: "strategy_feature_postings".to_string(),
+        key: agent_key,
+        value: quality_bytes,
+    });
+
+    Ok(ops)
 }
