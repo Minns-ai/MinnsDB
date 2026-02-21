@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Table definitions (16 total)
-/// Keys and values are stored as bytes (bincode serialization)
+/// Keys and values are stored as bytes (MessagePack serialization)
 mod table_defs {
     use super::*;
 
@@ -284,14 +284,15 @@ impl RedbBackend {
         })
     }
 
-    /// Put a value (serialize with bincode)
+    /// Put a value (serialize with MessagePack)
     pub fn put<K, V>(&self, table_name: &str, key: K, value: &V) -> StorageResult<()>
     where
         K: AsRef<[u8]>,
         V: Serialize,
     {
         let table_def = Self::get_table_def(table_name)?;
-        let value_bytes = bincode::serialize(value).map_err(StorageError::Serialization)?;
+        let value_bytes =
+            rmp_serde::to_vec(value).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         let write_txn = self
             .db
@@ -344,7 +345,7 @@ impl RedbBackend {
         Ok(())
     }
 
-    /// Get a value (deserialize with bincode)
+    /// Get a value (deserialize with MessagePack)
     pub fn get<K, V>(&self, table_name: &str, key: K) -> StorageResult<Option<V>>
     where
         K: AsRef<[u8]>,
@@ -367,7 +368,8 @@ impl RedbBackend {
         {
             Some(access_guard) => {
                 let bytes = access_guard.value();
-                let value = bincode::deserialize(bytes).map_err(StorageError::Deserialization)?;
+                let value = rmp_serde::from_slice(bytes)
+                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
                 Ok(Some(value))
             },
             None => Ok(None),
@@ -461,8 +463,8 @@ impl RedbBackend {
                 break;
             }
 
-            let deserialized =
-                bincode::deserialize(value.value()).map_err(StorageError::Deserialization)?;
+            let deserialized = rmp_serde::from_slice(value.value())
+                .map_err(|e| StorageError::Deserialization(e.to_string()))?;
 
             results.push((key.value().to_vec(), deserialized));
         }
@@ -684,12 +686,12 @@ mod tests {
             BatchOperation::Put {
                 table_name: table_names::MEMORY_RECORDS.to_string(),
                 key: b"key1".to_vec(),
-                value: bincode::serialize(&100u64).unwrap(),
+                value: rmp_serde::to_vec(&100u64).unwrap(),
             },
             BatchOperation::Put {
                 table_name: table_names::MEMORY_RECORDS.to_string(),
                 key: b"key2".to_vec(),
-                value: bincode::serialize(&200u64).unwrap(),
+                value: rmp_serde::to_vec(&200u64).unwrap(),
             },
         ];
 

@@ -96,9 +96,6 @@ pub struct GraphEngineConfig {
     /// Batch size for processing events
     pub batch_size: usize,
 
-    /// Enable graph persistence to storage
-    pub enable_persistence: bool,
-
     /// Interval for persisting graph state (in events processed)
     pub persistence_interval: u64,
 
@@ -376,7 +373,6 @@ impl Default for GraphEngineConfig {
             auto_strategy_extraction: true,
             auto_reinforcement_learning: true,
             batch_size: 100,
-            enable_persistence: true,
             persistence_interval: 1000,
             max_graph_size: 1_000_000,
             enable_louvain: true,
@@ -1700,11 +1696,13 @@ impl GraphEngine {
         );
 
         // Serialize each node: key = "n" + node_id (big-endian)
+        // Uses MessagePack for schema-evolution safety (handles added/removed fields,
+        // serde_json::Value in properties, and new enum variants across upgrades)
         for (id, node) in &graph.nodes {
             let mut key = Vec::with_capacity(9);
             key.push(b'n');
             key.extend_from_slice(&id.to_be_bytes());
-            let value = bincode::serialize(node).map_err(|e| {
+            let value = rmp_serde::to_vec(node).map_err(|e| {
                 GraphError::OperationError(format!("Failed to serialize node {}: {}", id, e))
             })?;
             ops.push(BatchOperation::Put {
@@ -1719,7 +1717,7 @@ impl GraphEngine {
             let mut key = Vec::with_capacity(9);
             key.push(b'e');
             key.extend_from_slice(&id.to_be_bytes());
-            let value = bincode::serialize(edge).map_err(|e| {
+            let value = rmp_serde::to_vec(edge).map_err(|e| {
                 GraphError::OperationError(format!("Failed to serialize edge {}: {}", id, e))
             })?;
             ops.push(BatchOperation::Put {
@@ -1747,7 +1745,7 @@ impl GraphEngine {
             next_edge_id: graph.next_edge_id,
             stats: graph.stats.clone(),
         };
-        let meta_value = bincode::serialize(&meta).map_err(|e| {
+        let meta_value = rmp_serde::to_vec(&meta).map_err(|e| {
             GraphError::OperationError(format!("Failed to serialize graph metadata: {}", e))
         })?;
         ops.push(BatchOperation::Put {
@@ -1800,11 +1798,13 @@ impl GraphEngine {
         }
 
         let meta: GraphMeta = match backend
-            .get(table_names::GRAPH_ADJACENCY, b"__meta__")
+            .get_raw(table_names::GRAPH_ADJACENCY, b"__meta__")
             .map_err(|e| {
                 GraphError::OperationError(format!("Failed to read graph metadata: {:?}", e))
             })? {
-            Some(m) => m,
+            Some(bytes) => rmp_serde::from_slice(&bytes).map_err(|e| {
+                GraphError::OperationError(format!("Failed to deserialize graph metadata: {}", e))
+            })?,
             None => {
                 tracing::info!("No persisted graph state found — starting fresh");
                 return Ok((0, 0));
@@ -1812,18 +1812,32 @@ impl GraphEngine {
         };
 
         // Load all nodes (keys prefixed with 'n')
-        let raw_nodes: Vec<(Vec<u8>, GraphNode)> = backend
-            .scan_prefix(table_names::GRAPH_NODES, b"n")
+        let raw_node_bytes = backend
+            .scan_prefix_raw(table_names::GRAPH_NODES, b"n")
             .map_err(|e| {
                 GraphError::OperationError(format!("Failed to scan graph nodes: {:?}", e))
             })?;
+        let mut raw_nodes = Vec::with_capacity(raw_node_bytes.len());
+        for (key, value) in raw_node_bytes {
+            let node: GraphNode = rmp_serde::from_slice(&value).map_err(|e| {
+                GraphError::OperationError(format!("Failed to deserialize graph node: {}", e))
+            })?;
+            raw_nodes.push((key, node));
+        }
 
         // Load all edges (keys prefixed with 'e')
-        let raw_edges: Vec<(Vec<u8>, GraphEdge)> = backend
-            .scan_prefix(table_names::GRAPH_EDGES, b"e")
+        let raw_edge_bytes = backend
+            .scan_prefix_raw(table_names::GRAPH_EDGES, b"e")
             .map_err(|e| {
                 GraphError::OperationError(format!("Failed to scan graph edges: {:?}", e))
             })?;
+        let mut raw_edges = Vec::with_capacity(raw_edge_bytes.len());
+        for (key, value) in raw_edge_bytes {
+            let edge: GraphEdge = rmp_serde::from_slice(&value).map_err(|e| {
+                GraphError::OperationError(format!("Failed to deserialize graph edge: {}", e))
+            })?;
+            raw_edges.push((key, edge));
+        }
 
         let node_count = raw_nodes.len();
         let edge_count = raw_edges.len();

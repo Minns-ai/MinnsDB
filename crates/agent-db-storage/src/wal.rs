@@ -270,7 +270,8 @@ impl WriteAheadLog {
         // Serialize and write entries
         let mut writer = self.current_file.lock().unwrap();
         for entry in entries_to_flush {
-            let serialized = bincode::serialize(&entry).map_err(StorageError::Serialization)?;
+            let serialized = rmp_serde::to_vec(&entry)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
 
             // Write length prefix
             let len = serialized.len() as u32;
@@ -349,7 +350,7 @@ impl WriteAheadLog {
             }
 
             // Deserialize and check sequence
-            if let Ok(record) = bincode::deserialize::<WalRecord>(&entry_data) {
+            if let Ok(record) = rmp_serde::from_slice::<WalRecord>(&entry_data) {
                 last_sequence = last_sequence.max(record.sequence);
             }
         }
@@ -387,7 +388,7 @@ impl WriteAheadLog {
                 break;
             }
 
-            if let Ok(record) = bincode::deserialize::<WalRecord>(&entry_data) {
+            if let Ok(record) = rmp_serde::from_slice::<WalRecord>(&entry_data) {
                 if matches!(record.entry, WalEntry::Checkpoint { .. }) {
                     last_checkpoint_sequence = record.sequence;
                 }
@@ -411,7 +412,7 @@ impl WriteAheadLog {
                 break;
             }
 
-            if let Ok(record) = bincode::deserialize::<WalRecord>(&entry_data) {
+            if let Ok(record) = rmp_serde::from_slice::<WalRecord>(&entry_data) {
                 // Skip entries before last checkpoint
                 if record.sequence <= last_checkpoint_sequence {
                     continue;

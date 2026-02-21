@@ -252,7 +252,8 @@ impl StorageEngine {
     /// Store event with durability guarantees
     pub async fn store_event(&self, event: Event) -> StorageResult<()> {
         // Serialize and optionally compress event
-        let serialized = bincode::serialize(&event).map_err(StorageError::Serialization)?;
+        let serialized =
+            rmp_serde::to_vec(&event).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         let raw_len = serialized.len();
         let (data, is_compressed) = match self.config.compression {
@@ -445,7 +446,8 @@ impl StorageEngine {
                 continue;
             };
 
-            let serialized = bincode::serialize(&event).map_err(StorageError::Serialization)?;
+            let serialized = rmp_serde::to_vec(&event)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
             let raw_len = serialized.len();
             let (data, is_compressed) = match self.config.compression {
                 CompressionType::Lz4 => match compress(&serialized, None, true) {
@@ -727,7 +729,8 @@ impl StorageEngine {
         };
 
         // Deserialize
-        let event = bincode::deserialize(&event_data).map_err(StorageError::Serialization)?;
+        let event = rmp_serde::from_slice(&event_data)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         Ok(Some(event))
     }
@@ -894,17 +897,18 @@ impl StorageEngine {
 
     fn decode_wal_event(&self, data: &[u8]) -> StorageResult<(Event, bool)> {
         if let Ok(decompressed) = decompress(data, None) {
-            if let Ok(event) = bincode::deserialize::<Event>(&decompressed) {
+            if let Ok(event) = rmp_serde::from_slice::<Event>(&decompressed) {
                 return Ok((event, true));
             }
         }
 
-        let event = bincode::deserialize::<Event>(data).map_err(StorageError::Serialization)?;
+        let event = rmp_serde::from_slice::<Event>(data)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
         Ok((event, false))
     }
 
     fn update_recovery_counters(&self, event: &Event, stored_bytes: &[u8]) {
-        if let Ok(serialized) = bincode::serialize(event) {
+        if let Ok(serialized) = rmp_serde::to_vec(event) {
             self.counters
                 .total_events_written
                 .fetch_add(1, Ordering::Relaxed);

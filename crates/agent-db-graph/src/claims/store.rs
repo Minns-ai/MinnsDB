@@ -292,7 +292,7 @@ impl ClaimStore {
             let mut loaded = 0usize;
             for item in table.iter()? {
                 let (id_guard, value) = item?;
-                let claim: DerivedClaim = bincode::deserialize(value.value())?;
+                let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
                 if claim.status == ClaimStatus::Active {
                     bm25.index_document(id_guard.value(), &claim.claim_text);
                     if !claim.embedding.is_empty() {
@@ -339,7 +339,7 @@ impl ClaimStore {
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(CLAIMS_TABLE)?;
-            let serialized = bincode::serialize(claim)?;
+            let serialized = rmp_serde::to_vec(claim)?;
             table.insert(claim.id, serialized.as_slice())?;
         }
         write_txn.commit()?;
@@ -361,7 +361,7 @@ impl ClaimStore {
         let table = read_txn.open_table(CLAIMS_TABLE)?;
 
         if let Some(value) = table.get(claim_id)? {
-            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
             debug!("Retrieved claim {}", claim_id);
             Ok(Some(claim))
         } else {
@@ -390,7 +390,7 @@ impl ClaimStore {
         {
             let mut table = write_txn.open_table(CLAIMS_TABLE)?;
             let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
-                let claim: DerivedClaim = bincode::deserialize(value.value())?;
+                let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
                 Some(claim)
             } else {
                 None
@@ -398,7 +398,7 @@ impl ClaimStore {
 
             if let Some(mut claim) = maybe_claim {
                 claim.support_count += 1;
-                let serialized = bincode::serialize(&claim)?;
+                let serialized = rmp_serde::to_vec(&claim)?;
                 table.insert(claim_id, serialized.as_slice())?;
                 debug!(
                     "Added support to claim {} (now: {})",
@@ -416,7 +416,7 @@ impl ClaimStore {
         {
             let mut table = write_txn.open_table(CLAIMS_TABLE)?;
             let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
-                let claim: DerivedClaim = bincode::deserialize(value.value())?;
+                let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
                 Some(claim)
             } else {
                 None
@@ -424,7 +424,7 @@ impl ClaimStore {
 
             if let Some(mut claim) = maybe_claim {
                 claim.status = status;
-                let serialized = bincode::serialize(&claim)?;
+                let serialized = rmp_serde::to_vec(&claim)?;
                 table.insert(claim_id, serialized.as_slice())?;
                 debug!("Updated claim {} status to {:?}", claim_id, status);
 
@@ -444,7 +444,7 @@ impl ClaimStore {
         {
             let mut table = write_txn.open_table(CLAIMS_TABLE)?;
             let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
-                let claim: DerivedClaim = bincode::deserialize(value.value())?;
+                let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
                 Some(claim)
             } else {
                 None
@@ -452,7 +452,7 @@ impl ClaimStore {
 
             if let Some(mut claim) = maybe_claim {
                 claim.mark_accessed();
-                let serialized = bincode::serialize(&claim)?;
+                let serialized = rmp_serde::to_vec(&claim)?;
                 table.insert(claim_id, serialized.as_slice())?;
             }
         }
@@ -469,7 +469,7 @@ impl ClaimStore {
         let result = {
             let mut table = write_txn.open_table(CLAIMS_TABLE)?;
             let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
-                let claim: DerivedClaim = bincode::deserialize(value.value())?;
+                let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
                 Some(claim)
             } else {
                 None
@@ -477,7 +477,7 @@ impl ClaimStore {
 
             if let Some(mut claim) = maybe_claim {
                 claim.record_outcome(success);
-                let serialized = bincode::serialize(&claim)?;
+                let serialized = rmp_serde::to_vec(&claim)?;
                 table.insert(claim_id, serialized.as_slice())?;
                 debug!(
                     "Recorded {} outcome for claim {} (pos={}, neg={})",
@@ -532,7 +532,7 @@ impl ClaimStore {
             }
 
             let (_id, value) = item?;
-            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
 
             if claim.status == ClaimStatus::Active {
                 claims.push(claim);
@@ -576,7 +576,8 @@ impl ClaimStore {
                 if let Ok(table) = read_txn.open_table(CLAIMS_TABLE) {
                     for cid in &upsert_ids {
                         if let Ok(Some(value)) = table.get(*cid) {
-                            if let Ok(claim) = bincode::deserialize::<DerivedClaim>(value.value()) {
+                            if let Ok(claim) = rmp_serde::from_slice::<DerivedClaim>(value.value())
+                            {
                                 if claim.status == ClaimStatus::Active {
                                     upsert_data.push((claim.id, claim.embedding, claim.claim_text));
                                 }
@@ -764,7 +765,7 @@ impl ClaimStore {
         {
             let mut table = write_txn.open_table(CLAIMS_TABLE)?;
             let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
-                let claim: DerivedClaim = bincode::deserialize(value.value())?;
+                let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
                 Some(claim)
             } else {
                 None
@@ -772,7 +773,7 @@ impl ClaimStore {
 
             if let Some(mut claim) = maybe_claim {
                 claim.embedding = embedding.clone();
-                let serialized = bincode::serialize(&claim)?;
+                let serialized = rmp_serde::to_vec(&claim)?;
                 table.insert(claim_id, serialized.as_slice())?;
                 debug!(
                     "Updated embedding for claim {} ({} dimensions)",
@@ -804,7 +805,7 @@ impl ClaimStore {
             }
 
             let (_id, value) = item?;
-            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
 
             if claim.status == ClaimStatus::Active && claim.embedding.is_empty() {
                 claims.push(claim);
@@ -844,7 +845,7 @@ impl ClaimStore {
         let mut active_claims: Vec<(ClaimId, u64)> = Vec::new(); // (id, created_at)
         for item in table.iter()? {
             let (id_guard, value) = item?;
-            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
             if claim.status == ClaimStatus::Active && !claim.embedding.is_empty() {
                 active_claims.push((id_guard.value(), claim.created_at));
             }
@@ -883,7 +884,7 @@ impl ClaimStore {
         let mut to_purge: Vec<ClaimId> = Vec::new();
         for item in table.iter()? {
             let (id_guard, value) = item?;
-            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
             match claim.status {
                 ClaimStatus::Dormant | ClaimStatus::Rejected | ClaimStatus::Superseded => {
                     to_purge.push(id_guard.value());
@@ -925,7 +926,7 @@ impl ClaimStore {
         let mut to_dormant: Vec<ClaimId> = Vec::new();
         for item in table.iter()? {
             let (id_guard, value) = item?;
-            let claim: DerivedClaim = bincode::deserialize(value.value())?;
+            let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
             if claim.status == ClaimStatus::Active {
                 if let Some(exp) = claim.expires_at {
                     if now > exp {

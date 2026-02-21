@@ -58,7 +58,7 @@ impl NerFeatureStore {
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(NER_FEATURES_TABLE)?;
-            let serialized = bincode::serialize(&versioned)?;
+            let serialized = rmp_serde::to_vec(&versioned)?;
             table.insert(features.event_id, serialized.as_slice())?;
         }
         write_txn.commit()?;
@@ -80,7 +80,7 @@ impl NerFeatureStore {
             let bytes = value.value();
 
             // Try to deserialize as versioned first, fall back to legacy format
-            let features = match bincode::deserialize::<VersionedFeatures>(bytes) {
+            let features = match rmp_serde::from_slice::<VersionedFeatures>(bytes) {
                 Ok(versioned) => {
                     if versioned.version != CURRENT_SCHEMA_VERSION {
                         warn!(
@@ -97,7 +97,7 @@ impl NerFeatureStore {
                         "Loading legacy unversioned NER features for event {}",
                         event_id
                     );
-                    bincode::deserialize::<ExtractedFeatures>(bytes)?
+                    rmp_serde::from_slice::<ExtractedFeatures>(bytes)?
                 },
             };
 

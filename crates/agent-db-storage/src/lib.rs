@@ -13,10 +13,10 @@ pub mod error {
         Io(#[from] std::io::Error),
 
         #[error("Serialization error: {0}")]
-        Serialization(#[from] bincode::Error),
+        Serialization(String),
 
         #[error("Deserialization error: {0}")]
-        Deserialization(bincode::Error),
+        Deserialization(String),
 
         #[error("Compression error: {0}")]
         Compression(String),

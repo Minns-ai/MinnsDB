@@ -235,7 +235,6 @@ impl MultiTenantGraphEngine {
         
         // Enable/disable features based on tenant configuration
         config.auto_pattern_detection = tenant_config.features.advanced_patterns;
-        config.enable_persistence = true; // Always enabled
         config.enable_query_cache = true; // Always enabled for performance
         
         config

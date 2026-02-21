@@ -126,8 +126,8 @@ fn json_bytes<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, GraphStoreError> {
 }
 
 #[inline]
-fn bincode_bytes<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, GraphStoreError> {
-    bincode::serialize(v).map_err(|e| GraphStoreError::Serialization(e.to_string()))
+fn msgpack_bytes<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, GraphStoreError> {
+    rmp_serde::to_vec(v).map_err(|e| GraphStoreError::Serialization(e.to_string()))
 }
 
 #[inline]
@@ -352,7 +352,7 @@ impl RedbGraphStore {
             partition.nodes.insert(node.id, node);
         }
 
-        // Load forward adjacency lists (bincode CompressedAdjacencyList storing EdgeIds)
+        // Load forward adjacency lists (msgpack CompressedAdjacencyList storing EdgeIds)
         let fwd_prefix = {
             let mut p = vec![KeyType::AdjacencyForward as u8];
             p.extend_from_slice(&bucket.to_be_bytes());
@@ -381,7 +381,7 @@ impl RedbGraphStore {
                 .insert(node_id, SmallVec::from_vec(compressed.decompress()));
         }
 
-        // Load reverse adjacency lists (bincode CompressedAdjacencyList storing EdgeIds)
+        // Load reverse adjacency lists (msgpack CompressedAdjacencyList storing EdgeIds)
         let rev_prefix = {
             let mut p = vec![KeyType::AdjacencyReverse as u8];
             p.extend_from_slice(&bucket.to_be_bytes());
@@ -678,7 +678,7 @@ impl RedbGraphStore {
                     ops.push(op_put(
                         TABLE_GRAPH_ADJACENCY,
                         fwd_key,
-                        bincode_bytes(&compressed)?,
+                        msgpack_bytes(&compressed)?,
                     ));
                     partition.forward_edges.insert(from, edge_ids);
                 }
@@ -704,7 +704,7 @@ impl RedbGraphStore {
                     ops.push(op_put(
                         TABLE_GRAPH_ADJACENCY,
                         rev_key,
-                        bincode_bytes(&compressed)?,
+                        msgpack_bytes(&compressed)?,
                     ));
                     partition.reverse_edges.insert(to, edge_ids);
                 }
@@ -870,7 +870,7 @@ impl GraphStore for RedbGraphStore {
             ops.push(op_put(
                 TABLE_GRAPH_ADJACENCY,
                 fwd_key,
-                bincode_bytes(&compressed)?,
+                msgpack_bytes(&compressed)?,
             ));
         }
 
@@ -880,7 +880,7 @@ impl GraphStore for RedbGraphStore {
             ops.push(op_put(
                 TABLE_GRAPH_ADJACENCY,
                 rev_key,
-                bincode_bytes(&compressed)?,
+                msgpack_bytes(&compressed)?,
             ));
         }
 

@@ -314,8 +314,8 @@ impl RedbMemoryStore {
         let mut ops = Vec::with_capacity(4);
 
         // Main record
-        let value =
-            bincode::serialize(memory).map_err(agent_db_storage::StorageError::Serialization)?;
+        let value = rmp_serde::to_vec(memory)
+            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?;
         ops.push(BatchOperation::Put {
             table_name: "memory_records".to_string(),
             key: memory.id.to_be_bytes().to_vec(),
@@ -329,8 +329,8 @@ impl RedbMemoryStore {
         ops.push(BatchOperation::Put {
             table_name: "mem_by_context_hash".to_string(),
             key: context_key,
-            value: bincode::serialize(&())
-                .map_err(agent_db_storage::StorageError::Serialization)?,
+            value: rmp_serde::to_vec(&())
+                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
         });
 
         // Index by agent
@@ -340,8 +340,8 @@ impl RedbMemoryStore {
         ops.push(BatchOperation::Put {
             table_name: "mem_by_bucket".to_string(),
             key: agent_key,
-            value: bincode::serialize(&())
-                .map_err(agent_db_storage::StorageError::Serialization)?,
+            value: rmp_serde::to_vec(&())
+                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
         });
 
         // Index by goal bucket
@@ -353,8 +353,8 @@ impl RedbMemoryStore {
             ops.push(BatchOperation::Put {
                 table_name: "mem_by_goal_bucket".to_string(),
                 key: gb_key,
-                value: serde_json::to_vec(&())
-                    .map_err(|e| agent_db_storage::StorageError::DatabaseError(e.to_string()))?,
+                value: rmp_serde::to_vec(&())
+                    .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
             });
         }
 
@@ -1234,8 +1234,8 @@ impl RedbStrategyStore {
         let mut ops = Vec::with_capacity(4);
 
         // Main record
-        let value =
-            bincode::serialize(strategy).map_err(agent_db_storage::StorageError::Serialization)?;
+        let value = rmp_serde::to_vec(strategy)
+            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?;
         ops.push(BatchOperation::Put {
             table_name: "strategy_records".to_string(),
             key: strategy.id.to_be_bytes().to_vec(),
@@ -1249,8 +1249,8 @@ impl RedbStrategyStore {
         ops.push(BatchOperation::Put {
             table_name: "strategy_by_bucket".to_string(),
             key: bucket_key,
-            value: bincode::serialize(&())
-                .map_err(agent_db_storage::StorageError::Serialization)?,
+            value: rmp_serde::to_vec(&())
+                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
         });
 
         // Index by behavior signature
@@ -1267,16 +1267,16 @@ impl RedbStrategyStore {
         ops.push(BatchOperation::Put {
             table_name: "strategy_by_signature".to_string(),
             key: signature_key,
-            value: bincode::serialize(&())
-                .map_err(agent_db_storage::StorageError::Serialization)?,
+            value: rmp_serde::to_vec(&())
+                .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?,
         });
 
         // Index by agent
         let mut agent_key = Vec::with_capacity(16);
         agent_key.extend_from_slice(&strategy.agent_id.to_be_bytes());
         agent_key.extend_from_slice(&strategy.id.to_be_bytes());
-        let quality_bytes = bincode::serialize(&strategy.quality_score)
-            .map_err(agent_db_storage::StorageError::Serialization)?;
+        let quality_bytes = rmp_serde::to_vec(&strategy.quality_score)
+            .map_err(|e| agent_db_storage::StorageError::Serialization(e.to_string()))?;
         ops.push(BatchOperation::Put {
             table_name: "strategy_feature_postings".to_string(),
             key: agent_key,
