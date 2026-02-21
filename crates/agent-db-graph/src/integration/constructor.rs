@@ -1,0 +1,396 @@
+use super::*;
+
+impl GraphEngine {
+    /// Create a new graph engine with default configuration
+    pub async fn new() -> GraphResult<Self> {
+        Self::with_config(GraphEngineConfig::default()).await
+    }
+
+    /// Create a graph engine with custom configuration
+    pub async fn with_config(config: GraphEngineConfig) -> GraphResult<Self> {
+        // Apply Free Tier overrides if requested via environment
+        let config = if std::env::var("SERVICE_PROFILE").unwrap_or_default() == "free" {
+            tracing::info!("Applying Free Tier resource limits (0.25 CPU, 768MB RAM cap, No NER)");
+            let mut free_config = config;
+            free_config.enable_louvain = false;
+            free_config.redb_cache_size_mb = 64;
+            free_config.memory_cache_size = 1000;
+            free_config.strategy_cache_size = 500;
+            free_config.ner_workers = 0; // Disable NER workers for free tier
+            free_config.claim_workers = 1;
+            free_config.embedding_workers = 1;
+            free_config
+        } else {
+            config
+        };
+
+        let inference = Arc::new(RwLock::new(GraphInference::with_config(
+            config.inference_config.clone(),
+        )));
+
+        let traversal = Arc::new(RwLock::new(GraphTraversal::new()));
+
+        let event_ordering = Arc::new(EventOrderingEngine::new(config.ordering_config.clone()));
+
+        let scoped_inference = Arc::new(
+            crate::scoped_inference::ScopedInferenceEngine::new(
+                config.scoped_inference_config.clone(),
+            )
+            .await?,
+        );
+
+        // Initialize self-evolution components
+        // Note: EpisodeDetector requires an Arc<Graph> but doesn't actually use it for detection
+        // It uses event-based heuristics instead. We provide an empty graph for API compatibility.
+        let graph_for_episodes = Arc::new(Graph::new());
+        let episode_detector = Arc::new(RwLock::new(EpisodeDetector::new(
+            graph_for_episodes,
+            config.episode_config.clone(),
+        )));
+
+        // Initialize stores based on storage backend configuration
+        let (memory_store, strategy_store, redb_backend): (
+            MemoryStoreType,
+            StrategyStoreType,
+            Option<Arc<RedbBackend>>,
+        ) = match config.storage_backend {
+            StorageBackend::InMemory => {
+                tracing::info!("Initializing with InMemory storage backend");
+                let mem = Arc::new(RwLock::new(Box::new(InMemoryMemoryStore::new(
+                    config.memory_config.clone(),
+                )) as Box<dyn MemoryStore>));
+                let strat = Arc::new(RwLock::new(Box::new(InMemoryStrategyStore::new(
+                    config.strategy_config.clone(),
+                )) as Box<dyn StrategyStore>));
+                (mem, strat, None)
+            },
+            StorageBackend::Persistent => {
+                tracing::info!(
+                    "Initializing with Persistent storage backend (redb) at {:?}",
+                    config.redb_path
+                );
+
+                // Initialize redb backend
+                let redb_config = RedbConfig {
+                    data_path: config.redb_path.clone(),
+                    cache_size_bytes: config.redb_cache_size_mb * 1024 * 1024,
+                    repair_on_open: false,
+                };
+                let backend = Arc::new(RedbBackend::open(redb_config).map_err(|e| {
+                    GraphError::OperationError(format!("Failed to open redb: {:?}", e))
+                })?);
+
+                // Create memory store with LRU cache
+                let mut mem_store = RedbMemoryStore::new(
+                    backend.clone(),
+                    config.memory_config.clone(),
+                    config.memory_cache_size.max(1000), // Minimum 1000 entries
+                );
+                mem_store.initialize().map_err(|e| {
+                    GraphError::OperationError(format!(
+                        "Failed to initialize memory store: {:?}",
+                        e
+                    ))
+                })?;
+
+                // Create strategy store with LRU cache
+                let mut strat_store = RedbStrategyStore::new(
+                    backend.clone(),
+                    config.strategy_config.clone(),
+                    config.strategy_cache_size.max(500), // Minimum 500 entries
+                );
+                strat_store.initialize().map_err(|e| {
+                    GraphError::OperationError(format!(
+                        "Failed to initialize strategy store: {:?}",
+                        e
+                    ))
+                })?;
+
+                let mem = Arc::new(RwLock::new(Box::new(mem_store) as Box<dyn MemoryStore>));
+                let strat = Arc::new(RwLock::new(Box::new(strat_store) as Box<dyn StrategyStore>));
+
+                tracing::info!(
+                    "Persistent storage initialized: memory_cache={}, strategy_cache={}",
+                    config.memory_cache_size,
+                    config.strategy_cache_size
+                );
+
+                (mem, strat, Some(backend))
+            },
+        };
+
+        let transition_model = Arc::new(RwLock::new(TransitionModel::new(
+            TransitionModelConfig::default(),
+        )));
+
+        // Initialize advanced graph features
+        let index_manager = Arc::new(RwLock::new(IndexManager::new()));
+
+        // Auto-create common indexes for fast lookups
+        {
+            let mut idx_mgr = index_manager.write().await;
+
+            // Context hash index (exact match, high frequency)
+            idx_mgr.create_index(
+                "context_hash_idx".to_string(),
+                "context_hash".to_string(),
+                IndexType::Hash,
+            )?;
+
+            // Agent type index (exact match)
+            idx_mgr.create_index(
+                "agent_type_idx".to_string(),
+                "agent_type".to_string(),
+                IndexType::Hash,
+            )?;
+
+            // Event type index (exact match)
+            idx_mgr.create_index(
+                "event_type_idx".to_string(),
+                "event_type".to_string(),
+                IndexType::Hash,
+            )?;
+
+            // Significance index (range queries)
+            idx_mgr.create_index(
+                "significance_idx".to_string(),
+                "significance".to_string(),
+                IndexType::BTree,
+            )?;
+        }
+
+        let louvain = Arc::new(LouvainAlgorithm::new());
+        let centrality = Arc::new(CentralityMeasures::new());
+
+        // Initialize semantic memory components if enabled
+        let (ner_queue, ner_store) = if config.enable_semantic_memory {
+            tracing::info!("Initializing semantic memory with NER extraction");
+
+            // Create NER extractor (external service)
+            let extractor = Arc::new(
+                agent_db_ner::NerServiceExtractor::new(agent_db_ner::NerServiceConfig {
+                    base_url: config.ner_service_url.clone(),
+                    request_timeout_ms: config.ner_request_timeout_ms,
+                    model: config.ner_model.clone(),
+                    max_retries: 3,
+                    retry_delay_ms: 100,
+                })
+                .map_err(|e| {
+                    GraphError::OperationError(format!("Failed to initialize NER client: {}", e))
+                })?,
+            );
+
+            // Create NER extraction queue
+            let queue = Arc::new(agent_db_ner::NerExtractionQueue::new(
+                extractor,
+                config.ner_workers,
+            ));
+
+            // Create NER storage
+            let store = if let Some(path) = &config.ner_storage_path {
+                let store = agent_db_ner::NerFeatureStore::new(path).map_err(|e| {
+                    GraphError::OperationError(format!("Failed to initialize NER storage: {}", e))
+                })?;
+                Some(Arc::new(store))
+            } else {
+                None
+            };
+
+            tracing::info!(
+                "Semantic memory initialized with {} NER workers",
+                config.ner_workers
+            );
+            (Some(queue), store)
+        } else {
+            (None, None)
+        };
+
+        // Initialize claim extraction components if semantic memory is enabled
+        let (claim_queue, claim_store, llm_client, embedding_client) = if config
+            .enable_semantic_memory
+        {
+            tracing::info!("Initializing claim extraction pipeline");
+
+            // Create claim store
+            let store = if let Some(path) = &config.claim_storage_path {
+                let store = crate::claims::ClaimStore::new(path).map_err(|e| {
+                    GraphError::OperationError(format!("Failed to initialize claim storage: {}", e))
+                })?;
+                Some(Arc::new(store))
+            } else {
+                None
+            };
+
+            // Create LLM client
+            let client: Arc<dyn crate::claims::LlmClient> =
+                if let Some(key) = &config.openai_api_key {
+                    Arc::new(crate::claims::OpenAiClient::new(
+                        key.clone(),
+                        config.llm_model.clone(),
+                    ))
+                } else {
+                    Arc::new(crate::claims::MockClient::new())
+                };
+
+            // Create embedding client
+            let embedding_client: Arc<dyn crate::claims::EmbeddingClient> =
+                if let Some(key) = &config.openai_api_key {
+                    Arc::new(crate::claims::OpenAiEmbeddingClient::new(
+                        key.clone(),
+                        "text-embedding-3-small".to_string(),
+                    ))
+                } else {
+                    Arc::new(crate::claims::MockEmbeddingClient::new(384))
+                };
+
+            // Create claim extraction queue
+            let queue = if let Some(ref store) = store {
+                let extraction_config = crate::claims::ClaimExtractionConfig {
+                    max_claims_per_input: config.claim_max_per_input,
+                    min_confidence: config.claim_min_confidence,
+                    min_evidence_length: 10,
+                    enable_dedup: true,
+                    maintenance_config: config.maintenance_config.clone(),
+                };
+
+                let queue = Arc::new(crate::claims::ClaimExtractionQueue::new(
+                    client.clone(),
+                    embedding_client.clone(),
+                    store.clone(),
+                    config.claim_workers,
+                    extraction_config,
+                ));
+                Some(queue)
+            } else {
+                None
+            };
+
+            tracing::info!(
+                "Claim extraction initialized with {} workers",
+                config.claim_workers
+            );
+            (queue, store, Some(client), Some(embedding_client))
+        } else {
+            (None, None, None, None)
+        };
+
+        // Initialize embedding generation components if semantic memory is enabled
+        let (embedding_queue, embedding_client) =
+            if config.enable_semantic_memory && config.enable_embedding_generation {
+                tracing::info!("Initializing embedding generation pipeline");
+
+                // Use the client created above if available, otherwise create a new one
+                let client: Arc<dyn crate::claims::EmbeddingClient> =
+                    if let Some(ref client) = embedding_client {
+                        client.clone()
+                    } else if let Some(key) = &config.openai_api_key {
+                        Arc::new(crate::claims::OpenAiEmbeddingClient::new(
+                            key.clone(),
+                            "text-embedding-3-small".to_string(),
+                        ))
+                    } else {
+                        Arc::new(crate::claims::MockEmbeddingClient::new(384))
+                    };
+
+                // Create embedding queue if claim store is available
+                let queue = if let Some(ref store) = claim_store {
+                    let queue = Arc::new(crate::claims::EmbeddingQueue::new(
+                        client.clone(),
+                        store.clone(),
+                        config.embedding_workers,
+                    ));
+                    Some(queue)
+                } else {
+                    None
+                };
+
+                tracing::info!(
+                    "Embedding generation initialized with {} workers",
+                    config.embedding_workers
+                );
+                (queue, Some(client))
+            } else {
+                (None, embedding_client)
+            };
+
+        // 10x/100x: Build consolidation + refinement before config is moved
+        let consolidation_engine_arc =
+            Arc::new(RwLock::new(crate::consolidation::ConsolidationEngine::new(
+                config.consolidation_config.clone(),
+                100_000,
+            )));
+        let refinement_engine_arc = {
+            let mut refine_config = config.refinement_config.clone();
+            if config.openai_api_key.is_some() {
+                refine_config.enable_llm_refinement = true;
+            }
+            if config.openai_api_key.is_some() || config.enable_semantic_memory {
+                refine_config.enable_summary_embedding = true;
+            }
+            let engine = crate::refinement::RefinementEngine::new(
+                refine_config,
+                config.openai_api_key.clone(),
+            );
+            Some(Arc::new(engine))
+        };
+
+        // Initialize RedbGraphStore alongside the existing backend
+        let graph_store = if let Some(ref backend) = redb_backend {
+            let store = crate::redb_graph_store::RedbGraphStore::new(
+                backend.clone(),
+                8, // max loaded partitions
+            );
+            tracing::info!("RedbGraphStore initialized for unified graph persistence");
+            Some(Arc::new(RwLock::new(store)))
+        } else {
+            None
+        };
+
+        let engine = Self {
+            inference,
+            traversal,
+            event_ordering,
+            scoped_inference,
+            episode_detector,
+            memory_store,
+            strategy_store,
+            transition_model,
+            event_store: Arc::new(RwLock::new(HashMap::new())),
+            event_store_order: Arc::new(RwLock::new(VecDeque::new())),
+            decision_traces: Arc::new(dashmap::DashMap::new()),
+            redb_backend,
+            graph_store,
+            config,
+            stats: Arc::new(RwLock::new(GraphEngineStats::default())),
+            event_buffer: Arc::new(RwLock::new(Vec::new())),
+            last_persistence: Arc::new(RwLock::new(0)),
+            index_manager,
+            louvain,
+            centrality,
+            ner_queue,
+            ner_store,
+            claim_queue,
+            claim_store,
+            llm_client,
+            embedding_queue,
+            embedding_client,
+            // 10x/100x: Consolidation + Refinement — built BEFORE config is moved
+            consolidation_engine: consolidation_engine_arc,
+            refinement_engine: refinement_engine_arc,
+            episodes_since_consolidation: Arc::new(RwLock::new(0)),
+        };
+
+        // Restore graph state from redb if available
+        match engine.restore_graph_state().await {
+            Ok((nodes, edges)) if nodes > 0 || edges > 0 => {
+                tracing::info!("Restored graph from disk: {} nodes, {} edges", nodes, edges);
+            },
+            Ok(_) => {},
+            Err(e) => {
+                tracing::warn!("Failed to restore graph state (starting fresh): {}", e);
+            },
+        }
+
+        Ok(engine)
+    }
+}

@@ -6,7 +6,6 @@
 use crate::{GraphResult, GraphError, GraphEngine, GraphEngineConfig, GraphQuery, QueryResult};
 use agent_db_core::tenant::{TenantId, TenantManager, TenantConfig, Operation, UsageUpdate, TenantError};
 use agent_db_events::Event;
-use agent_db_storage::StorageEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -18,10 +17,7 @@ pub struct MultiTenantGraphEngine {
     
     /// Per-tenant graph engines
     tenant_graphs: Arc<RwLock<HashMap<TenantId, Arc<GraphEngine>>>>,
-    
-    /// Shared storage engine (with tenant isolation)
-    storage: Arc<StorageEngine>,
-    
+
     /// Default configuration for new tenants
     default_config: GraphEngineConfig,
     
@@ -31,11 +27,10 @@ pub struct MultiTenantGraphEngine {
 
 impl MultiTenantGraphEngine {
     /// Create a new multi-tenant graph engine
-    pub async fn new(storage: Arc<StorageEngine>) -> GraphResult<Self> {
+    pub async fn new() -> GraphResult<Self> {
         Ok(Self {
             tenant_manager: Arc::new(RwLock::new(TenantManager::new())),
             tenant_graphs: Arc::new(RwLock::new(HashMap::new())),
-            storage,
             default_config: GraphEngineConfig::default(),
             analytics: None,
         })
@@ -50,11 +45,10 @@ impl MultiTenantGraphEngine {
         }
         
         // Create isolated graph engine for this tenant
-        let tenant_storage = self.create_tenant_storage(&config.tenant_id).await?;
         let graph_config = self.create_graph_config_for_tenant(&config);
-        let graph_engine = GraphEngine::with_storage(graph_config, tenant_storage)
+        let graph_engine = GraphEngine::with_config(graph_config)
             .await
-            .map_err(|e| TenantError::InsufficientPermissions)?;
+            .map_err(|_e| TenantError::InsufficientPermissions)?;
         
         // Store the tenant's graph engine
         {
@@ -204,13 +198,6 @@ impl MultiTenantGraphEngine {
         }
         
         Ok(report)
-    }
-    
-    /// Create tenant-specific storage partition
-    async fn create_tenant_storage(&self, tenant_id: &TenantId) -> Result<Arc<StorageEngine>, TenantError> {
-        // In a real implementation, this would create a tenant-specific partition
-        // For now, we'll return the shared storage with tenant prefixing
-        Ok(self.storage.clone())
     }
     
     /// Create graph configuration tailored to tenant

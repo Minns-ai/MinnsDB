@@ -14,7 +14,6 @@
 
 use agent_db_core::types::{AgentId, SessionId, AgentType, generate_event_id, current_timestamp};
 use agent_db_events::{Event, EventContext, EventType, ActionOutcome, CognitiveType, EnvironmentState, TemporalContext, ResourceState, ComputationalResources};
-use agent_db_storage::{StorageEngine, StorageConfig, CompressionType};
 use agent_db_graph::{
     GraphEngine, GraphEngineConfig,
     event_ordering::OrderingConfig,
@@ -32,15 +31,6 @@ use serde_json::json;
 #[tokio::test]
 async fn test_complete_system_integration() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize components
-    let storage_config = StorageConfig {
-        data_dir: "./test_data".to_string(),
-        compression: CompressionType::Lz4,
-        max_file_size_mb: 10,
-        enable_checksums: true,
-        sync_interval_secs: 1,
-    };
-    let storage = StorageEngine::new(storage_config).await?;
-
     let graph_config = GraphEngineConfig {
         ordering_config: OrderingConfig {
             reorder_window_ms: 1000,
@@ -75,19 +65,14 @@ async fn test_complete_system_integration() -> Result<(), Box<dyn std::error::Er
         create_test_event(4, agent_type_b.clone(), session_2, &context, base_time + 1_500_000_000),
     ];
 
-    // Test 1: Event processing and storage
+    // Test 1: Event processing
     for event in &events {
         let result = graph.process_event(event.clone()).await?;
-        storage.store_event(event.clone()).await?;
-        
+
         assert!(!result.nodes_created.is_empty(), "Should create nodes for each event");
     }
 
-    // Test 2: Storage retrieval
-    let retrieved_events = storage.query_events(session_1, base_time, base_time + 2_000_000_000).await?;
-    assert_eq!(retrieved_events.len(), 2, "Should retrieve events for session 1");
-
-    // Test 3: Graph statistics
+    // Test 2: Graph statistics
     let graph_stats = graph.get_graph_stats().await;
     assert!(graph_stats.node_count > 0, "Graph should have nodes");
     assert!(graph_stats.edge_count >= 0, "Graph should have edges");
@@ -110,7 +95,6 @@ async fn test_complete_system_integration() -> Result<(), Box<dyn std::error::Er
 
     // Cleanup
     graph.flush_all_buffers().await?;
-    storage.sync().await?;
 
     println!("✅ All integration tests passed!");
     Ok(())
@@ -180,38 +164,6 @@ async fn test_cross_scope_inference() -> Result<(), Box<dyn std::error::Error>> 
     assert!(scope_stats.cross_scope_edges > 0, "Should create cross-scope edges");
 
     println!("✅ Cross-scope inference test passed!");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_storage_persistence() -> Result<(), Box<dyn std::error::Error>> {
-    let config = StorageConfig {
-        data_dir: "./test_persistence".to_string(),
-        compression: CompressionType::None, // No compression for testing
-        max_file_size_mb: 1,
-        enable_checksums: true,
-        sync_interval_secs: 1,
-    };
-
-    // Create storage engine and add some events
-    {
-        let storage = StorageEngine::new(config.clone()).await?;
-        let context = create_test_context();
-        let base_time = current_timestamp();
-
-        let event = create_test_event(1, "persistent-agent".to_string(), 42, &context, base_time);
-        storage.store_event(&event).await?;
-        storage.sync().await?;
-    } // Storage engine goes out of scope
-
-    // Create new storage engine (simulating restart)
-    {
-        let storage = StorageEngine::new(config).await?;
-        let events = storage.query_events(42, 0, u64::MAX).await?;
-        assert_eq!(events.len(), 1, "Should persist and retrieve event after restart");
-    }
-
-    println!("✅ Storage persistence test passed!");
     Ok(())
 }
 

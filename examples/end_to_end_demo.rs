@@ -18,7 +18,6 @@ use agent_db_graph::{
     scoped_inference::{InferenceScope, ScopedInferenceConfig},
     GraphEngine, GraphEngineConfig,
 };
-use agent_db_storage::{CompressionType, StorageConfig, StorageEngine};
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -28,16 +27,6 @@ use tokio::time::sleep;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Agentic Database - End-to-End System Demo");
     println!("===============================================\n");
-
-    // Initialize storage engine
-    println!("📁 Initializing storage layer...");
-    let mut storage_config = StorageConfig::with_directory("./demo_data");
-    storage_config.compression = CompressionType::Lz4;
-    storage_config.max_file_size_mb = 100;
-    storage_config.enable_checksums = true;
-    storage_config.sync_interval_secs = 30;
-    let storage = StorageEngine::new(storage_config).await?;
-    println!("   ✅ Storage engine initialized");
 
     // Initialize graph engine with comprehensive config
     println!("🧠 Initializing graph engine...");
@@ -91,7 +80,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, event) in dev_events.iter().enumerate() {
         let result = graph.process_event(event.clone()).await?;
-        storage.store_event(event.clone()).await?;
 
         println!(
             "   Event {}: {} ({}ms) - {} nodes, {} relationships",
@@ -117,7 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, event) in analysis_events.iter().enumerate() {
         let result = graph.process_event(event.clone()).await?;
-        storage.store_event(event.clone()).await?;
 
         println!(
             "   Event {}: {} ({}ms) - {} nodes, {} relationships",
@@ -141,7 +128,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, event) in monitoring_events.iter().enumerate() {
         let result = graph.process_event(event.clone()).await?;
-        storage.store_event(event.clone()).await?;
 
         println!(
             "   Event {}: {} ({}ms) - {} nodes, {} relationships",
@@ -165,7 +151,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, event) in task_events.iter().enumerate() {
         let result = graph.process_event(event.clone()).await?;
-        storage.store_event(event.clone()).await?;
 
         println!(
             "   Event {}: {} ({}ms) - {} nodes, {} relationships",
@@ -180,19 +165,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Flush any remaining buffered events
     println!("\n🔄 Flushing event buffers...");
     graph.flush_all_buffers().await?;
-
-    // Storage analytics
-    println!("\n💾 Storage Analytics:");
-    let storage_stats = storage.get_storage_stats().await;
-    println!("   Total events stored: {}", storage_stats.total_events);
-    println!(
-        "   Storage size: {:.2} MB",
-        storage_stats.total_size_bytes as f64 / (1024.0 * 1024.0)
-    );
-    println!(
-        "   Compression ratio: {:.2}x",
-        storage_stats.compression_ratio
-    );
 
     // Graph analytics
     println!("\n🕸️  Graph Analytics:");
@@ -309,10 +281,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "⚠️  Needs attention"
         }
     );
-
-    // Final synchronization
-    println!("\n💫 Synchronizing storage...");
-    storage.sync().await?;
 
     println!("\n🎉 End-to-End Demo Completed Successfully!");
     println!("   The Agentic Database successfully processed events from multiple");

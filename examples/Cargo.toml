@@ -8,10 +8,6 @@ name = "basic_pipeline"
 path = "basic_pipeline.rs"
 
 [[bin]]
-name = "storage_pipeline"
-path = "storage_pipeline.rs"
-
-[[bin]]
 name = "graph_integration"
 path = "graph_integration.rs"
 
@@ -30,7 +26,6 @@ path = "end_to_end_demo.rs"
 [dependencies]
 agent-db-core = { path = "../crates/agent-db-core" }
 agent-db-events = { path = "../crates/agent-db-events" }
-agent-db-storage = { path = "../crates/agent-db-storage" }
 agent-db-graph = { path = "../crates/agent-db-graph" }
 serde_json = "1.0"
 bincode = "1.3"
