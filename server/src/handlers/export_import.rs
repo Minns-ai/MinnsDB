@@ -118,9 +118,8 @@ pub async fn export_handler(State(state): State<AppState>) -> Result<Response, A
         let backend = match engine.export_backend() {
             Ok(b) => b,
             Err(e) => {
-                let _ = tx.blocking_send(Err(std::io::Error::other(
-                    format!("export_backend: {}", e),
-                )));
+                let _ =
+                    tx.blocking_send(Err(std::io::Error::other(format!("export_backend: {}", e))));
                 return;
             },
         };
@@ -137,9 +136,7 @@ pub async fn export_handler(State(state): State<AppState>) -> Result<Response, A
             },
             Err(e) => {
                 warn!("Export failed: {}", e);
-                let _ = tx.blocking_send(Err(std::io::Error::other(
-                    format!("export: {}", e),
-                )));
+                let _ = tx.blocking_send(Err(std::io::Error::other(format!("export: {}", e))));
             },
         }
     });
