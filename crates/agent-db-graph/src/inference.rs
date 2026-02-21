@@ -1452,7 +1452,7 @@ impl GraphInference {
                 confidence: pattern.confidence,
             });
 
-            if let Ok(_) = self.graph.add_node(skill_node) {
+            if self.graph.add_node(skill_node).is_ok() {
                 consolidated += 1;
             }
         }

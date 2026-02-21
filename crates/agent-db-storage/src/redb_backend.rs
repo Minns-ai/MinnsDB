@@ -617,9 +617,9 @@ impl RedbBackend {
         let table = read_txn
             .open_table(table_def)
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        Ok(table
+        table
             .len()
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))?)
+            .map_err(|e| StorageError::DatabaseError(e.to_string()))
     }
 
     /// Internal iterator: calls `f(key, value)` for each row whose key starts

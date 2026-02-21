@@ -247,7 +247,7 @@ pub fn import_from_reader<R: Read>(
     reader
         .read_exact(&mut header_buf)
         .map_err(WireError::from)?;
-    hasher.update(&header_buf);
+    hasher.update(header_buf);
     // Validate header contents
     {
         let mut cursor = std::io::Cursor::new(&header_buf[..]);
@@ -299,13 +299,11 @@ pub fn import_from_reader<R: Read>(
         }
 
         // Hash the tag byte (non-footer records are part of checksum)
-        hasher.update(&tag_buf);
+        hasher.update(tag_buf);
 
         // Check for duplicate singletons
-        if wire_v2::is_singleton_tag(tag) {
-            if !singletons_seen.insert(tag) {
-                return Err(ImportError::DuplicateSingleton(tag));
-            }
+        if wire_v2::is_singleton_tag(tag) && !singletons_seen.insert(tag) {
+            return Err(ImportError::DuplicateSingleton(tag));
         }
 
         // Read record body and hash it
@@ -423,7 +421,7 @@ fn read_record_body_hashing<R: Read>(
     // key_len (4 bytes)
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
-    hasher.update(&len_buf);
+    hasher.update(len_buf);
     let key_len = u32::from_be_bytes(len_buf);
     if key_len > wire_v2::MAX_KEY_LEN {
         return Err(WireError::KeyTooLarge(key_len));
@@ -436,7 +434,7 @@ fn read_record_body_hashing<R: Read>(
 
     // value_len (4 bytes)
     reader.read_exact(&mut len_buf)?;
-    hasher.update(&len_buf);
+    hasher.update(len_buf);
     let value_len = u32::from_be_bytes(len_buf);
     if value_len > wire_v2::MAX_VALUE_LEN {
         return Err(WireError::ValueTooLarge(value_len));

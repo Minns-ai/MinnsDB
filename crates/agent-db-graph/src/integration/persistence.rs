@@ -209,7 +209,7 @@ impl GraphEngine {
         let mut total_persisted_nodes = 0usize;
         let mut deser_errors = 0usize;
         let scan_result: Result<(), agent_db_storage::ForEachError<std::convert::Infallible>> =
-            backend.for_each_prefix_raw(table_names::GRAPH_NODES, b"n".to_vec(), |_key, value| {
+            backend.for_each_prefix_raw(table_names::GRAPH_NODES, vec![b'n'], |_key, value| {
                 total_persisted_nodes += 1;
                 match agent_db_storage::deserialize_versioned::<GraphNode>(value) {
                     Ok(node) => all_nodes.push(node),
@@ -257,7 +257,7 @@ impl GraphEngine {
         // Stream edges
         let mut raw_edges: Vec<GraphEdge> = Vec::new();
         let edge_scan: Result<(), agent_db_storage::ForEachError<std::convert::Infallible>> =
-            backend.for_each_prefix_raw(table_names::GRAPH_EDGES, b"e".to_vec(), |_key, value| {
+            backend.for_each_prefix_raw(table_names::GRAPH_EDGES, vec![b'e'], |_key, value| {
                 match agent_db_storage::deserialize_versioned::<GraphEdge>(value) {
                     Ok(edge) => raw_edges.push(edge),
                     Err(e) => {

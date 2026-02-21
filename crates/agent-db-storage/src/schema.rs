@@ -92,7 +92,10 @@ pub fn check_schema_version(backend: &RedbBackend) -> Result<(), SchemaError> {
         },
         Some(on_disk) => {
             if on_disk.major == SCHEMA_MAJOR {
-                // Compatible — update stamp if minor has advanced
+                // Compatible — update stamp if minor has advanced.
+                // Note: while SCHEMA_MINOR == 0 this block is unreachable,
+                // but it is kept for forward-compatibility when SCHEMA_MINOR is bumped.
+                #[allow(clippy::absurd_extreme_comparisons)]
                 if on_disk.minor < SCHEMA_MINOR {
                     tracing::info!(
                         "Upgrading schema stamp: v{}.{} → v{}.{}",

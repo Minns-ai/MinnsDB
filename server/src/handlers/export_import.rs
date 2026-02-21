@@ -118,8 +118,7 @@ pub async fn export_handler(State(state): State<AppState>) -> Result<Response, A
         let backend = match engine.export_backend() {
             Ok(b) => b,
             Err(e) => {
-                let _ = tx.blocking_send(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                let _ = tx.blocking_send(Err(std::io::Error::other(
                     format!("export_backend: {}", e),
                 )));
                 return;
@@ -138,8 +137,7 @@ pub async fn export_handler(State(state): State<AppState>) -> Result<Response, A
             },
             Err(e) => {
                 warn!("Export failed: {}", e);
-                let _ = tx.blocking_send(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                let _ = tx.blocking_send(Err(std::io::Error::other(
                     format!("export: {}", e),
                 )));
             },
@@ -210,10 +208,7 @@ pub async fn import_handler(
                 },
                 Err(e) => {
                     warn!("Import pump body read error: {}", e);
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ));
+                    return Err(std::io::Error::other(e.to_string()));
                 },
             }
         }
