@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
 # Copy dependency manifests first (for layer caching)
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY ml ./ml
 COPY server ./server
 COPY examples ./examples
 
@@ -35,7 +36,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="EventGraphDB Team"
 LABEL description="EventGraphDB - Event-driven graph database with self-evolution"
-LABEL version="0.2.5"
+LABEL version="0.9.5"
 
 WORKDIR /app
 
