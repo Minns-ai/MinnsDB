@@ -11,6 +11,7 @@ use agent_db_events::core::{
     ActionOutcome, CognitiveType, Event, EventContext, EventType, MetadataValue,
 };
 
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -159,7 +160,7 @@ impl Default for EpisodeDetectorConfig {
 /// Episode detector automatically identifies episode boundaries from event streams
 pub struct EpisodeDetector {
     /// Active episodes by agent
-    active_episodes: HashMap<AgentId, Episode>,
+    active_episodes: FxHashMap<AgentId, Episode>,
 
     /// Completed episodes
     completed_episodes: Vec<Episode>,
@@ -175,11 +176,11 @@ pub struct EpisodeDetector {
     next_episode_id: EpisodeId,
 
     /// Last consolidation timestamp by agent
-    last_consolidation: HashMap<AgentId, Timestamp>,
+    last_consolidation: FxHashMap<AgentId, Timestamp>,
 
     // ========== Novelty Tracking (for significance calculation) ==========
     /// Track seen context hashes for novelty detection
-    seen_contexts: HashMap<ContextHash, u32>, // hash -> count
+    seen_contexts: FxHashMap<ContextHash, u32>, // hash -> count
 
     /// Track seen event types for novelty detection
     seen_event_types: HashMap<String, u32>, // event_type_name -> count
@@ -193,12 +194,12 @@ pub enum EpisodeUpdate {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct EpisodeDetectorSnapshot {
-    active_episodes: HashMap<AgentId, Episode>,
+    active_episodes: FxHashMap<AgentId, Episode>,
     completed_episodes: Vec<Episode>,
     next_episode_id: EpisodeId,
-    last_consolidation: HashMap<AgentId, Timestamp>,
+    last_consolidation: FxHashMap<AgentId, Timestamp>,
     #[serde(default)]
-    seen_contexts: HashMap<ContextHash, u32>,
+    seen_contexts: FxHashMap<ContextHash, u32>,
     #[serde(default)]
     seen_event_types: HashMap<String, u32>,
 }
@@ -233,13 +234,13 @@ impl EpisodeDetector {
     /// Create a new episode detector
     pub fn new(graph: Arc<Graph>, config: EpisodeDetectorConfig) -> Self {
         Self {
-            active_episodes: HashMap::new(),
+            active_episodes: FxHashMap::default(),
             completed_episodes: Vec::new(),
             graph,
             config,
             next_episode_id: 1,
-            last_consolidation: HashMap::new(),
-            seen_contexts: HashMap::new(),
+            last_consolidation: FxHashMap::default(),
+            seen_contexts: FxHashMap::default(),
             seen_event_types: HashMap::new(),
         }
     }

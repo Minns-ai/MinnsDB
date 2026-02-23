@@ -10,7 +10,9 @@ use crate::StorageError;
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Current data envelope version written by this software.
-pub const CURRENT_DATA_VERSION: u8 = 1;
+/// - v1: compact (array) msgpack via `rmp_serde::to_vec` (broken for `serde_json::Value` fields)
+/// - v2: named (map) msgpack via `rmp_serde::to_vec_named` (supports `deserialize_any`)
+pub const CURRENT_DATA_VERSION: u8 = 2;
 
 /// Magic byte that prefixes all versioned payloads.
 /// 0x00 is never a valid first byte for msgpack map, array, string, or bin
@@ -41,12 +43,13 @@ pub fn unwrap_versioned(data: &[u8]) -> (u8, &[u8]) {
     }
 }
 
-/// Serialize `T` → versioned msgpack bytes.
+/// Serialize `T` → versioned msgpack bytes (named/map format).
 ///
-/// Equivalent to `wrap_versioned(CURRENT_DATA_VERSION, &rmp_serde::to_vec(value)?)`.
+/// Uses `rmp_serde::to_vec_named` so struct fields are keyed by name,
+/// which allows `deserialize_any` (required by `serde_json::Value`).
 pub fn serialize_versioned<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError> {
     let payload =
-        rmp_serde::to_vec(value).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        rmp_serde::to_vec_named(value).map_err(|e| StorageError::Serialization(e.to_string()))?;
     Ok(wrap_versioned(CURRENT_DATA_VERSION, &payload))
 }
 
@@ -56,9 +59,9 @@ pub fn serialize_versioned<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageEr
 /// versioned (envelope present) data, providing backward compatibility.
 pub fn deserialize_versioned<T: DeserializeOwned>(data: &[u8]) -> Result<T, StorageError> {
     let (_version, payload) = unwrap_versioned(data);
-    // For now, all versions (0 and 1) use the same msgpack format.
-    // Future versions can branch here:
-    //   match version { 0 | 1 => ..., 2 => migrate(...), _ => error }
+    // `rmp_serde::from_slice` auto-detects both compact (v0/v1) and named (v2) format.
+    // v0/v1 compact data still deserializes for types without `deserialize_any` fields.
+    // v2 named data additionally supports `serde_json::Value` and similar types.
     rmp_serde::from_slice(payload).map_err(|e| StorageError::Deserialization(e.to_string()))
 }
 
@@ -131,5 +134,47 @@ mod tests {
         // Only 1 byte, not enough for envelope (need >= 2)
         assert_eq!(version, 0);
         assert_eq!(payload, &[0x00]);
+    }
+
+    #[test]
+    fn test_roundtrip_json_value_fields() {
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        // Struct with serde_json::Value — the exact pattern that was broken with compact format
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct WithJsonValue {
+            id: u64,
+            data: HashMap<String, serde_json::Value>,
+        }
+
+        let val = WithJsonValue {
+            id: 1,
+            data: HashMap::from([
+                ("key".into(), json!({"nested": true})),
+                ("num".into(), json!(42)),
+                ("arr".into(), json!([1, "two", null])),
+            ]),
+        };
+        let bytes = serialize_versioned(&val).unwrap();
+        assert_eq!(bytes[0], VERSION_MAGIC);
+        assert_eq!(bytes[1], CURRENT_DATA_VERSION);
+
+        let restored: WithJsonValue = deserialize_versioned(&bytes).unwrap();
+        assert_eq!(val, restored);
+    }
+
+    #[test]
+    fn test_v1_compact_data_still_reads() {
+        // Simulate v1 data written with to_vec (compact format)
+        let data = TestData {
+            id: 42,
+            name: "v1".into(),
+        };
+        let compact_payload = rmp_serde::to_vec(&data).unwrap();
+        let v1_bytes = wrap_versioned(1, &compact_payload);
+
+        let restored: TestData = deserialize_versioned(&v1_bytes).unwrap();
+        assert_eq!(data, restored);
     }
 }

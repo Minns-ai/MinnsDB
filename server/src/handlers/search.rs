@@ -31,7 +31,7 @@ pub async fn search(
                 let (node_type, properties) = if let Some(n) = node {
                     let props =
                         serde_json::to_value(&n.properties).unwrap_or(serde_json::Value::Null);
-                    (n.type_name(), props)
+                    (n.type_name().to_string(), props)
                 } else {
                     ("unknown".to_string(), serde_json::Value::Null)
                 };
@@ -73,7 +73,7 @@ pub async fn search(
                 let (node_type, properties) = if let Some(n) = node {
                     let props =
                         serde_json::to_value(&n.properties).unwrap_or(serde_json::Value::Null);
-                    (n.type_name(), props)
+                    (n.type_name().to_string(), props)
                 } else {
                     ("unknown".to_string(), serde_json::Value::Null)
                 };
@@ -124,7 +124,7 @@ pub async fn search(
                 let (node_type, properties) = if let Some(n) = node {
                     let props =
                         serde_json::to_value(&n.properties).unwrap_or(serde_json::Value::Null);
-                    (n.type_name(), props)
+                    (n.type_name().to_string(), props)
                 } else {
                     ("unknown".to_string(), serde_json::Value::Null)
                 };

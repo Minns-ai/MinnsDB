@@ -9,7 +9,7 @@
 //! - Every scan is capped; partial progress is returned when limits hit
 //! - NodeHeader (~40 bytes) avoids full deserialization during scoring
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use agent_db_core::types::Timestamp;
 
@@ -243,8 +243,8 @@ impl GraphPruner {
         budget: &mut ReadBudget,
     ) -> Result<usize, crate::error::GraphError> {
         // Step 1: Load adjacency for each candidate (capped)
-        let mut candidate_neighbors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        let mut candidate_discriminants: HashMap<NodeId, u8> = HashMap::new();
+        let mut candidate_neighbors: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
+        let mut candidate_discriminants: FxHashMap<NodeId, u8> = FxHashMap::default();
 
         for cand in candidates {
             if budget.exhausted() {
@@ -278,7 +278,7 @@ impl GraphPruner {
         }
 
         // Step 2: Build inverted map: neighbor_id → Vec<candidate_id>
-        let mut inverted: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut inverted: FxHashMap<NodeId, Vec<NodeId>> = FxHashMap::default();
         for (cand_id, neighbors) in &candidate_neighbors {
             for &neighbor in neighbors {
                 inverted.entry(neighbor).or_default().push(*cand_id);
@@ -298,7 +298,7 @@ impl GraphPruner {
             }
 
             // Find partners via inverted index
-            let mut partner_shared: HashMap<NodeId, usize> = HashMap::new();
+            let mut partner_shared: FxHashMap<NodeId, usize> = FxHashMap::default();
             for &neighbor in neighbors {
                 if let Some(cands) = inverted.get(&neighbor) {
                     for &other in cands {

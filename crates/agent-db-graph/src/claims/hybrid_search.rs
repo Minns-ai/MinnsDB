@@ -48,10 +48,7 @@ impl HybridClaimSearch {
 
         match config.mode {
             SearchMode::Keyword => {
-                let bm25 = claim_store
-                    .bm25_index()
-                    .read()
-                    .map_err(|e| anyhow::anyhow!("BM25 index lock poisoned: {}", e))?;
+                let bm25 = claim_store.bm25_index().read();
                 let mut results = bm25.search(query_text, config.per_index_limit);
                 results.truncate(top_k);
                 Ok(results)
@@ -64,10 +61,7 @@ impl HybridClaimSearch {
             SearchMode::Hybrid => {
                 // BM25 keyword leg
                 let keyword_results = {
-                    let bm25 = claim_store
-                        .bm25_index()
-                        .read()
-                        .map_err(|e| anyhow::anyhow!("BM25 index lock poisoned: {}", e))?;
+                    let bm25 = claim_store.bm25_index().read();
                     bm25.search(query_text, config.per_index_limit)
                 };
 

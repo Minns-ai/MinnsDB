@@ -8,6 +8,7 @@ edition = "2021"
 agent-db-graph = { path = "../crates/agent-db-graph" }
 agent-db-events = { path = "../crates/agent-db-events" }
 agent-db-core = { path = "../crates/agent-db-core" }
+agent-db-planning = { path = "../ml/agent-db-planning" }
 
 # Web framework
 axum = "0.7"
@@ -36,3 +37,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Time
 chrono = "0.4"
+axum-macros = "0.5.0"

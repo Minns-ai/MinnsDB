@@ -7,10 +7,10 @@
 // single source of truth. NodeHeader provides a lightweight scoring record (~40 bytes)
 // for streaming importance scoring without full deserialization.
 
-use crate::structures::{EdgeId, GoalBucketId, NodeId};
+use crate::structures::{AdjList, EdgeId, GoalBucketId, NodeId};
 use agent_db_core::types::Timestamp;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 // Re-export structures.rs types so downstream can `use graph_store::{GraphNode, ..}`
 pub use crate::structures::{EdgeType, GraphEdge, GraphNode, NodeType};
@@ -514,22 +514,22 @@ impl NodeFilter {
 /// Stores structures.rs types directly. Edges are keyed by EdgeId
 /// with forward/reverse adjacency lists tracking EdgeIds.
 pub struct InMemoryGraphStore {
-    nodes: HashMap<(GoalBucketId, NodeId), GraphNode>,
-    edges: HashMap<(GoalBucketId, EdgeId), GraphEdge>,
-    forward_edges: HashMap<(GoalBucketId, NodeId), Vec<EdgeId>>,
-    reverse_edges: HashMap<(GoalBucketId, NodeId), Vec<EdgeId>>,
-    headers: HashMap<(GoalBucketId, NodeId), NodeHeader>,
+    nodes: FxHashMap<(GoalBucketId, NodeId), GraphNode>,
+    edges: FxHashMap<(GoalBucketId, EdgeId), GraphEdge>,
+    forward_edges: FxHashMap<(GoalBucketId, NodeId), AdjList>,
+    reverse_edges: FxHashMap<(GoalBucketId, NodeId), AdjList>,
+    headers: FxHashMap<(GoalBucketId, NodeId), NodeHeader>,
     loaded_partitions: std::collections::HashSet<GoalBucketId>,
 }
 
 impl InMemoryGraphStore {
     pub fn new() -> Self {
         Self {
-            nodes: HashMap::new(),
-            edges: HashMap::new(),
-            forward_edges: HashMap::new(),
-            reverse_edges: HashMap::new(),
-            headers: HashMap::new(),
+            nodes: FxHashMap::default(),
+            edges: FxHashMap::default(),
+            forward_edges: FxHashMap::default(),
+            reverse_edges: FxHashMap::default(),
+            headers: FxHashMap::default(),
             loaded_partitions: std::collections::HashSet::new(),
         }
     }
@@ -993,6 +993,491 @@ impl GraphStore for InMemoryGraphStore {
     }
 }
 
+// ============================================================================
+// ShardedGraphStore — per-bucket locking for concurrent access
+// ============================================================================
+
+/// Internal shard holding all data for a single goal bucket.
+struct BucketShard {
+    nodes: FxHashMap<NodeId, GraphNode>,
+    edges: FxHashMap<EdgeId, GraphEdge>,
+    forward_edges: FxHashMap<NodeId, AdjList>,
+    reverse_edges: FxHashMap<NodeId, AdjList>,
+    headers: FxHashMap<NodeId, NodeHeader>,
+}
+
+impl BucketShard {
+    fn new() -> Self {
+        Self {
+            nodes: FxHashMap::default(),
+            edges: FxHashMap::default(),
+            forward_edges: FxHashMap::default(),
+            reverse_edges: FxHashMap::default(),
+            headers: FxHashMap::default(),
+        }
+    }
+}
+
+/// Sharded graph store with per-bucket `RwLock` for fine-grained concurrency.
+///
+/// Edges are **bucket-local only** — both endpoints must reside in the same bucket.
+/// This is enforced at `add_edge()`.
+pub struct ShardedGraphStore {
+    shards: FxHashMap<GoalBucketId, parking_lot::RwLock<BucketShard>>,
+    loaded_partitions: parking_lot::RwLock<std::collections::HashSet<GoalBucketId>>,
+}
+
+impl ShardedGraphStore {
+    pub fn new() -> Self {
+        Self {
+            shards: FxHashMap::default(),
+            loaded_partitions: parking_lot::RwLock::new(std::collections::HashSet::new()),
+        }
+    }
+
+    fn ensure_shard(&mut self, bucket: GoalBucketId) {
+        self.shards
+            .entry(bucket)
+            .or_insert_with(|| parking_lot::RwLock::new(BucketShard::new()));
+    }
+}
+
+impl Default for ShardedGraphStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphStore for ShardedGraphStore {
+    fn add_node(&mut self, bucket: GoalBucketId, node: GraphNode) -> Result<(), GraphStoreError> {
+        self.ensure_shard(bucket);
+        let shard = self.shards.get(&bucket).unwrap();
+        let mut s = shard.write();
+        s.nodes.insert(node.id, node);
+        Ok(())
+    }
+
+    fn get_node(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Option<GraphNode>, GraphStoreError> {
+        match self.shards.get(&bucket) {
+            Some(shard) => Ok(shard.read().nodes.get(&node_id).cloned()),
+            None => Ok(None),
+        }
+    }
+
+    fn delete_node(
+        &mut self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<(), GraphStoreError> {
+        let shard = match self.shards.get(&bucket) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let mut s = shard.write();
+        s.nodes.remove(&node_id);
+
+        // Remove outgoing edges
+        if let Some(edge_ids) = s.forward_edges.remove(&node_id) {
+            for eid in &edge_ids {
+                if let Some(edge) = s.edges.remove(eid) {
+                    if let Some(rev) = s.reverse_edges.get_mut(&edge.target) {
+                        rev.retain(|e| e != eid);
+                    }
+                }
+            }
+        }
+
+        // Remove incoming edges
+        if let Some(edge_ids) = s.reverse_edges.remove(&node_id) {
+            for eid in &edge_ids {
+                if let Some(edge) = s.edges.remove(eid) {
+                    if let Some(fwd) = s.forward_edges.get_mut(&edge.source) {
+                        fwd.retain(|e| e != eid);
+                    }
+                }
+            }
+        }
+
+        s.headers.remove(&node_id);
+        Ok(())
+    }
+
+    fn has_node(&self, bucket: GoalBucketId, node_id: NodeId) -> Result<bool, GraphStoreError> {
+        match self.shards.get(&bucket) {
+            Some(shard) => Ok(shard.read().nodes.contains_key(&node_id)),
+            None => Ok(false),
+        }
+    }
+
+    fn get_all_nodes(&self, bucket: GoalBucketId) -> Result<Vec<GraphNode>, GraphStoreError> {
+        match self.shards.get(&bucket) {
+            Some(shard) => Ok(shard.read().nodes.values().cloned().collect()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn add_edge(&mut self, bucket: GoalBucketId, edge: GraphEdge) -> Result<(), GraphStoreError> {
+        self.ensure_shard(bucket);
+        let shard = self.shards.get(&bucket).unwrap();
+        let mut s = shard.write();
+
+        // Enforce bucket-local constraint
+        if !s.nodes.contains_key(&edge.source) || !s.nodes.contains_key(&edge.target) {
+            return Err(GraphStoreError::ConstraintViolation(
+                "Both endpoints must be in the same bucket".to_string(),
+            ));
+        }
+
+        let edge_id = edge.id;
+        let source = edge.source;
+        let target = edge.target;
+
+        s.forward_edges.entry(source).or_default().push(edge_id);
+        s.reverse_edges.entry(target).or_default().push(edge_id);
+        s.edges.insert(edge_id, edge);
+        Ok(())
+    }
+
+    fn get_edge(
+        &self,
+        bucket: GoalBucketId,
+        edge_id: EdgeId,
+    ) -> Result<Option<GraphEdge>, GraphStoreError> {
+        match self.shards.get(&bucket) {
+            Some(shard) => Ok(shard.read().edges.get(&edge_id).cloned()),
+            None => Ok(None),
+        }
+    }
+
+    fn delete_edge(
+        &mut self,
+        bucket: GoalBucketId,
+        edge_id: EdgeId,
+    ) -> Result<(), GraphStoreError> {
+        let shard = match self.shards.get(&bucket) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let mut s = shard.write();
+        if let Some(edge) = s.edges.remove(&edge_id) {
+            if let Some(fwd) = s.forward_edges.get_mut(&edge.source) {
+                fwd.retain(|e| *e != edge_id);
+            }
+            if let Some(rev) = s.reverse_edges.get_mut(&edge.target) {
+                rev.retain(|e| *e != edge_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn get_neighbors(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
+        let shard = match self.shards.get(&bucket) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let s = shard.read();
+        let edge_ids = match s.forward_edges.get(&node_id) {
+            Some(ids) => ids,
+            None => return Ok(Vec::new()),
+        };
+        let mut neighbors: Vec<NodeId> = edge_ids
+            .iter()
+            .filter_map(|eid| s.edges.get(eid).map(|e| e.target))
+            .collect();
+        neighbors.sort();
+        neighbors.dedup();
+        Ok(neighbors)
+    }
+
+    fn get_predecessors(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
+        let shard = match self.shards.get(&bucket) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let s = shard.read();
+        let edge_ids = match s.reverse_edges.get(&node_id) {
+            Some(ids) => ids,
+            None => return Ok(Vec::new()),
+        };
+        let mut preds: Vec<NodeId> = edge_ids
+            .iter()
+            .filter_map(|eid| s.edges.get(eid).map(|e| e.source))
+            .collect();
+        preds.sort();
+        preds.dedup();
+        Ok(preds)
+    }
+
+    fn get_outgoing_edges(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError> {
+        let shard = match self.shards.get(&bucket) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let s = shard.read();
+        let edge_ids = match s.forward_edges.get(&node_id) {
+            Some(ids) => ids,
+            None => return Ok(Vec::new()),
+        };
+        Ok(edge_ids
+            .iter()
+            .filter_map(|eid| s.edges.get(eid).cloned())
+            .collect())
+    }
+
+    fn get_incoming_edges(
+        &self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<Vec<GraphEdge>, GraphStoreError> {
+        let shard = match self.shards.get(&bucket) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let s = shard.read();
+        let edge_ids = match s.reverse_edges.get(&node_id) {
+            Some(ids) => ids,
+            None => return Ok(Vec::new()),
+        };
+        Ok(edge_ids
+            .iter()
+            .filter_map(|eid| s.edges.get(eid).cloned())
+            .collect())
+    }
+
+    fn store_header(
+        &mut self,
+        bucket: GoalBucketId,
+        header: NodeHeader,
+    ) -> Result<(), GraphStoreError> {
+        self.ensure_shard(bucket);
+        let shard = self.shards.get(&bucket).unwrap();
+        shard.write().headers.insert(header.node_id, header);
+        Ok(())
+    }
+
+    fn scan_headers(&self, limit: usize) -> Result<Vec<NodeHeader>, GraphStoreError> {
+        let mut result = Vec::new();
+        for shard in self.shards.values() {
+            let s = shard.read();
+            for h in s.headers.values() {
+                result.push(h.clone());
+                if result.len() >= limit {
+                    return Ok(result);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn delete_header(
+        &mut self,
+        bucket: GoalBucketId,
+        node_id: NodeId,
+    ) -> Result<(), GraphStoreError> {
+        if let Some(shard) = self.shards.get(&bucket) {
+            shard.write().headers.remove(&node_id);
+        }
+        Ok(())
+    }
+
+    fn load_partition(&mut self, bucket: GoalBucketId) -> Result<(), GraphStoreError> {
+        {
+            let mut loaded = self.loaded_partitions.write();
+            if loaded.contains(&bucket) {
+                return Err(GraphStoreError::PartitionAlreadyLoaded(bucket));
+            }
+            loaded.insert(bucket);
+        }
+        self.ensure_shard(bucket);
+        Ok(())
+    }
+
+    fn unload_partition(&mut self, bucket: GoalBucketId) -> Result<(), GraphStoreError> {
+        self.loaded_partitions.write().remove(&bucket);
+        Ok(())
+    }
+
+    fn is_partition_loaded(&self, bucket: GoalBucketId) -> bool {
+        self.loaded_partitions.read().contains(&bucket)
+    }
+
+    fn get_partition_stats(&self, bucket: GoalBucketId) -> Result<BucketInfo, GraphStoreError> {
+        match self.shards.get(&bucket) {
+            Some(shard) => {
+                let s = shard.read();
+                Ok(BucketInfo {
+                    bucket_id: bucket,
+                    node_count: s.nodes.len() as u64,
+                    edge_count: s.edges.len() as u64,
+                    size_bytes: 0,
+                    last_modified: 0,
+                })
+            }
+            None => Ok(BucketInfo {
+                bucket_id: bucket,
+                node_count: 0,
+                edge_count: 0,
+                size_bytes: 0,
+                last_modified: 0,
+            }),
+        }
+    }
+
+    fn get_all_buckets(&self) -> Result<Vec<GoalBucketId>, GraphStoreError> {
+        let mut buckets: Vec<_> = self.shards.keys().copied().collect();
+        buckets.sort();
+        Ok(buckets)
+    }
+
+    fn traverse_bfs(
+        &self,
+        bucket: GoalBucketId,
+        start: NodeId,
+        max_depth: u32,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        let mut result = Vec::new();
+
+        queue.push_back((start, 0));
+        visited.insert(start);
+
+        while let Some((node, depth)) = queue.pop_front() {
+            result.push(node);
+            if depth < max_depth {
+                for neighbor in self.get_neighbors(bucket, node)? {
+                    if !visited.contains(&neighbor) {
+                        visited.insert(neighbor);
+                        queue.push_back((neighbor, depth + 1));
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn traverse_dfs(
+        &self,
+        bucket: GoalBucketId,
+        start: NodeId,
+        max_depth: u32,
+    ) -> Result<Vec<NodeId>, GraphStoreError> {
+        let mut visited = std::collections::HashSet::new();
+        let mut stack = vec![(start, 0u32)];
+        let mut result = Vec::new();
+
+        while let Some((node, depth)) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            result.push(node);
+            if depth < max_depth {
+                for neighbor in self.get_neighbors(bucket, node)? {
+                    if !visited.contains(&neighbor) {
+                        stack.push((neighbor, depth + 1));
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn find_paths(
+        &self,
+        bucket: GoalBucketId,
+        from: NodeId,
+        to: NodeId,
+        max_depth: u32,
+    ) -> Result<Vec<GraphPath>, GraphStoreError> {
+        let mut paths = Vec::new();
+        let mut stack: Vec<(NodeId, Vec<NodeId>, u32)> = vec![(from, vec![from], 0)];
+
+        while let Some((current, path, depth)) = stack.pop() {
+            if current == to {
+                let mut edges = Vec::new();
+                let mut total_weight = 0.0;
+                for w in path.windows(2) {
+                    let outgoing = self.get_outgoing_edges(bucket, w[0])?;
+                    if let Some(edge) = outgoing.into_iter().find(|e| e.target == w[1]) {
+                        total_weight += edge.weight;
+                        edges.push(edge);
+                    }
+                }
+                let length = path.len() - 1;
+                paths.push(GraphPath {
+                    nodes: path,
+                    edges,
+                    total_weight,
+                    length,
+                });
+                continue;
+            }
+
+            if depth >= max_depth {
+                continue;
+            }
+
+            for neighbor in self.get_neighbors(bucket, current)? {
+                if !path.contains(&neighbor) {
+                    let mut new_path = path.clone();
+                    new_path.push(neighbor);
+                    stack.push((neighbor, new_path, depth + 1));
+                }
+            }
+        }
+
+        Ok(paths)
+    }
+
+    fn get_subgraph(
+        &self,
+        bucket: GoalBucketId,
+        center: NodeId,
+        radius: u32,
+    ) -> Result<Subgraph, GraphStoreError> {
+        let node_ids = self.traverse_bfs(bucket, center, radius)?;
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        let id_set: std::collections::HashSet<NodeId> = node_ids.iter().copied().collect();
+
+        for &nid in &node_ids {
+            if let Some(node) = self.get_node(bucket, nid)? {
+                nodes.push(node);
+            }
+            for edge in self.get_outgoing_edges(bucket, nid)? {
+                if id_set.contains(&edge.target) {
+                    edges.push(edge);
+                }
+            }
+        }
+
+        Ok(Subgraph {
+            center,
+            nodes,
+            edges,
+            radius,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1127,5 +1612,124 @@ mod tests {
         assert!(visited.contains(&2));
         assert!(visited.contains(&3));
         assert!(visited.contains(&4));
+    }
+
+    // ================================================================
+    // ShardedGraphStore tests
+    // ================================================================
+
+    #[test]
+    fn sharded_add_get_node() {
+        let mut store = ShardedGraphStore::new();
+        let node = make_test_node(100);
+        store.add_node(1, node.clone()).unwrap();
+
+        let retrieved = store.get_node(1, 100).unwrap();
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().id, 100);
+
+        // Different bucket → not found
+        assert!(store.get_node(2, 100).unwrap().is_none());
+    }
+
+    #[test]
+    fn sharded_add_get_edge() {
+        let mut store = ShardedGraphStore::new();
+        store.add_node(1, make_test_node(100)).unwrap();
+        store.add_node(1, make_test_node(200)).unwrap();
+
+        let edge = make_test_edge(1, 100, 200);
+        store.add_edge(1, edge).unwrap();
+
+        let neighbors = store.get_neighbors(1, 100).unwrap();
+        assert_eq!(neighbors, vec![200]);
+
+        let preds = store.get_predecessors(1, 200).unwrap();
+        assert_eq!(preds, vec![100]);
+    }
+
+    #[test]
+    fn sharded_cross_bucket_edge_rejected() {
+        let mut store = ShardedGraphStore::new();
+        store.add_node(1, make_test_node(100)).unwrap();
+        store.add_node(2, make_test_node(200)).unwrap();
+
+        // Edge spans buckets — should fail
+        let edge = make_test_edge(1, 100, 200);
+        let result = store.add_edge(1, edge);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sharded_delete_node() {
+        let mut store = ShardedGraphStore::new();
+        store.add_node(1, make_test_node(100)).unwrap();
+        store.add_node(1, make_test_node(200)).unwrap();
+        store.add_edge(1, make_test_edge(1, 100, 200)).unwrap();
+
+        store.delete_node(1, 100).unwrap();
+        assert!(store.get_node(1, 100).unwrap().is_none());
+        assert!(store.get_edge(1, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn sharded_outgoing_edges() {
+        let mut store = ShardedGraphStore::new();
+        store.add_node(1, make_test_node(100)).unwrap();
+        store.add_node(1, make_test_node(200)).unwrap();
+        store.add_edge(1, make_test_edge(1, 100, 200)).unwrap();
+
+        let edges = store.get_outgoing_edges(1, 100).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, 200);
+    }
+
+    #[test]
+    fn sharded_partition_ops() {
+        let mut store = ShardedGraphStore::new();
+        assert!(!store.is_partition_loaded(1));
+
+        store.load_partition(1).unwrap();
+        assert!(store.is_partition_loaded(1));
+
+        // Double-load fails
+        assert!(store.load_partition(1).is_err());
+
+        store.unload_partition(1).unwrap();
+        assert!(!store.is_partition_loaded(1));
+    }
+
+    #[test]
+    fn sharded_traverse_bfs() {
+        let mut store = ShardedGraphStore::new();
+        for i in 1..=4 {
+            store.add_node(1, make_test_node(i)).unwrap();
+        }
+        store.add_edge(1, make_test_edge(1, 1, 2)).unwrap();
+        store.add_edge(1, make_test_edge(2, 2, 3)).unwrap();
+        store.add_edge(1, make_test_edge(3, 2, 4)).unwrap();
+
+        let visited = store.traverse_bfs(1, 1, 2).unwrap();
+        assert_eq!(visited.len(), 4);
+    }
+
+    #[test]
+    fn sharded_get_all_buckets() {
+        let mut store = ShardedGraphStore::new();
+        store.add_node(10, make_test_node(1)).unwrap();
+        store.add_node(20, make_test_node(2)).unwrap();
+
+        let buckets = store.get_all_buckets().unwrap();
+        assert!(buckets.contains(&10));
+        assert!(buckets.contains(&20));
+    }
+
+    #[test]
+    fn sharded_has_node() {
+        let mut store = ShardedGraphStore::new();
+        store.add_node(1, make_test_node(100)).unwrap();
+        assert!(store.has_node(1, 100).unwrap());
+        assert!(!store.has_node(1, 999).unwrap());
+        assert!(!store.has_node(99, 100).unwrap());
     }
 }

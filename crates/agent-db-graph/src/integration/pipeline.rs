@@ -53,12 +53,14 @@ impl GraphEngine {
                     let store_ref = self.memory_store.clone();
                     let refinement_ref = refinement.clone();
                     let embedding_client = self.embedding_client.clone();
+                    let event_narrative = crate::event_content::build_event_narrative(&events);
                     tokio::spawn(async move {
                         if let Err(e) = refinement_ref
                             .refine_and_embed_memory(
                                 memory_id,
                                 &store_ref,
                                 embedding_client.as_ref(),
+                                Some(event_narrative),
                             )
                             .await
                         {
@@ -159,6 +161,43 @@ impl GraphEngine {
                         strategy.failure_count
                     );
                     self.attach_strategy_to_graph(episode, &strategy).await?;
+
+                    // Fire-and-forget: async LLM refinement + embedding for strategy
+                    if let Some(ref refinement) = self.refinement_engine {
+                        let strategy_id = upsert.id;
+                        let strategy_clone = strategy.clone();
+                        let store_ref = self.strategy_store.clone();
+                        let refinement_ref = refinement.clone();
+                        let embedding_client = self.embedding_client.clone();
+                        let event_narrative =
+                            crate::event_content::build_event_narrative(&events);
+                        tokio::spawn(async move {
+                            match refinement_ref
+                                .refine_and_embed_strategy(
+                                    &strategy_clone,
+                                    embedding_client.as_ref(),
+                                    Some(event_narrative),
+                                )
+                                .await
+                            {
+                                Ok(refined) => {
+                                    let mut store = store_ref.write().await;
+                                    if let Err(e) = store.update_strategy(refined) {
+                                        tracing::warn!(
+                                            "Failed to persist refined strategy {}: {}",
+                                            strategy_id,
+                                            e
+                                        );
+                                    }
+                                },
+                                Err(e) => tracing::warn!(
+                                    "Strategy refinement failed for {}: {}",
+                                    strategy_id,
+                                    e
+                                ),
+                            }
+                        });
+                    }
                 }
             } else {
                 tracing::info!(
@@ -218,6 +257,64 @@ impl GraphEngine {
         self.update_transition_model(episode).await?;
 
         self.stats.write().await.total_reinforcements_applied += 1;
+
+        Ok(())
+    }
+
+    /// Process episode for world model training (shadow mode).
+    /// Assembles a training tuple and submits it to the critic.
+    pub(super) async fn process_episode_for_world_model(
+        &self,
+        episode: &Episode,
+    ) -> GraphResult<()> {
+        let Some(ref wm) = self.world_model else {
+            return Ok(());
+        };
+
+        // Load events for feature extraction
+        let events: Vec<Event> = {
+            let store = self.event_store.read().await;
+            episode
+                .events
+                .iter()
+                .filter_map(|id| store.get(id).cloned())
+                .collect()
+        };
+
+        // Find best matching memory for this episode's context
+        let memory = {
+            let mut store = self.memory_store.write().await;
+            store
+                .retrieve_by_context(&episode.context, 1)
+                .into_iter()
+                .next()
+        };
+
+        // Find matching strategy by context hash
+        let strategy = {
+            let store = self.strategy_store.read().await;
+            store
+                .get_strategies_for_context(episode.context_signature, 1)
+                .into_iter()
+                .next()
+        };
+
+        // Assemble training tuple
+        if let Some(tuple) = world_model::assemble_training_tuple(
+            episode,
+            &events,
+            memory.as_ref(),
+            strategy.as_ref(),
+        ) {
+            let mut wm_guard = wm.write().await;
+            wm_guard.submit_training(tuple);
+            tracing::debug!(
+                "World model training tuple submitted episode_id={} events={} salience={:.3}",
+                episode.id,
+                events.len(),
+                episode.salience_score,
+            );
+        }
 
         Ok(())
     }

@@ -10,7 +10,7 @@ use anyhow::Result;
 use crossbeam::queue::SegQueue;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use tracing::{debug, info};
 
 const CLAIMS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("claims");
@@ -589,7 +589,8 @@ impl ClaimStore {
         }
 
         // Single write-lock acquisition for vector index
-        if let Ok(mut idx) = self.index.write() {
+        {
+            let mut idx = self.index.write();
             // Materialise flat entries from HNSW if needed for mutation
             if idx.hnsw.is_some()
                 && idx.entries.is_empty()
@@ -618,7 +619,8 @@ impl ClaimStore {
         }
 
         // Single write-lock acquisition for BM25 index
-        if let Ok(mut bm25) = self.bm25_index.write() {
+        {
+            let mut bm25 = self.bm25_index.write();
             for &cid in &remove_ids {
                 bm25.remove_document(cid);
             }
@@ -667,7 +669,6 @@ impl ClaimStore {
         let results = self
             .index
             .read()
-            .map_err(|e| anyhow::anyhow!("Vector index read lock poisoned: {}", e))?
             .find_similar(&query_norm, top_k, min_similarity);
 
         debug!(
@@ -703,10 +704,7 @@ impl ClaimStore {
         self.apply_pending();
 
         // For other metrics, do a full scan using VectorSimilarity::compute()
-        let idx = self
-            .index
-            .read()
-            .map_err(|e| anyhow::anyhow!("Vector index read lock poisoned: {}", e))?;
+        let idx = self.index.read();
 
         // When HNSW is active, entries is empty — scan HNSW points instead
         let mut results: Vec<(ClaimId, f32)> = if idx.entries().is_empty() {
@@ -824,7 +822,28 @@ impl ClaimStore {
     /// Applies pending updates first for consistency.
     pub fn vector_index_size(&self) -> usize {
         self.apply_pending();
-        self.index.read().map(|idx| idx.len()).unwrap_or(0)
+        self.index.read().len()
+    }
+
+    /// Find active Avoidance claims, returning up to `limit` sorted by recency.
+    ///
+    /// Simple table scan filtered by `ClaimType::Avoidance` — acceptable because
+    /// avoidance claims are rare (only generated after 2+ failures).
+    pub fn find_avoidance_claims(&self, limit: usize) -> Result<Vec<DerivedClaim>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(CLAIMS_TABLE)?;
+        let mut claims = Vec::new();
+        for item in table.iter()? {
+            let (_, value) = item?;
+            let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
+            if claim.status == ClaimStatus::Active && claim.claim_type == ClaimType::Avoidance {
+                claims.push(claim);
+            }
+        }
+        // Sort by recency (most recent first)
+        claims.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        claims.truncate(limit);
+        Ok(claims)
     }
 
     /// Enforce a cap on the in-memory vector index.
@@ -1299,9 +1318,41 @@ mod tests {
         store.apply_pending();
 
         // BM25 should find the claim
-        let bm25 = store.bm25_index().read().unwrap();
+        let bm25 = store.bm25_index().read();
         let results = bm25.search("quick fox", 10);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 1);
+    }
+
+    #[test]
+    fn test_find_avoidance_claims() {
+        let dir = tempdir().unwrap();
+        let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+        // Create 3 claims: 1 Avoidance, 1 Fact, 1 Avoidance
+        let mut c1 = create_test_claim(1, "Avoid relying on: flaky API");
+        c1.claim_type = ClaimType::Avoidance;
+        c1.created_at = 1000;
+        store.store(&c1).unwrap();
+
+        let mut c2 = create_test_claim(2, "The API uses REST");
+        c2.claim_type = ClaimType::Fact;
+        store.store(&c2).unwrap();
+
+        let mut c3 = create_test_claim(3, "Avoid relying on: cached state");
+        c3.claim_type = ClaimType::Avoidance;
+        c3.created_at = 2000; // more recent
+        store.store(&c3).unwrap();
+
+        let avoidance = store.find_avoidance_claims(10).unwrap();
+        assert_eq!(avoidance.len(), 2, "Should find 2 avoidance claims");
+        // Most recent first
+        assert_eq!(avoidance[0].id, 3, "Most recent avoidance claim first");
+        assert_eq!(avoidance[1].id, 1);
+
+        // Test limit
+        let limited = store.find_avoidance_claims(1).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].id, 3);
     }
 }

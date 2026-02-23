@@ -23,7 +23,7 @@ services:
       - REDB_CACHE_SIZE_MB=256
       - MEMORY_CACHE_SIZE=10000
       - STRATEGY_CACHE_SIZE=5000
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LLM_API_KEY=${LLM_API_KEY}
       - LLM_MODEL=gpt-4o-mini
       # NER Service Configuration (external server)
       - NER_SERVICE_URL=${NER_SERVICE_URL:-http://localhost:8081/ner}

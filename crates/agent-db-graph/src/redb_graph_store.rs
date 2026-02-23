@@ -47,6 +47,8 @@ enum KeyType {
     #[allow(dead_code)]
     BucketCatalog = 0x05, // Partition statistics
     HeaderMeta = 0x06,       // NodeHeader for fast scoring
+    DirEdgeOut = 0x07,       // Direction-encoded outgoing: [bucket][source][edge_id] → edge
+    DirEdgeIn = 0x08,        // Direction-encoded incoming: [bucket][target][edge_id] → edge
 }
 
 /// Build hierarchical key: [TypeByte][GoalBucket(8)][NodeID(8)]
@@ -91,6 +93,47 @@ fn make_header_key(bucket: GoalBucketId, node_id: NodeId) -> Vec<u8> {
     key.push(KeyType::HeaderMeta as u8);
     key.extend_from_slice(&bucket.to_be_bytes());
     key.extend_from_slice(&node_id.to_be_bytes());
+    key
+}
+
+/// Build direction-encoded outgoing edge key: [0x07][bucket:8][source:8][edge_id:8]
+///
+/// Enables prefix scan on `[0x07][bucket][source]` to find all outgoing edges
+/// with full metadata, bypassing the adjacency list + individual edge lookup.
+fn make_dir_out_key(bucket: GoalBucketId, source: NodeId, edge_id: EdgeId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + 8 + 8 + 8);
+    key.push(KeyType::DirEdgeOut as u8);
+    key.extend_from_slice(&bucket.to_be_bytes());
+    key.extend_from_slice(&source.to_be_bytes());
+    key.extend_from_slice(&edge_id.to_be_bytes());
+    key
+}
+
+/// Build direction-encoded outgoing prefix: [0x07][bucket:8][source:8]
+fn make_dir_out_prefix(bucket: GoalBucketId, source: NodeId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + 8 + 8);
+    key.push(KeyType::DirEdgeOut as u8);
+    key.extend_from_slice(&bucket.to_be_bytes());
+    key.extend_from_slice(&source.to_be_bytes());
+    key
+}
+
+/// Build direction-encoded incoming edge key: [0x08][bucket:8][target:8][edge_id:8]
+fn make_dir_in_key(bucket: GoalBucketId, target: NodeId, edge_id: EdgeId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + 8 + 8 + 8);
+    key.push(KeyType::DirEdgeIn as u8);
+    key.extend_from_slice(&bucket.to_be_bytes());
+    key.extend_from_slice(&target.to_be_bytes());
+    key.extend_from_slice(&edge_id.to_be_bytes());
+    key
+}
+
+/// Build direction-encoded incoming prefix: [0x08][bucket:8][target:8]
+fn make_dir_in_prefix(bucket: GoalBucketId, target: NodeId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + 8 + 8);
+    key.push(KeyType::DirEdgeIn as u8);
+    key.extend_from_slice(&bucket.to_be_bytes());
+    key.extend_from_slice(&target.to_be_bytes());
     key
 }
 
@@ -714,6 +757,16 @@ impl RedbGraphStore {
         // Delete edge metadata
         ops.push(op_del(TABLE_GRAPH_EDGES, make_edge_key(bucket, edge_id)));
 
+        // Delete direction-encoded keys
+        ops.push(op_del(
+            TABLE_GRAPH_EDGES,
+            make_dir_out_key(bucket, from, edge_id),
+        ));
+        ops.push(op_del(
+            TABLE_GRAPH_EDGES,
+            make_dir_in_key(bucket, to, edge_id),
+        ));
+
         Ok(())
     }
 }
@@ -885,10 +938,23 @@ impl GraphStore for RedbGraphStore {
         }
 
         // Store edge metadata (JSON)
+        let edge_bytes = json_bytes(&edge)?;
         ops.push(op_put(
             TABLE_GRAPH_EDGES,
             make_edge_key(bucket, edge_id),
-            json_bytes(&edge)?,
+            edge_bytes.clone(),
+        ));
+
+        // Direction-encoded keys for on-disk directional traversal
+        ops.push(op_put(
+            TABLE_GRAPH_EDGES,
+            make_dir_out_key(bucket, source, edge_id),
+            edge_bytes.clone(),
+        ));
+        ops.push(op_put(
+            TABLE_GRAPH_EDGES,
+            make_dir_in_key(bucket, target, edge_id),
+            edge_bytes,
         ));
 
         self.backend
@@ -960,7 +1026,19 @@ impl GraphStore for RedbGraphStore {
             return Ok(neighbors);
         }
 
-        // Not loaded — read adjacency from disk, then look up each edge
+        // Direction-encoded prefix scan: single pass
+        let prefix = make_dir_out_prefix(bucket, node_id);
+        let results =
+            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
+        if !results.is_empty() {
+            let mut neighbors: Vec<NodeId> =
+                results.into_iter().map(|(_, edge)| edge.target).collect();
+            neighbors.sort();
+            neighbors.dedup();
+            return Ok(neighbors);
+        }
+
+        // Fallback for data written before direction-encoded keys
         let key = make_adjacency_forward_key(bucket, node_id);
         match self
             .backend
@@ -1003,6 +1081,19 @@ impl GraphStore for RedbGraphStore {
             return Ok(preds);
         }
 
+        // Direction-encoded prefix scan: single pass
+        let prefix = make_dir_in_prefix(bucket, node_id);
+        let results =
+            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
+        if !results.is_empty() {
+            let mut preds: Vec<NodeId> =
+                results.into_iter().map(|(_, edge)| edge.source).collect();
+            preds.sort();
+            preds.dedup();
+            return Ok(preds);
+        }
+
+        // Fallback for data written before direction-encoded keys
         let key = make_adjacency_reverse_key(bucket, node_id);
         match self
             .backend
@@ -1042,6 +1133,15 @@ impl GraphStore for RedbGraphStore {
                 .collect());
         }
 
+        // Direction-encoded prefix scan: single pass, no adjacency list lookup
+        let prefix = make_dir_out_prefix(bucket, node_id);
+        let results =
+            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
+        if !results.is_empty() {
+            return Ok(results.into_iter().map(|(_, edge)| edge).collect());
+        }
+
+        // Fallback for data written before direction-encoded keys
         let key = make_adjacency_forward_key(bucket, node_id);
         match self
             .backend
@@ -1079,6 +1179,15 @@ impl GraphStore for RedbGraphStore {
                 .collect());
         }
 
+        // Direction-encoded prefix scan: single pass, no adjacency list lookup
+        let prefix = make_dir_in_prefix(bucket, node_id);
+        let results =
+            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
+        if !results.is_empty() {
+            return Ok(results.into_iter().map(|(_, edge)| edge).collect());
+        }
+
+        // Fallback for data written before direction-encoded keys
         let key = make_adjacency_reverse_key(bucket, node_id);
         match self
             .backend

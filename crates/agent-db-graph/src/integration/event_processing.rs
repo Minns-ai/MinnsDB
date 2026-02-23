@@ -128,6 +128,182 @@ impl GraphEngine {
                 result.errors.push(e);
             }
 
+            // World Model: bottom-up prediction error (mode-aware)
+            if self.config.effective_world_model_mode() != WorldModelMode::Disabled {
+                if let Some(ref wm) = self.world_model {
+                    let wm_guard = wm.read().await;
+                    let event_features = world_model::extract_event_features_raw(&ready_event);
+                    let memory_features = agent_db_world_model::MemoryFeatures {
+                        tier: 0,
+                        strength: 0.5,
+                        access_count: 1,
+                        context_fingerprint: ready_event.context.fingerprint,
+                        goal_bucket_id: 0,
+                    };
+                    let strategy_features = agent_db_world_model::StrategyFeatures {
+                        quality_score: 0.5,
+                        expected_success: 0.5,
+                        expected_value: 0.5,
+                        confidence: 0.0,
+                        goal_bucket_id: 0,
+                        behavior_signature_hash: 0,
+                    };
+                    let policy_features = agent_db_world_model::PolicyFeatures {
+                        goal_count: ready_event.context.active_goals.len() as u32,
+                        top_goal_priority: ready_event
+                            .context
+                            .active_goals
+                            .iter()
+                            .map(|g| g.priority)
+                            .fold(0.5f32, f32::max),
+                        resource_cpu_percent: 0.0,
+                        resource_memory_bytes: 0,
+                        context_fingerprint: ready_event.context.fingerprint,
+                    };
+                    let error = wm_guard.prediction_error(
+                        &event_features,
+                        &memory_features,
+                        &strategy_features,
+                        &policy_features,
+                    );
+                    tracing::debug!(
+                        "World model prediction_error event_id={} total_z={:.2} layer={:?}",
+                        ready_event.id,
+                        error.total_z,
+                        error.mismatch_layer,
+                    );
+
+                    // Repair logging (Full mode only)
+                    if self.config.effective_world_model_mode() == WorldModelMode::Full {
+                        if agent_db_planning::repair::should_repair(
+                            &error,
+                            &self.config.planning_config,
+                        ) {
+                            let scope =
+                                agent_db_planning::repair::determine_repair_scope(&error, 0);
+                            tracing::info!(
+                                "World model repair triggered event_id={} total_z={:.2} scope={:?}",
+                                ready_event.id,
+                                error.total_z,
+                                scope,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Bottom-up execution validation (Full mode only)
+            // Fire-and-forget: don't block the main pipeline
+            if self.config.planning_config.generation_mode
+                == agent_db_planning::GenerationMode::Full
+                && !self.active_executions.is_empty()
+            {
+                let session_id = ready_event.session_id;
+                // Find active executions matching this event's session
+                let matching_exec_ids: Vec<u64> = self
+                    .active_executions
+                    .iter()
+                    .filter_map(|entry| {
+                        let state = entry.value().try_read();
+                        if let Ok(s) = state {
+                            if s.session_id == session_id {
+                                Some(*entry.key())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !matching_exec_ids.is_empty() {
+                    let engine_executions = self.active_executions.clone();
+                    let engine_world_model = self.world_model.clone();
+                    let _engine_action_gen = self.action_generator.clone();
+                    let _engine_strategy_gen = self.strategy_generator.clone();
+                    let planning_config = self.config.planning_config.clone();
+                    let event_clone = ready_event.clone();
+
+                    tokio::spawn(async move {
+                        for exec_id in matching_exec_ids {
+                            if let Some(exec_arc) = engine_executions.get(&exec_id) {
+                                let exec_arc = exec_arc.clone();
+                                // Just log the prediction error — actual repair would
+                                // need the full GraphEngine which we can't move into spawn.
+                                if let Some(ref wm) = engine_world_model {
+                                    if let Ok(wm_guard) = wm.try_read() {
+                                        if let Ok(state) = exec_arc.try_read() {
+                                            let event_features =
+                                                world_model::extract_event_features_raw(
+                                                    &event_clone,
+                                                );
+                                            let memory_features =
+                                                agent_db_world_model::MemoryFeatures {
+                                                    tier: 0,
+                                                    strength: 0.5,
+                                                    access_count: 1,
+                                                    context_fingerprint: state
+                                                        .context_fingerprint,
+                                                    goal_bucket_id: state
+                                                        .strategy
+                                                        .goal_bucket_id,
+                                                };
+                                            let strategy_features =
+                                                agent_db_world_model::StrategyFeatures {
+                                                    quality_score: state.strategy.confidence,
+                                                    expected_success: state
+                                                        .strategy
+                                                        .confidence,
+                                                    expected_value: 0.5,
+                                                    confidence: state.strategy.confidence,
+                                                    goal_bucket_id: state
+                                                        .strategy
+                                                        .goal_bucket_id,
+                                                    behavior_signature_hash: 0,
+                                                };
+                                            let policy_features =
+                                                agent_db_world_model::PolicyFeatures {
+                                                    goal_count: 1,
+                                                    top_goal_priority: 0.8,
+                                                    resource_cpu_percent: 0.0,
+                                                    resource_memory_bytes: 0,
+                                                    context_fingerprint: state
+                                                        .context_fingerprint,
+                                                };
+
+                                            let error = wm_guard.prediction_error(
+                                                &event_features,
+                                                &memory_features,
+                                                &strategy_features,
+                                                &policy_features,
+                                            );
+
+                                            if agent_db_planning::repair::should_repair(
+                                                &error,
+                                                &planning_config,
+                                            ) {
+                                                let scope =
+                                                    agent_db_planning::repair::determine_repair_scope(
+                                                        &error,
+                                                        state.consecutive_action_repairs,
+                                                    );
+                                                tracing::info!(
+                                                    exec_id,
+                                                    total_z = error.total_z,
+                                                    ?scope,
+                                                    "Bottom-up execution validation: repair needed"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+
             if let Err(e) = self.handle_learning_event(&ready_event).await {
                 result.errors.push(e);
             }
@@ -181,6 +357,20 @@ impl GraphEngine {
                                 self.update_transition_model(episode).await?;
                             } else {
                                 self.process_episode_for_reinforcement(episode).await?;
+                            }
+                        }
+
+                        // World model training (mode-aware)
+                        if self.config.effective_world_model_mode() != WorldModelMode::Disabled
+                            && self.world_model.is_some()
+                        {
+                            if let Err(e) =
+                                self.process_episode_for_world_model(episode).await
+                            {
+                                tracing::warn!(
+                                    "World model training tuple assembly failed: {}",
+                                    e
+                                );
                             }
                         }
                     }
@@ -476,6 +666,58 @@ impl GraphEngine {
                     strategy_id,
                     success,
                     updated
+                );
+            }
+        }
+
+        // World model: feedback training tuple from outcome (Phase 6)
+        if self.config.effective_world_model_mode() != WorldModelMode::Disabled {
+            if let Some(ref wm) = self.world_model {
+                let policy = agent_db_world_model::PolicyFeatures {
+                    goal_count: 1,
+                    top_goal_priority: 0.8,
+                    resource_cpu_percent: 0.0,
+                    resource_memory_bytes: 0,
+                    context_fingerprint: 0,
+                };
+                let memory = agent_db_world_model::MemoryFeatures {
+                    tier: 0,
+                    strength: 0.5,
+                    access_count: trace.memory_used.len() as u32,
+                    context_fingerprint: 0,
+                    goal_bucket_id: 0,
+                };
+                let strategy = agent_db_world_model::StrategyFeatures {
+                    quality_score: if success { 0.8 } else { 0.2 },
+                    expected_success: if success { 0.8 } else { 0.2 },
+                    expected_value: 0.5,
+                    confidence: 0.5,
+                    goal_bucket_id: 0,
+                    behavior_signature_hash: 0,
+                };
+                let event = agent_db_world_model::EventFeatures {
+                    event_type_hash: 0,
+                    action_name_hash: 0,
+                    context_fingerprint: 0,
+                    outcome_success: if success { 1.0 } else { 0.0 },
+                    significance: 0.7,
+                    temporal_delta_ns: 0.0,
+                    duration_ns: 0.0,
+                };
+
+                let tuple = agent_db_world_model::TrainingTuple {
+                    event_features: event,
+                    memory_features: memory,
+                    strategy_features: strategy,
+                    policy_features: policy,
+                    is_positive: success,
+                    weight: if success { 0.5 } else { 1.0 },
+                };
+                wm.write().await.submit_training(tuple);
+                tracing::debug!(
+                    "World model outcome training tuple query_id={} success={}",
+                    query_id,
+                    success,
                 );
             }
         }

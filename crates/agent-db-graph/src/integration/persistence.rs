@@ -1,4 +1,6 @@
 use super::*;
+use crate::structures::AdjList;
+use rustc_hash::FxHashMap;
 
 impl GraphEngine {
     /// Persist current graph state to redb storage.
@@ -112,8 +114,8 @@ impl GraphEngine {
         // This keeps the batch atomic and avoids needing extra tables.
         #[derive(serde::Serialize, serde::Deserialize)]
         struct GraphMeta {
-            adjacency_out: HashMap<NodeId, Vec<EdgeId>>,
-            adjacency_in: HashMap<NodeId, Vec<EdgeId>>,
+            adjacency_out: FxHashMap<NodeId, AdjList>,
+            adjacency_in: FxHashMap<NodeId, AdjList>,
             next_node_id: NodeId,
             next_edge_id: EdgeId,
             stats: GraphStats,
@@ -145,6 +147,12 @@ impl GraphEngine {
             GraphError::OperationError(format!("Failed to persist graph state: {:?}", e))
         })?;
 
+        // Clear dirty state after full persist (all data is now on disk)
+        {
+            let mut inference = self.inference.write().await;
+            inference.graph_mut().clear_dirty();
+        }
+
         // Update persistence checkpoint
         let engine_stats = self.stats.read().await;
         *self.last_persistence.write().await = engine_stats.total_events_processed;
@@ -156,6 +164,164 @@ impl GraphEngine {
         );
 
         Ok((node_count, edge_count))
+    }
+
+    /// Persist only changed graph state (delta) to redb storage.
+    ///
+    /// Only writes dirty nodes/edges and deletes removed ones, avoiding
+    /// the full-graph scan of `persist_graph_state`. Falls back to full
+    /// persistence if there are no pending changes or if the dirty set
+    /// covers more than 50% of the graph (full persist is simpler).
+    ///
+    /// Returns the number of operations written.
+    pub async fn persist_graph_delta(&self) -> GraphResult<usize> {
+        let backend = match self.redb_backend {
+            Some(ref b) => b.clone(),
+            None => return Ok(0),
+        };
+
+        let mut inference = self.inference.write().await;
+        let graph = inference.graph_mut();
+
+        if !graph.has_pending_changes() {
+            return Ok(0);
+        }
+
+        // If dirty set is very large relative to graph size, fall back to full persist
+        let dirty_ratio = (graph.dirty_nodes.len() + graph.dirty_edges.len()) as f64
+            / (graph.nodes.len() + graph.edges.len()).max(1) as f64;
+        if dirty_ratio > 0.5 {
+            drop(inference);
+            let (n, e) = self.persist_graph_state().await?;
+            // Clear dirty state after full persist
+            let mut inference = self.inference.write().await;
+            inference.graph_mut().clear_dirty();
+            return Ok(n + e);
+        }
+
+        let mut ops: Vec<BatchOperation> = Vec::new();
+
+        // Delete removed nodes from disk
+        for node_id in &graph.deleted_nodes {
+            let mut key = Vec::with_capacity(9);
+            key.push(b'n');
+            key.extend_from_slice(&node_id.to_be_bytes());
+            ops.push(BatchOperation::Delete {
+                table_name: table_names::GRAPH_NODES.to_string(),
+                key,
+            });
+        }
+
+        // Delete removed edges from disk
+        for edge_id in &graph.deleted_edges {
+            let mut key = Vec::with_capacity(9);
+            key.push(b'e');
+            key.extend_from_slice(&edge_id.to_be_bytes());
+            ops.push(BatchOperation::Delete {
+                table_name: table_names::GRAPH_EDGES.to_string(),
+                key,
+            });
+        }
+
+        // Serialize only dirty nodes
+        for &node_id in &graph.dirty_nodes {
+            if let Some(node) = graph.nodes.get(&node_id) {
+                let mut key = Vec::with_capacity(9);
+                key.push(b'n');
+                key.extend_from_slice(&node_id.to_be_bytes());
+                let value = agent_db_storage::serialize_versioned(node).map_err(|e| {
+                    GraphError::OperationError(format!(
+                        "Failed to serialize node {}: {}",
+                        node_id, e
+                    ))
+                })?;
+                ops.push(BatchOperation::Put {
+                    table_name: table_names::GRAPH_NODES.to_string(),
+                    key,
+                    value,
+                });
+            }
+        }
+
+        // Serialize only dirty edges
+        for &edge_id in &graph.dirty_edges {
+            if let Some(edge) = graph.edges.get(&edge_id) {
+                let mut key = Vec::with_capacity(9);
+                key.push(b'e');
+                key.extend_from_slice(&edge_id.to_be_bytes());
+                let value = agent_db_storage::serialize_versioned(edge).map_err(|e| {
+                    GraphError::OperationError(format!(
+                        "Failed to serialize edge {}: {}",
+                        edge_id, e
+                    ))
+                })?;
+                ops.push(BatchOperation::Put {
+                    table_name: table_names::GRAPH_EDGES.to_string(),
+                    key,
+                    value,
+                });
+            }
+        }
+
+        // Re-persist adjacency metadata if changed
+        if graph.adjacency_dirty {
+            #[derive(serde::Serialize, serde::Deserialize)]
+            struct GraphMeta {
+                adjacency_out: FxHashMap<NodeId, AdjList>,
+                adjacency_in: FxHashMap<NodeId, AdjList>,
+                next_node_id: NodeId,
+                next_edge_id: EdgeId,
+                stats: GraphStats,
+            }
+
+            let meta = GraphMeta {
+                adjacency_out: graph.adjacency_out.clone(),
+                adjacency_in: graph.adjacency_in.clone(),
+                next_node_id: graph.next_node_id,
+                next_edge_id: graph.next_edge_id,
+                stats: graph.stats.clone(),
+            };
+            let meta_value = agent_db_storage::serialize_versioned(&meta).map_err(|e| {
+                GraphError::OperationError(format!(
+                    "Failed to serialize graph metadata: {}",
+                    e
+                ))
+            })?;
+            ops.push(BatchOperation::Put {
+                table_name: table_names::GRAPH_ADJACENCY.to_string(),
+                key: b"__meta__".to_vec(),
+                value: meta_value,
+            });
+        }
+
+        let op_count = ops.len();
+        let dirty_n = graph.dirty_nodes.len();
+        let dirty_e = graph.dirty_edges.len();
+        let del_n = graph.deleted_nodes.len();
+        let del_e = graph.deleted_edges.len();
+
+        // Clear dirty state before I/O (safe: ops already built)
+        graph.clear_dirty();
+
+        // Release lock before blocking I/O
+        drop(inference);
+
+        if op_count > 0 {
+            backend.write_batch(ops).map_err(|e| {
+                GraphError::OperationError(format!("Failed to persist graph delta: {:?}", e))
+            })?;
+        }
+
+        tracing::info!(
+            "Graph delta persisted: {} ops ({}N dirty, {}E dirty, {}N deleted, {}E deleted)",
+            op_count,
+            dirty_n,
+            dirty_e,
+            del_n,
+            del_e,
+        );
+
+        Ok(op_count)
     }
 
     /// Restore graph state from redb on startup.
@@ -171,8 +337,8 @@ impl GraphEngine {
         // Load metadata first — if it doesn't exist, there's nothing to restore
         #[derive(serde::Serialize, serde::Deserialize)]
         struct GraphMeta {
-            adjacency_out: HashMap<NodeId, Vec<EdgeId>>,
-            adjacency_in: HashMap<NodeId, Vec<EdgeId>>,
+            adjacency_out: FxHashMap<NodeId, AdjList>,
+            adjacency_in: FxHashMap<NodeId, AdjList>,
             next_node_id: NodeId,
             next_edge_id: EdgeId,
             stats: GraphStats,
@@ -287,6 +453,7 @@ impl GraphEngine {
 
         // Clear all secondary indexes before rebuilding
         graph.type_index.clear();
+        graph.temporal_index.clear();
         graph.context_index.clear();
         graph.agent_index.clear();
         graph.event_index.clear();
@@ -307,13 +474,19 @@ impl GraphEngine {
         for node in all_nodes {
             let node_id = node.id;
 
-            // Rebuild type index
-            let type_name = node.type_name();
+            // Rebuild type index (u8 discriminant key)
             graph
                 .type_index
-                .entry(type_name)
+                .entry(node.node_type.discriminant())
                 .or_default()
                 .insert(node_id);
+
+            // Rebuild temporal index
+            graph
+                .temporal_index
+                .entry(node.created_at)
+                .or_insert_with(smallvec::SmallVec::new)
+                .push(node_id);
 
             // Rebuild specialized indexes
             match &node.node_type {
@@ -339,16 +512,19 @@ impl GraphEngine {
                     graph.strategy_index.insert(*strategy_id, node_id);
                 },
                 NodeType::Tool { tool_name, .. } => {
-                    graph.tool_index.insert(tool_name.clone(), node_id);
+                    let key = graph.interner.intern(tool_name);
+                    graph.tool_index.insert(key, node_id);
                 },
                 NodeType::Result { result_key, .. } => {
-                    graph.result_index.insert(result_key.clone(), node_id);
+                    let key = graph.interner.intern(result_key);
+                    graph.result_index.insert(key, node_id);
                 },
                 NodeType::Claim { claim_id, .. } => {
                     graph.claim_index.insert(*claim_id, node_id);
                 },
                 NodeType::Concept { concept_name, .. } => {
-                    graph.concept_index.insert(concept_name.clone(), node_id);
+                    let key = graph.interner.intern(concept_name);
+                    graph.concept_index.insert(key, node_id);
                 },
             }
 

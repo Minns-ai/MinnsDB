@@ -6,6 +6,8 @@ members = [
     "crates/agent-db-storage",
     "crates/agent-db-graph",
     "crates/agent-db-ner",
+    "ml/agent-db-world-model",
+    "ml/agent-db-planning",
     "examples",
     "server",
 ]
@@ -32,6 +34,8 @@ time = ">=0.3.47"  # Security: Override vulnerable transitive dependency from se
 # Collections and data structures
 indexmap = "1.9"
 smallvec = "1.10"
+parking_lot = "0.12"
+rustc-hash = "2.1"
 
 # Performance
 rayon = "1.7"

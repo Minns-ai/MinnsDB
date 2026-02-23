@@ -237,9 +237,9 @@ pub struct RedbMemoryStore {
     sum_strength: f32,
     sum_access_count: u64,
     /// Refcount map: agent_id -> number of memories for that agent
-    agent_refcounts: std::collections::HashMap<AgentId, u32>,
+    agent_refcounts: rustc_hash::FxHashMap<AgentId, u32>,
     /// Refcount map: context_fingerprint -> number of memories with that fingerprint
-    context_refcounts: std::collections::HashMap<u64, u32>,
+    context_refcounts: rustc_hash::FxHashMap<u64, u32>,
 }
 
 impl RedbMemoryStore {
@@ -267,8 +267,8 @@ impl RedbMemoryStore {
             schema_count: 0,
             sum_strength: 0.0,
             sum_access_count: 0,
-            agent_refcounts: std::collections::HashMap::new(),
-            context_refcounts: std::collections::HashMap::new(),
+            agent_refcounts: rustc_hash::FxHashMap::default(),
+            context_refcounts: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -292,6 +292,7 @@ impl RedbMemoryStore {
         self.context_refcounts.clear();
 
         // Streaming scan to build stats and find max ID
+        let mut skipped_count = 0usize;
         let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
             .backend
             .for_each_prefix_raw("memory_records", vec![], |_key, value| {
@@ -315,8 +316,8 @@ impl RedbMemoryStore {
                             .entry(memory.context.fingerprint)
                             .or_insert(0) += 1;
                     },
-                    Err(e) => {
-                        tracing::warn!("Skipping corrupt memory record during init: {:?}", e);
+                    Err(_) => {
+                        skipped_count += 1;
                     },
                 }
                 Ok(())
@@ -324,6 +325,12 @@ impl RedbMemoryStore {
 
         if let Err(ForEachError::Storage(e)) = scan_result {
             tracing::error!("Failed to scan memories during init: {:?}", e);
+        }
+        if skipped_count > 0 {
+            tracing::warn!(
+                "initialize: skipped {} corrupt memory records (likely v1 compact format with serde_json::Value fields)",
+                skipped_count
+            );
         }
 
         tracing::info!(
@@ -752,12 +759,17 @@ impl MemoryStore for RedbMemoryStore {
             candidates.retain(|m| m.agent_id == aid);
         }
 
-        // Filter by similarity threshold (using context fingerprint as proxy)
+        // Filter by similarity threshold using embeddings when available
         candidates.retain(|m| {
             let similarity = if m.context.fingerprint == context.fingerprint {
                 1.0
             } else {
-                0.5 // TODO: Implement proper similarity metric
+                match (context.embeddings.as_deref(), m.context.embeddings.as_deref()) {
+                    (Some(q), Some(e)) if !q.is_empty() && !e.is_empty() => {
+                        agent_db_core::utils::cosine_similarity(q, e)
+                    }
+                    _ => 0.0,
+                }
             };
             similarity >= min_similarity
         });
@@ -767,22 +779,59 @@ impl MemoryStore for RedbMemoryStore {
     }
 
     fn apply_outcome(&mut self, memory_id: MemoryId, success: bool) -> bool {
+        use crate::memory::{
+            memory_outcome_score, META_NEGATIVE_OUTCOMES, META_POSITIVE_OUTCOMES, META_Q_VALUE,
+            Q_ALPHA,
+        };
+
         // Load memory
         let mut memory = match self.load_memory(memory_id) {
             Some(m) => m,
             None => return false,
         };
 
-        // Update strength based on outcome
-        if success {
-            memory.strength =
-                (memory.strength + self.config.access_strength_boost).min(self.config.max_strength);
-        } else {
-            memory.strength = (memory.strength - self.config.access_strength_boost * 0.5).max(0.0);
-        }
-
         memory.access_count += 1;
         memory.last_accessed = agent_db_core::types::current_timestamp();
+
+        // Update lifetime counters in metadata (lossless)
+        let counter_key = if success {
+            META_POSITIVE_OUTCOMES
+        } else {
+            META_NEGATIVE_OUTCOMES
+        };
+        let current_count: u32 = memory
+            .metadata
+            .get(counter_key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        memory
+            .metadata
+            .insert(counter_key.to_string(), (current_count + 1).to_string());
+
+        // Update EMA Q-value: Q = Q + alpha(r - Q)
+        let r = if success { 1.0_f32 } else { 0.0 };
+        let q_old: f32 = memory
+            .metadata
+            .get(META_Q_VALUE)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.5);
+        let q_new = q_old + Q_ALPHA * (r - q_old);
+        memory
+            .metadata
+            .insert(META_Q_VALUE.to_string(), format!("{:.6}", q_new));
+
+        // Compute piecewise score
+        let piecewise_score = memory_outcome_score(&memory);
+
+        // Blend: preserve formation quality while incorporating outcome feedback
+        memory.strength = (memory.strength * 0.5 + piecewise_score * 0.5).min(self.config.max_strength);
+
+        // Adjust relevance score
+        if success {
+            memory.relevance_score = (memory.relevance_score + 0.02).min(1.0);
+        } else {
+            memory.relevance_score = (memory.relevance_score - 0.02).max(0.0);
+        }
 
         // Persist updated memory
         if let Err(e) = self.persist_memory(&memory) {
@@ -844,14 +893,15 @@ impl MemoryStore for RedbMemoryStore {
         let mut forgotten_metas: Vec<(MemoryId, crate::memory::MemoryTier, f32, u64, u64)> =
             Vec::new(); // (id, tier, strength, agent_id, fingerprint)
         let mut modified_cache_updates: Vec<(MemoryId, f32)> = Vec::new(); // (id, new_strength)
+        let mut skipped_count = 0usize;
 
         let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
             .backend
             .for_each_prefix_raw("memory_records", vec![], |_key, value| {
                 let memory: Memory = match deserialize_versioned(value) {
                     Ok(m) => m,
-                    Err(e) => {
-                        tracing::warn!("apply_decay: skipping corrupt record: {:?}", e);
+                    Err(_) => {
+                        skipped_count += 1;
                         return Ok(());
                     },
                 };
@@ -900,6 +950,12 @@ impl MemoryStore for RedbMemoryStore {
         if let Err(ForEachError::Storage(e)) = scan_result {
             tracing::error!("apply_decay: streaming scan failed: {:?}", e);
             return;
+        }
+        if skipped_count > 0 {
+            tracing::warn!(
+                "apply_decay: skipped {} corrupt memory records",
+                skipped_count
+            );
         }
         // Final partial batch
         if !pending_ops.is_empty() {
@@ -965,6 +1021,7 @@ impl MemoryStore for RedbMemoryStore {
         let cached_ids: HashSet<MemoryId> = self.memory_cache.iter().map(|(&id, _)| id).collect();
 
         let mut all: Vec<Memory> = Vec::new();
+        let mut skipped_count = 0usize;
 
         // Stream from redb, skip entries that are in cache (cache is fresher)
         let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
@@ -976,8 +1033,8 @@ impl MemoryStore for RedbMemoryStore {
                             all.push(memory);
                         }
                     },
-                    Err(e) => {
-                        tracing::warn!("list_all_memories: skipping corrupt record: {:?}", e);
+                    Err(_) => {
+                        skipped_count += 1;
                     },
                 }
                 Ok(())
@@ -985,6 +1042,12 @@ impl MemoryStore for RedbMemoryStore {
 
         if let Err(ForEachError::Storage(e)) = scan_result {
             tracing::error!("Failed to stream memories from redb: {:?}", e);
+        }
+        if skipped_count > 0 {
+            tracing::warn!(
+                "list_all_memories: skipped {} corrupt memory records",
+                skipped_count
+            );
         }
 
         // Add cached versions (fresher)
@@ -1325,6 +1388,9 @@ pub trait StrategyStore: Send + Sync {
     ) -> crate::GraphResult<()>;
     fn get_stats(&self) -> StrategyStats;
 
+    /// Update a strategy in the store (e.g. after LLM refinement).
+    fn update_strategy(&mut self, strategy: Strategy) -> crate::GraphResult<()>;
+
     // ========== Pruning API ==========
     /// Remove weak / stale strategies and merge near-duplicates.
     /// Returns the total number of strategies removed.
@@ -1403,6 +1469,10 @@ impl StrategyStore for InMemoryStrategyStore {
 
     fn get_stats(&self) -> StrategyStats {
         self.inner.get_stats()
+    }
+
+    fn update_strategy(&mut self, strategy: Strategy) -> crate::GraphResult<()> {
+        self.inner.insert_loaded_strategy(strategy)
     }
 
     fn prune_strategies(
@@ -1485,6 +1555,7 @@ impl RedbStrategyStore {
         }
 
         // Streaming scan to find max ID (in case persisted ID is stale)
+        let mut skipped_count = 0usize;
         let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
             .backend
             .for_each_prefix_raw("strategy_records", vec![], |_key, value| {
@@ -1494,8 +1565,8 @@ impl RedbStrategyStore {
                             self.next_strategy_id = strategy.id + 1;
                         }
                     },
-                    Err(e) => {
-                        tracing::warn!("Skipping corrupt strategy record during init: {:?}", e);
+                    Err(_) => {
+                        skipped_count += 1;
                     },
                 }
                 Ok(())
@@ -1503,6 +1574,12 @@ impl RedbStrategyStore {
 
         if let Err(ForEachError::Storage(e)) = scan_result {
             tracing::error!("Failed to scan strategies during init: {:?}", e);
+        }
+        if skipped_count > 0 {
+            tracing::warn!(
+                "initialize: skipped {} corrupt strategy records",
+                skipped_count
+            );
         }
 
         tracing::info!(
@@ -1832,6 +1909,21 @@ impl StrategyStore for RedbStrategyStore {
         }
     }
 
+    fn update_strategy(&mut self, strategy: Strategy) -> crate::GraphResult<()> {
+        let id = strategy.id;
+        // Persist to redb
+        if let Err(e) = self.persist_strategy(&strategy) {
+            tracing::error!("Failed to persist updated strategy {}: {:?}", id, e);
+            return Err(crate::GraphError::OperationError(format!(
+                "Failed to persist strategy: {:?}",
+                e
+            )));
+        }
+        // Update cache
+        self.cache_strategy(strategy);
+        Ok(())
+    }
+
     fn prune_strategies(
         &mut self,
         min_confidence: f32,
@@ -1918,6 +2010,7 @@ impl StrategyStore for RedbStrategyStore {
             self.strategy_cache.iter().map(|(&id, _)| id).collect();
 
         let mut all: Vec<Strategy> = Vec::new();
+        let mut skipped_count = 0usize;
 
         // Stream from redb, skip cached entries
         let scan_result: Result<(), ForEachError<std::convert::Infallible>> = self
@@ -1929,8 +2022,8 @@ impl StrategyStore for RedbStrategyStore {
                             all.push(strategy);
                         }
                     },
-                    Err(e) => {
-                        tracing::warn!("list_all_strategies: skipping corrupt record: {:?}", e);
+                    Err(_) => {
+                        skipped_count += 1;
                     },
                 }
                 Ok(())
@@ -1938,6 +2031,12 @@ impl StrategyStore for RedbStrategyStore {
 
         if let Err(ForEachError::Storage(e)) = scan_result {
             tracing::error!("Failed to stream strategies from redb: {:?}", e);
+        }
+        if skipped_count > 0 {
+            tracing::warn!(
+                "list_all_strategies: skipped {} corrupt strategy records",
+                skipped_count
+            );
         }
 
         // Add cached versions (fresher)
@@ -2042,4 +2141,149 @@ pub fn build_strategy_index_ops(strategy: &Strategy) -> StorageResult<Vec<BatchO
     });
 
     Ok(ops)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::{
+        memory_negative_outcomes, memory_outcome_score, memory_positive_outcomes,
+        ConsolidationStatus, MemoryTier, MemoryType,
+    };
+    use agent_db_events::core::EventContext;
+    use crate::episodes::EpisodeOutcome;
+
+    /// Helper: create a minimal Memory for testing
+    fn make_test_memory(id: MemoryId) -> Memory {
+        Memory {
+            id,
+            agent_id: 1,
+            session_id: 1,
+            episode_id: 1,
+            summary: "test memory".to_string(),
+            takeaway: String::new(),
+            causal_note: String::new(),
+            summary_embedding: Vec::new(),
+            tier: MemoryTier::Episodic,
+            consolidated_from: Vec::new(),
+            schema_id: None,
+            consolidation_status: ConsolidationStatus::Active,
+            context: EventContext::default(),
+            key_events: Vec::new(),
+            strength: 0.5,
+            relevance_score: 0.5,
+            formed_at: 1000,
+            last_accessed: 1000,
+            access_count: 0,
+            outcome: EpisodeOutcome::Success,
+            memory_type: MemoryType::Episodic { significance: 0.5 },
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Helper: create a RedbMemoryStore with a temp directory
+    fn make_test_store(dir: &tempfile::TempDir) -> RedbMemoryStore {
+        let backend = Arc::new(
+            RedbBackend::open(agent_db_storage::RedbConfig {
+                data_path: dir.path().join("test.redb"),
+                cache_size_bytes: 4 * 1024 * 1024,
+                repair_on_open: false,
+            })
+            .unwrap(),
+        );
+        let config = MemoryFormationConfig::default();
+        let mut store = RedbMemoryStore::new(backend, config, 128);
+        store.initialize().unwrap();
+        store
+    }
+
+    #[test]
+    fn test_redb_memory_piecewise_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = make_test_store(&dir);
+
+        // Store a memory via store_consolidated_memory
+        let mem = make_test_memory(1);
+        let initial_strength = mem.strength;
+        store.store_consolidated_memory(mem);
+
+        // Apply 3 positive outcomes
+        for _ in 0..3 {
+            assert!(store.apply_outcome(1, true));
+        }
+
+        // Apply 1 negative outcome
+        assert!(store.apply_outcome(1, false));
+
+        // Load the memory and verify piecewise scoring was applied
+        let mem = store.load_memory(1).expect("memory should exist");
+        assert_eq!(memory_positive_outcomes(&mem), 3);
+        assert_eq!(memory_negative_outcomes(&mem), 1);
+
+        // Strength should differ from initial (piecewise blended)
+        assert!(
+            (mem.strength - initial_strength).abs() > 0.001,
+            "strength should have changed via piecewise scoring"
+        );
+
+        // Piecewise score should be well-defined
+        let score = memory_outcome_score(&mem);
+        assert!(score > 0.0 && score <= 1.0);
+
+        // Relevance should have shifted
+        // +3 success * 0.02 = +0.06, -1 failure * 0.02 = -0.02 → net +0.04
+        let expected_relevance = 0.5 + 0.04;
+        assert!(
+            (mem.relevance_score - expected_relevance).abs() < 0.001,
+            "relevance_score {} should be ~{}",
+            mem.relevance_score,
+            expected_relevance
+        );
+    }
+
+    #[test]
+    fn test_redb_memory_embedding_similarity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = make_test_store(&dir);
+
+        let shared_fp = 42u64;
+
+        let mut mem1 = make_test_memory(1);
+        mem1.context.fingerprint = shared_fp;
+        mem1.context.embeddings = Some(vec![1.0, 0.0, 0.0]);
+        store.store_consolidated_memory(mem1);
+
+        let mut mem2 = make_test_memory(2);
+        mem2.context.fingerprint = shared_fp;
+        mem2.context.embeddings = Some(vec![0.9, 0.1, 0.0]);
+        store.store_consolidated_memory(mem2);
+
+        let mut mem3 = make_test_memory(3);
+        mem3.context.fingerprint = 999; // different fingerprint
+        mem3.context.embeddings = Some(vec![0.0, 0.0, 1.0]);
+        store.store_consolidated_memory(mem3);
+
+        // Query with shared_fp: exact-match returns mem1 and mem2 (similarity=1.0)
+        let mut query_ctx = EventContext::default();
+        query_ctx.fingerprint = shared_fp;
+        query_ctx.embeddings = Some(vec![1.0, 0.0, 0.0]);
+
+        let results = store.retrieve_by_context_similar(&query_ctx, 10, 0.5, None, None);
+        let ids: Vec<MemoryId> = results.iter().map(|m| m.id).collect();
+        assert!(ids.contains(&1), "mem1 should match (exact fingerprint)");
+        assert!(ids.contains(&2), "mem2 should match (exact fingerprint)");
+        assert!(!ids.contains(&3), "mem3 should NOT match (different fingerprint)");
+
+        // Query with fp=999: only mem3 is a candidate, exact match → passes
+        query_ctx.fingerprint = 999;
+        let results2 = store.retrieve_by_context_similar(&query_ctx, 10, 0.5, None, None);
+        assert_eq!(results2.len(), 1);
+        assert_eq!(results2[0].id, 3);
+
+        // Verify cosine utility works correctly (unit-level sanity check)
+        let sim = agent_db_core::utils::cosine_similarity(&[1.0, 0.0, 0.0], &[0.0, 0.0, 1.0]);
+        assert!(sim.abs() < 0.01, "orthogonal vectors should have ~0.0 similarity");
+        let sim2 = agent_db_core::utils::cosine_similarity(&[1.0, 0.0, 0.0], &[0.9, 0.1, 0.0]);
+        assert!(sim2 > 0.9, "similar vectors should have high cosine similarity");
+    }
 }

@@ -40,9 +40,18 @@ impl CentralityMeasures {
         Ok(centrality)
     }
 
-    /// Calculate betweenness centrality
-    /// Measures how often a node appears on shortest paths between other nodes
-    /// High betweenness = "bridge" or "gatekeeper" node
+    /// Calculate betweenness centrality using Brandes' algorithm — O(V*E).
+    ///
+    /// Measures how often a node appears on shortest paths between other nodes.
+    /// High betweenness = "bridge" or "gatekeeper" node.
+    ///
+    /// For each source *s* the algorithm:
+    /// 1. Runs a BFS to compute shortest-path counts σ and predecessor lists.
+    /// 2. Back-propagates a dependency value δ through the BFS tree.
+    /// 3. Accumulates δ into the global betweenness scores.
+    ///
+    /// The result is normalized by (n-1)(n-2) for directed graphs so that
+    /// values fall in [0, 1].
     pub fn betweenness_centrality(&self, graph: &Graph) -> GraphResult<HashMap<NodeId, f32>> {
         let nodes = graph.get_all_node_ids();
         let n = nodes.len();
@@ -51,44 +60,79 @@ impl CentralityMeasures {
             return Ok(nodes.iter().map(|&id| (id, 0.0)).collect());
         }
 
-        let mut centrality: HashMap<NodeId, f32> = nodes.iter().map(|&id| (id, 0.0)).collect();
+        // Accumulator: C_B[v] for every v
+        let mut cb: HashMap<NodeId, f64> = nodes.iter().map(|&id| (id, 0.0)).collect();
 
-        // For each pair of nodes, find all shortest paths
-        for (i, &source) in nodes.iter().enumerate() {
-            for &target in &nodes[i + 1..] {
-                if source == target {
-                    continue;
-                }
+        for &s in &nodes {
+            // --- single-source shortest-path (BFS) ---
+            // Stack of nodes in order of non-decreasing distance from s
+            let mut stack: Vec<NodeId> = Vec::new();
+            // Predecessors on shortest paths from s
+            let mut pred: HashMap<NodeId, Vec<NodeId>> = nodes
+                .iter()
+                .map(|&v| (v, Vec::new()))
+                .collect();
+            // σ[t] = number of shortest paths from s to t
+            let mut sigma: HashMap<NodeId, f64> = nodes.iter().map(|&v| (v, 0.0)).collect();
+            *sigma.get_mut(&s).unwrap() = 1.0;
+            // d[t] = distance from s to t (-1 = unseen)
+            let mut dist: HashMap<NodeId, i64> = nodes.iter().map(|&v| (v, -1_i64)).collect();
+            *dist.get_mut(&s).unwrap() = 0;
 
-                // Find all shortest paths from source to target
-                let paths = self.all_shortest_paths(graph, source, target)?;
+            let mut queue: VecDeque<NodeId> = VecDeque::new();
+            queue.push_back(s);
 
-                if paths.is_empty() {
-                    continue;
-                }
+            while let Some(v) = queue.pop_front() {
+                stack.push(v);
+                let dv = dist[&v];
 
-                let num_paths = paths.len() as f32;
-
-                // Count how many paths go through each node
-                for path in &paths {
-                    for &node_id in path {
-                        if node_id != source && node_id != target {
-                            *centrality.entry(node_id).or_insert(0.0) += 1.0 / num_paths;
-                        }
+                for w in graph.get_neighbors(v) {
+                    // w found for the first time?
+                    if dist[&w] < 0 {
+                        queue.push_back(w);
+                        *dist.get_mut(&w).unwrap() = dv + 1;
+                    }
+                    // shortest path to w via v?
+                    if dist[&w] == dv + 1 {
+                        *sigma.get_mut(&w).unwrap() += sigma[&v];
+                        pred.get_mut(&w).unwrap().push(v);
                     }
                 }
             }
-        }
 
-        // Normalize by maximum possible betweenness: (n-1)(n-2)/2
-        let normalization = ((n - 1) * (n - 2)) as f32 / 2.0;
-        if normalization > 0.0 {
-            for value in centrality.values_mut() {
-                *value /= normalization;
+            // --- dependency accumulation ---
+            let mut delta: HashMap<NodeId, f64> = nodes.iter().map(|&v| (v, 0.0)).collect();
+
+            // Pop nodes from stack in reverse BFS order (furthest first)
+            while let Some(w) = stack.pop() {
+                let sw = sigma[&w];
+                if sw == 0.0 {
+                    continue;
+                }
+                let dw = delta[&w];
+                for v in &pred[&w] {
+                    let contribution = (sigma[v] / sw) * (1.0 + dw);
+                    *delta.get_mut(v).unwrap() += contribution;
+                }
+                if w != s {
+                    *cb.get_mut(&w).unwrap() += delta[&w];
+                }
             }
         }
 
-        Ok(centrality)
+        // Normalize: for directed graphs the normalization factor is (n-1)(n-2)
+        let normalization = ((n - 1) * (n - 2)) as f64;
+        let mut result: HashMap<NodeId, f32> = HashMap::with_capacity(n);
+        for (&node, &score) in &cb {
+            let normalized = if normalization > 0.0 {
+                score / normalization
+            } else {
+                0.0
+            };
+            result.insert(node, normalized as f32);
+        }
+
+        Ok(result)
     }
 
     /// Calculate closeness centrality
@@ -283,77 +327,6 @@ impl CentralityMeasures {
         Ok(None) // No path found
     }
 
-    /// Find all shortest paths between two nodes
-    fn all_shortest_paths(
-        &self,
-        graph: &Graph,
-        start: NodeId,
-        end: NodeId,
-    ) -> GraphResult<Vec<Vec<NodeId>>> {
-        if start == end {
-            return Ok(vec![vec![start]]);
-        }
-
-        // BFS to find shortest distance
-        let mut queue = VecDeque::new();
-        let mut distances: HashMap<NodeId, usize> = HashMap::new();
-        let mut predecessors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-
-        queue.push_back(start);
-        distances.insert(start, 0);
-
-        while let Some(current) = queue.pop_front() {
-            let current_dist = distances[&current];
-
-            for neighbor in graph.get_neighbors(current) {
-                if let std::collections::hash_map::Entry::Vacant(e) = distances.entry(neighbor) {
-                    // First time visiting
-                    e.insert(current_dist + 1);
-                    predecessors.insert(neighbor, vec![current]);
-                    queue.push_back(neighbor);
-                } else if distances[&neighbor] == current_dist + 1 {
-                    // Same distance, another shortest path
-                    predecessors.entry(neighbor).or_default().push(current);
-                }
-            }
-        }
-
-        // Check if end is reachable
-        if !distances.contains_key(&end) {
-            return Ok(Vec::new());
-        }
-
-        // Reconstruct all shortest paths
-        let mut paths = Vec::new();
-        let mut current_paths = vec![vec![end]];
-
-        while !current_paths.is_empty() {
-            let mut next_paths = Vec::new();
-
-            for path in current_paths {
-                let current = path[0];
-
-                if current == start {
-                    // Complete path found
-                    let mut complete_path = path.clone();
-                    complete_path.reverse();
-                    paths.push(complete_path);
-                } else if let Some(preds) = predecessors.get(&current) {
-                    // Extend path with each predecessor
-                    for &pred in preds {
-                        let mut new_path = vec![pred];
-                        new_path.extend_from_slice(&path);
-                        next_paths.push(new_path);
-                    }
-                }
-            }
-
-            current_paths = next_paths;
-        }
-
-        Ok(paths)
-    }
-
     /// Get top N nodes by centrality
     pub fn top_nodes(centrality: &HashMap<NodeId, f32>, n: usize) -> Vec<(NodeId, f32)> {
         let mut sorted: Vec<_> = centrality.iter().map(|(&id, &score)| (id, score)).collect();
@@ -474,6 +447,110 @@ mod tests {
         // Node 1 should have highest degree centrality (connected to 4 others)
         assert!(centrality[&n1] > centrality[&other_nodes[0]]);
         assert!(centrality[&n1] > 0.5);
+    }
+
+    #[test]
+    fn test_brandes_betweenness_line_graph() {
+        // Line graph: A -> B -> C -> D
+        // B and C are the only intermediate nodes — they should have highest betweenness.
+        let mut graph = Graph::new();
+        let a = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 1, event_type: "t".into(), significance: 0.5,
+        })).unwrap();
+        let b = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 2, event_type: "t".into(), significance: 0.5,
+        })).unwrap();
+        let c = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 3, event_type: "t".into(), significance: 0.5,
+        })).unwrap();
+        let d = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 4, event_type: "t".into(), significance: 0.5,
+        })).unwrap();
+
+        let edge = |s, t| GraphEdge::new(s, t, EdgeType::Causality { strength: 1.0, lag_ms: 10 }, 1.0);
+        graph.add_edge(edge(a, b));
+        graph.add_edge(edge(b, c));
+        graph.add_edge(edge(c, d));
+
+        let calc = CentralityMeasures::new();
+        let bc = calc.betweenness_centrality(&graph).unwrap();
+
+        // A and D are endpoints — zero betweenness
+        assert_eq!(bc[&a], 0.0);
+        assert_eq!(bc[&d], 0.0);
+
+        // B and C are intermediaries — positive betweenness
+        assert!(bc[&b] > 0.0, "B should have positive betweenness, got {}", bc[&b]);
+        assert!(bc[&c] > 0.0, "C should have positive betweenness, got {}", bc[&c]);
+    }
+
+    #[test]
+    fn test_brandes_betweenness_star_graph() {
+        // Star: center connected to 4 leaves (bidirectional edges).
+        // Center sits on ALL shortest paths between leaves.
+        let mut graph = Graph::new();
+        let center = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 100, event_type: "t".into(), significance: 0.5,
+        })).unwrap();
+        let mut leaves = Vec::new();
+        for i in 1..=4 {
+            let leaf = graph.add_node(GraphNode::new(NodeType::Event {
+                event_id: i, event_type: "t".into(), significance: 0.5,
+            })).unwrap();
+            leaves.push(leaf);
+            let edge = |s, t| GraphEdge::new(s, t, EdgeType::Causality { strength: 1.0, lag_ms: 10 }, 1.0);
+            graph.add_edge(edge(center, leaf));
+            graph.add_edge(edge(leaf, center));
+        }
+
+        let calc = CentralityMeasures::new();
+        let bc = calc.betweenness_centrality(&graph).unwrap();
+
+        // Center should have highest betweenness
+        for leaf in &leaves {
+            assert!(
+                bc[&center] > bc[leaf],
+                "Center betweenness {} should exceed leaf {} betweenness {}",
+                bc[&center], leaf, bc[leaf]
+            );
+        }
+
+        // Leaves have zero betweenness (no paths go through them)
+        for leaf in &leaves {
+            assert_eq!(bc[leaf], 0.0, "Leaf {} should have zero betweenness", leaf);
+        }
+    }
+
+    #[test]
+    fn test_brandes_betweenness_empty_and_small() {
+        let calc = CentralityMeasures::new();
+
+        // Empty graph
+        let graph = Graph::new();
+        let bc = calc.betweenness_centrality(&graph).unwrap();
+        assert!(bc.is_empty());
+
+        // Single node
+        let mut graph = Graph::new();
+        let _n = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 1, event_type: "t".into(), significance: 0.5,
+        })).unwrap();
+        let bc = calc.betweenness_centrality(&graph).unwrap();
+        assert_eq!(bc.len(), 1);
+        assert_eq!(*bc.values().next().unwrap(), 0.0);
+
+        // Two nodes
+        let mut graph = Graph::new();
+        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 1, event_type: "t".into(), significance: 0.5,
+        })).unwrap();
+        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
+            event_id: 2, event_type: "t".into(), significance: 0.5,
+        })).unwrap();
+        graph.add_edge(GraphEdge::new(n1, n2, EdgeType::Causality { strength: 1.0, lag_ms: 10 }, 1.0));
+        let bc = calc.betweenness_centrality(&graph).unwrap();
+        assert_eq!(bc[&n1], 0.0);
+        assert_eq!(bc[&n2], 0.0);
     }
 
     #[test]

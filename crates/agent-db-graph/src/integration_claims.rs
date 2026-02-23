@@ -595,12 +595,19 @@ impl GraphEngine {
             // Submit to claim extraction queue
             match claim_queue.extract(request).await {
                 Ok(result) => {
-                    debug!(
-                        "Claim extraction complete for event {}: {} accepted, {} rejected",
-                        event_id,
-                        result.accepted_claims.len(),
-                        result.rejected_claims.len()
-                    );
+                    if !result.accepted_claims.is_empty() || !result.rejected_claims.is_empty() {
+                        tracing::info!(
+                            "Claims extracted for event {}: {} accepted, {} rejected",
+                            event_id,
+                            result.accepted_claims.len(),
+                            result.rejected_claims.len()
+                        );
+                    } else {
+                        debug!(
+                            "Claim extraction complete for event {}: no claims produced",
+                            event_id,
+                        );
+                    }
 
                     // Step 2: Integrate accepted claims into the graph
                     for claim in result.accepted_claims {

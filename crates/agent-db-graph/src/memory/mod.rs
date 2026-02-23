@@ -11,6 +11,14 @@ use agent_db_core::types::{
 };
 use agent_db_events::core::{Event, EventContext};
 use std::collections::HashMap;
+use rustc_hash::FxHashMap;
+
+// Piecewise outcome scoring constants (same keys/values as claims for consistency)
+pub const META_POSITIVE_OUTCOMES: &str = "_positive_outcomes";
+pub const META_NEGATIVE_OUTCOMES: &str = "_negative_outcomes";
+pub const META_Q_VALUE: &str = "_q_value";
+pub const Q_KICK_IN: u32 = 5;
+pub const Q_ALPHA: f32 = 0.3;
 
 mod similarity;
 pub(crate) use similarity::calculate_context_similarity;
@@ -182,13 +190,13 @@ impl Default for MemoryFormationConfig {
 /// Memory formation engine
 pub struct MemoryFormation {
     /// All formed memories
-    memories: HashMap<MemoryId, Memory>,
+    memories: FxHashMap<MemoryId, Memory>,
     /// Memory index by agent
-    agent_memories: HashMap<AgentId, Vec<MemoryId>>,
+    agent_memories: FxHashMap<AgentId, Vec<MemoryId>>,
     /// Memory index by context hash
-    context_index: HashMap<ContextHash, Vec<MemoryId>>,
+    context_index: FxHashMap<ContextHash, Vec<MemoryId>>,
     /// Memory index by episode
-    episode_index: HashMap<EpisodeId, MemoryId>,
+    episode_index: FxHashMap<EpisodeId, MemoryId>,
     /// Configuration
     config: MemoryFormationConfig,
     /// Next memory ID
@@ -199,10 +207,10 @@ impl MemoryFormation {
     /// Create a new memory formation engine
     pub fn new(config: MemoryFormationConfig) -> Self {
         Self {
-            memories: HashMap::new(),
-            agent_memories: HashMap::new(),
-            context_index: HashMap::new(),
-            episode_index: HashMap::new(),
+            memories: FxHashMap::default(),
+            agent_memories: FxHashMap::default(),
+            context_index: FxHashMap::default(),
+            episode_index: FxHashMap::default(),
             config,
             next_memory_id: 1,
         }
@@ -538,7 +546,14 @@ impl MemoryFormation {
         }
     }
 
-    /// Apply explicit outcome feedback to a memory (used -> outcome)
+    /// Apply explicit outcome feedback to a memory (used -> outcome).
+    ///
+    /// Uses piecewise scoring (same algorithm as claims):
+    /// - Phase 1 (< 5 outcomes): Bayesian `(pos+1)/(total+2)` — stable, prior-dominated
+    /// - Phase 2 (>= 5 outcomes): EMA Q-value `Q = Q + α(r − Q)` — responsive to shift
+    ///
+    /// Strength is blended: `0.5 * old_strength + 0.5 * piecewise_score` to preserve
+    /// formation-time quality while incorporating outcome feedback.
     pub fn apply_outcome(&mut self, memory_id: MemoryId, success: bool) -> bool {
         let current_time = current_timestamp();
         let Some(memory) = self.memories.get_mut(&memory_id) else {
@@ -548,13 +563,43 @@ impl MemoryFormation {
         memory.access_count += 1;
         memory.last_accessed = current_time;
 
+        // Update lifetime counters in metadata (lossless)
+        let counter_key = if success {
+            META_POSITIVE_OUTCOMES
+        } else {
+            META_NEGATIVE_OUTCOMES
+        };
+        let current_count: u32 = memory
+            .metadata
+            .get(counter_key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        memory
+            .metadata
+            .insert(counter_key.to_string(), (current_count + 1).to_string());
+
+        // Update EMA Q-value: Q = Q + α(r − Q)
+        let r = if success { 1.0_f32 } else { 0.0 };
+        let q_old: f32 = memory
+            .metadata
+            .get(META_Q_VALUE)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.5);
+        let q_new = q_old + Q_ALPHA * (r - q_old);
+        memory
+            .metadata
+            .insert(META_Q_VALUE.to_string(), format!("{:.6}", q_new));
+
+        // Compute piecewise score
+        let piecewise_score = memory_outcome_score(memory);
+
+        // Blend: preserve formation quality while incorporating outcome feedback
+        memory.strength = (memory.strength * 0.5 + piecewise_score * 0.5).min(self.config.max_strength);
+
+        // Adjust relevance score
         if success {
-            memory.strength =
-                (memory.strength + self.config.access_strength_boost).min(self.config.max_strength);
             memory.relevance_score = (memory.relevance_score + 0.02).min(1.0);
         } else {
-            memory.strength = (memory.strength - self.config.decay_rate_per_hour)
-                .max(self.config.forget_threshold);
             memory.relevance_score = (memory.relevance_score - 0.02).max(0.0);
         }
 
@@ -841,4 +886,147 @@ pub struct MemoryStats {
     pub episodic_count: usize,
     pub semantic_count: usize,
     pub schema_count: usize,
+}
+
+// ========== Piecewise Outcome Scoring Helpers ==========
+
+/// Number of positive outcomes recorded for a memory.
+pub fn memory_positive_outcomes(m: &Memory) -> u32 {
+    m.metadata
+        .get(META_POSITIVE_OUTCOMES)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Number of negative outcomes recorded for a memory.
+pub fn memory_negative_outcomes(m: &Memory) -> u32 {
+    m.metadata
+        .get(META_NEGATIVE_OUTCOMES)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Piecewise outcome score for a memory ∈ [0.0, 1.0].
+///
+/// Below `Q_KICK_IN` outcomes: Bayesian `(pos+1)/(total+2)`.
+/// At or above: EMA Q-value (responsive to distribution shift).
+pub fn memory_outcome_score(m: &Memory) -> f32 {
+    let pos = memory_positive_outcomes(m);
+    let neg = memory_negative_outcomes(m);
+    let total = pos + neg;
+    if total < Q_KICK_IN {
+        (pos as f32 + 1.0) / (total as f32 + 2.0)
+    } else {
+        m.metadata
+            .get(META_Q_VALUE)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.5)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::episodes::EpisodeOutcome;
+    use agent_db_events::core::EventContext;
+
+    fn make_test_memory(id: MemoryId) -> Memory {
+        Memory {
+            id,
+            agent_id: 1,
+            session_id: 1,
+            episode_id: 1,
+            summary: String::new(),
+            takeaway: String::new(),
+            causal_note: String::new(),
+            summary_embedding: Vec::new(),
+            tier: MemoryTier::Episodic,
+            consolidated_from: Vec::new(),
+            schema_id: None,
+            consolidation_status: ConsolidationStatus::Active,
+            context: EventContext::default(),
+            key_events: Vec::new(),
+            strength: 0.7,
+            relevance_score: 0.5,
+            formed_at: current_timestamp(),
+            last_accessed: current_timestamp(),
+            access_count: 0,
+            outcome: EpisodeOutcome::Success,
+            memory_type: MemoryType::Episodic { significance: 0.5 },
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_memory_piecewise_outcome_scoring() {
+        let config = MemoryFormationConfig::default();
+        let mut engine = MemoryFormation::new(config);
+        let mem = make_test_memory(1);
+        engine.store_direct(mem);
+
+        // Record 3 successes, 1 failure (total=4, still in Bayesian phase)
+        engine.apply_outcome(1, true);
+        engine.apply_outcome(1, true);
+        engine.apply_outcome(1, true);
+        engine.apply_outcome(1, false);
+
+        let m = engine.get_memory(1).unwrap();
+        assert_eq!(memory_positive_outcomes(m), 3);
+        assert_eq!(memory_negative_outcomes(m), 1);
+        // Bayesian: (3+1)/(4+2) = 4/6 ≈ 0.667
+        let score = memory_outcome_score(m);
+        assert!((score - 0.6667).abs() < 0.01, "Bayesian score should be ~0.667, got {}", score);
+
+        // Record 2 more successes to cross Q_KICK_IN threshold (total=6)
+        engine.apply_outcome(1, true);
+        engine.apply_outcome(1, true);
+
+        let m = engine.get_memory(1).unwrap();
+        assert_eq!(memory_positive_outcomes(m), 5);
+        assert_eq!(memory_negative_outcomes(m), 1);
+        // Now in Q phase — EMA should be well above 0.5 (mostly successes)
+        let score = memory_outcome_score(m);
+        assert!(score > 0.5, "Q-value should be >0.5 after mostly successes, got {}", score);
+
+        // Strength should reflect piecewise blending (not just flat +/-0.1)
+        let final_strength = m.strength;
+        assert!(final_strength > 0.0 && final_strength <= 1.0,
+            "Strength should be in (0,1], got {}", final_strength);
+    }
+
+    #[test]
+    fn test_memory_outcome_counters_in_metadata() {
+        let config = MemoryFormationConfig::default();
+        let mut engine = MemoryFormation::new(config);
+        let mem = make_test_memory(1);
+        engine.store_direct(mem);
+
+        engine.apply_outcome(1, true);
+        engine.apply_outcome(1, false);
+
+        let m = engine.get_memory(1).unwrap();
+        // Verify metadata keys exist
+        assert!(m.metadata.contains_key(META_POSITIVE_OUTCOMES));
+        assert!(m.metadata.contains_key(META_NEGATIVE_OUTCOMES));
+        assert!(m.metadata.contains_key(META_Q_VALUE));
+
+        // Verify values
+        assert_eq!(m.metadata.get(META_POSITIVE_OUTCOMES).unwrap(), "1");
+        assert_eq!(m.metadata.get(META_NEGATIVE_OUTCOMES).unwrap(), "1");
+
+        // Q-value after 1 success then 1 failure:
+        // Start: 0.5, after success: 0.5 + 0.3*(1.0-0.5) = 0.65
+        // After failure: 0.65 + 0.3*(0.0-0.65) = 0.455
+        let q: f32 = m.metadata.get(META_Q_VALUE).unwrap().parse().unwrap();
+        assert!((q - 0.455).abs() < 0.001, "Q should be ~0.455, got {}", q);
+    }
+
+    #[test]
+    fn test_memory_outcome_helpers_no_metadata() {
+        let m = make_test_memory(1);
+        assert_eq!(memory_positive_outcomes(&m), 0);
+        assert_eq!(memory_negative_outcomes(&m), 0);
+        // No outcomes → Bayesian (0+1)/(0+2) = 0.5
+        assert!((memory_outcome_score(&m) - 0.5).abs() < 0.001);
+    }
 }

@@ -79,6 +79,15 @@ pub mod refinement;
 pub mod export;
 pub mod wire_v2;
 
+// Event content extraction helpers
+pub mod event_content;
+
+// Temporal views (snapshot, rolling window)
+pub mod temporal_view;
+
+// String interning pool
+pub mod intern;
+
 // Background maintenance (decay, pruning, dedup)
 pub mod maintenance;
 
@@ -116,18 +125,24 @@ pub use strategies::{
     StrategyExtractionConfig, StrategyExtractor, StrategyId, StrategyStats, StrategyType,
 };
 pub use structures::{
-    ConceptType, EdgeId, EdgeType, EdgeWeight, GoalRelationType, GoalStatus, Graph, GraphEdge,
-    GraphNode, GraphStats, InteractionType, NodeId, NodeType,
+    AdjList, ConceptType, Depth, Direction, EdgeId, EdgeType, EdgeWeight, GoalRelationType,
+    GoalStatus, Graph, GraphEdge, GraphNode, GraphStats, InteractionType, NodeId, NodeType,
 };
+pub use temporal_view::{GraphAtSnapshot, RollingWindow};
 pub use traversal::{
-    ActionSuggestion, BfsIter, CommunityAlgorithm, DfsIter, DijkstraIter, GraphQuery,
-    GraphTraversal, PathConstraint, QueryResult, QueryStats,
+    ActionSuggestion, BfsIter, CancelHandle, CommunityAlgorithm, DfsIter, DijkstraIter,
+    DirectedBfsIter, DirectedDfsIter, DirectedDijkstraIter, EdgeFilterExpr, GraphQuery,
+    GraphTraversal, Instruction, NodeFilterExpr, PathConstraint, QueryContext, QueryResult,
+    QueryStats, StreamingQuery, TraversalRequest, TraversalSpec,
 };
 
 // New advanced graph features
 pub use algorithms::{
     AllCentralities, CentralityMeasures, CommunityDetectionResult, CommunityPrepData,
-    LouvainAlgorithm, LouvainConfig, ParallelGraphAlgorithms, ProcessResult,
+    LabelPropagationAlgorithm, LabelPropagationConfig, LabelPropagationResult, LouvainAlgorithm,
+    LouvainConfig, ParallelGraphAlgorithms, ProcessResult, RandomWalkConfig, RandomWalkResult,
+    RandomWalker, ReachabilityRecord, TemporalReachability, TemporalReachabilityConfig,
+    TemporalReachabilityResult, WalkPath,
 };
 pub use analytics::{GraphAnalytics, GraphMetrics, LearningMetrics};
 pub use indexing::{IndexManager, IndexStats, IndexType, PropertyIndex};
@@ -136,7 +151,7 @@ pub use indexing::{IndexManager, IndexStats, IndexType, PropertyIndex};
 pub use compression::{CompressedAdjacencyList, CompressionStats};
 pub use graph_store::{
     BucketInfo, EvictionTier, GraphPath, GraphStore, GraphStoreError, InMemoryGraphStore,
-    NodeFilter, NodeHeader, Subgraph, NODE_HEADER_BYTES,
+    NodeFilter, NodeHeader, ShardedGraphStore, Subgraph, NODE_HEADER_BYTES,
 };
 pub use redb_graph_store::RedbGraphStore;
 

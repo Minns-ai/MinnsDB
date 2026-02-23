@@ -1227,7 +1227,7 @@ async fn main() -> anyhow::Result<()> {
     config.embedding_workers = 2;
     config.ner_storage_path = Some(PathBuf::from("./data/ner_features.redb"));
     config.claim_storage_path = Some(PathBuf::from("./data/claims.redb"));
-    config.openai_api_key = env::var("OPENAI_API_KEY").ok();
+    config.openai_api_key = env::var("LLM_API_KEY").ok();
     config.llm_model = env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
     config.claim_min_confidence = 0.7;
     config.claim_max_per_input = 10;

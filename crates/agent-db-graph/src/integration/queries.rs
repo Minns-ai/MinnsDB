@@ -185,6 +185,82 @@ impl GraphEngine {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        // PPR-based proximity boost: nodes closer to last action get a small bonus
+        if let Some(source_node) = last_action_node {
+            if let Ok(ppr_scores) = self.random_walker.personalized_pagerank(graph, source_node) {
+                // Rank-based normalization: sort PPR scores for the candidate set,
+                // map to [0.0, 1.0] rank percentiles
+                let n = suggestions.len();
+                if n > 0 {
+                    let mut indexed_scores: Vec<(usize, f64)> = suggestions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            let score = ppr_scores
+                                .get(&s.action_node_id)
+                                .copied()
+                                .unwrap_or(0.0);
+                            (i, score)
+                        })
+                        .collect();
+                    indexed_scores.sort_by(|a, b| {
+                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    let mut rank_scores = vec![0.0f64; n];
+                    for (rank, &(idx, _)) in indexed_scores.iter().enumerate() {
+                        rank_scores[idx] = rank as f64 / (n.max(2) - 1) as f64;
+                    }
+
+                    for (i, suggestion) in suggestions.iter_mut().enumerate() {
+                        suggestion.success_probability =
+                            suggestion.success_probability * 0.9 + rank_scores[i] as f32 * 0.1;
+                    }
+
+                    suggestions.sort_by(|a, b| {
+                        b.success_probability
+                            .partial_cmp(&a.success_probability)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+            }
+        }
+
+        // World model reranking (ScoringAndReranking or Full mode only)
+        if matches!(
+            self.config.effective_world_model_mode(),
+            WorldModelMode::ScoringAndReranking | WorldModelMode::Full
+        ) {
+            if let Some(ref wm) = self.world_model {
+                let wm_guard = wm.read().await;
+                if wm_guard.energy_stats().is_warmed_up {
+                    let policy = agent_db_world_model::PolicyFeatures {
+                        goal_count: 1,
+                        top_goal_priority: 0.8,
+                        resource_cpu_percent: 0.0,
+                        resource_memory_bytes: 0,
+                        context_fingerprint: context_hash,
+                    };
+                    let strategy = world_model::extract_strategy_features(None);
+                    let report = wm_guard.score_strategy(&policy, &strategy);
+                    let wm_score = (-report.total_energy).clamp(0.0, 1.0);
+
+                    for suggestion in &mut suggestions {
+                        // Blend: 80% existing score + 20% world model compatibility
+                        suggestion.success_probability =
+                            suggestion.success_probability * 0.8 + wm_score * 0.2;
+                    }
+
+                    // Re-sort after blending
+                    suggestions.sort_by(|a, b| {
+                        b.success_probability
+                            .partial_cmp(&a.success_probability)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+            }
+        }
+
         // Return top-k after centrality ranking
         Ok(suggestions.into_iter().take(limit).collect())
     }

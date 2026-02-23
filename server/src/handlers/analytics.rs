@@ -2,11 +2,14 @@
 
 use crate::errors::ApiError;
 use crate::models::{
-    AnalyticsResponse, CentralityScoresResponse, CommunitiesResponse, CommunityResponse,
-    IndexStatsResponse, LearningMetricsResponse,
+    AnalyticsResponse, CausalPathQuery, CausalPathResponse, CentralityScoresResponse,
+    CommunitiesQuery, CommunitiesResponse, CommunityResponse, IndexStatsResponse,
+    LearningMetricsResponse, PprNodeScore, PprQuery, PprResponse, ReachabilityNodeResponse,
+    ReachabilityQuery, ReachabilityResponse,
 };
 use crate::state::AppState;
-use axum::{extract::State, Json};
+use axum::extract::{Query, State};
+use axum::Json;
 
 // GET /api/analytics - Get comprehensive graph analytics
 pub async fn get_analytics(
@@ -64,12 +67,22 @@ pub async fn get_indexes(
 // GET /api/communities - Detect and return graph communities
 pub async fn get_communities(
     State(state): State<AppState>,
+    Query(params): Query<CommunitiesQuery>,
 ) -> Result<Json<CommunitiesResponse>, ApiError> {
     let result = state
         .engine
-        .detect_communities()
+        .detect_communities_with_algorithm(params.algorithm.as_deref())
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to detect communities: {}", e)))?;
+        .map_err(|e| match &e {
+            agent_db_graph::GraphError::InvalidQuery(_) => ApiError::BadRequest(e.to_string()),
+            _ => ApiError::Internal(format!("Failed to detect communities: {}", e)),
+        })?;
+
+    let resolved_algorithm = params
+        .algorithm
+        .as_deref()
+        .unwrap_or(&state.engine.config.community_algorithm)
+        .to_string();
 
     let communities: Vec<CommunityResponse> = result
         .communities
@@ -86,6 +99,7 @@ pub async fn get_communities(
         modularity: result.modularity,
         iterations: result.iterations,
         community_count: result.community_count,
+        algorithm: resolved_algorithm,
     }))
 }
 
@@ -147,4 +161,128 @@ pub async fn get_centrality(
     });
 
     Ok(Json(scores))
+}
+
+// GET /api/ppr - Compute PersonalizedPageRank from a source node
+pub async fn get_ppr(
+    State(state): State<AppState>,
+    Query(params): Query<PprQuery>,
+) -> Result<Json<PprResponse>, ApiError> {
+    let start = std::time::Instant::now();
+
+    let ppr_scores = state
+        .engine
+        .personalized_pagerank(params.source_node_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to compute PPR: {}", e)))?;
+
+    let min_score = params.min_score.unwrap_or(0.001);
+    let limit = params.limit.unwrap_or(100);
+
+    let mut scores: Vec<PprNodeScore> = ppr_scores
+        .into_iter()
+        .filter(|(_, score)| *score >= min_score)
+        .map(|(node_id, score)| PprNodeScore { node_id, score })
+        .collect();
+
+    scores.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scores.truncate(limit);
+
+    tracing::info!(
+        source = params.source_node_id,
+        results = scores.len(),
+        duration_ms = start.elapsed().as_millis() as u64,
+        "PPR computed"
+    );
+
+    Ok(Json(PprResponse {
+        source_node_id: params.source_node_id,
+        algorithm: "personalized_pagerank".to_string(),
+        scores,
+    }))
+}
+
+// GET /api/reachability - Compute temporal reachability from a source node
+pub async fn get_reachability(
+    State(state): State<AppState>,
+    Query(params): Query<ReachabilityQuery>,
+) -> Result<Json<ReachabilityResponse>, ApiError> {
+    let start = std::time::Instant::now();
+    let max_hops = params.max_hops.unwrap_or(0);
+    let max_results = params.max_results.unwrap_or(500);
+
+    let result = state
+        .engine
+        .temporal_reachability_from(params.source, max_hops)
+        .await
+        .map_err(|e| match &e {
+            agent_db_graph::GraphError::InvalidQuery(_) => ApiError::BadRequest(e.to_string()),
+            _ => ApiError::Internal(format!("Failed to compute reachability: {}", e)),
+        })?;
+
+    let mut reachable: Vec<ReachabilityNodeResponse> = result
+        .reachable
+        .iter()
+        .map(|(&node_id, record)| ReachabilityNodeResponse {
+            node_id,
+            origin: record.origin,
+            arrival_time: record.arrival_time,
+            hops: record.hops,
+            predecessor: record.predecessor,
+        })
+        .collect();
+
+    // Sort by arrival time for consistent output
+    reachable.sort_by_key(|r| r.arrival_time);
+    reachable.truncate(max_results);
+
+    tracing::info!(
+        source = params.source,
+        max_hops = max_hops,
+        reachable_count = result.reachable.len(),
+        duration_ms = start.elapsed().as_millis() as u64,
+        "Temporal reachability computed"
+    );
+
+    Ok(Json(ReachabilityResponse {
+        source_node_id: params.source,
+        reachable_count: result.reachable.len(),
+        max_depth: result.max_depth,
+        edges_traversed: result.edges_traversed,
+        reachable,
+    }))
+}
+
+// GET /api/causal-path - Find causal path between two nodes
+pub async fn get_causal_path(
+    State(state): State<AppState>,
+    Query(params): Query<CausalPathQuery>,
+) -> Result<Json<CausalPathResponse>, ApiError> {
+    // Handle source == target trivially
+    if params.source == params.target {
+        return Ok(Json(CausalPathResponse {
+            source: params.source,
+            target: params.target,
+            found: true,
+            path: Some(vec![params.source]),
+        }));
+    }
+
+    let path = state
+        .engine
+        .causal_path(params.source, params.target)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to compute causal path: {}", e)))?;
+
+    let found = path.is_some();
+    Ok(Json(CausalPathResponse {
+        source: params.source,
+        target: params.target,
+        found,
+        path,
+    }))
 }

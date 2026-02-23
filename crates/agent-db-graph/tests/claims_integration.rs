@@ -1,6 +1,6 @@
 //! Real LLM claims pipeline integration test
 //!
-//! Requires OPENAI_API_KEY to be set in the environment.
+//! Requires LLM_API_KEY to be set in the environment.
 //! Run with: cargo test -p agent-db-graph --test claims_integration -- --ignored
 
 use agent_db_events::core::{EventContext, EventType};
@@ -36,12 +36,12 @@ fn build_context_event(text: &str) -> Event {
 /// End-to-end test: send a Context event through the full claims pipeline
 /// with a real OpenAI API key and verify claims are extracted and stored.
 #[tokio::test]
-#[ignore = "requires OPENAI_API_KEY — run with: cargo test --ignored"]
+#[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
 async fn test_real_claims_pipeline_end_to_end() {
-    let api_key = match std::env::var("OPENAI_API_KEY") {
+    let api_key = match std::env::var("LLM_API_KEY") {
         Ok(key) if !key.is_empty() => key,
         _ => {
-            eprintln!("Skipping: OPENAI_API_KEY not set");
+            eprintln!("Skipping: LLM_API_KEY not set");
             return;
         },
     };
@@ -157,12 +157,12 @@ async fn test_real_claims_pipeline_end_to_end() {
 
 /// Test that embedding generation works end-to-end with real OpenAI API.
 #[tokio::test]
-#[ignore = "requires OPENAI_API_KEY — run with: cargo test --ignored"]
+#[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
 async fn test_real_embedding_generation() {
-    let api_key = match std::env::var("OPENAI_API_KEY") {
+    let api_key = match std::env::var("LLM_API_KEY") {
         Ok(key) if !key.is_empty() => key,
         _ => {
-            eprintln!("Skipping: OPENAI_API_KEY not set");
+            eprintln!("Skipping: LLM_API_KEY not set");
             return;
         },
     };

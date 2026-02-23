@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use rustc_hash::FxHashMap;
+
 use crate::contracts::{AbstractTrace, AbstractTransition};
 use crate::episodes::EpisodeId;
 
@@ -54,30 +56,30 @@ impl TransitionStats {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct TransitionModelSnapshot {
-    buckets: HashMap<u64, HashMap<TransitionKey, TransitionStats>>,
-    episode_transitions: HashMap<EpisodeId, Vec<TransitionKey>>,
-    episode_outcomes: HashMap<EpisodeId, bool>,
-    episode_goal_bucket: HashMap<EpisodeId, u64>,
+    buckets: FxHashMap<u64, HashMap<TransitionKey, TransitionStats>>,
+    episode_transitions: FxHashMap<EpisodeId, Vec<TransitionKey>>,
+    episode_outcomes: FxHashMap<EpisodeId, bool>,
+    episode_goal_bucket: FxHashMap<EpisodeId, u64>,
     config: TransitionModelConfig,
 }
 
 #[derive(Debug, Default)]
 pub struct TransitionModel {
     config: TransitionModelConfig,
-    buckets: HashMap<u64, HashMap<TransitionKey, TransitionStats>>,
-    episode_transitions: HashMap<EpisodeId, Vec<TransitionKey>>,
-    episode_outcomes: HashMap<EpisodeId, bool>,
-    episode_goal_bucket: HashMap<EpisodeId, u64>,
+    buckets: FxHashMap<u64, HashMap<TransitionKey, TransitionStats>>,
+    episode_transitions: FxHashMap<EpisodeId, Vec<TransitionKey>>,
+    episode_outcomes: FxHashMap<EpisodeId, bool>,
+    episode_goal_bucket: FxHashMap<EpisodeId, u64>,
 }
 
 impl TransitionModel {
     pub fn new(config: TransitionModelConfig) -> Self {
         Self {
             config,
-            buckets: HashMap::new(),
-            episode_transitions: HashMap::new(),
-            episode_outcomes: HashMap::new(),
-            episode_goal_bucket: HashMap::new(),
+            buckets: FxHashMap::default(),
+            episode_transitions: FxHashMap::default(),
+            episode_outcomes: FxHashMap::default(),
+            episode_goal_bucket: FxHashMap::default(),
         }
     }
 
@@ -214,6 +216,34 @@ impl TransitionModel {
             episode_outcomes: snapshot.episode_outcomes,
             episode_goal_bucket: snapshot.episode_goal_bucket,
         })
+    }
+
+    /// Get top transitions for a goal bucket, sorted by observation count descending.
+    ///
+    /// Returns `(state, action, next_state, stats)` tuples. Useful for surfacing
+    /// empirical success rates to the planning prompt.
+    pub fn top_transitions(
+        &self,
+        goal_bucket_id: u64,
+        limit: usize,
+    ) -> Vec<(String, String, String, TransitionStats)> {
+        let Some(bucket) = self.buckets.get(&goal_bucket_id) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<_> = bucket.iter().collect();
+        entries.sort_by(|a, b| b.1.count.cmp(&a.1.count));
+        entries
+            .into_iter()
+            .take(limit)
+            .map(|(key, stats)| {
+                (
+                    key.state.clone(),
+                    key.action.clone(),
+                    key.next_state.clone(),
+                    stats.clone(),
+                )
+            })
+            .collect()
     }
 
     /// Remove transition entries whose total count is below `min_count`.

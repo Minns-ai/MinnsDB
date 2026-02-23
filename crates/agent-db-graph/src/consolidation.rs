@@ -16,6 +16,7 @@ use crate::memory::{ConsolidationStatus, Memory, MemoryId, MemoryTier, MemoryTyp
 use crate::stores::MemoryStore;
 use agent_db_core::types::current_timestamp;
 use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// How Phase 2 groups semantic memories into schemas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -275,7 +276,7 @@ impl ConsolidationEngine {
 
     /// ExactFingerprint: group semantics by their context fingerprint (original behaviour).
     fn group_by_fingerprint<'a>(&self, eligible: &[&'a Memory]) -> Vec<Vec<&'a Memory>> {
-        let mut fp_groups: HashMap<u64, Vec<&'a Memory>> = HashMap::new();
+        let mut fp_groups: FxHashMap<u64, Vec<&'a Memory>> = FxHashMap::default();
         for m in eligible {
             fp_groups.entry(m.context.fingerprint).or_default().push(m);
         }
@@ -443,6 +444,26 @@ impl ConsolidationEngine {
 
     // ---- Synthesis helpers ----
 
+    /// Extract deduplicated goal descriptions from source memories' active_goals.
+    /// Falls back to "goal bucket {id}" if no descriptions are found.
+    fn extract_goal_descriptions(memories: &[&Memory], goal_bucket_id: u64) -> String {
+        let mut seen = std::collections::HashSet::new();
+        let mut descriptions = Vec::new();
+        for m in memories {
+            for goal in &m.context.active_goals {
+                let desc = goal.description.trim();
+                if !desc.is_empty() && seen.insert(desc.to_string()) {
+                    descriptions.push(desc.to_string());
+                }
+            }
+        }
+        if descriptions.is_empty() {
+            format!("goal bucket {}", goal_bucket_id)
+        } else {
+            descriptions.join("; ")
+        }
+    }
+
     fn synthesize_semantic(&mut self, memories: &[&Memory], goal_bucket_id: u64) -> Memory {
         let id = self.next_id();
         let agent_id = memories[0].agent_id;
@@ -464,76 +485,104 @@ impl ConsolidationEngine {
             }
         }
 
-        // Build summary by merging individual summaries
+        // Extract goal descriptions for human-readable output
+        let goals_label = Self::extract_goal_descriptions(memories, goal_bucket_id);
+
+        // Partition episodes by outcome for actionable summaries
+        let success_summaries: Vec<&str> = memories
+            .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Success)
+            .map(|m| m.summary.as_str())
+            .filter(|s| !s.is_empty())
+            .take(2)
+            .collect();
+        let failure_summaries: Vec<&str> = memories
+            .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Failure)
+            .map(|m| m.summary.as_str())
+            .filter(|s| !s.is_empty())
+            .take(2)
+            .collect();
+
         let mut summary_parts = Vec::new();
+        summary_parts.push(format!("For {}:", goals_label));
+        if !success_summaries.is_empty() {
+            summary_parts.push(format!("What worked: {}.", success_summaries.join(". ")));
+        }
+        if !failure_summaries.is_empty() {
+            summary_parts.push(format!("What failed: {}.", failure_summaries.join(". ")));
+        }
         summary_parts.push(format!(
-            "Generalized from {} episodes in goal bucket {}.",
-            memories.len(),
-            goal_bucket_id
-        ));
-        summary_parts.push(format!(
-            "Success rate: {:.0}% ({} succeeded, {} failed).",
-            if success + failure > 0 {
-                success as f32 / (success + failure) as f32 * 100.0
-            } else {
-                0.0
-            },
+            "Success rate: {}/{} episodes.",
             success,
-            failure
+            memories.len()
         ));
 
-        // Extract common themes from individual takeaways
-        let takeaways: Vec<&str> = memories
+        // Partition takeaways by outcome
+        let success_takeaways: Vec<&str> = memories
             .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Success)
             .map(|m| m.takeaway.as_str())
             .filter(|t| !t.is_empty())
+            .take(2)
             .collect();
-        if !takeaways.is_empty() {
-            summary_parts.push(format!(
-                "Key patterns: {}",
-                takeaways
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            ));
-        }
-
-        // Extract common causal patterns
-        let causal_notes: Vec<&str> = memories
+        let failure_takeaways: Vec<&str> = memories
             .iter()
-            .map(|m| m.causal_note.as_str())
-            .filter(|n| !n.is_empty())
+            .filter(|m| m.outcome == EpisodeOutcome::Failure)
+            .map(|m| m.takeaway.as_str())
+            .filter(|t| !t.is_empty())
+            .take(2)
             .collect();
-        let consolidated_causal = if causal_notes.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "Causal patterns across episodes: {}",
-                causal_notes
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            )
-        };
 
         let consolidated_takeaway = if success > failure {
-            format!(
-                "This approach works reliably for goal bucket {} ({:.0}% success across {} episodes).",
-                goal_bucket_id,
-                success as f32 / (success + failure) as f32 * 100.0,
-                memories.len()
-            )
+            let mut parts = vec![format!("Effective approach for {}", goals_label)];
+            if !success_takeaways.is_empty() {
+                parts.push(format!(": {}.", success_takeaways.join(". ")));
+            } else {
+                parts.push(".".to_string());
+            }
+            if !failure_takeaways.is_empty() {
+                parts.push(format!(" Avoid: {}.", failure_takeaways.join(". ")));
+            }
+            parts.join("")
         } else {
-            format!(
-                "This approach needs improvement for goal bucket {} — only {:.0}% success across {} episodes.",
-                goal_bucket_id,
-                if success + failure > 0 { success as f32 / (success + failure) as f32 * 100.0 } else { 0.0 },
-                memories.len()
-            )
+            let mut parts = vec![format!("Approach needs improvement for {}", goals_label)];
+            if !failure_takeaways.is_empty() {
+                parts.push(format!(": {}.", failure_takeaways.join(". ")));
+            } else {
+                parts.push(".".to_string());
+            }
+            if !success_takeaways.is_empty() {
+                parts.push(format!(" Partial success when: {}.", success_takeaways.join(". ")));
+            }
+            parts.join("")
+        };
+
+        // Partition causal notes by outcome
+        let success_causes: Vec<&str> = memories
+            .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Success)
+            .map(|m| m.causal_note.as_str())
+            .filter(|n| !n.is_empty())
+            .take(2)
+            .collect();
+        let failure_causes: Vec<&str> = memories
+            .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Failure)
+            .map(|m| m.causal_note.as_str())
+            .filter(|n| !n.is_empty())
+            .take(2)
+            .collect();
+
+        let consolidated_causal = {
+            let mut parts = Vec::new();
+            if !success_causes.is_empty() {
+                parts.push(format!("Succeeded because: {}.", success_causes.join(". ")));
+            }
+            if !failure_causes.is_empty() {
+                parts.push(format!("Failed because: {}.", failure_causes.join(". ")));
+            }
+            parts.join(" ")
         };
 
         let source_ids: Vec<MemoryId> = memories.iter().map(|m| m.id).collect();
@@ -595,38 +644,83 @@ impl ConsolidationEngine {
             }
         }
 
-        let summary = format!(
-            "Schema: Reusable mental model for goal bucket {}. Distilled from {} semantic memories covering {} total episodes. \
-             Overall success rate: {:.0}%. This schema captures the core pattern that works across varied contexts in this domain.",
-            goal_bucket_id,
-            semantics.len(),
-            total_source_count,
-            if success + failure > 0 {
-                success as f32 / (success + failure) as f32 * 100.0
-            } else {
-                0.0
-            }
-        );
+        // Extract goal descriptions from semantic source memories
+        let goals_label = Self::extract_goal_descriptions(semantics, goal_bucket_id);
 
-        // Merge takeaways from semantic level
-        let merged_takeaways: Vec<&str> = semantics
+        // Collect success/failure takeaways and causes from semantic memories
+        let success_takeaways: Vec<&str> = semantics
+            .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Success)
+            .map(|m| m.takeaway.as_str())
+            .filter(|t| !t.is_empty())
+            .take(2)
+            .collect();
+        let failure_takeaways: Vec<&str> = semantics
+            .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Failure)
+            .map(|m| m.takeaway.as_str())
+            .filter(|t| !t.is_empty())
+            .take(2)
+            .collect();
+        let success_causes: Vec<&str> = semantics
+            .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Success)
+            .map(|m| m.causal_note.as_str())
+            .filter(|n| !n.is_empty())
+            .take(2)
+            .collect();
+        let failure_causes: Vec<&str> = semantics
+            .iter()
+            .filter(|m| m.outcome == EpisodeOutcome::Failure)
+            .map(|m| m.causal_note.as_str())
+            .filter(|n| !n.is_empty())
+            .take(2)
+            .collect();
+
+        // Build structured rule summary
+        let mut summary_parts = vec![format!("Rule for {}:", goals_label)];
+        if !success_causes.is_empty() {
+            summary_parts.push(format!("When: {}.", success_causes.join(". ")));
+        }
+        if !success_takeaways.is_empty() {
+            summary_parts.push(format!("Do: {}.", success_takeaways.join(". ")));
+        }
+        if !failure_takeaways.is_empty() {
+            summary_parts.push(format!("Avoid: {}.", failure_takeaways.join(". ")));
+        }
+        summary_parts.push(format!(
+            "Validated across {} episodes ({}/{} succeeded).",
+            total_source_count, success, semantics.len()
+        ));
+        let summary = summary_parts.join(" ");
+
+        // Build takeaway from semantic takeaways
+        let all_takeaways: Vec<&str> = semantics
             .iter()
             .map(|m| m.takeaway.as_str())
             .filter(|t| !t.is_empty())
+            .take(3)
             .collect();
-
-        let takeaway = if merged_takeaways.is_empty() {
-            format!(
-                "This is a proven mental model for goal bucket {} with {} supporting episodes.",
-                goal_bucket_id, total_source_count
-            )
+        let takeaway = if all_takeaways.is_empty() {
+            format!("Core rule for {}.", goals_label)
         } else {
-            format!(
-                "Core insight: {} (validated across {} semantic memories, {} episodes)",
-                merged_takeaways.join("; "),
-                semantics.len(),
-                total_source_count
-            )
+            format!("Core rule for {}: {}", goals_label, all_takeaways.join(". "))
+        };
+
+        // Build causal note
+        let causal_note = {
+            let mut parts = Vec::new();
+            if !success_causes.is_empty() {
+                parts.push(format!("Works when: {}.", success_causes.join(". ")));
+            }
+            if !failure_causes.is_empty() {
+                parts.push(format!("Fails when: {}.", failure_causes.join(". ")));
+            }
+            if parts.is_empty() {
+                format!("Schema from {} semantic memories for {}.", semantics.len(), goals_label)
+            } else {
+                parts.join(" ")
+            }
         };
 
         let source_ids: Vec<MemoryId> = semantics.iter().map(|m| m.id).collect();
@@ -639,11 +733,7 @@ impl ConsolidationEngine {
             episode_id: 0,
             summary,
             takeaway,
-            causal_note: format!(
-                "Schema consolidated from {} semantic memories. Represents the dominant causal pattern for goal bucket {}.",
-                semantics.len(),
-                goal_bucket_id
-            ),
+            causal_note,
             summary_embedding: Vec::new(),
             tier: MemoryTier::Schema,
             consolidated_from: source_ids,
@@ -685,8 +775,8 @@ impl ConsolidationEngine {
         memories.iter().filter(|m| m.tier == *tier).collect()
     }
 
-    fn group_by_goal_bucket<'a>(memories: &[&'a Memory]) -> HashMap<u64, Vec<&'a Memory>> {
-        let mut groups: HashMap<u64, Vec<&'a Memory>> = HashMap::new();
+    fn group_by_goal_bucket<'a>(memories: &[&'a Memory]) -> FxHashMap<u64, Vec<&'a Memory>> {
+        let mut groups: FxHashMap<u64, Vec<&'a Memory>> = FxHashMap::default();
         for m in memories {
             groups.entry(m.context.goal_bucket_id).or_default().push(m);
         }
@@ -764,7 +854,7 @@ mod tests {
     use crate::memory::{
         ConsolidationStatus, Memory, MemoryFormationConfig, MemoryTier, MemoryType,
     };
-    use agent_db_events::core::EventContext;
+    use agent_db_events::core::{EventContext, Goal};
 
     fn make_episodic_memory(id: MemoryId, goal_bucket: u64, outcome: EpisodeOutcome) -> Memory {
         let ctx = EventContext {
@@ -845,7 +935,7 @@ mod tests {
         assert_eq!(semantic_mems.len(), 1);
         assert!(semantic_mems[0]
             .summary
-            .contains("Generalized from 3 episodes"));
+            .contains("Success rate: 3/3 episodes"));
         assert_eq!(semantic_mems[0].consolidated_from.len(), 3);
 
         // Check the consolidated episodic memories have schema_id = None
@@ -918,7 +1008,7 @@ mod tests {
             .filter(|m| m.tier == MemoryTier::Schema)
             .collect();
         assert_eq!(schemas.len(), 1);
-        assert!(schemas[0].summary.contains("Schema: Reusable mental model"));
+        assert!(schemas[0].summary.contains("Rule for"));
 
         let created_schema_id = schemas[0].id;
 
@@ -1284,6 +1374,87 @@ mod tests {
         assert_eq!(
             schemas[0].metadata.get("grouping_mode").unwrap(),
             "EmbeddingMutual"
+        );
+    }
+
+    #[test]
+    fn test_semantic_uses_goal_descriptions() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+            ..Default::default()
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // Create 3 episodic memories with active_goals containing real descriptions
+        for i in 1..=3u64 {
+            let ctx = EventContext {
+                fingerprint: 555,
+                goal_bucket_id: 555,
+                active_goals: vec![Goal {
+                    id: 1,
+                    description: "Deploy the web service".to_string(),
+                    priority: 1.0,
+                    deadline: None,
+                    progress: 0.0,
+                    subgoals: vec![],
+                }],
+                ..Default::default()
+            };
+            let mem = Memory {
+                id: i,
+                agent_id: 1,
+                session_id: 100,
+                episode_id: i,
+                summary: format!("Episode {} happened", i),
+                takeaway: format!("Lesson from episode {}", i),
+                causal_note: format!("Because of X in episode {}", i),
+                summary_embedding: Vec::new(),
+                tier: MemoryTier::Episodic,
+                consolidated_from: Vec::new(),
+                schema_id: None,
+                consolidation_status: ConsolidationStatus::Active,
+                context: ctx,
+                key_events: Vec::new(),
+                strength: 0.8,
+                relevance_score: 0.7,
+                formed_at: 1000 + i,
+                last_accessed: 1000 + i,
+                access_count: 0,
+                outcome: EpisodeOutcome::Success,
+                memory_type: MemoryType::Episodic { significance: 0.8 },
+                metadata: HashMap::new(),
+            };
+            store.store_consolidated_memory(mem);
+        }
+
+        let mut engine = ConsolidationEngine::new(config, 100);
+        let result = engine.run_consolidation(&mut store);
+
+        assert_eq!(result.semantic_created, 1);
+
+        let all = store.list_all_memories();
+        let semantic: Vec<&Memory> = all
+            .iter()
+            .filter(|m| m.tier == MemoryTier::Semantic)
+            .collect();
+        assert_eq!(semantic.len(), 1);
+
+        // Summary should contain the actual goal description, not "goal bucket 555"
+        assert!(
+            semantic[0].summary.contains("Deploy the web service"),
+            "Summary should use goal description, got: {}",
+            semantic[0].summary
+        );
+        assert!(
+            !semantic[0].summary.contains("goal bucket"),
+            "Summary should NOT contain 'goal bucket' when descriptions available, got: {}",
+            semantic[0].summary
         );
     }
 

@@ -1,6 +1,6 @@
 //! redb backend for persistent storage
 //!
-//! This module provides the core redb infrastructure with 19 tables
+//! This module provides the core redb infrastructure with 20 tables
 //! for storing episodes, memories, strategies, transitions, telemetry, and graph structure.
 //!
 //! ## Why redb?
@@ -84,6 +84,9 @@ mod table_defs {
     pub const GRAPH_ADJACENCY: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("graph_adjacency");
     pub const GRAPH_EDGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("graph_edges");
+
+    // World model (Phase 3)
+    pub const WORLD_MODEL: TableDefinition<&[u8], &[u8]> = TableDefinition::new("world_model");
 }
 
 /// Table names (for string-based access)
@@ -108,6 +111,7 @@ pub mod table_names {
     pub const GRAPH_NODES: &str = "graph_nodes";
     pub const GRAPH_ADJACENCY: &str = "graph_adjacency";
     pub const GRAPH_EDGES: &str = "graph_edges";
+    pub const WORLD_MODEL: &str = "world_model";
 }
 
 /// redb backend configuration
@@ -240,6 +244,11 @@ impl RedbBackend {
             let _ = write_txn
                 .open_table(table_defs::GRAPH_EDGES)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+            // World model (Phase 3)
+            let _ = write_txn
+                .open_table(table_defs::WORLD_MODEL)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
 
         write_txn
@@ -247,7 +256,7 @@ impl RedbBackend {
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
-            "redb opened at {:?} with 19 tables, cache size: {} MB",
+            "redb opened at {:?} with 20 tables, cache size: {} MB",
             config.data_path,
             config.cache_size_bytes / (1024 * 1024)
         );
@@ -290,6 +299,7 @@ impl RedbBackend {
             table_names::GRAPH_NODES => table_defs::GRAPH_NODES,
             table_names::GRAPH_ADJACENCY => table_defs::GRAPH_ADJACENCY,
             table_names::GRAPH_EDGES => table_defs::GRAPH_EDGES,
+            table_names::WORLD_MODEL => table_defs::WORLD_MODEL,
             _ => {
                 return Err(StorageError::DatabaseError(format!(
                     "Unknown table: {}",

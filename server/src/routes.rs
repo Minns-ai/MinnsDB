@@ -46,11 +46,30 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/graph/context", get(handlers::get_graph_for_context))
         .route("/api/graph/persist", post(handlers::persist_graph))
         .route("/api/stats", get(handlers::get_stats))
+        .route(
+            "/api/world-model/stats",
+            get(handlers::get_world_model_stats),
+        )
+        // Planning
+        .route(
+            "/api/planning/strategies",
+            post(handlers::generate_strategies),
+        )
+        .route("/api/planning/actions", post(handlers::generate_actions))
+        .route("/api/planning/plan", post(handlers::plan_for_goal))
+        .route("/api/planning/execute", post(handlers::start_execution))
+        .route(
+            "/api/planning/validate",
+            post(handlers::validate_execution_event),
+        )
         // Advanced analytics
         .route("/api/analytics", get(handlers::get_analytics))
         .route("/api/indexes", get(handlers::get_indexes))
         .route("/api/communities", get(handlers::get_communities))
         .route("/api/centrality", get(handlers::get_centrality))
+        .route("/api/ppr", get(handlers::get_ppr))
+        .route("/api/reachability", get(handlers::get_reachability))
+        .route("/api/causal-path", get(handlers::get_causal_path))
         // Search
         .route("/api/search", post(handlers::search))
         // Semantic memory / claims

@@ -60,6 +60,10 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000);
 
+    config.community_algorithm = env::var("COMMUNITY_ALGORITHM")
+        .unwrap_or_else(|_| "louvain".to_string());
+    info!("  Community algorithm: {}", config.community_algorithm);
+
     // Configure semantic memory (always available)
     config.enable_semantic_memory = true;
     config.ner_workers = 2;
@@ -73,11 +77,90 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
     config.embedding_workers = 2;
     config.ner_storage_path = Some(PathBuf::from("./data/ner_features.redb"));
     config.claim_storage_path = Some(PathBuf::from("./data/claims.redb"));
-    config.openai_api_key = env::var("OPENAI_API_KEY").ok();
+    config.openai_api_key = env::var("LLM_API_KEY").ok();
     config.llm_model = env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
     config.claim_min_confidence = 0.7;
     config.claim_max_per_input = 10;
     config.enable_embedding_generation = true;
+
+    // World model mode
+    config.enable_world_model = env::var("ENABLE_WORLD_MODEL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(false);
+
+    config.world_model_mode = match env::var("WORLD_MODEL_MODE")
+        .unwrap_or_else(|_| "disabled".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "shadow" => agent_db_planning::WorldModelMode::Shadow,
+        "scoring" => agent_db_planning::WorldModelMode::ScoringOnly,
+        "reranking" => agent_db_planning::WorldModelMode::ScoringAndReranking,
+        "full" => agent_db_planning::WorldModelMode::Full,
+        _ => agent_db_planning::WorldModelMode::Disabled,
+    };
+
+    // Planning config
+    config.planning_config.enable_strategy_generation = env::var("ENABLE_STRATEGY_GENERATION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(false);
+
+    config.planning_config.enable_action_generation = env::var("ENABLE_ACTION_GENERATION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(false);
+
+    config.planning_config.generation_mode = match env::var("GENERATION_MODE")
+        .unwrap_or_else(|_| "disabled".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "generate_only" => agent_db_planning::GenerationMode::GenerateOnly,
+        "generate_and_score" => agent_db_planning::GenerationMode::GenerateAndScore,
+        "generate_score_and_select" => agent_db_planning::GenerationMode::GenerateScoreAndSelect,
+        "full" => agent_db_planning::GenerationMode::Full,
+        _ => agent_db_planning::GenerationMode::Disabled,
+    };
+
+    config.planning_config.repair_enabled = env::var("ENABLE_REPAIR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(false);
+
+    // Planning LLM configuration
+    config.planning_llm_api_key = env::var("PLANNING_LLM_API_KEY")
+        .ok()
+        .or_else(|| env::var("LLM_API_KEY").ok());
+
+    config.planning_llm_provider = env::var("PLANNING_LLM_PROVIDER")
+        .unwrap_or_else(|_| "openai".to_string());
+
+    info!(
+        "  World model mode: {:?}",
+        config.effective_world_model_mode()
+    );
+    info!(
+        "  Strategy generation: {}",
+        config.planning_config.enable_strategy_generation
+    );
+    info!(
+        "  Action generation: {}",
+        config.planning_config.enable_action_generation
+    );
+    info!(
+        "  Generation mode: {:?}",
+        config.planning_config.generation_mode
+    );
+    info!(
+        "  Planning LLM: {}",
+        if config.planning_llm_api_key.is_some() {
+            format!("{} (key set)", config.planning_llm_provider)
+        } else {
+            "mock (no API key)".to_string()
+        }
+    );
 
     // Create data directory if it doesn't exist
     if let Some(parent) = config.redb_path.parent() {

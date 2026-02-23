@@ -10,10 +10,18 @@ use crate::GraphResult;
 use agent_db_core::types::{current_timestamp, AgentId, ContextHash, Timestamp};
 use agent_db_events::core::{ActionOutcome, CognitiveType, Event, EventType, MetadataValue};
 use serde_json::json;
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 
 /// Unique identifier for a strategy
 pub type StrategyId = u64;
+
+// Piecewise outcome scoring constants (same keys/values as claims/memories for consistency)
+const META_POSITIVE_OUTCOMES: &str = "_positive_outcomes";
+const META_NEGATIVE_OUTCOMES: &str = "_negative_outcomes";
+const META_Q_VALUE: &str = "_q_value";
+const Q_KICK_IN: u32 = 5;
+const Q_ALPHA: f32 = 0.3;
 
 /// Compute a deterministic goal bucket id from a set of goal ids.
 ///
@@ -364,40 +372,40 @@ impl Default for StrategyExtractionConfig {
 /// Strategy extraction engine
 pub struct StrategyExtractor {
     /// All extracted strategies
-    strategies: HashMap<StrategyId, Strategy>,
+    strategies: FxHashMap<StrategyId, Strategy>,
 
     /// Strategy index by agent
-    agent_strategies: HashMap<AgentId, Vec<StrategyId>>,
+    agent_strategies: FxHashMap<AgentId, Vec<StrategyId>>,
 
     /// Strategy index by context hash
-    context_index: HashMap<ContextHash, Vec<StrategyId>>,
+    context_index: FxHashMap<ContextHash, Vec<StrategyId>>,
 
     /// Strategy index by goal bucket
-    goal_bucket_index: HashMap<u64, Vec<StrategyId>>,
+    goal_bucket_index: FxHashMap<u64, Vec<StrategyId>>,
 
     /// Strategy index by behavior signature
     behavior_index: HashMap<String, Vec<StrategyId>>,
 
     /// Context counts for novelty estimation
-    context_counts: HashMap<(AgentId, u64, ContextHash), u32>,
+    context_counts: FxHashMap<(AgentId, u64, ContextHash), u32>,
 
     /// Goal bucket occurrence counts (per agent)
-    goal_bucket_counts: HashMap<(AgentId, u64), u32>,
+    goal_bucket_counts: FxHashMap<(AgentId, u64), u32>,
 
     /// Motif stats by goal bucket (per agent)
-    motif_stats_by_bucket: HashMap<(AgentId, u64), HashMap<String, MotifStats>>,
+    motif_stats_by_bucket: FxHashMap<(AgentId, u64), HashMap<String, MotifStats>>,
 
     /// Episode cache for validation (per agent + goal bucket)
-    episode_cache_by_bucket: HashMap<(AgentId, u64), Vec<EpisodeMotifRecord>>,
+    episode_cache_by_bucket: FxHashMap<(AgentId, u64), Vec<EpisodeMotifRecord>>,
 
     /// Strategy signature index to prevent duplicates
     strategy_signature_index: HashMap<String, StrategyId>,
 
     /// Episode to strategy index (idempotency)
-    episode_index: HashMap<EpisodeId, StrategyId>,
+    episode_index: FxHashMap<EpisodeId, StrategyId>,
 
     /// Episode outcome tracking for corrections
-    episode_outcomes: HashMap<EpisodeId, EpisodeOutcome>,
+    episode_outcomes: FxHashMap<EpisodeId, EpisodeOutcome>,
 
     /// Configuration
     config: StrategyExtractionConfig,
@@ -421,18 +429,18 @@ impl StrategyExtractor {
     /// Create a new strategy extractor
     pub fn new(config: StrategyExtractionConfig) -> Self {
         Self {
-            strategies: HashMap::new(),
-            agent_strategies: HashMap::new(),
-            context_index: HashMap::new(),
-            goal_bucket_index: HashMap::new(),
+            strategies: FxHashMap::default(),
+            agent_strategies: FxHashMap::default(),
+            context_index: FxHashMap::default(),
+            goal_bucket_index: FxHashMap::default(),
             behavior_index: HashMap::new(),
-            context_counts: HashMap::new(),
-            goal_bucket_counts: HashMap::new(),
-            motif_stats_by_bucket: HashMap::new(),
-            episode_cache_by_bucket: HashMap::new(),
+            context_counts: FxHashMap::default(),
+            goal_bucket_counts: FxHashMap::default(),
+            motif_stats_by_bucket: FxHashMap::default(),
+            episode_cache_by_bucket: FxHashMap::default(),
             strategy_signature_index: HashMap::new(),
-            episode_index: HashMap::new(),
-            episode_outcomes: HashMap::new(),
+            episode_index: FxHashMap::default(),
+            episode_outcomes: FxHashMap::default(),
             config,
             next_strategy_id: 1,
         }
@@ -2041,28 +2049,72 @@ impl StrategyExtractor {
             .unwrap_or_default()
     }
 
-    /// Update strategy based on new usage outcome
+    /// Update strategy based on new usage outcome.
+    ///
+    /// Keeps existing counters and raw ratio (`quality_score`) for backward compat.
+    /// Adds EMA Q-value in metadata and piecewise-blended `confidence` that
+    /// reflects both sample size and outcome quality.
     pub fn update_strategy_outcome(
         &mut self,
         strategy_id: StrategyId,
         success: bool,
     ) -> GraphResult<()> {
         if let Some(strategy) = self.strategies.get_mut(&strategy_id) {
+            // Lossless counters (keep existing)
             if success {
                 strategy.success_count += 1;
             } else {
                 strategy.failure_count += 1;
             }
 
-            // Update quality score
+            // Raw win ratio (keep for backward compat)
             let total = strategy.success_count + strategy.failure_count;
             if total > 0 {
                 strategy.quality_score = strategy.success_count as f32 / total as f32;
             }
             strategy.support_count = total;
+
+            // Bayesian expected success (keep for small N)
             strategy.expected_success =
                 (strategy.success_count as f32 + 1.0) / (total as f32 + 2.0);
-            strategy.confidence = 1.0 - (-((total as f32) / 3.0)).exp();
+
+            // Update EMA Q-value in metadata: Q = Q + α(r − Q)
+            let r = if success { 1.0_f32 } else { 0.0 };
+            let q_old: f32 = strategy
+                .metadata
+                .get(META_Q_VALUE)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.5);
+            let q_new = q_old + Q_ALPHA * (r - q_old);
+            strategy
+                .metadata
+                .insert(META_Q_VALUE.to_string(), format!("{:.6}", q_new));
+
+            // Store lifetime counters in metadata for audit
+            let pos_key = if success {
+                META_POSITIVE_OUTCOMES
+            } else {
+                META_NEGATIVE_OUTCOMES
+            };
+            let current_count: u32 = strategy
+                .metadata
+                .get(pos_key)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            strategy
+                .metadata
+                .insert(pos_key.to_string(), (current_count + 1).to_string());
+
+            // Piecewise score: Bayesian for small N, EMA for large N
+            let piecewise_score = if total < Q_KICK_IN {
+                strategy.expected_success // Bayesian
+            } else {
+                q_new // EMA Q-value
+            };
+
+            // Confidence = sample-size factor × piecewise outcome quality
+            let sample_confidence = 1.0 - (-((total as f32) / 3.0)).exp();
+            strategy.confidence = sample_confidence * piecewise_score;
 
             strategy.last_used = current_timestamp();
         }
@@ -2205,7 +2257,7 @@ impl StrategyExtractor {
         let mut to_merge: Vec<(StrategyId, StrategyId)> = Vec::new(); // (victim, survivor)
 
         // Group strategies by (agent_id, goal_bucket_id, strategy_type)
-        let mut groups: HashMap<(AgentId, u64, StrategyType), Vec<StrategyId>> = HashMap::new();
+        let mut groups: FxHashMap<(AgentId, u64, StrategyType), Vec<StrategyId>> = FxHashMap::default();
         for s in self.strategies.values() {
             groups
                 .entry((s.agent_id, s.goal_bucket_id, s.strategy_type))
@@ -2356,22 +2408,18 @@ fn outcome_to_counts(outcome: Option<&EpisodeOutcome>) -> (u32, u32) {
     }
 }
 
-/// Truncate a string to `max_len` chars, appending "…" if truncated.
+use crate::event_content::{
+    extract_action_description, extract_cognitive_summary, extract_communication_summary,
+    extract_context_summary, extract_observation_summary,
+};
+
+/// Truncate a string to `max_len` chars, appending "..." if truncated.
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() > max_len {
-        format!("{}…", &s[..max_len])
+        format!("{}...", &s[..max_len])
     } else {
         s.to_string()
     }
-}
-
-/// Truncate a `serde_json::Value` to a readable string of at most `max_len` chars.
-fn truncate_value(v: &serde_json::Value, max_len: usize) -> String {
-    let raw = match v {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    truncate_str(&raw, max_len)
 }
 
 /// Synthesize a natural language strategy summary from an episode and its events.
@@ -2388,10 +2436,29 @@ pub fn synthesize_strategy_summary(
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // 1. Strategy type framing
+    // 1. Strategy type framing — derive from goals + actions, not generic templates
+    let goal_desc: Vec<&str> = episode
+        .context
+        .active_goals
+        .iter()
+        .map(|g| g.description.as_str())
+        .filter(|d| !d.is_empty())
+        .collect();
     match strategy_type {
-        StrategyType::Positive => parts.push("DO this when applicable.".to_string()),
-        StrategyType::Constraint => parts.push("AVOID this pattern.".to_string()),
+        StrategyType::Positive => {
+            if !goal_desc.is_empty() {
+                parts.push(format!("Strategy for achieving: {}", goal_desc.join("; ")));
+            } else {
+                parts.push("Proven approach from a successful episode.".to_string());
+            }
+        },
+        StrategyType::Constraint => {
+            if !goal_desc.is_empty() {
+                parts.push(format!("Constraint: avoid this pattern when pursuing: {}", goal_desc.join("; ")));
+            } else {
+                parts.push("Constraint: avoid this pattern (led to failure).".to_string());
+            }
+        },
     }
 
     // 2. When — goals and context
@@ -2430,59 +2497,65 @@ pub fn synthesize_strategy_summary(
         match &event.event_type {
             EventType::Action {
                 action_name,
+                parameters,
                 outcome: action_outcome,
                 ..
             } => {
-                let result_hint = match action_outcome {
-                    ActionOutcome::Success { result } => {
-                        format!(" -> {}", truncate_value(result, 80))
-                    },
-                    ActionOutcome::Failure { error, .. } => {
-                        format!(" [FAILED: {}]", truncate_str(error, 60))
-                    },
-                    ActionOutcome::Partial { .. } => " [partial]".to_string(),
-                };
-                steps.push(format!("{}. {}{}", step_num, action_name, result_hint));
+                let desc = extract_action_description(action_name, parameters, action_outcome);
+                steps.push(format!("{}. {}", step_num, desc));
                 step_num += 1;
             },
             EventType::Context {
                 context_type, text, ..
             } => {
                 steps.push(format!(
-                    "{}. Receive [{}]: {}",
+                    "{}. Receive {}",
                     step_num,
-                    context_type,
-                    truncate_str(text, 100)
+                    extract_context_summary(text, context_type)
                 ));
                 step_num += 1;
             },
             EventType::Observation {
                 observation_type,
                 data,
-                ..
+                confidence,
+                source,
             } => {
                 steps.push(format!(
-                    "{}. Observe [{}]: {}",
+                    "{}. Observe {}",
                     step_num,
-                    observation_type,
-                    truncate_value(data, 100)
+                    extract_observation_summary(observation_type, data, *confidence, source)
                 ));
                 step_num += 1;
             },
-            EventType::Cognitive { process_type, .. } => {
-                steps.push(format!("{}. Think ({:?})", step_num, process_type));
+            EventType::Cognitive {
+                process_type,
+                input,
+                output,
+                reasoning_trace,
+            } => {
+                steps.push(format!(
+                    "{}. {}",
+                    step_num,
+                    extract_cognitive_summary(process_type, input, output, reasoning_trace)
+                ));
                 step_num += 1;
             },
             EventType::Communication {
                 message_type,
+                sender,
+                recipient,
                 content,
-                ..
             } => {
                 steps.push(format!(
-                    "{}. Communicate [{}]: {}",
+                    "{}. {}",
                     step_num,
-                    message_type,
-                    truncate_value(content, 100)
+                    extract_communication_summary(
+                        message_type,
+                        (*sender).into(),
+                        (*recipient).into(),
+                        content,
+                    )
                 ));
                 step_num += 1;
             },
@@ -2545,7 +2618,7 @@ pub fn synthesize_strategy_summary(
 fn synthesize_when_to_use(
     strategy_type: &StrategyType,
     episode: &Episode,
-    _events: &[Event],
+    events: &[Event],
 ) -> String {
     let goals: Vec<&str> = episode
         .context
@@ -2565,6 +2638,26 @@ fn synthesize_when_to_use(
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
 
+    // Find top cognitive reasoning if available
+    let cognitive_hint: Option<String> = events.iter().find_map(|e| {
+        if let EventType::Cognitive {
+            process_type,
+            input,
+            output,
+            reasoning_trace,
+        } = &e.event_type
+        {
+            Some(extract_cognitive_summary(
+                process_type,
+                input,
+                output,
+                reasoning_trace,
+            ))
+        } else {
+            None
+        }
+    });
+
     match strategy_type {
         StrategyType::Positive => {
             let mut parts = Vec::new();
@@ -2574,16 +2667,21 @@ fn synthesize_when_to_use(
             if !env_hints.is_empty() {
                 parts.push(format!("Context matches: {}", env_hints.join(", ")));
             }
-            parts.push(format!(
-                "Best for episodes with significance ≥ {:.0}%",
-                episode.significance * 100.0
-            ));
+            if let Some(reasoning) = cognitive_hint {
+                parts.push(format!("Agent reasoning: {}", reasoning));
+            }
+            if parts.is_empty() {
+                parts.push("Use when facing a similar task context.".to_string());
+            }
             parts.join(". ")
         },
         StrategyType::Constraint => {
             let mut parts = Vec::new();
             if !goals.is_empty() {
                 parts.push(format!("Watch out when the goal is: {}", goals.join("; ")));
+            }
+            if let Some(reasoning) = cognitive_hint {
+                parts.push(format!("Agent reasoning that led to failure: {}", reasoning));
             }
             parts.push(
                 "Applies when the agent is about to repeat a pattern that previously failed"
@@ -2603,29 +2701,50 @@ fn synthesize_when_not_to_use(
     match strategy_type {
         StrategyType::Positive => {
             let mut reasons = Vec::new();
-            // If there were failures in the episode, note the fragile conditions
-            let has_failures = events.iter().any(|e| {
-                matches!(
-                    &e.event_type,
-                    EventType::Action {
-                        outcome: ActionOutcome::Failure { .. },
-                        ..
-                    }
-                )
-            });
-            if has_failures {
+            // Identify specific failure points and their context
+            for event in events {
+                if let EventType::Action {
+                    action_name,
+                    parameters,
+                    outcome: ActionOutcome::Failure { error, .. },
+                    ..
+                } = &event.event_type
+                {
+                    let desc = extract_action_description(
+                        action_name,
+                        parameters,
+                        &ActionOutcome::Failure {
+                            error: error.clone(),
+                            error_code: 0,
+                        },
+                    );
+                    reasons.push(format!(
+                        "Fragile when: {}",
+                        truncate_str(&desc, 120)
+                    ));
+                }
+            }
+            if episode.significance < 0.3 {
+                reasons.push("Low-significance episode — may not generalize to other contexts".to_string());
+            }
+            let goals: Vec<&str> = episode
+                .context
+                .active_goals
+                .iter()
+                .map(|g| g.description.as_str())
+                .filter(|d| !d.is_empty())
+                .collect();
+            if !goals.is_empty() {
+                reasons.push(format!(
+                    "Do not use when goals differ significantly from: {}",
+                    goals.join("; ")
+                ));
+            } else {
                 reasons.push(
-                    "Some actions failed during this episode; the strategy is fragile under error conditions"
+                    "Do not use when the context significantly differs from the original episode"
                         .to_string(),
                 );
             }
-            if episode.significance < 0.3 {
-                reasons.push("Low-significance episodes may not generalize".to_string());
-            }
-            reasons.push(
-                "Do not use when the context significantly differs from the original goals"
-                    .to_string(),
-            );
             reasons.join(". ")
         },
         StrategyType::Constraint => {
@@ -2641,27 +2760,21 @@ fn synthesize_failure_modes(events: &[Event]) -> Vec<String> {
     for event in events {
         if let EventType::Action {
             action_name,
-            outcome: ActionOutcome::Failure { error, .. },
+            parameters,
+            outcome: outcome @ ActionOutcome::Failure { .. },
             ..
         } = &event.event_type
         {
-            modes.push(format!(
-                "Action '{}' can fail: {}",
-                action_name,
-                truncate_str(error, 120)
-            ));
+            modes.push(extract_action_description(action_name, parameters, outcome));
         }
         if let EventType::Action {
             action_name,
-            outcome: ActionOutcome::Partial { issues, .. },
+            parameters,
+            outcome: outcome @ ActionOutcome::Partial { .. },
             ..
         } = &event.event_type
         {
-            modes.push(format!(
-                "Action '{}' partially succeeds with issues: {:?}",
-                action_name,
-                issues.iter().take(2).cloned().collect::<Vec<_>>()
-            ));
+            modes.push(extract_action_description(action_name, parameters, outcome));
         }
     }
     modes.truncate(5); // Keep top 5
@@ -2677,11 +2790,13 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
         match &event.event_type {
             EventType::Action {
                 action_name,
+                parameters,
                 outcome: action_outcome,
                 ..
             } => {
                 let mut branches = Vec::new();
                 let mut recovery = String::new();
+                let action_desc = extract_action_description(action_name, parameters, action_outcome);
 
                 match action_outcome {
                     ActionOutcome::Failure { error, .. } => {
@@ -2710,7 +2825,7 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
 
                 steps.push(PlaybookStep {
                     step: step_num,
-                    action: format!("Execute '{}'", action_name),
+                    action: action_desc,
                     condition: String::new(),
                     skip_if: String::new(),
                     branches,
@@ -2725,7 +2840,7 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
             } => {
                 steps.push(PlaybookStep {
                     step: step_num,
-                    action: format!("Receive [{}]: {}", context_type, truncate_str(text, 80)),
+                    action: format!("Receive {}", extract_context_summary(text, context_type)),
                     condition: String::new(),
                     skip_if: "No input available".to_string(),
                     branches: Vec::new(),
@@ -2736,11 +2851,17 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
                 step_num += 1;
             },
             EventType::Observation {
-                observation_type, ..
+                observation_type,
+                data,
+                confidence,
+                source,
             } => {
                 steps.push(PlaybookStep {
                     step: step_num,
-                    action: format!("Observe [{}]", observation_type),
+                    action: format!(
+                        "Observe {}",
+                        extract_observation_summary(observation_type, data, *confidence, source)
+                    ),
                     condition: String::new(),
                     skip_if: String::new(),
                     branches: Vec::new(),
@@ -2750,10 +2871,38 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
                 });
                 step_num += 1;
             },
-            EventType::Cognitive { process_type, .. } => {
+            EventType::Cognitive {
+                process_type,
+                input,
+                output,
+                reasoning_trace,
+            } => {
                 steps.push(PlaybookStep {
                     step: step_num,
-                    action: format!("Think ({:?})", process_type),
+                    action: extract_cognitive_summary(process_type, input, output, reasoning_trace),
+                    condition: String::new(),
+                    skip_if: String::new(),
+                    branches: Vec::new(),
+                    recovery: String::new(),
+                    step_id: String::new(),
+                    next_step_id: None,
+                });
+                step_num += 1;
+            },
+            EventType::Communication {
+                message_type,
+                sender,
+                recipient,
+                content,
+            } => {
+                steps.push(PlaybookStep {
+                    step: step_num,
+                    action: extract_communication_summary(
+                        message_type,
+                        (*sender).into(),
+                        (*recipient).into(),
+                        content,
+                    ),
                     condition: String::new(),
                     skip_if: String::new(),
                     branches: Vec::new(),
@@ -2774,31 +2923,52 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
 
 /// Generate a counterfactual: what would have happened differently.
 fn synthesize_counterfactual(outcome: &EpisodeOutcome, events: &[Event]) -> String {
-    // Find failure points and suggest alternatives
+    // Find failure points with descriptive context
     let failures: Vec<String> = events
         .iter()
         .filter_map(|e| {
             if let EventType::Action {
                 action_name,
-                outcome: ActionOutcome::Failure { error, .. },
+                parameters,
+                outcome: outcome @ ActionOutcome::Failure { .. },
                 ..
             } = &e.event_type
             {
-                Some(format!("'{}' ({})", action_name, truncate_str(error, 60)))
+                Some(extract_action_description(action_name, parameters, outcome))
             } else {
                 None
             }
         })
         .collect();
 
-    match outcome {
+    // Find cognitive reasoning that explains what was tried
+    let reasoning: Option<String> = events.iter().find_map(|e| {
+        if let EventType::Cognitive {
+            process_type,
+            input,
+            output,
+            reasoning_trace,
+        } = &e.event_type
+        {
+            Some(extract_cognitive_summary(
+                process_type,
+                input,
+                output,
+                reasoning_trace,
+            ))
+        } else {
+            None
+        }
+    });
+
+    let mut result = match outcome {
         EpisodeOutcome::Success => {
             if failures.is_empty() {
                 "All actions succeeded; no obvious alternative path needed.".to_string()
             } else {
                 format!(
-                    "Despite failures at {}, the episode recovered. Skipping those steps could have been faster.",
-                    failures.join(", ")
+                    "Despite failures ({}), the episode recovered. Skipping those steps could have been faster.",
+                    failures.iter().take(2).cloned().collect::<Vec<_>>().join("; ")
                 )
             }
         },
@@ -2808,8 +2978,8 @@ fn synthesize_counterfactual(outcome: &EpisodeOutcome, events: &[Event]) -> Stri
                     .to_string()
             } else {
                 format!(
-                    "If {} had been handled differently (retry, alternative, or skip), the outcome might have been success.",
-                    failures.join(" and ")
+                    "If these had been handled differently: {}. Retry, alternative, or skip could lead to success.",
+                    failures.iter().take(2).cloned().collect::<Vec<_>>().join("; ")
                 )
             }
         },
@@ -2819,7 +2989,13 @@ fn synthesize_counterfactual(outcome: &EpisodeOutcome, events: &[Event]) -> Stri
         EpisodeOutcome::Interrupted => {
             "Ensuring preconditions and resources before starting would reduce interruption risk.".to_string()
         },
+    };
+
+    if let Some(reasoning) = reasoning {
+        result.push_str(&format!(" Agent's reasoning: {}", reasoning));
     }
+
+    result
 }
 
 /// Statistics about strategy extraction
@@ -2901,5 +3077,208 @@ mod tests {
             ctx.goal_bucket_id, strategy_bucket,
             "Strategy bucket id must match EventContext.goal_bucket_id for the same goals"
         );
+    }
+
+    fn make_test_episode(outcome: EpisodeOutcome) -> Episode {
+        use agent_db_core::types::Timestamp;
+        use agent_db_events::core::EventContext;
+        Episode {
+            id: 1,
+            episode_version: 1,
+            agent_id: 1,
+            start_event: 1u128.into(),
+            end_event: Some(2u128.into()),
+            events: vec![1u128.into(), 2u128.into()],
+            session_id: 1,
+            context_signature: 0,
+            context: EventContext::default(),
+            outcome: Some(outcome.clone()),
+            start_timestamp: Timestamp::from(1000u64),
+            end_timestamp: Some(Timestamp::from(2000u64)),
+            significance: 0.8,
+            prediction_error: 0.0,
+            self_judged_quality: None,
+            salience_score: 0.5,
+            last_event_timestamp: Some(Timestamp::from(2000u64)),
+            consecutive_outcome_count: 0,
+        }
+    }
+
+    fn make_test_event(event_type: EventType) -> Event {
+        use agent_db_core::types::Timestamp;
+        Event {
+            id: 1u128.into(),
+            timestamp: Timestamp::from(1000u64),
+            agent_id: 1,
+            agent_type: "test".to_string(),
+            session_id: 1,
+            event_type,
+            causality_chain: vec![],
+            context: agent_db_events::core::EventContext::default(),
+            metadata: Default::default(),
+            context_size_bytes: 0,
+            segment_pointer: None,
+        }
+    }
+
+    #[test]
+    fn test_playbook_not_execute_raw() {
+        let events = vec![make_test_event(EventType::Action {
+            action_name: "cognitive_plan".to_string(),
+            parameters: serde_json::json!({"query": "plan deployment"}),
+            outcome: ActionOutcome::Success {
+                result: serde_json::json!({"text": "plan created"}),
+            },
+            duration_ns: 1000,
+        })];
+
+        let playbook = build_playbook(&events, &StrategyType::Positive);
+        assert!(!playbook.is_empty());
+        // Should NOT contain "Execute 'cognitive_plan'"
+        assert!(
+            !playbook[0].action.starts_with("Execute"),
+            "Playbook action should not be raw 'Execute', got: {}",
+            playbook[0].action
+        );
+        // Should contain humanized description
+        assert!(
+            playbook[0].action.contains("Cognitive Plan"),
+            "Playbook action should contain humanized name, got: {}",
+            playbook[0].action
+        );
+    }
+
+    #[test]
+    fn test_summary_not_do_this() {
+        let episode = make_test_episode(EpisodeOutcome::Success);
+        let events = vec![make_test_event(EventType::Action {
+            action_name: "search".to_string(),
+            parameters: serde_json::json!({"query": "find users"}),
+            outcome: ActionOutcome::Success {
+                result: serde_json::json!({"text": "found 10 users"}),
+            },
+            duration_ns: 1000,
+        })];
+
+        let summary = synthesize_strategy_summary(
+            &StrategyType::Positive,
+            &EpisodeOutcome::Success,
+            &episode,
+            &events,
+            &[],
+            &[],
+        );
+        // Should NOT start with generic "DO this when applicable"
+        assert!(
+            !summary.contains("DO this when applicable"),
+            "Summary should not contain generic template, got: {}",
+            summary
+        );
+    }
+
+    #[test]
+    fn test_cognitive_in_playbook() {
+        let events = vec![make_test_event(EventType::Cognitive {
+            process_type: agent_db_events::core::CognitiveType::Reasoning,
+            input: serde_json::json!("analyze options"),
+            output: serde_json::json!("chose option A"),
+            reasoning_trace: vec!["step1".to_string()],
+        })];
+
+        let playbook = build_playbook(&events, &StrategyType::Positive);
+        assert!(!playbook.is_empty());
+        // Should NOT contain "Think (Reasoning)" — should have actual content
+        assert!(
+            !playbook[0].action.starts_with("Think ("),
+            "Playbook cognitive step should not be generic 'Think', got: {}",
+            playbook[0].action
+        );
+        assert!(
+            playbook[0].action.contains("Reasoning"),
+            "Should contain reasoning label, got: {}",
+            playbook[0].action
+        );
+        assert!(
+            playbook[0].action.contains("chose option A"),
+            "Should contain cognitive output, got: {}",
+            playbook[0].action
+        );
+    }
+
+    #[test]
+    fn test_strategy_ema_q_value() {
+        let mut extractor = StrategyExtractor::new(Default::default());
+        // Create a minimal strategy
+        let strategy = Strategy {
+            id: 1,
+            name: "test_strategy".to_string(),
+            summary: String::new(),
+            when_to_use: String::new(),
+            when_not_to_use: String::new(),
+            failure_modes: Vec::new(),
+            playbook: Vec::new(),
+            counterfactual: String::new(),
+            supersedes: Vec::new(),
+            applicable_domains: Vec::new(),
+            lineage_depth: 0,
+            summary_embedding: Vec::new(),
+            agent_id: 1,
+            reasoning_steps: Vec::new(),
+            context_patterns: Vec::new(),
+            success_indicators: Vec::new(),
+            failure_patterns: Vec::new(),
+            quality_score: 0.0,
+            success_count: 0,
+            failure_count: 0,
+            support_count: 0,
+            strategy_type: StrategyType::Positive,
+            precondition: String::new(),
+            action_hint: String::new(),
+            expected_success: 0.5,
+            expected_cost: 0.0,
+            expected_value: 0.0,
+            confidence: 0.0,
+            contradictions: Vec::new(),
+            goal_bucket_id: 1,
+            behavior_signature: String::new(),
+            source_episodes: Vec::new(),
+            created_at: current_timestamp(),
+            last_used: current_timestamp(),
+            metadata: HashMap::new(),
+            self_judged_quality: None,
+            source_outcomes: Vec::new(),
+            version: 1,
+            parent_strategy: None,
+        };
+        extractor.strategies.insert(1, strategy);
+
+        // Record 3 successes (Bayesian phase)
+        extractor.update_strategy_outcome(1, true).unwrap();
+        extractor.update_strategy_outcome(1, true).unwrap();
+        extractor.update_strategy_outcome(1, true).unwrap();
+
+        let s = extractor.strategies.get(&1).unwrap();
+        assert_eq!(s.success_count, 3);
+        assert_eq!(s.failure_count, 0);
+        // Q-value should be in metadata
+        assert!(s.metadata.contains_key(META_Q_VALUE));
+        let q: f32 = s.metadata.get(META_Q_VALUE).unwrap().parse().unwrap();
+        assert!(q > 0.5, "Q should be above 0.5 after 3 successes, got {}", q);
+        // Confidence should reflect both sample size and outcome quality
+        assert!(s.confidence > 0.0, "Confidence should be positive");
+
+        // Record 3 more (crosses Q_KICK_IN=5)
+        extractor.update_strategy_outcome(1, true).unwrap();
+        extractor.update_strategy_outcome(1, true).unwrap();
+        extractor.update_strategy_outcome(1, false).unwrap();
+
+        let s = extractor.strategies.get(&1).unwrap();
+        assert_eq!(s.success_count, 5);
+        assert_eq!(s.failure_count, 1);
+        // Now in Q phase — confidence should reflect outcome quality
+        let q: f32 = s.metadata.get(META_Q_VALUE).unwrap().parse().unwrap();
+        assert!(q > 0.5, "Q should still be >0.5, got {}", q);
+        // Confidence = sample_confidence * piecewise_score, should be substantial
+        assert!(s.confidence > 0.3, "Confidence should be substantial, got {}", s.confidence);
     }
 }

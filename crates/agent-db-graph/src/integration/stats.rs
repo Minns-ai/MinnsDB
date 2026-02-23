@@ -20,6 +20,13 @@ impl GraphEngine {
         }
     }
 
+    /// Get world model energy statistics (returns None if world model is disabled).
+    pub async fn get_world_model_stats(&self) -> Option<agent_db_world_model::EnergyStats> {
+        let wm = self.world_model.as_ref()?;
+        let guard = wm.read().await;
+        Some(guard.energy_stats())
+    }
+
     /// Get live aggregate counts from all stores
     pub async fn get_store_metrics(&self) -> StoreMetrics {
         // Memory stats

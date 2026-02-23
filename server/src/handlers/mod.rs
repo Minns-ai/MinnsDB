@@ -9,6 +9,7 @@ pub mod health;
 pub mod memories;
 pub mod search;
 pub mod strategies;
+pub mod world_model;
 
 // Re-export all handlers for convenience
 pub use analytics::*;
@@ -20,3 +21,4 @@ pub use health::*;
 pub use memories::*;
 pub use search::*;
 pub use strategies::*;
+pub use world_model::*;

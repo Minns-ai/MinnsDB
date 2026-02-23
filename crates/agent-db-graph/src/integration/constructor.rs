@@ -161,6 +161,14 @@ impl GraphEngine {
 
         let louvain = Arc::new(LouvainAlgorithm::new());
         let centrality = Arc::new(CentralityMeasures::new());
+        let random_walker = Arc::new(RandomWalker::with_config(
+            crate::algorithms::RandomWalkConfig {
+                restart_probability: 0.15,
+                ..Default::default()
+            },
+        ));
+        let temporal_reachability = Arc::new(TemporalReachability::new());
+        let label_propagation = Arc::new(LabelPropagationAlgorithm::new());
 
         // Initialize semantic memory components if enabled
         let (ner_queue, ner_store) = if config.enable_semantic_memory {
@@ -202,6 +210,7 @@ impl GraphEngine {
             );
             (Some(queue), store)
         } else {
+            tracing::warn!("NER disabled — claims will have no entity annotations");
             (None, None)
         };
 
@@ -229,6 +238,9 @@ impl GraphEngine {
                         config.llm_model.clone(),
                     ))
                 } else {
+                    tracing::warn!(
+                        "No LLM_API_KEY set — claims extraction will use MockClient (no real claims produced)"
+                    );
                     Arc::new(crate::claims::MockClient::new())
                 };
 
@@ -334,6 +346,73 @@ impl GraphEngine {
             Some(Arc::new(engine))
         };
 
+        // Initialize world model (mode-aware)
+        let world_model = if config.effective_world_model_mode() != WorldModelMode::Disabled {
+            tracing::info!("Initializing world model (mode={:?})", config.effective_world_model_mode());
+            Some(Arc::new(RwLock::new(EbmWorldModel::new(
+                config.world_model_config.clone(),
+            ))))
+        } else {
+            None
+        };
+
+        // Initialize planning orchestrator + generators (LLM or mock)
+        let (planning_orchestrator, strategy_generator_arc, action_generator_arc) =
+            if config.planning_config.enable_strategy_generation
+                || config.planning_config.enable_action_generation
+            {
+                tracing::info!("Initializing planning orchestrator");
+                let orch = PlanningOrchestrator::new(config.planning_config.clone());
+
+                if let Some(ref api_key) = config.planning_llm_api_key {
+                    tracing::info!(
+                        "Using LLM generators (provider={})",
+                        config.planning_llm_provider
+                    );
+                    let llm_client: Arc<dyn agent_db_planning::llm_client::PlanningLlmClient> =
+                        match config.planning_llm_provider.as_str() {
+                            "anthropic" => Arc::new(
+                                super::planning_llm_adapter::AnthropicPlanningClient::new(
+                                    api_key.clone(),
+                                    config.planning_config.llm_model.clone(),
+                                ),
+                            ),
+                            _ => Arc::new(
+                                super::planning_llm_adapter::OpenAiPlanningClient::new(
+                                    api_key.clone(),
+                                    config.planning_config.llm_model.clone(),
+                                ),
+                            ),
+                        };
+                    let sg: Arc<dyn agent_db_planning::StrategyGenerator> = Arc::new(
+                        agent_db_planning::llm_generator::LlmStrategyGenerator::new(
+                            llm_client.clone(),
+                            config.planning_config.clone(),
+                        ),
+                    );
+                    let ag: Arc<dyn agent_db_planning::ActionGenerator> = Arc::new(
+                        agent_db_planning::llm_generator::LlmActionGenerator::new(
+                            llm_client,
+                            config.planning_config.clone(),
+                        ),
+                    );
+                    (Some(orch), Some(sg), Some(ag))
+                } else {
+                    tracing::info!("Using mock generators (no planning LLM API key)");
+                    let sg: Arc<dyn agent_db_planning::StrategyGenerator> =
+                        Arc::new(agent_db_planning::mock_generator::MockStrategyGenerator::new(
+                            config.planning_config.strategy_candidates_k,
+                        ));
+                    let ag: Arc<dyn agent_db_planning::ActionGenerator> =
+                        Arc::new(agent_db_planning::mock_generator::MockActionGenerator::new(
+                            config.planning_config.action_candidates_n,
+                        ));
+                    (Some(orch), Some(sg), Some(ag))
+                }
+            } else {
+                (None, None, None)
+            };
+
         // Initialize RedbGraphStore alongside the existing backend
         let graph_store = if let Some(ref backend) = redb_backend {
             let store = crate::redb_graph_store::RedbGraphStore::new(
@@ -367,6 +446,9 @@ impl GraphEngine {
             index_manager,
             louvain,
             centrality,
+            random_walker,
+            temporal_reachability,
+            label_propagation,
             ner_queue,
             ner_store,
             claim_queue,
@@ -378,6 +460,12 @@ impl GraphEngine {
             consolidation_engine: consolidation_engine_arc,
             refinement_engine: refinement_engine_arc,
             episodes_since_consolidation: Arc::new(RwLock::new(0)),
+            world_model,
+            planning_orchestrator,
+            strategy_generator: strategy_generator_arc,
+            action_generator: action_generator_arc,
+            active_executions: Arc::new(dashmap::DashMap::new()),
+            next_execution_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
 
         // Restore graph state from redb if available
@@ -464,6 +552,38 @@ impl GraphEngine {
                 Err(e) => {
                     tracing::warn!("Failed to read consolidation counter from redb: {:?}", e);
                 },
+            }
+        }
+
+        // Restore world model from redb (version-aware)
+        if engine.config.effective_world_model_mode() != WorldModelMode::Disabled {
+            if let (Some(ref wm), Some(ref backend)) = (&engine.world_model, &engine.redb_backend) {
+                match backend.get_raw(table_names::WORLD_MODEL, b"__weights__") {
+                    Ok(Some(raw)) => {
+                        let (_version, bytes) = agent_db_storage::unwrap_versioned(&raw);
+                        match EbmWorldModel::from_bytes(bytes) {
+                            Ok(restored) => {
+                                let stats = restored.energy_stats();
+                                *wm.write().await = restored;
+                                tracing::info!(
+                                    "Restored world model from disk (trained={}, scored={})",
+                                    stats.total_trained,
+                                    stats.total_scored
+                                );
+                            },
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to deserialize world model (starting fresh): {}",
+                                    e
+                                );
+                            },
+                        }
+                    },
+                    Ok(None) => {},
+                    Err(e) => {
+                        tracing::warn!("Failed to read world model from redb: {:?}", e);
+                    },
+                }
             }
         }
 

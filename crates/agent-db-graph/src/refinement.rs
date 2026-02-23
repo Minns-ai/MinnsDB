@@ -119,17 +119,29 @@ impl RefinementEngine {
     // ========== Memory Refinement ==========
 
     /// Refine a memory's summary, takeaway, and causal_note using LLM.
-    pub async fn refine_memory(&self, memory: &Memory) -> Result<RefinedMemoryFields> {
+    /// When `event_data` is provided, it contains a rich narrative of the raw events
+    /// that the LLM can use to produce a much better refinement than template text alone.
+    pub async fn refine_memory(
+        &self,
+        memory: &Memory,
+        event_data: Option<&str>,
+    ) -> Result<RefinedMemoryFields> {
         let api_key = self
             .api_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No API key for refinement"))?;
 
+        let event_section = match event_data {
+            Some(narrative) => format!("\n\nRaw event narrative:\n{}", narrative),
+            None => String::new(),
+        };
+
         let user_prompt = format!(
-            "Raw episode data:\n\nSummary: {}\nTakeaway: {}\nCausal note: {}\nOutcome: {:?}\nStrength: {:.2}\nRelevance: {:.2}",
+            "Template summary: {}\nTakeaway: {}\nCausal note: {}{}\n\nOutcome: {:?}, Strength: {:.2}, Relevance: {:.2}",
             memory.summary,
             memory.takeaway,
             memory.causal_note,
+            event_section,
             memory.outcome,
             memory.strength,
             memory.relevance_score
@@ -151,14 +163,24 @@ impl RefinementEngine {
     }
 
     /// Refine a strategy's summary, when_to_use, when_not_to_use, etc. using LLM.
-    pub async fn refine_strategy(&self, strategy: &Strategy) -> Result<RefinedStrategyFields> {
+    /// When `event_data` is provided, it contains a rich narrative of the raw events.
+    pub async fn refine_strategy(
+        &self,
+        strategy: &Strategy,
+        event_data: Option<&str>,
+    ) -> Result<RefinedStrategyFields> {
         let api_key = self
             .api_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No API key for refinement"))?;
 
+        let event_section = match event_data {
+            Some(narrative) => format!("\n\nRaw event narrative:\n{}", narrative),
+            None => String::new(),
+        };
+
         let user_prompt = format!(
-            "Raw strategy data:\n\nSummary: {}\nWhen to use: {}\nWhen not to use: {}\nAction hint: {}\nPrecondition: {}\nSuccess rate: {:.0}%\nQuality: {:.2}\nFailure patterns: {:?}\nPlaybook steps: {}",
+            "Raw strategy data:\n\nSummary: {}\nWhen to use: {}\nWhen not to use: {}\nAction hint: {}\nPrecondition: {}\nSuccess rate: {:.0}%\nQuality: {:.2}\nFailure patterns: {:?}\nPlaybook steps: {}{}",
             strategy.summary,
             strategy.when_to_use,
             strategy.when_not_to_use,
@@ -167,7 +189,8 @@ impl RefinementEngine {
             strategy.expected_success * 100.0,
             strategy.quality_score,
             strategy.failure_patterns,
-            strategy.playbook.len()
+            strategy.playbook.len(),
+            event_section
         );
 
         let response = self
@@ -210,6 +233,7 @@ impl RefinementEngine {
         memory_id: MemoryId,
         store: &Arc<RwLock<Box<dyn MemoryStore>>>,
         embedding_client: Option<&Arc<dyn EmbeddingClient>>,
+        event_data: Option<String>,
     ) -> Result<()> {
         // Get current memory
         let memory = {
@@ -222,7 +246,10 @@ impl RefinementEngine {
 
         // Step 1: LLM refinement
         if self.is_llm_available() {
-            match self.refine_memory(&memory).await {
+            match self
+                .refine_memory(&memory, event_data.as_deref())
+                .await
+            {
                 Ok(refined) => {
                     info!(
                         "Refined memory {} summary: {} -> {}",
@@ -278,12 +305,13 @@ impl RefinementEngine {
         &self,
         strategy: &Strategy,
         embedding_client: Option<&Arc<dyn EmbeddingClient>>,
+        event_data: Option<String>,
     ) -> Result<Strategy> {
         let mut updated = strategy.clone();
 
         // Step 1: LLM refinement
         if self.is_llm_available() {
-            match self.refine_strategy(strategy).await {
+            match self.refine_strategy(strategy, event_data.as_deref()).await {
                 Ok(refined) => {
                     info!(
                         "Refined strategy {} summary: {} -> {}",

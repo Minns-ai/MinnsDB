@@ -420,6 +420,7 @@ pub struct CommunitiesResponse {
     pub modularity: f32,
     pub iterations: usize,
     pub community_count: usize,
+    pub algorithm: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -431,6 +432,81 @@ pub struct CentralityScoresResponse {
     pub eigenvector: f32,
     pub pagerank: f32,
     pub combined: f32,
+}
+
+// ============================================================================
+// Graph Algorithm Query Types
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct PprQuery {
+    pub source_node_id: u64,
+    pub limit: Option<usize>,
+    pub min_score: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReachabilityQuery {
+    pub source: u64,
+    pub max_hops: Option<usize>,
+    pub max_results: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CausalPathQuery {
+    pub source: u64,
+    pub target: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CommunitiesQuery {
+    pub algorithm: Option<String>,
+}
+
+// ============================================================================
+// Graph Algorithm Response Types
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct PprResponse {
+    pub source_node_id: u64,
+    pub algorithm: String,
+    pub scores: Vec<PprNodeScore>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PprNodeScore {
+    pub node_id: u64,
+    pub score: f64,
+}
+
+#[serde_as]
+#[derive(Debug, Serialize)]
+pub struct ReachabilityResponse {
+    pub source_node_id: u64,
+    pub reachable_count: usize,
+    pub max_depth: usize,
+    pub edges_traversed: usize,
+    pub reachable: Vec<ReachabilityNodeResponse>,
+}
+
+#[serde_as]
+#[derive(Debug, Serialize)]
+pub struct ReachabilityNodeResponse {
+    pub node_id: u64,
+    pub origin: u64,
+    #[serde_as(as = "DisplayFromStr")]
+    pub arrival_time: u64,
+    pub hops: usize,
+    pub predecessor: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CausalPathResponse {
+    pub source: u64,
+    pub target: u64,
+    pub found: bool,
+    pub path: Option<Vec<u64>>,
 }
 
 #[serde_as]

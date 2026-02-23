@@ -106,7 +106,34 @@ impl GraphEngine {
             }
         }
 
-        // 7. BUG 9 fix: Persist graph state with retry (3 attempts, 100ms delay)
+        // 7. Persist world model weights (with version envelope)
+        if let (Some(ref wm), Some(ref backend)) = (&self.world_model, &self.redb_backend) {
+            let wm_guard = wm.read().await;
+            match wm_guard.to_bytes() {
+                Ok(bytes) => {
+                    let wrapped = agent_db_storage::wrap_versioned(
+                        agent_db_storage::CURRENT_DATA_VERSION,
+                        &bytes,
+                    );
+                    if let Err(e) =
+                        backend.put_raw(table_names::WORLD_MODEL, b"__weights__", &wrapped)
+                    {
+                        tracing::warn!("Failed to persist world model: {:?}", e);
+                    } else {
+                        let stats = wm_guard.energy_stats();
+                        tracing::info!(
+                            "World model persisted ({} bytes, trained={}, scored={})",
+                            bytes.len(),
+                            stats.total_trained,
+                            stats.total_scored,
+                        );
+                    }
+                },
+                Err(e) => tracing::warn!("Failed to serialize world model: {}", e),
+            }
+        }
+
+        // 8. BUG 9 fix: Persist graph state with retry (3 attempts, 100ms delay)
         if self.redb_backend.is_some() {
             let mut last_err = None;
             for attempt in 1..=3u32 {
@@ -310,6 +337,51 @@ impl GraphEngine {
                                 tracing::warn!("Maintenance: claim purge failed: {}", e);
                             },
                             _ => {},
+                        }
+                    }
+                }
+
+                // 9. World model training step (mode-aware)
+                if engine.config.effective_world_model_mode() != WorldModelMode::Disabled {
+                    if let Some(ref wm) = engine.world_model {
+                        let mut wm_guard = wm.write().await;
+                        let pending = wm_guard.pending_training_count();
+                        if pending > 0 {
+                            let loss = wm_guard.train_step();
+                            let stats = wm_guard.energy_stats();
+                            tracing::info!(
+                                "Maintenance: world model train_step pending={} loss={:.4} trained={} scored={} warmed_up={}",
+                                pending, loss, stats.total_trained, stats.total_scored, stats.is_warmed_up,
+                            );
+                        }
+                    }
+                }
+
+                // 10. World model periodic checkpoint (every 100 training steps)
+                if let (Some(ref wm), Some(ref backend)) =
+                    (&engine.world_model, &engine.redb_backend)
+                {
+                    let wm_guard = wm.read().await;
+                    let stats = wm_guard.energy_stats();
+                    if stats.total_trained > 0 && stats.total_trained % 100 == 0 {
+                        if let Ok(bytes) = wm_guard.to_bytes() {
+                            let wrapped = agent_db_storage::wrap_versioned(
+                                agent_db_storage::CURRENT_DATA_VERSION,
+                                &bytes,
+                            );
+                            if let Err(e) = backend.put_raw(
+                                table_names::WORLD_MODEL,
+                                b"__weights__",
+                                &wrapped,
+                            ) {
+                                tracing::warn!("World model checkpoint failed: {:?}", e);
+                            } else {
+                                tracing::info!(
+                                    "World model checkpoint ({} bytes, trained={})",
+                                    bytes.len(),
+                                    stats.total_trained,
+                                );
+                            }
                         }
                     }
                 }

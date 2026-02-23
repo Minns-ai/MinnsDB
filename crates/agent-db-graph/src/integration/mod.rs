@@ -20,13 +20,17 @@ mod persistence;
 mod pipeline;
 mod queries;
 mod stats;
+mod world_model;
+mod planning;
+pub(crate) mod planning_llm_adapter;
+mod execution;
 
 pub use stats::{
     ClaimMetrics, GraphHealthMetrics, GraphMetricsSummary, MemoryMetrics, StoreMetrics,
     StrategyMetrics,
 };
 
-use crate::algorithms::{CentralityMeasures, LouvainAlgorithm};
+use crate::algorithms::{CentralityMeasures, LabelPropagationAlgorithm, LouvainAlgorithm, RandomWalker, TemporalReachability};
 use crate::analytics::GraphAnalytics;
 use crate::episodes::{Episode, EpisodeDetector, EpisodeDetectorConfig, EpisodeOutcome};
 use crate::event_ordering::{EventOrderingEngine, OrderingConfig};
@@ -45,6 +49,9 @@ use crate::structures::{
     NodeType,
 };
 use crate::transitions::{TransitionModel, TransitionModelConfig};
+use agent_db_world_model::{EbmWorldModel, WorldModelConfig, WorldModelCritic};
+use agent_db_planning::{PlanningConfig, WorldModelMode};
+use agent_db_planning::orchestrator::PlanningOrchestrator;
 use crate::traversal::{ActionSuggestion, GraphQuery, GraphTraversal, QueryResult};
 use crate::{GraphError, GraphResult};
 use agent_db_core::types::{AgentId, AgentType, ContextHash, EventId, SessionId};
@@ -123,6 +130,9 @@ pub struct GraphEngineConfig {
 
     /// Interval for running community detection (in events processed)
     pub louvain_interval: u64,
+
+    /// Community detection algorithm to use ("louvain" or "label_propagation")
+    pub community_algorithm: String,
 
     /// Enable query caching
     pub enable_query_cache: bool,
@@ -219,6 +229,37 @@ pub struct GraphEngineConfig {
 
     /// Maximum age (seconds) for decision traces before TTL eviction
     pub max_decision_trace_age_secs: u64,
+
+    // ========== World Model (Shadow Mode) ==========
+    /// Enable the energy-based world model (shadow mode: train + score + log only)
+    pub enable_world_model: bool,
+    /// World model configuration (embed_dim, learning_rate, etc.)
+    pub world_model_config: WorldModelConfig,
+    /// Graduated activation mode for the world model
+    pub world_model_mode: WorldModelMode,
+
+    // ========== Planning Engine ==========
+    /// Planning engine configuration (generation, selection, repair thresholds)
+    pub planning_config: PlanningConfig,
+
+    /// API key for planning LLM (separate from claim extraction)
+    pub planning_llm_api_key: Option<String>,
+
+    /// LLM provider for planning ("openai" or "anthropic")
+    pub planning_llm_provider: String,
+}
+
+impl GraphEngineConfig {
+    /// Effective world model mode (backward compat: enable_world_model=true → Shadow)
+    pub fn effective_world_model_mode(&self) -> WorldModelMode {
+        if self.world_model_mode != WorldModelMode::Disabled {
+            self.world_model_mode
+        } else if self.enable_world_model {
+            WorldModelMode::Shadow
+        } else {
+            WorldModelMode::Disabled
+        }
+    }
 }
 
 /// Results from graph operations
@@ -307,7 +348,7 @@ pub struct GraphEngine {
     pub(crate) graph_store: Option<Arc<RwLock<crate::redb_graph_store::RedbGraphStore>>>,
 
     /// Configuration
-    pub(crate) config: GraphEngineConfig,
+    pub config: GraphEngineConfig,
 
     /// Operation statistics
     pub(crate) stats: Arc<RwLock<GraphEngineStats>>,
@@ -327,6 +368,15 @@ pub struct GraphEngine {
 
     /// Centrality measures for importance ranking
     pub(crate) centrality: Arc<CentralityMeasures>,
+
+    /// Random walk engine for PersonalizedPageRank
+    pub(crate) random_walker: Arc<RandomWalker>,
+
+    /// Temporal reachability for causal chain discovery
+    pub(crate) temporal_reachability: Arc<TemporalReachability>,
+
+    /// Label propagation for community detection
+    pub(crate) label_propagation: Arc<LabelPropagationAlgorithm>,
 
     // ========== Semantic Memory (Optional) ==========
     /// NER extraction queue (optional, when semantic memory is enabled)
@@ -360,6 +410,24 @@ pub struct GraphEngine {
 
     /// Counter for triggering periodic consolidation
     pub(crate) episodes_since_consolidation: Arc<RwLock<u64>>,
+
+    // ========== World Model (Shadow Mode) ==========
+    /// Energy-based world model for predictive coding (optional, shadow mode)
+    pub(crate) world_model: Option<Arc<RwLock<EbmWorldModel>>>,
+
+    // ========== Planning Engine ==========
+    /// Planning orchestrator for strategy/action generation (optional)
+    pub(crate) planning_orchestrator: Option<PlanningOrchestrator>,
+    /// Strategy generator (mock for now, LLM later)
+    pub(crate) strategy_generator: Option<Arc<dyn agent_db_planning::StrategyGenerator>>,
+    /// Action generator (mock for now, LLM later)
+    pub(crate) action_generator: Option<Arc<dyn agent_db_planning::ActionGenerator>>,
+
+    // ========== Execution State ==========
+    /// Active plan executions keyed by execution ID
+    pub(crate) active_executions: Arc<dashmap::DashMap<u64, Arc<RwLock<execution::ExecutionState>>>>,
+    /// Monotonic counter for generating unique execution IDs
+    pub(crate) next_execution_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Statistics for the graph engine
@@ -400,6 +468,7 @@ impl Default for GraphEngineConfig {
             max_graph_size: 1_000_000,
             enable_louvain: true,
             louvain_interval: 1000,
+            community_algorithm: "louvain".to_string(),
             enable_query_cache: true,
             // Storage configuration defaults
             storage_backend: StorageBackend::InMemory,
@@ -436,6 +505,14 @@ impl Default for GraphEngineConfig {
             // Bounded memory caps
             max_event_store_size: 50_000,
             max_decision_trace_age_secs: 3600, // 1 hour
+            // World Model (shadow mode — disabled by default)
+            enable_world_model: false,
+            world_model_config: WorldModelConfig::default(),
+            world_model_mode: WorldModelMode::Disabled,
+            // Planning engine (disabled by default)
+            planning_config: PlanningConfig::default(),
+            planning_llm_api_key: None,
+            planning_llm_provider: "openai".to_string(),
         }
     }
 }

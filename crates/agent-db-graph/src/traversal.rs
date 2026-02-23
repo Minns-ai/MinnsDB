@@ -12,11 +12,16 @@
 //! - Bidirectional Dijkstra for large graphs
 
 use crate::structures::{
-    EdgeId, EdgeType, EdgeWeight, Graph, GraphEdge, GraphNode, NodeId, NodeType,
+    Depth, Direction, EdgeId, EdgeType, EdgeWeight, Graph, GraphEdge, GraphNode, NodeId, NodeType,
 };
 use crate::{GraphError, GraphResult};
+use ordered_float::OrderedFloat;
+use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 // ============================================================================
 // Edge cost derivation from edge types
@@ -146,6 +151,16 @@ pub enum GraphQuery {
     /// Unlike BFS (`NeighborsWithinDistance`), this explores deep paths
     /// before wide ones — useful for causal chain and lineage discovery.
     DeepReachability { start: NodeId, max_depth: u32 },
+
+    /// Direction-aware traversal with depth specification.
+    DirectedTraversal {
+        start: NodeId,
+        direction: Direction,
+        depth: Depth,
+    },
+
+    /// Composable recursive traversal with filters, budgets, and instructions.
+    RecursiveTraversal(TraversalRequest),
 }
 
 /// Constraints for path finding
@@ -184,6 +199,150 @@ pub enum CommunityAlgorithm {
 
     /// Connected components (simple)
     ConnectedComponents,
+}
+
+/// Compute a u64 cache key for a GraphQuery without allocating a Debug string.
+/// Handles types that don't impl Hash (serde_json::Value, fn pointers) by
+/// hashing their Debug representation bytes or raw address.
+fn query_cache_key(query: &GraphQuery) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+
+    // Discriminant first
+    std::mem::discriminant(query).hash(&mut h);
+
+    match query {
+        GraphQuery::NodesByType(s) => s.hash(&mut h),
+        GraphQuery::ShortestPath { start, end } => {
+            start.hash(&mut h);
+            end.hash(&mut h);
+        }
+        GraphQuery::NeighborsWithinDistance {
+            start,
+            max_distance,
+        } => {
+            start.hash(&mut h);
+            max_distance.hash(&mut h);
+        }
+        GraphQuery::StronglyConnectedComponents => {}
+        GraphQuery::NodesByProperty { key, value } => {
+            key.hash(&mut h);
+            // serde_json::Value doesn't impl Hash — hash its compact JSON bytes
+            let json = serde_json::to_string(value).unwrap_or_default();
+            json.hash(&mut h);
+        }
+        GraphQuery::EdgesByType {
+            edge_type,
+            min_weight,
+        } => {
+            edge_type.hash(&mut h);
+            min_weight.to_bits().hash(&mut h);
+        }
+        GraphQuery::PathQuery {
+            start,
+            end,
+            constraints,
+        } => {
+            start.hash(&mut h);
+            end.hash(&mut h);
+            for c in constraints {
+                hash_path_constraint(c, &mut h);
+            }
+        }
+        GraphQuery::Subgraph {
+            center,
+            radius,
+            node_types,
+        } => {
+            center.hash(&mut h);
+            radius.hash(&mut h);
+            node_types.hash(&mut h);
+        }
+        GraphQuery::PageRank {
+            iterations,
+            damping_factor,
+        } => {
+            iterations.hash(&mut h);
+            damping_factor.to_bits().hash(&mut h);
+        }
+        GraphQuery::CommunityDetection { algorithm } => {
+            hash_community_algorithm(algorithm, &mut h);
+        }
+        GraphQuery::AStarPath { start, end } => {
+            start.hash(&mut h);
+            end.hash(&mut h);
+        }
+        GraphQuery::KShortestPaths { start, end, k } => {
+            start.hash(&mut h);
+            end.hash(&mut h);
+            k.hash(&mut h);
+        }
+        GraphQuery::BidirectionalPath { start, end } => {
+            start.hash(&mut h);
+            end.hash(&mut h);
+        }
+        GraphQuery::NearestByCost { start, k } => {
+            start.hash(&mut h);
+            k.hash(&mut h);
+        }
+        GraphQuery::DeepReachability { start, max_depth } => {
+            start.hash(&mut h);
+            max_depth.hash(&mut h);
+        }
+        GraphQuery::DirectedTraversal {
+            start,
+            direction,
+            depth,
+        } => {
+            start.hash(&mut h);
+            direction.hash(&mut h);
+            depth.hash(&mut h);
+        }
+        GraphQuery::RecursiveTraversal(ref req) => {
+            0x01u8.hash(&mut h); // version byte
+            req.start.hash(&mut h);
+            req.direction.hash(&mut h);
+            req.depth.hash(&mut h);
+            req.instruction.hash(&mut h);
+            // Sort filter lists for deterministic hashing
+            let mut nf = req.node_filters.clone();
+            nf.sort();
+            nf.hash(&mut h);
+            let mut ef = req.edge_filters.clone();
+            ef.sort();
+            ef.hash(&mut h);
+            req.max_nodes_visited.hash(&mut h);
+            req.max_edges_traversed.hash(&mut h);
+            req.time_window.hash(&mut h);
+        }
+    }
+
+    h.finish()
+}
+
+fn hash_path_constraint(c: &PathConstraint, h: &mut impl Hasher) {
+    std::mem::discriminant(c).hash(h);
+    match c {
+        PathConstraint::MaxLength(n) => n.hash(h),
+        PathConstraint::RequiredNodeTypes(v) => v.hash(h),
+        PathConstraint::AvoidNodeTypes(v) => v.hash(h),
+        PathConstraint::MinEdgeWeight(w) => w.to_bits().hash(h),
+        PathConstraint::RequiredEdgeTypes(v) => v.hash(h),
+        PathConstraint::AvoidEdgeTypes(v) => v.hash(h),
+        PathConstraint::CustomFilter(f) => {
+            // fn pointers are just addresses — hash the raw pointer
+            (*f as usize).hash(h);
+        }
+    }
+}
+
+fn hash_community_algorithm(alg: &CommunityAlgorithm, h: &mut impl Hasher) {
+    std::mem::discriminant(alg).hash(h);
+    match alg {
+        CommunityAlgorithm::Louvain { resolution } => resolution.to_bits().hash(h),
+        CommunityAlgorithm::LabelPropagation { iterations } => iterations.hash(h),
+        CommunityAlgorithm::ConnectedComponents => {}
+    }
 }
 
 /// Results from graph queries
@@ -276,9 +435,13 @@ struct CacheEntry {
 }
 
 /// LRU-evicting query cache with TTL expiration.
+/// Keys are u64 hashes of `GraphQuery` — no allocation per lookup.
 struct QueryCache {
-    entries: lru::LruCache<String, CacheEntry>,
+    entries: lru::LruCache<u64, CacheEntry>,
     ttl_secs: u64,
+    /// Graph generation when the cache was last validated. Entries are
+    /// implicitly stale when `graph.generation() > known_generation`.
+    known_generation: u64,
     hits: u64,
     misses: u64,
 }
@@ -291,28 +454,29 @@ impl QueryCache {
                     .unwrap_or(std::num::NonZeroUsize::new(1).unwrap()),
             ),
             ttl_secs,
+            known_generation: 0,
             hits: 0,
             misses: 0,
         }
     }
 
     /// Lookup a cached result. Returns None if missing or expired.
-    fn get(&mut self, key: &str) -> Option<&QueryResult> {
+    fn get(&mut self, key: u64) -> Option<&QueryResult> {
         // LruCache::get promotes the entry; we must also check TTL.
-        if let Some(entry) = self.entries.get(key) {
+        if let Some(entry) = self.entries.get(&key) {
             if entry.inserted_at.elapsed().as_secs() < self.ttl_secs {
                 self.hits += 1;
                 // Re-borrow to satisfy the borrow checker
-                return self.entries.peek(key).map(|e| &e.result);
+                return self.entries.peek(&key).map(|e| &e.result);
             }
             // Expired — remove
-            self.entries.pop(key);
+            self.entries.pop(&key);
         }
         self.misses += 1;
         None
     }
 
-    fn insert(&mut self, key: String, result: QueryResult) {
+    fn insert(&mut self, key: u64, result: QueryResult) {
         self.entries.push(
             key,
             CacheEntry {
@@ -327,14 +491,22 @@ impl QueryCache {
         self.entries.clear();
     }
 
+    /// Check graph generation and auto-invalidate if the graph has mutated.
+    fn check_generation(&mut self, graph_generation: u64) {
+        if graph_generation > self.known_generation {
+            self.entries.clear();
+            self.known_generation = graph_generation;
+        }
+    }
+
     /// Remove expired entries without blocking normal lookups.
     fn evict_expired(&mut self) {
         let now = std::time::Instant::now();
-        let keys_to_remove: Vec<String> = self
+        let keys_to_remove: Vec<u64> = self
             .entries
             .iter()
             .filter(|(_, entry)| now.duration_since(entry.inserted_at).as_secs() >= self.ttl_secs)
-            .map(|(k, _)| k.clone())
+            .map(|(k, _)| *k)
             .collect();
         for key in keys_to_remove {
             self.entries.pop(&key);
@@ -384,10 +556,13 @@ impl GraphTraversal {
 
     /// Execute a graph query, returning cached results when available.
     pub fn execute_query(&mut self, graph: &Graph, query: GraphQuery) -> GraphResult<QueryResult> {
-        let cache_key = format!("{:?}", query);
+        // Auto-invalidate cache if the graph has mutated since last query
+        self.cache.check_generation(graph.generation());
+
+        let cache_key = query_cache_key(&query);
 
         // Try cache first
-        if let Some(cached) = self.cache.get(&cache_key) {
+        if let Some(cached) = self.cache.get(cache_key) {
             return Ok(cached.clone());
         }
 
@@ -437,6 +612,28 @@ impl GraphTraversal {
             GraphQuery::DeepReachability { start, max_depth } => {
                 self.deep_reachability(graph, start, max_depth)
             },
+            GraphQuery::DirectedTraversal {
+                start,
+                direction,
+                depth,
+            } => {
+                let spec = TraversalSpec {
+                    start,
+                    direction,
+                    depth,
+                    instruction: Instruction::Collect,
+                    node_filter: None,
+                    edge_filter: None,
+                    max_nodes_visited: None,
+                    max_edges_traversed: None,
+                    time_window: None,
+                };
+                execute_traversal(graph, &spec)
+            },
+            GraphQuery::RecursiveTraversal(request) => {
+                let spec = request.compile();
+                execute_traversal(graph, &spec)
+            },
         }?;
 
         // Cache the result
@@ -459,8 +656,8 @@ impl GraphTraversal {
         }
 
         let mut heap = BinaryHeap::new();
-        let mut dist: HashMap<NodeId, f32> = HashMap::new();
-        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut dist: FxHashMap<NodeId, f32> = FxHashMap::default();
+        let mut came_from: FxHashMap<NodeId, NodeId> = FxHashMap::default();
 
         dist.insert(start, 0.0);
         heap.push(PathEntry {
@@ -526,8 +723,8 @@ impl GraphTraversal {
         };
 
         let mut open_set = BinaryHeap::new();
-        let mut g_score: HashMap<NodeId, f32> = HashMap::new();
-        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut g_score: FxHashMap<NodeId, f32> = FxHashMap::default();
+        let mut came_from: FxHashMap<NodeId, NodeId> = FxHashMap::default();
 
         g_score.insert(start, 0.0);
         open_set.push(PathEntry {
@@ -657,14 +854,14 @@ impl GraphTraversal {
         }
 
         // Forward search state
-        let mut fwd_dist: HashMap<NodeId, f32> = HashMap::new();
-        let mut fwd_from: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut fwd_dist: FxHashMap<NodeId, f32> = FxHashMap::default();
+        let mut fwd_from: FxHashMap<NodeId, NodeId> = FxHashMap::default();
         let mut fwd_heap = BinaryHeap::new();
         let mut fwd_settled: HashSet<NodeId> = HashSet::new();
 
         // Backward search state
-        let mut bwd_dist: HashMap<NodeId, f32> = HashMap::new();
-        let mut bwd_from: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut bwd_dist: FxHashMap<NodeId, f32> = FxHashMap::default();
+        let mut bwd_from: FxHashMap<NodeId, NodeId> = FxHashMap::default();
         let mut bwd_heap = BinaryHeap::new();
         let mut bwd_settled: HashSet<NodeId> = HashSet::new();
 
@@ -877,9 +1074,9 @@ impl GraphTraversal {
 
         // Modified Dijkstra with constraint checking
         let mut heap = BinaryHeap::new();
-        let mut dist: HashMap<NodeId, f32> = HashMap::new();
-        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
-        let mut depth: HashMap<NodeId, u32> = HashMap::new();
+        let mut dist: FxHashMap<NodeId, f32> = FxHashMap::default();
+        let mut came_from: FxHashMap<NodeId, NodeId> = FxHashMap::default();
+        let mut depth: FxHashMap<NodeId, u32> = FxHashMap::default();
 
         dist.insert(start, 0.0);
         depth.insert(start, 0);
@@ -898,7 +1095,7 @@ impl GraphTraversal {
 
                 // Post-filter: check RequiredNodeTypes
                 if !required_node_types.is_empty() {
-                    let path_types: HashSet<String> = path
+                    let path_types: HashSet<&str> = path
                         .iter()
                         .filter_map(|&nid| graph.get_node(nid).map(|n| n.type_name()))
                         .collect();
@@ -954,7 +1151,7 @@ impl GraphTraversal {
                 // Constraint: AvoidNodeTypes
                 if !avoid_node_types.is_empty() {
                     if let Some(neighbor_node) = graph.get_node(neighbor_id) {
-                        if avoid_node_types.contains(neighbor_node.type_name().as_str()) {
+                        if avoid_node_types.contains(neighbor_node.type_name()) {
                             continue;
                         }
                     }
@@ -1021,8 +1218,8 @@ impl GraphTraversal {
         }
 
         let mut heap = BinaryHeap::new();
-        let mut dist: HashMap<NodeId, f32> = HashMap::new();
-        let mut came_from: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut dist: FxHashMap<NodeId, f32> = FxHashMap::default();
+        let mut came_from: FxHashMap<NodeId, NodeId> = FxHashMap::default();
 
         dist.insert(start, 0.0);
         heap.push(PathEntry {
@@ -1071,7 +1268,7 @@ impl GraphTraversal {
 
     /// Reconstruct a path from the came_from map.
     fn reconstruct_path(
-        came_from: &HashMap<NodeId, NodeId>,
+        came_from: &FxHashMap<NodeId, NodeId>,
         start: NodeId,
         end: NodeId,
     ) -> Vec<NodeId> {
@@ -1124,8 +1321,8 @@ impl GraphTraversal {
     fn find_strongly_connected_components(&self, graph: &Graph) -> GraphResult<QueryResult> {
         let mut index = 0;
         let mut stack = Vec::new();
-        let mut indices: HashMap<NodeId, usize> = HashMap::new();
-        let mut lowlinks: HashMap<NodeId, usize> = HashMap::new();
+        let mut indices: FxHashMap<NodeId, usize> = FxHashMap::default();
+        let mut lowlinks: FxHashMap<NodeId, usize> = FxHashMap::default();
         let mut on_stack: HashSet<NodeId> = HashSet::new();
         let mut components = Vec::new();
 
@@ -1158,8 +1355,8 @@ impl GraphTraversal {
         node_id: NodeId,
         index: &mut usize,
         stack: &mut Vec<NodeId>,
-        indices: &mut HashMap<NodeId, usize>,
-        lowlinks: &mut HashMap<NodeId, usize>,
+        indices: &mut FxHashMap<NodeId, usize>,
+        lowlinks: &mut FxHashMap<NodeId, usize>,
         on_stack: &mut HashSet<NodeId>,
         components: &mut Vec<Vec<NodeId>>,
     ) {
@@ -1253,7 +1450,7 @@ impl GraphTraversal {
                     .filter(|&node_id| {
                         graph
                             .get_node(node_id)
-                            .is_some_and(|node| types.contains(&node.type_name()))
+                            .is_some_and(|node| types.iter().any(|t| t == node.type_name()))
                     })
                     .collect()
             } else {
@@ -1294,8 +1491,8 @@ impl GraphTraversal {
             return Ok(QueryResult::Rankings(Vec::new()));
         }
 
-        let mut pagerank: HashMap<NodeId, f32> = HashMap::with_capacity(all_nodes.len());
-        let mut new_pagerank: HashMap<NodeId, f32> = HashMap::with_capacity(all_nodes.len());
+        let mut pagerank: FxHashMap<NodeId, f32> = FxHashMap::with_capacity_and_hasher(all_nodes.len(), Default::default());
+        let mut new_pagerank: FxHashMap<NodeId, f32> = FxHashMap::with_capacity_and_hasher(all_nodes.len(), Default::default());
 
         // Initialize PageRank scores
         let init = 1.0 / n;
@@ -1339,14 +1536,29 @@ impl GraphTraversal {
         match algorithm {
             CommunityAlgorithm::ConnectedComponents => {
                 self.find_strongly_connected_components(graph)
-            },
-            CommunityAlgorithm::Louvain { resolution: _ } => {
-                // Louvain is implemented in the algorithms module
-                self.find_strongly_connected_components(graph)
-            },
-            CommunityAlgorithm::LabelPropagation { iterations: _ } => {
-                self.find_strongly_connected_components(graph)
-            },
+            }
+            CommunityAlgorithm::Louvain { resolution } => {
+                let config = crate::algorithms::LouvainConfig {
+                    resolution: *resolution,
+                    ..Default::default()
+                };
+                let louvain = crate::algorithms::LouvainAlgorithm::with_config(config);
+                let result = louvain.detect_communities(graph)?;
+                // Convert to Vec<Vec<NodeId>> for QueryResult::Communities
+                let mut communities: Vec<Vec<NodeId>> = result.communities.into_values().collect();
+                communities.sort_by(|a, b| b.len().cmp(&a.len())); // largest first
+                Ok(QueryResult::Communities(communities))
+            }
+            CommunityAlgorithm::LabelPropagation { iterations } => {
+                let config = crate::algorithms::LabelPropagationConfig {
+                    max_iterations: *iterations,
+                };
+                let lp = crate::algorithms::LabelPropagationAlgorithm::with_config(config);
+                let result = lp.detect_communities(graph)?;
+                let mut communities: Vec<Vec<NodeId>> = result.communities.into_values().collect();
+                communities.sort_by(|a, b| b.len().cmp(&a.len()));
+                Ok(QueryResult::Communities(communities))
+            }
         }
     }
 
@@ -1755,14 +1967,14 @@ impl<'a> Iterator for DfsIter<'a> {
 pub struct DijkstraIter<'a> {
     graph: &'a Graph,
     heap: BinaryHeap<PathEntry>,
-    dist: HashMap<NodeId, f32>,
+    dist: FxHashMap<NodeId, f32>,
 }
 
 impl<'a> DijkstraIter<'a> {
     /// Create a Dijkstra iterator rooted at `start`.
     /// Yields every reachable node in cost-ascending order.
     pub fn new(graph: &'a Graph, start: NodeId) -> Self {
-        let mut dist = HashMap::new();
+        let mut dist = FxHashMap::default();
         let mut heap = BinaryHeap::new();
         dist.insert(start, 0.0);
         heap.push(PathEntry {
@@ -1811,7 +2023,7 @@ impl<'a> Iterator for DijkstraIter<'a> {
 // ============================================================================
 
 /// Get a string name for an edge type (for constraint matching).
-fn edge_type_name(et: &EdgeType) -> String {
+pub(crate) fn edge_type_name(et: &EdgeType) -> String {
     match et {
         EdgeType::Causality { .. } => "Causality".to_string(),
         EdgeType::Temporal { .. } => "Temporal".to_string(),
@@ -1834,4 +2046,1292 @@ pub struct ActionSuggestion {
     pub success_probability: f32,
     pub evidence_count: u32,
     pub reasoning: String,
+}
+
+// ============================================================================
+// Phase 4: Direction-Aware Iterators
+// ============================================================================
+
+/// Helper: expand neighbors + costs for a given direction.
+fn expand_directed_costs(graph: &Graph, node_id: NodeId, direction: Direction) -> Vec<(NodeId, f32)> {
+    match direction {
+        Direction::Out => graph
+            .get_edges_from(node_id)
+            .into_iter()
+            .map(|e| (e.target, edge_cost(e)))
+            .collect(),
+        Direction::In => graph
+            .get_edges_to(node_id)
+            .into_iter()
+            .map(|e| (e.source, edge_cost(e)))
+            .collect(),
+        Direction::Both => {
+            let mut best: FxHashMap<NodeId, f32> = FxHashMap::default();
+            for e in graph.get_edges_from(node_id) {
+                let c = edge_cost(e);
+                let entry = best.entry(e.target).or_insert(f32::INFINITY);
+                if c < *entry {
+                    *entry = c;
+                }
+            }
+            for e in graph.get_edges_to(node_id) {
+                let c = edge_cost(e);
+                let entry = best.entry(e.source).or_insert(f32::INFINITY);
+                if c < *entry {
+                    *entry = c;
+                }
+            }
+            best.into_iter().collect()
+        }
+    }
+}
+
+/// Directed BFS iterator yielding `(NodeId, depth)` for nodes in `[min_depth, max_depth]`.
+pub struct DirectedBfsIter<'a> {
+    graph: &'a Graph,
+    queue: VecDeque<(NodeId, u32)>,
+    visited: HashSet<NodeId>,
+    direction: Direction,
+    min_depth: u32,
+    max_depth: Option<u32>,
+}
+
+impl<'a> DirectedBfsIter<'a> {
+    pub fn new(graph: &'a Graph, start: NodeId, direction: Direction, depth: Depth) -> Self {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        visited.insert(start);
+        queue.push_back((start, 0));
+        Self {
+            graph,
+            queue,
+            visited,
+            direction,
+            min_depth: depth.min_depth(),
+            max_depth: depth.max_depth(),
+        }
+    }
+}
+
+impl<'a> Iterator for DirectedBfsIter<'a> {
+    type Item = (NodeId, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (current, depth) = self.queue.pop_front()?;
+
+            // Expand neighbors if within depth budget
+            let should_expand = self.max_depth.map_or(true, |max| depth < max);
+            if should_expand {
+                for neighbor in self.graph.neighbors_directed(current, self.direction) {
+                    if self.visited.insert(neighbor) {
+                        self.queue.push_back((neighbor, depth + 1));
+                    }
+                }
+            }
+
+            // Only yield if depth >= min_depth
+            if depth >= self.min_depth {
+                return Some((current, depth));
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.queue.len(), None)
+    }
+}
+
+/// Directed DFS (pre-order) iterator yielding `(NodeId, depth)`.
+pub struct DirectedDfsIter<'a> {
+    graph: &'a Graph,
+    stack: Vec<(NodeId, u32)>,
+    visited: HashSet<NodeId>,
+    direction: Direction,
+    min_depth: u32,
+    max_depth: Option<u32>,
+}
+
+impl<'a> DirectedDfsIter<'a> {
+    pub fn new(graph: &'a Graph, start: NodeId, direction: Direction, depth: Depth) -> Self {
+        let mut visited = HashSet::new();
+        visited.insert(start);
+        Self {
+            graph,
+            stack: vec![(start, 0)],
+            visited,
+            direction,
+            min_depth: depth.min_depth(),
+            max_depth: depth.max_depth(),
+        }
+    }
+}
+
+impl<'a> Iterator for DirectedDfsIter<'a> {
+    type Item = (NodeId, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (current, depth) = self.stack.pop()?;
+
+            let should_expand = self.max_depth.map_or(true, |max| depth < max);
+            if should_expand {
+                for neighbor in self.graph.neighbors_directed(current, self.direction) {
+                    if self.visited.insert(neighbor) {
+                        self.stack.push((neighbor, depth + 1));
+                    }
+                }
+            }
+
+            if depth >= self.min_depth {
+                return Some((current, depth));
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.stack.len(), None)
+    }
+}
+
+/// Directed Dijkstra iterator yielding `(NodeId, cost)` in cost-ascending order.
+pub struct DirectedDijkstraIter<'a> {
+    graph: &'a Graph,
+    heap: BinaryHeap<PathEntry>,
+    dist: FxHashMap<NodeId, f32>,
+    direction: Direction,
+}
+
+impl<'a> DirectedDijkstraIter<'a> {
+    pub fn new(graph: &'a Graph, start: NodeId, direction: Direction) -> Self {
+        let mut dist = FxHashMap::default();
+        let mut heap = BinaryHeap::new();
+        dist.insert(start, 0.0);
+        heap.push(PathEntry {
+            node_id: start,
+            cost: 0.0,
+        });
+        Self {
+            graph,
+            heap,
+            dist,
+            direction,
+        }
+    }
+}
+
+impl<'a> Iterator for DirectedDijkstraIter<'a> {
+    type Item = (NodeId, f32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(PathEntry { node_id, cost }) = self.heap.pop() {
+            if cost > *self.dist.get(&node_id).unwrap_or(&f32::INFINITY) {
+                continue;
+            }
+
+            for (neighbor, w) in expand_directed_costs(self.graph, node_id, self.direction) {
+                let new_cost = cost + w;
+                if new_cost < *self.dist.get(&neighbor).unwrap_or(&f32::INFINITY) {
+                    self.dist.insert(neighbor, new_cost);
+                    self.heap.push(PathEntry {
+                        node_id: neighbor,
+                        cost: new_cost,
+                    });
+                }
+            }
+
+            return Some((node_id, cost));
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (if self.heap.is_empty() { 0 } else { 1 }, None)
+    }
+}
+
+// ============================================================================
+// Phase 4.2: Recursive Instructions & Traversal Types
+// ============================================================================
+
+/// Predicate for filtering nodes during traversal (closure-based, internal use).
+pub type NodePredicate = Arc<dyn Fn(&GraphNode) -> bool + Send + Sync>;
+
+/// Predicate for filtering edges during traversal (closure-based, internal use).
+pub type EdgePredicate = Arc<dyn Fn(&GraphEdge) -> bool + Send + Sync>;
+
+/// Serializable node filter expression for the public query API.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum NodeFilterExpr {
+    /// Match nodes whose `type_name()` equals the given string.
+    ByType(String),
+    /// Match nodes created after the given timestamp.
+    CreatedAfter(u64),
+    /// Match nodes created before the given timestamp.
+    CreatedBefore(u64),
+    /// Match nodes with degree >= threshold.
+    MinDegree(u32),
+}
+
+/// Serializable edge filter expression for the public query API.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum EdgeFilterExpr {
+    /// Match edges whose type name equals the given string.
+    ByType(String),
+    /// Match edges with weight >= threshold.
+    MinWeight(OrderedFloat<f32>),
+    /// Match edges created after the given timestamp.
+    CreatedAfter(u64),
+    /// Match edges created before the given timestamp.
+    CreatedBefore(u64),
+}
+
+/// What to do with traversed nodes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Instruction {
+    /// Collect all reachable nodes.
+    Collect,
+    /// Find simple paths (no repeated nodes), stop after `max_paths`.
+    Path { max_paths: usize },
+    /// Find shortest path to target via directed Dijkstra.
+    Shortest(NodeId),
+}
+
+/// Internal traversal specification (closures allowed).
+pub struct TraversalSpec {
+    pub start: NodeId,
+    pub direction: Direction,
+    pub depth: Depth,
+    pub instruction: Instruction,
+    pub node_filter: Option<NodePredicate>,
+    pub edge_filter: Option<EdgePredicate>,
+    pub max_nodes_visited: Option<u32>,
+    pub max_edges_traversed: Option<u32>,
+    pub time_window: Option<(u64, u64)>,
+}
+
+/// Serializable traversal request for the public query API.
+#[derive(Debug, Clone)]
+pub struct TraversalRequest {
+    pub start: NodeId,
+    pub direction: Direction,
+    pub depth: Depth,
+    pub instruction: Instruction,
+    pub node_filters: Vec<NodeFilterExpr>,
+    pub edge_filters: Vec<EdgeFilterExpr>,
+    pub max_nodes_visited: Option<u32>,
+    pub max_edges_traversed: Option<u32>,
+    pub time_window: Option<(u64, u64)>,
+}
+
+impl TraversalRequest {
+    /// Compile this request into an executable `TraversalSpec` by converting
+    /// filter expressions into closures.
+    pub fn compile(self) -> TraversalSpec {
+        let node_filter = if self.node_filters.is_empty() {
+            None
+        } else {
+            let filters = self.node_filters;
+            Some(Arc::new(move |node: &GraphNode| {
+                filters.iter().all(|f| match f {
+                    NodeFilterExpr::ByType(t) => node.type_name() == t.as_str(),
+                    NodeFilterExpr::CreatedAfter(ts) => node.created_at > *ts,
+                    NodeFilterExpr::CreatedBefore(ts) => node.created_at < *ts,
+                    NodeFilterExpr::MinDegree(d) => node.degree >= *d,
+                })
+            }) as NodePredicate)
+        };
+
+        let edge_filter = if self.edge_filters.is_empty() {
+            None
+        } else {
+            let filters = self.edge_filters;
+            Some(Arc::new(move |edge: &GraphEdge| {
+                filters.iter().all(|f| match f {
+                    EdgeFilterExpr::ByType(t) => edge_type_name(&edge.edge_type) == *t,
+                    EdgeFilterExpr::MinWeight(w) => edge.weight >= w.into_inner(),
+                    EdgeFilterExpr::CreatedAfter(ts) => edge.created_at > *ts,
+                    EdgeFilterExpr::CreatedBefore(ts) => edge.created_at < *ts,
+                })
+            }) as EdgePredicate)
+        };
+
+        TraversalSpec {
+            start: self.start,
+            direction: self.direction,
+            depth: self.depth,
+            instruction: self.instruction,
+            node_filter,
+            edge_filter,
+            max_nodes_visited: self.max_nodes_visited,
+            max_edges_traversed: self.max_edges_traversed,
+            time_window: self.time_window,
+        }
+    }
+}
+
+// ============================================================================
+// execute_traversal — dispatch on Instruction
+// ============================================================================
+
+/// Execute a traversal specification against a graph.
+pub fn execute_traversal(graph: &Graph, spec: &TraversalSpec) -> GraphResult<QueryResult> {
+    spec.depth.validate()?;
+    match &spec.instruction {
+        Instruction::Collect => execute_collect(graph, spec),
+        Instruction::Path { max_paths } => execute_paths(graph, spec, *max_paths),
+        Instruction::Shortest(target) => execute_shortest(graph, spec, *target),
+    }
+}
+
+/// Resolve the "other endpoint" of an edge relative to `current` and `direction`.
+#[inline]
+fn edge_neighbor(edge: &GraphEdge, current: NodeId, direction: Direction) -> NodeId {
+    match direction {
+        Direction::Out => edge.target,
+        Direction::In => edge.source,
+        Direction::Both => {
+            if edge.source == current {
+                edge.target
+            } else {
+                edge.source
+            }
+        }
+    }
+}
+
+/// Check if an edge passes time-window + edge-filter + node-filter for its neighbor.
+#[inline]
+fn edge_passes_filters(
+    graph: &Graph,
+    edge: &GraphEdge,
+    neighbor: NodeId,
+    spec: &TraversalSpec,
+) -> bool {
+    // Time window on edge
+    if let Some((tw_start, tw_end)) = spec.time_window {
+        if edge.created_at < tw_start || edge.created_at > tw_end {
+            return false;
+        }
+    }
+    // Edge filter
+    if let Some(ref ef) = spec.edge_filter {
+        if !ef(edge) {
+            return false;
+        }
+    }
+    // Time window on neighbor node
+    if let Some((tw_start, tw_end)) = spec.time_window {
+        if let Some(node) = graph.get_node(neighbor) {
+            if node.created_at < tw_start || node.created_at > tw_end {
+                return false;
+            }
+        }
+    }
+    // Node filter
+    if let Some(ref nf) = spec.node_filter {
+        if let Some(node) = graph.get_node(neighbor) {
+            if !nf(node) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `Collect` instruction: BFS with direction, depth, filters, budgets.
+fn execute_collect(graph: &Graph, spec: &TraversalSpec) -> GraphResult<QueryResult> {
+    let min_depth = spec.depth.min_depth();
+    let max_depth = spec.depth.max_depth();
+
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    let mut result = Vec::new();
+    let mut nodes_visited: u32 = 0;
+    let mut edges_traversed: u32 = 0;
+
+    visited.insert(spec.start);
+    queue.push_back((spec.start, 0u32));
+
+    while let Some((current, depth)) = queue.pop_front() {
+        nodes_visited += 1;
+        if let Some(max) = spec.max_nodes_visited {
+            if nodes_visited > max {
+                break;
+            }
+        }
+
+        if depth >= min_depth {
+            result.push(current);
+        }
+
+        let should_expand = max_depth.map_or(true, |max| depth < max);
+        if !should_expand {
+            continue;
+        }
+
+        let edges = graph.edges_directed(current, spec.direction);
+        for edge in edges {
+            edges_traversed += 1;
+            if let Some(max) = spec.max_edges_traversed {
+                if edges_traversed > max {
+                    break;
+                }
+            }
+
+            let neighbor = edge_neighbor(edge, current, spec.direction);
+            if !edge_passes_filters(graph, edge, neighbor, spec) {
+                continue;
+            }
+            if visited.insert(neighbor) {
+                queue.push_back((neighbor, depth + 1));
+            }
+        }
+    }
+
+    Ok(QueryResult::Nodes(result))
+}
+
+/// `Path` instruction: DFS simple-path enumeration with budgets.
+fn execute_paths(
+    graph: &Graph,
+    spec: &TraversalSpec,
+    max_paths: usize,
+) -> GraphResult<QueryResult> {
+    let max_depth = spec.depth.max_depth();
+    let mut paths: Vec<Vec<NodeId>> = Vec::new();
+
+    // Stack entries: (node, path_so_far, depth)
+    let mut stack: Vec<(NodeId, Vec<NodeId>, u32)> = Vec::new();
+    stack.push((spec.start, vec![spec.start], 0));
+
+    let mut nodes_visited: u32 = 0;
+
+    while let Some((current, path, depth)) = stack.pop() {
+        if paths.len() >= max_paths {
+            break;
+        }
+
+        nodes_visited += 1;
+        if let Some(max) = spec.max_nodes_visited {
+            if nodes_visited > max {
+                break;
+            }
+        }
+
+        let at_max = max_depth.map_or(false, |max| depth >= max);
+        if at_max {
+            if depth >= spec.depth.min_depth() {
+                paths.push(path);
+            }
+            continue;
+        }
+
+        let edges = graph.edges_directed(current, spec.direction);
+        let mut expanded = false;
+
+        for edge in edges {
+            let neighbor = edge_neighbor(edge, current, spec.direction);
+
+            // Simple path: no repeated nodes
+            if path.contains(&neighbor) {
+                continue;
+            }
+
+            if !edge_passes_filters(graph, edge, neighbor, spec) {
+                continue;
+            }
+
+            expanded = true;
+            let mut new_path = path.clone();
+            new_path.push(neighbor);
+            stack.push((neighbor, new_path, depth + 1));
+        }
+
+        // Leaf node — record path if it meets min_depth
+        if !expanded && depth >= spec.depth.min_depth() {
+            paths.push(path);
+        }
+    }
+
+    Ok(QueryResult::Paths(paths))
+}
+
+/// `Shortest` instruction: directed Dijkstra to a specific target.
+fn execute_shortest(
+    graph: &Graph,
+    spec: &TraversalSpec,
+    target: NodeId,
+) -> GraphResult<QueryResult> {
+    if spec.start == target {
+        return Ok(QueryResult::Path(vec![spec.start]));
+    }
+
+    let mut heap = BinaryHeap::new();
+    let mut dist: FxHashMap<NodeId, f32> = FxHashMap::default();
+    let mut came_from: FxHashMap<NodeId, NodeId> = FxHashMap::default();
+
+    dist.insert(spec.start, 0.0);
+    heap.push(PathEntry {
+        node_id: spec.start,
+        cost: 0.0,
+    });
+
+    let max_depth = spec.depth.max_depth();
+    let mut depth_map: FxHashMap<NodeId, u32> = FxHashMap::default();
+    depth_map.insert(spec.start, 0);
+
+    while let Some(PathEntry {
+        node_id: current,
+        cost,
+    }) = heap.pop()
+    {
+        if current == target {
+            return Ok(QueryResult::Path(GraphTraversal::reconstruct_path(
+                &came_from,
+                spec.start,
+                target,
+            )));
+        }
+
+        if cost > *dist.get(&current).unwrap_or(&f32::INFINITY) {
+            continue;
+        }
+
+        let current_depth = depth_map.get(&current).copied().unwrap_or(0);
+        if max_depth.map_or(false, |max| current_depth >= max) {
+            continue;
+        }
+
+        for edge in graph.edges_directed(current, spec.direction) {
+            let neighbor = edge_neighbor(edge, current, spec.direction);
+
+            if !edge_passes_filters(graph, edge, neighbor, spec) {
+                continue;
+            }
+
+            let w = edge_cost(edge);
+            let new_dist = cost + w;
+
+            if new_dist < *dist.get(&neighbor).unwrap_or(&f32::INFINITY) {
+                dist.insert(neighbor, new_dist);
+                came_from.insert(neighbor, current);
+                depth_map.insert(neighbor, current_depth + 1);
+                heap.push(PathEntry {
+                    node_id: neighbor,
+                    cost: new_dist,
+                });
+            }
+        }
+    }
+
+    Err(GraphError::NodeNotFound(
+        "No path found to target".to_string(),
+    ))
+}
+
+// ============================================================================
+// Phase 4.3: Streaming Query Results
+// ============================================================================
+
+/// Execution context for a streaming query.
+///
+/// `items_yielded` is auto-updated by `StreamingQuery`. Other metrics
+/// (`nodes_visited`, `edges_traversed`, `max_depth_seen`) are updated
+/// by the caller or iterator wrapper if desired.
+pub struct QueryContext {
+    cancelled: Arc<AtomicBool>,
+    limit: u64,
+    items_yielded: AtomicU64,
+    pub nodes_visited: AtomicU64,
+    pub edges_traversed: AtomicU64,
+    pub max_depth_seen: AtomicU32,
+}
+
+impl QueryContext {
+    pub fn new(limit: u64) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            limit,
+            items_yielded: AtomicU64::new(0),
+            nodes_visited: AtomicU64::new(0),
+            edges_traversed: AtomicU64::new(0),
+            max_depth_seen: AtomicU32::new(0),
+        }
+    }
+
+    /// Check whether the query should stop (cancelled or limit reached).
+    pub fn is_done(&self) -> bool {
+        self.cancelled.load(AtomicOrdering::Relaxed)
+            || self.items_yielded.load(AtomicOrdering::Relaxed) >= self.limit
+    }
+
+    /// Create a `CancelHandle` for this context.
+    pub fn cancel_handle(&self) -> CancelHandle {
+        CancelHandle {
+            cancelled: Arc::clone(&self.cancelled),
+        }
+    }
+
+    pub fn items_yielded(&self) -> u64 {
+        self.items_yielded.load(AtomicOrdering::Relaxed)
+    }
+}
+
+/// Thread-safe cancellation handle. Clone freely across threads.
+#[derive(Clone)]
+pub struct CancelHandle {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancelHandle {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, AtomicOrdering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(AtomicOrdering::Relaxed)
+    }
+}
+
+/// Streaming query wrapper that yields items in batches, respecting limits and cancellation.
+///
+/// Auto-increments `items_yielded` in the `QueryContext`.
+pub struct StreamingQuery<I: Iterator> {
+    iter: I,
+    context: QueryContext,
+    batch_size: usize,
+}
+
+impl<I: Iterator> StreamingQuery<I> {
+    pub fn new(iter: I, limit: u64, batch_size: usize) -> Self {
+        Self {
+            iter,
+            context: QueryContext::new(limit),
+            batch_size,
+        }
+    }
+
+    /// Yield the next batch of items (up to `batch_size`).
+    /// Returns `None` when exhausted or cancelled/limit-reached.
+    pub fn next_batch(&mut self) -> Option<Vec<I::Item>> {
+        if self.context.is_done() {
+            return None;
+        }
+
+        let mut batch = Vec::with_capacity(self.batch_size);
+        for _ in 0..self.batch_size {
+            if self.context.is_done() {
+                break;
+            }
+            match self.iter.next() {
+                Some(item) => {
+                    self.context
+                        .items_yielded
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    batch.push(item);
+                }
+                None => break,
+            }
+        }
+
+        if batch.is_empty() {
+            None
+        } else {
+            Some(batch)
+        }
+    }
+
+    /// Consume the entire iterator, respecting limits and cancellation.
+    pub fn collect_all(&mut self) -> Vec<I::Item> {
+        let mut all = Vec::new();
+        while let Some(batch) = self.next_batch() {
+            all.extend(batch);
+        }
+        all
+    }
+
+    pub fn context(&self) -> &QueryContext {
+        &self.context
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structures::{EdgeType, GraphEdge, GraphNode, NodeType};
+
+    fn make_node_at(id: NodeId, created_at: u64) -> GraphNode {
+        GraphNode {
+            id,
+            node_type: NodeType::Event {
+                event_id: id as u128,
+                event_type: format!("type_{}", id),
+                significance: 0.5,
+            },
+            created_at,
+            updated_at: created_at,
+            properties: HashMap::new(),
+            degree: 0,
+        }
+    }
+
+    fn make_edge_at(source: NodeId, target: NodeId, created_at: u64) -> GraphEdge {
+        GraphEdge {
+            id: 0,
+            source,
+            target,
+            edge_type: EdgeType::Causality {
+                strength: 0.8,
+                lag_ms: 100,
+            },
+            weight: 1.0,
+            created_at,
+            updated_at: created_at,
+            observation_count: 1,
+            confidence: 0.9,
+            properties: HashMap::new(),
+        }
+    }
+
+    /// Build: 1 -> 2 -> 3, 1 -> 4
+    fn build_directed_graph() -> Graph {
+        let mut g = Graph::new();
+        let mut n = make_node_at(0, 100);
+        let id1 = g.add_node(n.clone()).unwrap();
+        n.created_at = 200;
+        let id2 = g.add_node(n.clone()).unwrap();
+        n.created_at = 300;
+        let id3 = g.add_node(n.clone()).unwrap();
+        n.created_at = 400;
+        let id4 = g.add_node(n.clone()).unwrap();
+
+        g.add_edge(make_edge_at(id1, id2, 150));
+        g.add_edge(make_edge_at(id2, id3, 250));
+        g.add_edge(make_edge_at(id1, id4, 350));
+        g
+    }
+
+    // ── Direction / Depth unit tests ──
+
+    #[test]
+    fn depth_validate_valid() {
+        assert!(Depth::Fixed(5).validate().is_ok());
+        assert!(Depth::Range(1, 5).validate().is_ok());
+        assert!(Depth::Range(3, 3).validate().is_ok());
+        assert!(Depth::Unbounded.validate().is_ok());
+    }
+
+    #[test]
+    fn depth_validate_invalid() {
+        assert!(Depth::Range(5, 2).validate().is_err());
+    }
+
+    #[test]
+    fn depth_min_max() {
+        assert_eq!(Depth::Fixed(3).min_depth(), 3);
+        assert_eq!(Depth::Fixed(3).max_depth(), Some(3));
+        assert_eq!(Depth::Range(1, 5).min_depth(), 1);
+        assert_eq!(Depth::Range(1, 5).max_depth(), Some(5));
+        assert_eq!(Depth::Unbounded.min_depth(), 0);
+        assert_eq!(Depth::Unbounded.max_depth(), None);
+    }
+
+    #[test]
+    fn neighbors_directed_out() {
+        let g = build_directed_graph();
+        let mut n = g.neighbors_directed(1, Direction::Out);
+        n.sort();
+        assert_eq!(n, vec![2, 4]);
+    }
+
+    #[test]
+    fn neighbors_directed_in() {
+        let g = build_directed_graph();
+        let n = g.neighbors_directed(2, Direction::In);
+        assert_eq!(n, vec![1]);
+    }
+
+    #[test]
+    fn neighbors_directed_both() {
+        let g = build_directed_graph();
+        // Node 2: out=[3], in=[1] → both=[3,1] or [1,3]
+        let n = g.neighbors_directed(2, Direction::Both);
+        assert_eq!(n.len(), 2);
+        assert!(n.contains(&1));
+        assert!(n.contains(&3));
+    }
+
+    #[test]
+    fn edges_directed_out() {
+        let g = build_directed_graph();
+        let edges = g.edges_directed(1, Direction::Out);
+        assert_eq!(edges.len(), 2);
+        let targets: Vec<NodeId> = edges.iter().map(|e| e.target).collect();
+        assert!(targets.contains(&2));
+        assert!(targets.contains(&4));
+    }
+
+    #[test]
+    fn edges_directed_in() {
+        let g = build_directed_graph();
+        let edges = g.edges_directed(2, Direction::In);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source, 1);
+    }
+
+    #[test]
+    fn edges_directed_both_dedup() {
+        let g = build_directed_graph();
+        let edges = g.edges_directed(2, Direction::Both);
+        // out: edge to 3; in: edge from 1 → 2 edges total, all distinct
+        assert_eq!(edges.len(), 2);
+        let mut ids: Vec<EdgeId> = edges.iter().map(|e| e.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn latest_timestamp_empty() {
+        let g = Graph::new();
+        assert_eq!(g.latest_timestamp(), None);
+    }
+
+    #[test]
+    fn latest_timestamp_nonempty() {
+        let g = build_directed_graph();
+        // Nodes created at 100, 200, 300, 400
+        assert_eq!(g.latest_timestamp(), Some(400));
+    }
+
+    // ── DirectedBfsIter tests ──
+
+    #[test]
+    fn directed_bfs_out() {
+        let g = build_directed_graph();
+        let nodes: Vec<NodeId> = DirectedBfsIter::new(&g, 1, Direction::Out, Depth::Fixed(2))
+            .map(|(id, _)| id)
+            .collect();
+        assert!(nodes.contains(&1));
+        assert!(nodes.contains(&2));
+        assert!(nodes.contains(&3));
+        assert!(nodes.contains(&4));
+    }
+
+    #[test]
+    fn directed_bfs_in() {
+        let g = build_directed_graph();
+        // From node 3, going In: 3 ← 2 ← 1
+        let nodes: Vec<NodeId> = DirectedBfsIter::new(&g, 3, Direction::In, Depth::Fixed(2))
+            .map(|(id, _)| id)
+            .collect();
+        assert!(nodes.contains(&3));
+        assert!(nodes.contains(&2));
+        assert!(nodes.contains(&1));
+    }
+
+    #[test]
+    fn directed_bfs_depth_range() {
+        let g = build_directed_graph();
+        // Depth Range(1, 2): skip depth 0 (start node), collect depths 1 and 2
+        let nodes: Vec<NodeId> =
+            DirectedBfsIter::new(&g, 1, Direction::Out, Depth::Range(1, 2))
+                .map(|(id, _)| id)
+                .collect();
+        assert!(!nodes.contains(&1)); // depth 0, skipped
+        assert!(nodes.contains(&2)); // depth 1
+        assert!(nodes.contains(&4)); // depth 1
+        assert!(nodes.contains(&3)); // depth 2
+    }
+
+    // ── DirectedDfsIter tests ──
+
+    #[test]
+    fn directed_dfs_both() {
+        let g = build_directed_graph();
+        let nodes: Vec<NodeId> = DirectedDfsIter::new(&g, 2, Direction::Both, Depth::Fixed(1))
+            .map(|(id, _)| id)
+            .collect();
+        assert!(nodes.contains(&2)); // start
+        assert!(nodes.len() >= 2); // at least one neighbor
+    }
+
+    // ── DirectedDijkstraIter tests ──
+
+    #[test]
+    fn directed_dijkstra_out() {
+        let g = build_directed_graph();
+        let results: Vec<(NodeId, f32)> =
+            DirectedDijkstraIter::new(&g, 1, Direction::Out).collect();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, 1); // start node first
+        assert_eq!(results[0].1, 0.0); // zero cost to self
+    }
+
+    // ── execute_traversal tests ──
+
+    #[test]
+    fn execute_collect_basic() {
+        let g = build_directed_graph();
+        let spec = TraversalSpec {
+            start: 1,
+            direction: Direction::Out,
+            depth: Depth::Fixed(2),
+            instruction: Instruction::Collect,
+            node_filter: None,
+            edge_filter: None,
+            max_nodes_visited: None,
+            max_edges_traversed: None,
+            time_window: None,
+        };
+        let result = execute_traversal(&g, &spec).unwrap();
+        match result {
+            QueryResult::Nodes(nodes) => {
+                assert!(nodes.contains(&1));
+                assert!(nodes.contains(&2));
+                assert!(nodes.contains(&3));
+                assert!(nodes.contains(&4));
+            }
+            _ => panic!("Expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn execute_collect_with_depth_range() {
+        let g = build_directed_graph();
+        let spec = TraversalSpec {
+            start: 1,
+            direction: Direction::Out,
+            depth: Depth::Range(1, 1),
+            instruction: Instruction::Collect,
+            node_filter: None,
+            edge_filter: None,
+            max_nodes_visited: None,
+            max_edges_traversed: None,
+            time_window: None,
+        };
+        let result = execute_traversal(&g, &spec).unwrap();
+        match result {
+            QueryResult::Nodes(nodes) => {
+                assert!(!nodes.contains(&1)); // depth 0
+                assert!(nodes.contains(&2)); // depth 1
+                assert!(nodes.contains(&4)); // depth 1
+                assert!(!nodes.contains(&3)); // depth 2
+            }
+            _ => panic!("Expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn execute_collect_with_node_filter() {
+        let g = build_directed_graph();
+        let spec = TraversalSpec {
+            start: 1,
+            direction: Direction::Out,
+            depth: Depth::Fixed(2),
+            instruction: Instruction::Collect,
+            node_filter: Some(Arc::new(|node: &GraphNode| node.id != 4)),
+            edge_filter: None,
+            max_nodes_visited: None,
+            max_edges_traversed: None,
+            time_window: None,
+        };
+        let result = execute_traversal(&g, &spec).unwrap();
+        match result {
+            QueryResult::Nodes(nodes) => {
+                assert!(!nodes.contains(&4));
+                assert!(nodes.contains(&2));
+            }
+            _ => panic!("Expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn execute_collect_with_budget() {
+        let g = build_directed_graph();
+        let spec = TraversalSpec {
+            start: 1,
+            direction: Direction::Out,
+            depth: Depth::Unbounded,
+            instruction: Instruction::Collect,
+            node_filter: None,
+            edge_filter: None,
+            max_nodes_visited: Some(2),
+            max_edges_traversed: None,
+            time_window: None,
+        };
+        let result = execute_traversal(&g, &spec).unwrap();
+        match result {
+            QueryResult::Nodes(nodes) => {
+                assert!(nodes.len() <= 2);
+            }
+            _ => panic!("Expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn execute_collect_with_time_window() {
+        let g = build_directed_graph();
+        // Only allow edges/nodes in [100, 200]
+        let spec = TraversalSpec {
+            start: 1,
+            direction: Direction::Out,
+            depth: Depth::Fixed(3),
+            instruction: Instruction::Collect,
+            node_filter: None,
+            edge_filter: None,
+            max_nodes_visited: None,
+            max_edges_traversed: None,
+            time_window: Some((100, 200)),
+        };
+        let result = execute_traversal(&g, &spec).unwrap();
+        match result {
+            QueryResult::Nodes(nodes) => {
+                assert!(nodes.contains(&1)); // t=100, in range
+                assert!(nodes.contains(&2)); // t=200, in range; edge t=150 in range
+                assert!(!nodes.contains(&3)); // t=300, out of range
+            }
+            _ => panic!("Expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn execute_paths_simple() {
+        let g = build_directed_graph();
+        let spec = TraversalSpec {
+            start: 1,
+            direction: Direction::Out,
+            depth: Depth::Fixed(3),
+            instruction: Instruction::Path { max_paths: 10 },
+            node_filter: None,
+            edge_filter: None,
+            max_nodes_visited: None,
+            max_edges_traversed: None,
+            time_window: None,
+        };
+        let result = execute_traversal(&g, &spec).unwrap();
+        match result {
+            QueryResult::Paths(paths) => {
+                assert!(!paths.is_empty());
+                // All paths should start with node 1
+                for path in &paths {
+                    assert_eq!(path[0], 1);
+                }
+            }
+            _ => panic!("Expected Paths"),
+        }
+    }
+
+    #[test]
+    fn execute_shortest_directed() {
+        let g = build_directed_graph();
+        let spec = TraversalSpec {
+            start: 1,
+            direction: Direction::Out,
+            depth: Depth::Unbounded,
+            instruction: Instruction::Shortest(3),
+            node_filter: None,
+            edge_filter: None,
+            max_nodes_visited: None,
+            max_edges_traversed: None,
+            time_window: None,
+        };
+        let result = execute_traversal(&g, &spec).unwrap();
+        match result {
+            QueryResult::Path(path) => {
+                assert_eq!(path[0], 1);
+                assert_eq!(*path.last().unwrap(), 3);
+            }
+            _ => panic!("Expected Path"),
+        }
+    }
+
+    #[test]
+    fn execute_shortest_no_path() {
+        let g = build_directed_graph();
+        // Going In from node 1 cannot reach node 3
+        let spec = TraversalSpec {
+            start: 1,
+            direction: Direction::In,
+            depth: Depth::Unbounded,
+            instruction: Instruction::Shortest(3),
+            node_filter: None,
+            edge_filter: None,
+            max_nodes_visited: None,
+            max_edges_traversed: None,
+            time_window: None,
+        };
+        assert!(execute_traversal(&g, &spec).is_err());
+    }
+
+    // ── TraversalRequest compile tests ──
+
+    #[test]
+    fn traversal_request_compile() {
+        let req = TraversalRequest {
+            start: 1,
+            direction: Direction::Out,
+            depth: Depth::Fixed(3),
+            instruction: Instruction::Collect,
+            node_filters: vec![NodeFilterExpr::ByType("Event".to_string())],
+            edge_filters: vec![EdgeFilterExpr::MinWeight(OrderedFloat(0.5))],
+            max_nodes_visited: Some(100),
+            max_edges_traversed: None,
+            time_window: None,
+        };
+        let spec = req.compile();
+        assert_eq!(spec.start, 1);
+        assert!(spec.node_filter.is_some());
+        assert!(spec.edge_filter.is_some());
+    }
+
+    // ── GraphQuery dispatch tests ──
+
+    #[test]
+    fn query_directed_traversal() {
+        let g = build_directed_graph();
+        let mut engine = GraphTraversal::new();
+        let result = engine
+            .execute_query(
+                &g,
+                GraphQuery::DirectedTraversal {
+                    start: 1,
+                    direction: Direction::Out,
+                    depth: Depth::Fixed(1),
+                },
+            )
+            .unwrap();
+        match result {
+            QueryResult::Nodes(nodes) => {
+                assert!(nodes.contains(&1));
+                assert!(nodes.contains(&2));
+                assert!(nodes.contains(&4));
+            }
+            _ => panic!("Expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn query_recursive_traversal() {
+        let g = build_directed_graph();
+        let mut engine = GraphTraversal::new();
+        let result = engine
+            .execute_query(
+                &g,
+                GraphQuery::RecursiveTraversal(TraversalRequest {
+                    start: 1,
+                    direction: Direction::Out,
+                    depth: Depth::Fixed(2),
+                    instruction: Instruction::Collect,
+                    node_filters: vec![],
+                    edge_filters: vec![],
+                    max_nodes_visited: None,
+                    max_edges_traversed: None,
+                    time_window: None,
+                }),
+            )
+            .unwrap();
+        match result {
+            QueryResult::Nodes(nodes) => {
+                assert!(nodes.len() >= 3);
+            }
+            _ => panic!("Expected Nodes"),
+        }
+    }
+
+    // ── QueryContext tests ──
+
+    #[test]
+    fn query_context_new() {
+        let ctx = QueryContext::new(100);
+        assert!(!ctx.is_done());
+        assert_eq!(ctx.items_yielded(), 0);
+    }
+
+    #[test]
+    fn query_context_limit() {
+        let ctx = QueryContext::new(0);
+        assert!(ctx.is_done()); // limit=0 means immediately done
+    }
+
+    #[test]
+    fn query_context_cancel() {
+        let ctx = QueryContext::new(100);
+        let handle = ctx.cancel_handle();
+        assert!(!ctx.is_done());
+        handle.cancel();
+        assert!(ctx.is_done());
+    }
+
+    #[test]
+    fn cancel_handle_clone() {
+        let ctx = QueryContext::new(100);
+        let h1 = ctx.cancel_handle();
+        let h2 = h1.clone();
+        h2.cancel();
+        assert!(h1.is_cancelled());
+        assert!(ctx.is_done());
+    }
+
+    // ── StreamingQuery tests ──
+
+    #[test]
+    fn streaming_next_batch() {
+        let data = vec![1, 2, 3, 4, 5];
+        let mut sq = StreamingQuery::new(data.into_iter(), 100, 2);
+        let b1 = sq.next_batch().unwrap();
+        assert_eq!(b1, vec![1, 2]);
+        let b2 = sq.next_batch().unwrap();
+        assert_eq!(b2, vec![3, 4]);
+        let b3 = sq.next_batch().unwrap();
+        assert_eq!(b3, vec![5]);
+        assert!(sq.next_batch().is_none());
+    }
+
+    #[test]
+    fn streaming_collect_all() {
+        let data = vec![10, 20, 30];
+        let mut sq = StreamingQuery::new(data.into_iter(), 100, 2);
+        let all = sq.collect_all();
+        assert_eq!(all, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn streaming_respects_limit() {
+        let data = vec![1, 2, 3, 4, 5];
+        let mut sq = StreamingQuery::new(data.into_iter(), 3, 10);
+        let all = sq.collect_all();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn streaming_respects_cancel() {
+        let data = vec![1, 2, 3, 4, 5];
+        let mut sq = StreamingQuery::new(data.into_iter(), 100, 2);
+        let handle = sq.context().cancel_handle();
+        let b1 = sq.next_batch().unwrap();
+        assert_eq!(b1.len(), 2);
+        handle.cancel();
+        assert!(sq.next_batch().is_none());
+    }
+
+    #[test]
+    fn streaming_empty_iterator() {
+        let data: Vec<i32> = vec![];
+        let mut sq = StreamingQuery::new(data.into_iter(), 100, 10);
+        assert!(sq.next_batch().is_none());
+    }
+
+    #[test]
+    fn streaming_items_yielded() {
+        let data = vec![1, 2, 3];
+        let mut sq = StreamingQuery::new(data.into_iter(), 100, 10);
+        sq.collect_all();
+        assert_eq!(sq.context().items_yielded(), 3);
+    }
 }

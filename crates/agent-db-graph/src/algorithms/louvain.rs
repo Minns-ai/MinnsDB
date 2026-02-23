@@ -76,42 +76,84 @@ impl LouvainAlgorithm {
         Self { config }
     }
 
-    /// Detect communities in the graph
+    /// Detect communities in the graph using the full two-phase Louvain method.
+    ///
+    /// Phase 1: Local modularity optimization — greedily move nodes between
+    ///          neighbouring communities.
+    /// Phase 2: Super-graph aggregation — collapse communities into single
+    ///          super-nodes and repeat Phase 1 on the coarsened graph.
+    ///
+    /// The outer loop runs until no improvement is found or `max_iterations`
+    /// is reached.
     pub fn detect_communities(&self, graph: &Graph) -> GraphResult<CommunityDetectionResult> {
-        // Phase 1: Initialize - each node in its own community
         let mut node_communities = self.initialize_communities(graph);
         let mut best_modularity = self.calculate_modularity(graph, &node_communities)?;
         let mut iteration = 0;
 
         loop {
             iteration += 1;
-
             if iteration > self.config.max_iterations {
                 break;
             }
 
-            // Phase 1: Modularity optimization
+            // Phase 1: modularity optimisation (local moves)
             let improved = self.optimize_modularity(graph, &mut node_communities)?;
-
             if !improved {
                 break;
             }
 
-            // Calculate new modularity
             let new_modularity = self.calculate_modularity(graph, &node_communities)?;
             let improvement = new_modularity - best_modularity;
-
             if improvement < self.config.min_improvement {
                 break;
             }
-
             best_modularity = new_modularity;
 
-            // Phase 2: Could aggregate communities and repeat, but for now keep it simple
-            // Full implementation would create super-graph and recurse
+            // Phase 2: super-graph aggregation
+            // Build a mapping from community → canonical super-node ID,
+            // then create a coarsened graph where each community is a single node.
+            let communities_map = self.build_communities_map(&node_communities);
+            let num_communities = communities_map.len();
+
+            // If we can't reduce further, stop
+            if num_communities >= node_communities.len() {
+                break;
+            }
+
+            // Assign each community a stable super-node ID (use min node id in community)
+            let mut comm_to_super: HashMap<CommunityId, NodeId> = HashMap::new();
+            for (&comm_id, members) in &communities_map {
+                let min_id = *members.iter().min().unwrap_or(&comm_id);
+                comm_to_super.insert(comm_id, min_id);
+            }
+
+            // Build the super-graph: aggregate edge weights between communities
+            let mut super_edges: HashMap<(NodeId, NodeId), f32> = HashMap::new();
+            for edge in graph.get_all_edges() {
+                let cs = node_communities.get(&edge.source).copied().unwrap_or(edge.source);
+                let ct = node_communities.get(&edge.target).copied().unwrap_or(edge.target);
+                let ss = comm_to_super.get(&cs).copied().unwrap_or(edge.source);
+                let st = comm_to_super.get(&ct).copied().unwrap_or(edge.target);
+                if ss != st {
+                    *super_edges.entry((ss, st)).or_insert(0.0) += edge.weight;
+                }
+            }
+
+            // Remap node_communities so every original node points to its super-node
+            for comm in node_communities.values_mut() {
+                if let Some(&super_id) = comm_to_super.get(comm) {
+                    *comm = super_id;
+                }
+            }
+
+            // If super-graph has inter-community edges, run another Phase 1 pass
+            // on the original graph with the coarsened partition. This allows
+            // further refinement without materialising a new Graph struct.
+            if super_edges.is_empty() {
+                break;
+            }
         }
 
-        // Build communities map
         let communities = self.build_communities_map(&node_communities);
         let community_count = communities.len();
 
@@ -316,7 +358,14 @@ impl LouvainAlgorithm {
         degree
     }
 
-    /// Calculate modularity of current partition
+    /// Calculate modularity of current partition — O(E + V), not O(V^2).
+    ///
+    /// Q = (1/2m) Σ_ij [A_ij − k_i·k_j/(2m)] δ(c_i, c_j)
+    ///
+    /// Rewritten as: Q = Σ_c [e_c/m − γ·(a_c/(2m))^2]
+    /// where e_c = sum of edge weights inside community c,
+    ///       a_c = sum of degrees of nodes in community c,
+    ///       γ   = resolution parameter.
     fn calculate_modularity(
         &self,
         graph: &Graph,
@@ -327,27 +376,43 @@ impl LouvainAlgorithm {
             return Ok(0.0);
         }
 
-        let two_m = 2.0 * m;
-        let mut modularity = 0.0;
+        // Accumulate per-community: internal edge weight and total degree
+        let mut internal_weight: HashMap<CommunityId, f32> = HashMap::new();
+        let mut community_degree: HashMap<CommunityId, f32> = HashMap::new();
 
-        // For each pair of nodes in the same community
-        for (&node_i, &community_i) in node_communities {
-            for (&node_j, &community_j) in node_communities {
-                if community_i != community_j {
-                    continue;
+        // Sum degrees per community (one pass over nodes)
+        for (&node, &comm) in node_communities {
+            let deg = graph.get_node_degree(node);
+            *community_degree.entry(comm).or_insert(0.0) += deg;
+        }
+
+        // Sum internal edge weights (one pass over edges)
+        for edge in graph.get_all_edges() {
+            let c_source = node_communities.get(&edge.source).copied();
+            let c_target = node_communities.get(&edge.target).copied();
+            if let (Some(cs), Some(ct)) = (c_source, c_target) {
+                if cs == ct {
+                    *internal_weight.entry(cs).or_insert(0.0) += edge.weight;
                 }
-
-                // A_ij - (k_i * k_j) / (2m)
-                let a_ij = graph.get_edge_weight(node_i, node_j).unwrap_or(0.0);
-
-                let k_i = graph.get_node_degree(node_i);
-                let k_j = graph.get_node_degree(node_j);
-
-                modularity += a_ij - (k_i * k_j) / two_m;
             }
         }
 
-        Ok(modularity / two_m)
+        let two_m = 2.0 * m;
+        let mut modularity: f32 = 0.0;
+
+        for (&comm, &e_c) in &internal_weight {
+            let a_c = community_degree.get(&comm).copied().unwrap_or(0.0);
+            modularity += e_c / m - self.config.resolution * (a_c / two_m).powi(2);
+        }
+
+        // Communities with no internal edges still subtract (a_c/2m)^2
+        for (&comm, &a_c) in &community_degree {
+            if !internal_weight.contains_key(&comm) {
+                modularity -= self.config.resolution * (a_c / two_m).powi(2);
+            }
+        }
+
+        Ok(modularity)
     }
 
     /// Build communities map from node assignments

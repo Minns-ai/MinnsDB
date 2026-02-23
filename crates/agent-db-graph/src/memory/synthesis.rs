@@ -3,25 +3,19 @@
 // Natural-language synthesis helpers for memory formation.
 
 use crate::episodes::{Episode, EpisodeOutcome};
+use crate::event_content::{
+    extract_action_description, extract_cognitive_summary, extract_communication_summary,
+    extract_context_summary, extract_observation_summary,
+};
 use agent_db_events::core::{ActionOutcome, Event, EventType};
 
-/// Truncate a string to `max_len` chars, appending "…" if truncated.
+/// Truncate a string to `max_len` chars, appending "..." if truncated.
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() > max_len {
-        format!("{}…", &s[..max_len])
+        format!("{}...", &s[..max_len])
     } else {
         s.to_string()
     }
-}
-
-/// Truncate a `serde_json::Value` to a readable string of at most `max_len` chars.
-fn truncate_value(v: &serde_json::Value, max_len: usize) -> String {
-    // For strings, extract the inner string to avoid extra quotes
-    let raw = match v {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    truncate_str(&raw, max_len)
 }
 
 /// Synthesize a natural language summary from an episode and its events.
@@ -78,30 +72,17 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
     let mut observations: Vec<String> = Vec::new();
     let mut context_texts: Vec<String> = Vec::new();
     let mut communications: Vec<String> = Vec::new();
+    let mut cognitive_items: Vec<String> = Vec::new();
 
     for event in events {
         match &event.event_type {
             EventType::Action {
                 action_name,
+                parameters,
                 outcome,
                 ..
             } => {
-                let outcome_str = match outcome {
-                    ActionOutcome::Success { result } => {
-                        format!("succeeded: {}", truncate_value(result, 120))
-                    },
-                    ActionOutcome::Failure { error, .. } => {
-                        format!("failed: {}", truncate_str(error, 120))
-                    },
-                    ActionOutcome::Partial { result, issues } => {
-                        format!(
-                            "partial: {} (issues: {:?})",
-                            truncate_value(result, 80),
-                            issues
-                        )
-                    },
-                };
-                actions.push(format!("'{}' {}", action_name, outcome_str));
+                actions.push(extract_action_description(action_name, parameters, outcome));
             },
             EventType::Observation {
                 observation_type,
@@ -110,18 +91,17 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
                 confidence,
                 ..
             } => {
-                observations.push(format!(
-                    "[{}] from '{}' (conf {:.0}%): {}",
+                observations.push(extract_observation_summary(
                     observation_type,
+                    data,
+                    *confidence,
                     source,
-                    confidence * 100.0,
-                    truncate_value(data, 150)
                 ));
             },
             EventType::Context {
                 text, context_type, ..
             } => {
-                context_texts.push(format!("[{}] {}", context_type, truncate_str(text, 200)));
+                context_texts.push(extract_context_summary(text, context_type));
             },
             EventType::Communication {
                 message_type,
@@ -129,20 +109,31 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
                 recipient,
                 content,
             } => {
-                communications.push(format!(
-                    "{} agent {} -> agent {}: {}",
+                communications.push(extract_communication_summary(
                     message_type,
-                    sender,
-                    recipient,
-                    truncate_value(content, 150)
+                    (*sender).into(),
+                    (*recipient).into(),
+                    content,
                 ));
             },
-            _ => {}, // Cognitive & Learning are internal machinery, skip for narrative
+            EventType::Cognitive {
+                process_type,
+                input,
+                output,
+                reasoning_trace,
+            } => {
+                cognitive_items.push(extract_cognitive_summary(
+                    process_type,
+                    input,
+                    output,
+                    reasoning_trace,
+                ));
+            },
+            _ => {},
         }
     }
 
     if !context_texts.is_empty() {
-        // Limit to first 3 to keep summary tight
         let shown: Vec<&str> = context_texts.iter().take(3).map(|s| s.as_str()).collect();
         parts.push(format!("Input: {}", shown.join(" | ")));
     }
@@ -153,6 +144,10 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
     if !observations.is_empty() {
         let shown: Vec<&str> = observations.iter().take(3).map(|s| s.as_str()).collect();
         parts.push(format!("Observations: {}", shown.join("; ")));
+    }
+    if !cognitive_items.is_empty() {
+        let shown: Vec<&str> = cognitive_items.iter().take(3).map(|s| s.as_str()).collect();
+        parts.push(format!("Reasoning: {}", shown.join("; ")));
     }
     if !communications.is_empty() {
         let shown: Vec<&str> = communications.iter().take(2).map(|s| s.as_str()).collect();
@@ -199,15 +194,15 @@ pub fn synthesize_causal_note(episode: &Episode, events: &[Event]) -> String {
     let mut failures = 0u32;
     let mut last_failure_error = String::new();
     let mut last_success_action = String::new();
+    let mut cognitive_reasoning: Option<String> = None;
 
     for event in events {
-        if let EventType::Action {
-            action_name,
-            outcome: action_out,
-            ..
-        } = &event.event_type
-        {
-            match action_out {
+        match &event.event_type {
+            EventType::Action {
+                action_name,
+                outcome: action_out,
+                ..
+            } => match action_out {
                 ActionOutcome::Success { .. } => {
                     successes += 1;
                     last_success_action = action_name.clone();
@@ -222,7 +217,22 @@ pub fn synthesize_causal_note(episode: &Episode, events: &[Event]) -> String {
                         action_name, issues
                     ));
                 },
-            }
+            },
+            EventType::Cognitive {
+                process_type,
+                input,
+                output,
+                reasoning_trace,
+            } => {
+                // Capture cognitive reasoning — often explains *why* actions were taken
+                cognitive_reasoning = Some(extract_cognitive_summary(
+                    process_type,
+                    input,
+                    output,
+                    reasoning_trace,
+                ));
+            },
+            _ => {},
         }
     }
 
@@ -277,6 +287,11 @@ pub fn synthesize_causal_note(episode: &Episode, events: &[Event]) -> String {
         },
     }
 
+    // Include cognitive reasoning if it helps explain the cause
+    if let Some(reasoning) = cognitive_reasoning {
+        causes.push(format!("Agent reasoning: {}", reasoning));
+    }
+
     if episode.prediction_error > 0.3 {
         causes.push(format!(
             "This was a surprising outcome (prediction error {:.0}%)",
@@ -299,21 +314,22 @@ pub fn synthesize_takeaway(episode: &Episode, events: &[Event]) -> String {
         .unwrap_or(EpisodeOutcome::Interrupted);
 
     // Find the pivotal action (last success for successful episodes, last failure for failed)
-    let mut pivotal_action: Option<(&str, &ActionOutcome)> = None;
+    let mut pivotal_action: Option<(&str, &serde_json::Value, &ActionOutcome)> = None;
     for event in events.iter().rev() {
         if let EventType::Action {
             action_name,
+            parameters,
             outcome: action_out,
             ..
         } = &event.event_type
         {
             match (&outcome, action_out) {
                 (EpisodeOutcome::Success, ActionOutcome::Success { .. }) => {
-                    pivotal_action = Some((action_name, action_out));
+                    pivotal_action = Some((action_name, parameters, action_out));
                     break;
                 },
                 (EpisodeOutcome::Failure, ActionOutcome::Failure { .. }) => {
-                    pivotal_action = Some((action_name, action_out));
+                    pivotal_action = Some((action_name, parameters, action_out));
                     break;
                 },
                 _ => {},
@@ -336,18 +352,20 @@ pub fn synthesize_takeaway(episode: &Episode, events: &[Event]) -> String {
     };
 
     match (&outcome, pivotal_action) {
-        (EpisodeOutcome::Success, Some((action, ActionOutcome::Success { result }))) => format!(
-            "For '{}': action '{}' was the key step that led to success (result: {}).",
-            goal_str,
-            action,
-            truncate_value(result, 100)
-        ),
-        (EpisodeOutcome::Failure, Some((action, ActionOutcome::Failure { error, .. }))) => format!(
-            "For '{}': action '{}' caused failure — {}. Avoid this in similar contexts.",
-            goal_str,
-            action,
-            truncate_str(error, 100)
-        ),
+        (EpisodeOutcome::Success, Some((action_name, parameters, outcome))) => {
+            let desc = extract_action_description(action_name, parameters, outcome);
+            format!(
+                "For '{}': {} was the key step that led to success.",
+                goal_str, desc
+            )
+        },
+        (EpisodeOutcome::Failure, Some((action_name, parameters, outcome))) => {
+            let desc = extract_action_description(action_name, parameters, outcome);
+            format!(
+                "For '{}': {} — avoid this in similar contexts.",
+                goal_str, desc
+            )
+        },
         (EpisodeOutcome::Success, _) => format!(
             "Successfully completed '{}' with {} actions and significance {:.0}%.",
             goal_str,
@@ -370,5 +388,133 @@ pub fn synthesize_takeaway(episode: &Episode, events: &[Event]) -> String {
                 goal_str
             )
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_db_core::types::{AgentId, SessionId, Timestamp};
+    use agent_db_events::core::{CognitiveType, EventContext};
+    use serde_json::json;
+
+    fn make_episode(outcome: EpisodeOutcome, significance: f32) -> Episode {
+        Episode {
+            id: 1,
+            episode_version: 1,
+            agent_id: AgentId::from(1u64),
+            start_event: 1u128.into(),
+            end_event: Some(2u128.into()),
+            events: vec![1u128.into(), 2u128.into()],
+            session_id: SessionId::from(1u64),
+            context_signature: 0,
+            context: EventContext::default(),
+            outcome: Some(outcome),
+            start_timestamp: Timestamp::from(1000u64),
+            end_timestamp: Some(Timestamp::from(2000u64)),
+            significance,
+            prediction_error: 0.0,
+            self_judged_quality: None,
+            salience_score: 0.5,
+            last_event_timestamp: Some(Timestamp::from(2000u64)),
+            consecutive_outcome_count: 0,
+        }
+    }
+
+    fn make_event(event_type: EventType) -> Event {
+        Event {
+            id: 1u128.into(),
+            timestamp: Timestamp::from(1000u64),
+            agent_id: AgentId::from(1u64),
+            agent_type: "test".to_string(),
+            session_id: SessionId::from(1u64),
+            event_type,
+            causality_chain: vec![],
+            context: EventContext::default(),
+            metadata: Default::default(),
+            context_size_bytes: 0,
+            segment_pointer: None,
+        }
+    }
+
+    #[test]
+    fn test_cognitive_events_included() {
+        let episode = make_episode(EpisodeOutcome::Success, 0.8);
+        let events = vec![
+            make_event(EventType::Cognitive {
+                process_type: CognitiveType::Reasoning,
+                input: json!("analyze deployment options"),
+                output: json!("use blue-green strategy"),
+                reasoning_trace: vec!["compared options".to_string()],
+            }),
+            make_event(EventType::Action {
+                action_name: "deploy".to_string(),
+                parameters: json!({}),
+                outcome: ActionOutcome::Success {
+                    result: json!({"text": "deployed"}),
+                },
+                duration_ns: 1000,
+            }),
+        ];
+
+        let summary = synthesize_memory_summary(&episode, &events);
+        // Cognitive events should now appear in memory summary
+        assert!(
+            summary.contains("Reasoning"),
+            "Summary should contain cognitive reasoning, got: {}",
+            summary
+        );
+        assert!(summary.contains("blue-green"));
+    }
+
+    #[test]
+    fn test_action_result_not_raw_json() {
+        let episode = make_episode(EpisodeOutcome::Success, 0.8);
+        let events = vec![make_event(EventType::Action {
+            action_name: "create_user".to_string(),
+            parameters: json!({"name": "Alice"}),
+            outcome: ActionOutcome::Success {
+                result: json!({"created": true}),
+            },
+            duration_ns: 500,
+        })];
+
+        let summary = synthesize_memory_summary(&episode, &events);
+        // Should NOT contain raw JSON like {"created":true}
+        assert!(
+            !summary.contains(r#"{"created":true}"#),
+            "Summary should humanize JSON, not dump raw: {}",
+            summary
+        );
+        // Should contain the humanized action description
+        assert!(summary.contains("Create User"));
+    }
+
+    #[test]
+    fn test_causal_note_includes_cognitive() {
+        let episode = make_episode(EpisodeOutcome::Success, 0.8);
+        let events = vec![
+            make_event(EventType::Cognitive {
+                process_type: CognitiveType::Planning,
+                input: json!("plan approach"),
+                output: json!("decided to use caching"),
+                reasoning_trace: vec![],
+            }),
+            make_event(EventType::Action {
+                action_name: "deploy".to_string(),
+                parameters: json!({}),
+                outcome: ActionOutcome::Success {
+                    result: json!("ok"),
+                },
+                duration_ns: 1000,
+            }),
+        ];
+
+        let causal = synthesize_causal_note(&episode, &events);
+        assert!(
+            causal.contains("Agent reasoning"),
+            "Causal note should include cognitive reasoning, got: {}",
+            causal
+        );
     }
 }

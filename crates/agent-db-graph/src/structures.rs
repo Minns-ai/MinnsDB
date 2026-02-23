@@ -3,9 +3,13 @@
 //! Implements the graph data structures used for modeling relationships
 //! between agents, events, and contexts in the agentic database.
 
+use crate::intern::Interner;
 use agent_db_core::types::{AgentId, ContextHash, EventId, Timestamp};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use smallvec::SmallVec;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 /// Unique identifier for graph nodes
 pub type NodeId = u64;
@@ -16,8 +20,258 @@ pub type EdgeId = u64;
 /// Weight type for edges (can represent similarity, causality strength, etc.)
 pub type EdgeWeight = f32;
 
+/// Traversal direction for directed graph queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Direction {
+    /// Follow outgoing edges only.
+    Out,
+    /// Follow incoming edges only.
+    In,
+    /// Follow both outgoing and incoming edges.
+    Both,
+}
+
+/// Depth specification for traversal queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Depth {
+    /// Exactly N hops.
+    Fixed(u32),
+    /// Between min and max hops (inclusive).
+    Range(u32, u32),
+    /// No depth limit (bounded by budgets or graph size).
+    Unbounded,
+}
+
+impl Depth {
+    /// Maximum depth bound. `None` for `Unbounded`.
+    pub fn max_depth(&self) -> Option<u32> {
+        match self {
+            Depth::Fixed(n) => Some(*n),
+            Depth::Range(_, max) => Some(*max),
+            Depth::Unbounded => None,
+        }
+    }
+
+    /// Minimum depth bound. `0` for `Unbounded`.
+    pub fn min_depth(&self) -> u32 {
+        match self {
+            Depth::Fixed(n) => *n,
+            Depth::Range(min, _) => *min,
+            Depth::Unbounded => 0,
+        }
+    }
+
+    /// Validate depth specification. Returns error if Range has min > max.
+    pub fn validate(&self) -> crate::GraphResult<()> {
+        match self {
+            Depth::Range(min, max) if min > max => {
+                Err(crate::GraphError::InvalidQuery(format!(
+                    "Depth range min ({}) > max ({})",
+                    min, max
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+// ============================================================================
+// Adaptive Adjacency List
+// ============================================================================
+
+/// Threshold at which adjacency list is promoted from Small to Large.
+const ADJ_LARGE_THRESHOLD: usize = 1024;
+
+/// Adaptive adjacency list that selects the optimal representation
+/// based on edge count.
+///
+/// - `Empty`: zero edges, no allocation
+/// - `One(EdgeId)`: single edge, 8 bytes inline
+/// - `Small(SmallVec<[EdgeId; 8]>)`: 2–1024 edges, inline up to 8
+/// - `Large(BTreeSet<EdgeId>)`: 1025+ edges, O(log n) operations
+#[derive(Debug, Clone)]
+pub enum AdjList {
+    Empty,
+    One(EdgeId),
+    Small(SmallVec<[EdgeId; 8]>),
+    Large(BTreeSet<EdgeId>),
+}
+
+impl Default for AdjList {
+    fn default() -> Self {
+        AdjList::Empty
+    }
+}
+
+impl AdjList {
+    pub fn new() -> Self {
+        AdjList::Empty
+    }
+
+    pub fn push(&mut self, edge_id: EdgeId) {
+        *self = match std::mem::take(self) {
+            AdjList::Empty => AdjList::One(edge_id),
+            AdjList::One(existing) => {
+                let mut sv = SmallVec::new();
+                sv.push(existing);
+                sv.push(edge_id);
+                AdjList::Small(sv)
+            }
+            AdjList::Small(mut sv) => {
+                sv.push(edge_id);
+                if sv.len() > ADJ_LARGE_THRESHOLD {
+                    AdjList::Large(sv.into_iter().collect())
+                } else {
+                    AdjList::Small(sv)
+                }
+            }
+            AdjList::Large(mut set) => {
+                set.insert(edge_id);
+                AdjList::Large(set)
+            }
+        };
+    }
+
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&EdgeId) -> bool,
+    {
+        match self {
+            AdjList::Empty => {}
+            AdjList::One(eid) => {
+                if !f(eid) {
+                    *self = AdjList::Empty;
+                }
+            }
+            AdjList::Small(sv) => {
+                sv.retain(|eid| f(eid));
+                match sv.len() {
+                    0 => *self = AdjList::Empty,
+                    1 => {
+                        let eid = sv[0];
+                        *self = AdjList::One(eid);
+                    }
+                    _ => {}
+                }
+            }
+            AdjList::Large(set) => {
+                set.retain(|eid| f(eid));
+            }
+        }
+    }
+
+    pub fn iter(&self) -> AdjListIter<'_> {
+        match self {
+            AdjList::Empty => AdjListIter::Empty,
+            AdjList::One(eid) => AdjListIter::One(std::iter::once(eid)),
+            AdjList::Small(sv) => AdjListIter::Small(sv.iter()),
+            AdjList::Large(set) => AdjListIter::Large(set.iter()),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            AdjList::Empty => 0,
+            AdjList::One(_) => 1,
+            AdjList::Small(sv) => sv.len(),
+            AdjList::Large(set) => set.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, AdjList::Empty)
+    }
+
+    pub fn contains(&self, edge_id: &EdgeId) -> bool {
+        match self {
+            AdjList::Empty => false,
+            AdjList::One(eid) => eid == edge_id,
+            AdjList::Small(sv) => sv.contains(edge_id),
+            AdjList::Large(set) => set.contains(edge_id),
+        }
+    }
+
+    /// Build an AdjList from a Vec, picking the optimal variant.
+    fn from_vec(ids: Vec<EdgeId>) -> Self {
+        match ids.len() {
+            0 => AdjList::Empty,
+            1 => AdjList::One(ids[0]),
+            n if n > ADJ_LARGE_THRESHOLD => AdjList::Large(ids.into_iter().collect()),
+            _ => AdjList::Small(SmallVec::from_vec(ids)),
+        }
+    }
+}
+
+/// Custom Serialize: writes AdjList as a flat sequence of EdgeIds.
+/// This is backward-compatible with SmallVec<[EdgeId; 8]> serialization.
+impl Serialize for AdjList {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let len = self.len();
+        let mut seq = serializer.serialize_seq(Some(len))?;
+        for eid in self.iter() {
+            seq.serialize_element(eid)?;
+        }
+        seq.end()
+    }
+}
+
+/// Custom Deserialize: reads a sequence of EdgeIds and picks the optimal variant.
+/// Backward-compatible with SmallVec<[EdgeId; 8]> deserialization.
+impl<'de> Deserialize<'de> for AdjList {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let ids: Vec<EdgeId> = Vec::deserialize(deserializer)?;
+        Ok(AdjList::from_vec(ids))
+    }
+}
+
+/// Iterator over AdjList entries.
+pub enum AdjListIter<'a> {
+    Empty,
+    One(std::iter::Once<&'a EdgeId>),
+    Small(std::slice::Iter<'a, EdgeId>),
+    Large(std::collections::btree_set::Iter<'a, EdgeId>),
+}
+
+impl<'a> Iterator for AdjListIter<'a> {
+    type Item = &'a EdgeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            AdjListIter::Empty => None,
+            AdjListIter::One(it) => it.next(),
+            AdjListIter::Small(it) => it.next(),
+            AdjListIter::Large(it) => it.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            AdjListIter::Empty => (0, Some(0)),
+            AdjListIter::One(it) => it.size_hint(),
+            AdjListIter::Small(it) => it.size_hint(),
+            AdjListIter::Large(it) => it.size_hint(),
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for AdjListIter<'a> {}
+
+impl<'a> IntoIterator for &'a AdjList {
+    type Item = &'a EdgeId;
+    type IntoIter = AdjListIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// Unique identifier for goal buckets (semantic partitions)
 pub type GoalBucketId = u64;
+
+/// Maximum number of shards. Agent/event IDs are modded by this value
+/// so the shard count stays bounded regardless of entity cardinality.
+pub const NUM_SHARDS: u64 = 256;
 
 /// Core graph node representing entities in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +293,28 @@ pub struct GraphNode {
 
     /// Cached degree for performance
     pub degree: u32,
+}
+
+/// Number of distinct `NodeType` variants. Keep in sync with `NodeType::discriminant()`.
+pub const NODE_TYPE_COUNT: usize = 11;
+
+/// Map a type name string (e.g. "Agent", "Event") to the corresponding discriminant.
+/// Returns `None` for unknown names.
+pub fn node_type_discriminant_from_name(name: &str) -> Option<u8> {
+    match name {
+        "Agent" => Some(0),
+        "Event" => Some(1),
+        "Context" => Some(2),
+        "Concept" => Some(3),
+        "Goal" => Some(4),
+        "Episode" => Some(5),
+        "Memory" => Some(6),
+        "Strategy" => Some(7),
+        "Tool" => Some(8),
+        "Result" => Some(9),
+        "Claim" => Some(10),
+        _ => None,
+    }
 }
 
 /// Types of nodes in the graph
@@ -232,14 +508,14 @@ impl NodeType {
     }
 
     /// Derive the goal bucket for storage partitioning.
-    /// Agent-scoped nodes use agent_id; global nodes use 0.
+    /// All IDs are modded by [`NUM_SHARDS`] so the shard count stays bounded.
     pub fn goal_bucket(&self) -> GoalBucketId {
         match self {
             NodeType::Agent { agent_id, .. }
             | NodeType::Episode { agent_id, .. }
             | NodeType::Memory { agent_id, .. }
-            | NodeType::Strategy { agent_id, .. } => *agent_id,
-            NodeType::Event { event_id, .. } => (*event_id % 1024) as GoalBucketId,
+            | NodeType::Strategy { agent_id, .. } => *agent_id % NUM_SHARDS,
+            NodeType::Event { event_id, .. } => (*event_id as u64) % NUM_SHARDS,
             _ => 0, // Context, Concept, Goal, Tool, Result, Claim → default bucket
         }
     }
@@ -371,55 +647,68 @@ pub enum GoalRelationType {
 #[derive(Debug)]
 pub struct Graph {
     /// All nodes in the graph
-    pub(crate) nodes: HashMap<NodeId, GraphNode>,
+    pub(crate) nodes: FxHashMap<NodeId, GraphNode>,
 
     /// All edges in the graph
-    pub(crate) edges: HashMap<EdgeId, GraphEdge>,
+    pub(crate) edges: FxHashMap<EdgeId, GraphEdge>,
 
     /// Adjacency list for fast traversal (outgoing edges)
-    pub(crate) adjacency_out: HashMap<NodeId, Vec<EdgeId>>,
+    pub(crate) adjacency_out: FxHashMap<NodeId, AdjList>,
 
     /// Reverse adjacency list (incoming edges)
-    pub(crate) adjacency_in: HashMap<NodeId, Vec<EdgeId>>,
+    pub(crate) adjacency_in: FxHashMap<NodeId, AdjList>,
 
-    /// Index by node type for fast filtering
-    pub(crate) type_index: HashMap<String, HashSet<NodeId>>,
+    /// Index by node type discriminant (u8) for O(1) type-filtered queries.
+    /// Key is `NodeType::discriminant()` (0–10), not a heap-allocated string.
+    pub(crate) type_index: FxHashMap<u8, HashSet<NodeId>>,
+
+    /// Temporal index for efficient time-range queries.
+    /// Maps `created_at` timestamp to the nodes created at that instant.
+    pub(crate) temporal_index: BTreeMap<Timestamp, SmallVec<[NodeId; 4]>>,
+
+    /// Monotonically increasing generation counter. Incremented on every
+    /// structural mutation (add/remove node or edge, merge). Used by the
+    /// query cache to detect staleness without manual invalidation.
+    pub(crate) generation: u64,
 
     /// Spatial index for context nodes
-    pub(crate) context_index: HashMap<ContextHash, NodeId>,
+    pub(crate) context_index: FxHashMap<ContextHash, NodeId>,
 
     /// Agent index for quick agent lookup
-    pub(crate) agent_index: HashMap<AgentId, NodeId>,
+    pub(crate) agent_index: FxHashMap<AgentId, NodeId>,
 
     /// Event index for event-node mapping
-    pub(crate) event_index: HashMap<EventId, NodeId>,
+    pub(crate) event_index: FxHashMap<EventId, NodeId>,
 
     /// Goal index for goal-node mapping
-    pub(crate) goal_index: HashMap<u64, NodeId>,
+    pub(crate) goal_index: FxHashMap<u64, NodeId>,
 
     /// Episode index for episode-node mapping
-    pub(crate) episode_index: HashMap<u64, NodeId>,
+    pub(crate) episode_index: FxHashMap<u64, NodeId>,
 
     /// Memory index for memory-node mapping
-    pub(crate) memory_index: HashMap<u64, NodeId>,
+    pub(crate) memory_index: FxHashMap<u64, NodeId>,
 
     /// Strategy index for strategy-node mapping
-    pub(crate) strategy_index: HashMap<u64, NodeId>,
+    pub(crate) strategy_index: FxHashMap<u64, NodeId>,
 
-    /// Tool index for tool-node mapping
-    pub(crate) tool_index: HashMap<String, NodeId>,
+    /// Tool index for tool-node mapping (interned keys)
+    pub(crate) tool_index: HashMap<Arc<str>, NodeId>,
 
-    /// Result index for result-node mapping
-    pub(crate) result_index: HashMap<String, NodeId>,
+    /// Result index for result-node mapping (interned keys)
+    pub(crate) result_index: HashMap<Arc<str>, NodeId>,
 
     /// Claim index for claim-node mapping
-    pub(crate) claim_index: HashMap<u64, NodeId>,
+    pub(crate) claim_index: FxHashMap<u64, NodeId>,
 
-    /// Concept index for concept-node mapping (by name)
-    pub(crate) concept_index: HashMap<String, NodeId>,
+    /// Concept index for concept-node mapping (interned keys)
+    pub(crate) concept_index: HashMap<Arc<str>, NodeId>,
 
     /// BM25 full-text search index
     pub(crate) bm25_index: crate::indexing::Bm25Index,
+
+    /// String interner for deduplicating repeated string values
+    pub(crate) interner: Interner,
 
     /// Next available IDs
     pub(crate) next_node_id: NodeId,
@@ -430,6 +719,23 @@ pub struct Graph {
 
     /// Maximum number of nodes allowed (enforced at add_node)
     pub(crate) max_graph_size: usize,
+
+    // ── Delta tracking for incremental persistence ──
+
+    /// Nodes added or modified since last persist
+    pub(crate) dirty_nodes: HashSet<NodeId>,
+
+    /// Edges added or modified since last persist
+    pub(crate) dirty_edges: HashSet<EdgeId>,
+
+    /// Nodes deleted since last persist (need disk cleanup)
+    pub(crate) deleted_nodes: HashSet<NodeId>,
+
+    /// Edges deleted since last persist (need disk cleanup)
+    pub(crate) deleted_edges: HashSet<EdgeId>,
+
+    /// Whether adjacency metadata blob needs re-persisting
+    pub(crate) adjacency_dirty: bool,
 }
 
 /// Graph statistics for monitoring and optimization
@@ -463,20 +769,20 @@ impl GraphNode {
         }
     }
 
-    /// Get the type name of this node
-    pub fn type_name(&self) -> String {
+    /// Get the type name of this node as a static string (zero allocation).
+    pub fn type_name(&self) -> &'static str {
         match &self.node_type {
-            NodeType::Agent { .. } => "Agent".to_string(),
-            NodeType::Event { .. } => "Event".to_string(),
-            NodeType::Context { .. } => "Context".to_string(),
-            NodeType::Concept { .. } => "Concept".to_string(),
-            NodeType::Goal { .. } => "Goal".to_string(),
-            NodeType::Episode { .. } => "Episode".to_string(),
-            NodeType::Memory { .. } => "Memory".to_string(),
-            NodeType::Strategy { .. } => "Strategy".to_string(),
-            NodeType::Tool { .. } => "Tool".to_string(),
-            NodeType::Result { .. } => "Result".to_string(),
-            NodeType::Claim { .. } => "Claim".to_string(),
+            NodeType::Agent { .. } => "Agent",
+            NodeType::Event { .. } => "Event",
+            NodeType::Context { .. } => "Context",
+            NodeType::Concept { .. } => "Concept",
+            NodeType::Goal { .. } => "Goal",
+            NodeType::Episode { .. } => "Episode",
+            NodeType::Memory { .. } => "Memory",
+            NodeType::Strategy { .. } => "Strategy",
+            NodeType::Tool { .. } => "Tool",
+            NodeType::Result { .. } => "Result",
+            NodeType::Claim { .. } => "Claim",
         }
     }
 
@@ -644,27 +950,35 @@ impl Graph {
     /// Create a new empty graph with a specific max node capacity
     pub fn with_max_size(max_graph_size: usize) -> Self {
         Self {
-            nodes: HashMap::new(),
-            edges: HashMap::new(),
-            adjacency_out: HashMap::new(),
-            adjacency_in: HashMap::new(),
-            type_index: HashMap::new(),
-            context_index: HashMap::new(),
-            agent_index: HashMap::new(),
-            event_index: HashMap::new(),
-            goal_index: HashMap::new(),
-            episode_index: HashMap::new(),
-            memory_index: HashMap::new(),
-            strategy_index: HashMap::new(),
+            nodes: FxHashMap::default(),
+            edges: FxHashMap::default(),
+            adjacency_out: FxHashMap::default(),
+            adjacency_in: FxHashMap::default(),
+            type_index: FxHashMap::default(),
+            temporal_index: BTreeMap::new(),
+            generation: 0,
+            context_index: FxHashMap::default(),
+            agent_index: FxHashMap::default(),
+            event_index: FxHashMap::default(),
+            goal_index: FxHashMap::default(),
+            episode_index: FxHashMap::default(),
+            memory_index: FxHashMap::default(),
+            strategy_index: FxHashMap::default(),
             tool_index: HashMap::new(),
             result_index: HashMap::new(),
-            claim_index: HashMap::new(),
+            claim_index: FxHashMap::default(),
             concept_index: HashMap::new(),
             bm25_index: crate::indexing::Bm25Index::new(),
+            interner: Interner::new(),
             next_node_id: 1,
             next_edge_id: 1,
             stats: GraphStats::default(),
             max_graph_size,
+            dirty_nodes: HashSet::new(),
+            dirty_edges: HashSet::new(),
+            deleted_nodes: HashSet::new(),
+            deleted_edges: HashSet::new(),
+            adjacency_dirty: false,
         }
     }
 
@@ -686,12 +1000,20 @@ impl Graph {
 
         node.id = node_id;
 
-        // Update type index
-        let type_name = node.type_name();
+        // Update type index (u8 discriminant key)
         self.type_index
-            .entry(type_name)
+            .entry(node.node_type.discriminant())
             .or_default()
             .insert(node_id);
+
+        // Update temporal index
+        self.temporal_index
+            .entry(node.created_at)
+            .or_insert_with(SmallVec::new)
+            .push(node_id);
+
+        // Bump generation for cache invalidation
+        self.generation += 1;
 
         // Update specialized indices
         match &node.node_type {
@@ -717,22 +1039,25 @@ impl Graph {
                 self.strategy_index.insert(*strategy_id, node_id);
             },
             NodeType::Tool { tool_name, .. } => {
-                self.tool_index.insert(tool_name.clone(), node_id);
+                let key = self.interner.intern(tool_name);
+                self.tool_index.insert(key, node_id);
             },
             NodeType::Result { result_key, .. } => {
-                self.result_index.insert(result_key.clone(), node_id);
+                let key = self.interner.intern(result_key);
+                self.result_index.insert(key, node_id);
             },
             NodeType::Claim { claim_id, .. } => {
                 self.claim_index.insert(*claim_id, node_id);
             },
             NodeType::Concept { concept_name, .. } => {
-                self.concept_index.insert(concept_name.clone(), node_id);
+                let key = self.interner.intern(concept_name);
+                self.concept_index.insert(key, node_id);
             },
         }
 
         // Initialize adjacency lists
-        self.adjacency_out.insert(node_id, Vec::new());
-        self.adjacency_in.insert(node_id, Vec::new());
+        self.adjacency_out.insert(node_id, AdjList::new());
+        self.adjacency_in.insert(node_id, AdjList::new());
 
         // Index text content with BM25 for full-text search
         let mut text_parts = Vec::new();
@@ -786,6 +1111,8 @@ impl Graph {
         }
 
         self.nodes.insert(node_id, node);
+        self.dirty_nodes.insert(node_id);
+        self.adjacency_dirty = true;
         self.update_stats();
 
         Ok(node_id)
@@ -817,7 +1144,17 @@ impl Graph {
             target_node.touch();
         }
 
+        let source = edge.source;
+        let target = edge.target;
         self.edges.insert(edge_id, edge);
+        self.dirty_edges.insert(edge_id);
+        self.dirty_nodes.insert(source);
+        self.dirty_nodes.insert(target);
+        self.adjacency_dirty = true;
+
+        // Bump generation for cache invalidation
+        self.generation += 1;
+
         self.update_stats();
 
         Some(edge_id)
@@ -825,32 +1162,42 @@ impl Graph {
 
     /// Get neighbors of a node (outgoing edges)
     pub fn get_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
-        self.adjacency_out
-            .get(&node_id)
-            .unwrap_or(&Vec::new())
-            .iter()
-            .filter_map(|&edge_id| self.edges.get(&edge_id).map(|edge| edge.target))
-            .collect()
+        match self.adjacency_out.get(&node_id) {
+            Some(edges) => edges
+                .iter()
+                .filter_map(|&edge_id| self.edges.get(&edge_id).map(|edge| edge.target))
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Get incoming neighbors of a node
     pub fn get_incoming_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
-        self.adjacency_in
-            .get(&node_id)
-            .unwrap_or(&Vec::new())
-            .iter()
-            .filter_map(|&edge_id| self.edges.get(&edge_id).map(|edge| edge.source))
-            .collect()
+        match self.adjacency_in.get(&node_id) {
+            Some(edges) => edges
+                .iter()
+                .filter_map(|&edge_id| self.edges.get(&edge_id).map(|edge| edge.source))
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
-    /// Get all nodes of a specific type
+    /// Get all nodes of a specific type.
+    /// Accepts human-readable names ("Agent", "Event", etc.) and resolves them
+    /// to u8 discriminant keys internally.
     pub fn get_nodes_by_type(&self, type_name: &str) -> Vec<&GraphNode> {
+        let disc = match node_type_discriminant_from_name(type_name) {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
         self.type_index
-            .get(type_name)
-            .unwrap_or(&HashSet::new())
-            .iter()
-            .filter_map(|&node_id| self.nodes.get(&node_id))
-            .collect()
+            .get(&disc)
+            .map(|set| {
+                set.iter()
+                    .filter_map(|&node_id| self.nodes.get(&node_id))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Find shortest path between two nodes
@@ -1086,6 +1433,78 @@ impl Graph {
         self.nodes.keys().copied().collect()
     }
 
+    /// Current generation counter (monotonically increasing on every mutation).
+    /// Used by cache layers to detect stale entries.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Query nodes within a timestamp range `[start, end]` (inclusive).
+    /// Uses the BTree temporal index for O(log N + K) lookups.
+    pub fn nodes_in_time_range(&self, start: Timestamp, end: Timestamp) -> Vec<&GraphNode> {
+        self.temporal_index
+            .range(start..=end)
+            .flat_map(|(_, ids)| ids.iter())
+            .filter_map(|&nid| self.nodes.get(&nid))
+            .collect()
+    }
+
+    // ========================================================================
+    // Direction-aware queries
+    // ========================================================================
+
+    /// Get neighbors in the specified direction, deduped for `Both`.
+    pub fn neighbors_directed(&self, node_id: NodeId, direction: Direction) -> Vec<NodeId> {
+        match direction {
+            Direction::Out => self.get_neighbors(node_id),
+            Direction::In => self.get_incoming_neighbors(node_id),
+            Direction::Both => {
+                let mut seen = HashSet::new();
+                let mut result = Vec::new();
+                for n in self.get_neighbors(node_id) {
+                    if seen.insert(n) {
+                        result.push(n);
+                    }
+                }
+                for n in self.get_incoming_neighbors(node_id) {
+                    if seen.insert(n) {
+                        result.push(n);
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    /// Get incident edges in the specified direction, deduped by EdgeId for `Both`.
+    pub fn edges_directed(&self, node_id: NodeId, direction: Direction) -> Vec<&GraphEdge> {
+        match direction {
+            Direction::Out => self.get_edges_from(node_id),
+            Direction::In => self.get_edges_to(node_id),
+            Direction::Both => {
+                let mut seen = HashSet::new();
+                let mut result = Vec::new();
+                for edge in self.get_edges_from(node_id) {
+                    if seen.insert(edge.id) {
+                        result.push(edge);
+                    }
+                }
+                for edge in self.get_edges_to(node_id) {
+                    if seen.insert(edge.id) {
+                        result.push(edge);
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    /// The latest timestamp in the temporal index (max created_at across all nodes).
+    /// Returns `None` if the graph is empty.
+    pub fn latest_timestamp(&self) -> Option<Timestamp> {
+        self.temporal_index.keys().next_back().copied()
+    }
+
     // ========================================================================
     // remove_node — clean removal from all indices + edges + BM25
     // ========================================================================
@@ -1098,14 +1517,25 @@ impl Graph {
     pub fn remove_node(&mut self, node_id: NodeId) -> Option<GraphNode> {
         let node = self.nodes.remove(&node_id)?;
 
-        // Remove from type index
-        let type_name = node.type_name();
-        if let Some(set) = self.type_index.get_mut(&type_name) {
+        // Remove from type index (u8 discriminant key)
+        let disc = node.node_type.discriminant();
+        if let Some(set) = self.type_index.get_mut(&disc) {
             set.remove(&node_id);
             if set.is_empty() {
-                self.type_index.remove(&type_name);
+                self.type_index.remove(&disc);
             }
         }
+
+        // Remove from temporal index
+        if let Some(ids) = self.temporal_index.get_mut(&node.created_at) {
+            ids.retain(|nid| *nid != node_id);
+            if ids.is_empty() {
+                self.temporal_index.remove(&node.created_at);
+            }
+        }
+
+        // Bump generation for cache invalidation
+        self.generation += 1;
 
         // Remove from specialized indices
         match &node.node_type {
@@ -1131,16 +1561,16 @@ impl Graph {
                 self.strategy_index.remove(strategy_id);
             },
             NodeType::Tool { tool_name, .. } => {
-                self.tool_index.remove(tool_name);
+                self.tool_index.remove(tool_name.as_str());
             },
             NodeType::Result { result_key, .. } => {
-                self.result_index.remove(result_key);
+                self.result_index.remove(result_key.as_str());
             },
             NodeType::Claim { claim_id, .. } => {
                 self.claim_index.remove(claim_id);
             },
             NodeType::Concept { concept_name, .. } => {
-                self.concept_index.remove(concept_name);
+                self.concept_index.remove(concept_name.as_str());
             },
         }
 
@@ -1154,12 +1584,15 @@ impl Graph {
         // Remove outgoing edges and update targets' incoming adjacency + degree
         for edge_id in &outgoing_edge_ids {
             if let Some(edge) = self.edges.remove(edge_id) {
+                self.deleted_edges.insert(*edge_id);
+                self.dirty_edges.remove(edge_id);
                 if edge.target != node_id {
                     if let Some(in_list) = self.adjacency_in.get_mut(&edge.target) {
-                        in_list.retain(|&eid| eid != *edge_id);
+                        in_list.retain(|eid| *eid != *edge_id);
                     }
                     if let Some(target) = self.nodes.get_mut(&edge.target) {
                         target.degree = target.degree.saturating_sub(1);
+                        self.dirty_nodes.insert(edge.target);
                     }
                 }
             }
@@ -1168,16 +1601,24 @@ impl Graph {
         // Remove incoming edges and update sources' outgoing adjacency + degree
         for edge_id in &incoming_edge_ids {
             if let Some(edge) = self.edges.remove(edge_id) {
+                self.deleted_edges.insert(*edge_id);
+                self.dirty_edges.remove(edge_id);
                 if edge.source != node_id {
                     if let Some(out_list) = self.adjacency_out.get_mut(&edge.source) {
-                        out_list.retain(|&eid| eid != *edge_id);
+                        out_list.retain(|eid| *eid != *edge_id);
                     }
                     if let Some(source) = self.nodes.get_mut(&edge.source) {
                         source.degree = source.degree.saturating_sub(1);
+                        self.dirty_nodes.insert(edge.source);
                     }
                 }
             }
         }
+
+        // Track deletion for delta persistence
+        self.deleted_nodes.insert(node_id);
+        self.dirty_nodes.remove(&node_id);
+        self.adjacency_dirty = true;
 
         self.update_stats();
         Some(node)
@@ -1348,12 +1789,20 @@ impl Graph {
     pub fn insert_existing_node(&mut self, node: GraphNode) {
         let node_id = node.id;
 
-        // Update type index
-        let type_name = node.type_name();
+        // Update type index (u8 discriminant key)
         self.type_index
-            .entry(type_name)
+            .entry(node.node_type.discriminant())
             .or_default()
             .insert(node_id);
+
+        // Update temporal index
+        self.temporal_index
+            .entry(node.created_at)
+            .or_insert_with(SmallVec::new)
+            .push(node_id);
+
+        // Bump generation for cache invalidation
+        self.generation += 1;
 
         // Update specialized indices
         match &node.node_type {
@@ -1379,16 +1828,19 @@ impl Graph {
                 self.strategy_index.insert(*strategy_id, node_id);
             },
             NodeType::Tool { tool_name, .. } => {
-                self.tool_index.insert(tool_name.clone(), node_id);
+                let key = self.interner.intern(tool_name);
+                self.tool_index.insert(key, node_id);
             },
             NodeType::Result { result_key, .. } => {
-                self.result_index.insert(result_key.clone(), node_id);
+                let key = self.interner.intern(result_key);
+                self.result_index.insert(key, node_id);
             },
             NodeType::Claim { claim_id, .. } => {
                 self.claim_index.insert(*claim_id, node_id);
             },
             NodeType::Concept { concept_name, .. } => {
-                self.concept_index.insert(concept_name.clone(), node_id);
+                let key = self.interner.intern(concept_name);
+                self.concept_index.insert(key, node_id);
             },
         }
 
@@ -1433,6 +1885,8 @@ impl Graph {
         }
 
         self.nodes.insert(node_id, node);
+        self.dirty_nodes.insert(node_id);
+        self.adjacency_dirty = true;
         self.update_stats();
     }
 
@@ -1465,9 +1919,37 @@ impl Graph {
             self.next_edge_id = edge_id + 1;
         }
 
+        let source = edge.source;
+        let target = edge.target;
         self.edges.insert(edge_id, edge);
+        self.dirty_edges.insert(edge_id);
+        self.dirty_nodes.insert(source);
+        self.dirty_nodes.insert(target);
+        self.adjacency_dirty = true;
         self.update_stats();
 
         Some(edge_id)
+    }
+
+    // ========================================================================
+    // Delta persistence helpers
+    // ========================================================================
+
+    /// Whether there are any pending changes to persist.
+    pub fn has_pending_changes(&self) -> bool {
+        !self.dirty_nodes.is_empty()
+            || !self.dirty_edges.is_empty()
+            || !self.deleted_nodes.is_empty()
+            || !self.deleted_edges.is_empty()
+            || self.adjacency_dirty
+    }
+
+    /// Clear all dirty tracking state after a successful persist.
+    pub fn clear_dirty(&mut self) {
+        self.dirty_nodes.clear();
+        self.dirty_edges.clear();
+        self.deleted_nodes.clear();
+        self.deleted_edges.clear();
+        self.adjacency_dirty = false;
     }
 }
