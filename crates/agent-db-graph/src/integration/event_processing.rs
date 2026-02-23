@@ -174,20 +174,20 @@ impl GraphEngine {
                     );
 
                     // Repair logging (Full mode only)
-                    if self.config.effective_world_model_mode() == WorldModelMode::Full {
-                        if agent_db_planning::repair::should_repair(
+                    if self.config.effective_world_model_mode() == WorldModelMode::Full
+                        && agent_db_planning::repair::should_repair(
                             &error,
                             &self.config.planning_config,
-                        ) {
-                            let scope =
-                                agent_db_planning::repair::determine_repair_scope(&error, 0);
-                            tracing::info!(
-                                "World model repair triggered event_id={} total_z={:.2} scope={:?}",
-                                ready_event.id,
-                                error.total_z,
-                                scope,
-                            );
-                        }
+                        )
+                    {
+                        let scope =
+                            agent_db_planning::repair::determine_repair_scope(&error, 0);
+                        tracing::info!(
+                            "World model repair triggered event_id={} total_z={:.2} scope={:?}",
+                            ready_event.id,
+                            error.total_z,
+                            scope,
+                        );
                     }
                 }
             }

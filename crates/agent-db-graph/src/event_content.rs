@@ -268,8 +268,8 @@ pub fn build_event_narrative(events: &[Event]) -> String {
             } => {
                 let desc = extract_communication_summary(
                     message_type,
-                    (*sender).into(),
-                    (*recipient).into(),
+                    *sender,
+                    *recipient,
                     content,
                 );
                 format!("{}. Communication: {}", i + 1, desc)

@@ -11,6 +11,12 @@ use crate::PlanValidator;
 /// Default plan validator implementing structural checks.
 pub struct DefaultPlanValidator;
 
+impl Default for DefaultPlanValidator {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl DefaultPlanValidator {
     pub fn new() -> Self {
         Self

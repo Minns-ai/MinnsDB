@@ -87,18 +87,13 @@ const ADJ_LARGE_THRESHOLD: usize = 1024;
 /// - `One(EdgeId)`: single edge, 8 bytes inline
 /// - `Small(SmallVec<[EdgeId; 8]>)`: 2–1024 edges, inline up to 8
 /// - `Large(BTreeSet<EdgeId>)`: 1025+ edges, O(log n) operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum AdjList {
+    #[default]
     Empty,
     One(EdgeId),
     Small(SmallVec<[EdgeId; 8]>),
     Large(BTreeSet<EdgeId>),
-}
-
-impl Default for AdjList {
-    fn default() -> Self {
-        AdjList::Empty
-    }
 }
 
 impl AdjList {
@@ -1006,7 +1001,7 @@ impl Graph {
         // Update temporal index
         self.temporal_index
             .entry(node.created_at)
-            .or_insert_with(SmallVec::new)
+            .or_default()
             .push(node_id);
 
         // Bump generation for cache invalidation
@@ -1795,7 +1790,7 @@ impl Graph {
         // Update temporal index
         self.temporal_index
             .entry(node.created_at)
-            .or_insert_with(SmallVec::new)
+            .or_default()
             .push(node_id);
 
         // Bump generation for cache invalidation

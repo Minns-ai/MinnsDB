@@ -90,6 +90,7 @@ impl LinearLayer {
     }
 
     /// Forward pass: `ReLU(input * W^T + bias)`.
+    #[allow(clippy::needless_range_loop)]
     pub fn forward(&self, input: &[f32]) -> Vec<f32> {
         debug_assert_eq!(input.len(), self.input_dim, "input dimension mismatch");
         let mut output = Vec::with_capacity(self.output_dim);
@@ -105,6 +106,7 @@ impl LinearLayer {
     }
 
     /// Forward pass without ReLU (for the final projection layer).
+    #[allow(clippy::needless_range_loop)]
     pub fn forward_linear(&self, input: &[f32]) -> Vec<f32> {
         debug_assert_eq!(input.len(), self.input_dim, "input dimension mismatch");
         let mut output = Vec::with_capacity(self.output_dim);

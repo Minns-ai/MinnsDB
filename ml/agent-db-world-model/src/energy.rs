@@ -43,6 +43,7 @@ impl BilinearEnergy {
     /// Compute energy: `E(a, b) = -a^T W b`.
     ///
     /// Returns a scalar energy value. Lower = more compatible.
+    #[allow(clippy::needless_range_loop)]
     pub fn compute(&self, a: &[f32], b: &[f32]) -> f32 {
         debug_assert_eq!(a.len(), self.dim_a);
         debug_assert_eq!(b.len(), self.dim_b);
@@ -65,6 +66,7 @@ impl BilinearEnergy {
     ///   dE/dW = -a * b^T  (outer product)
     ///   dE/da = -W * b
     ///   dE/db = -W^T * a
+    #[allow(clippy::needless_range_loop)]
     pub fn gradients(&self, a: &[f32], b: &[f32]) -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>) {
         // dE/dW[i][j] = -a[i] * b[j]
         let dw: Vec<Vec<f32>> = (0..self.dim_a)

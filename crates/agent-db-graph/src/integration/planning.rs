@@ -118,6 +118,7 @@ impl GraphEngine {
     }
 
     /// Generate strategy candidates with pre-populated context.
+    #[allow(clippy::too_many_arguments)]
     async fn generate_strategy_candidates_with_context(
         &self,
         goal_description: &str,

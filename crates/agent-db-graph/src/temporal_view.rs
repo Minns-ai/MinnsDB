@@ -153,11 +153,11 @@ impl<'a> RollingWindow<'a> {
             && self
                 .graph
                 .get_node(edge.source)
-                .map_or(false, |n| self.is_visible_node(n))
+                .is_some_and(|n| self.is_visible_node(n))
             && self
                 .graph
                 .get_node(edge.target)
-                .map_or(false, |n| self.is_visible_node(n))
+                .is_some_and(|n| self.is_visible_node(n))
     }
 
     /// All visible nodes in the window.
@@ -201,7 +201,7 @@ impl<'a> RollingWindow<'a> {
         if !self
             .graph
             .get_node(node_id)
-            .map_or(false, |n| self.is_visible_node(n))
+            .is_some_and(|n| self.is_visible_node(n))
         {
             return Vec::new();
         }

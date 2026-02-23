@@ -111,8 +111,8 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
             } => {
                 communications.push(extract_communication_summary(
                     message_type,
-                    (*sender).into(),
-                    (*recipient).into(),
+                    *sender,
+                    *recipient,
                     content,
                 ));
             },

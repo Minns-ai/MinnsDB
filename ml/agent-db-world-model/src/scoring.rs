@@ -15,6 +15,7 @@ use crate::types::{
 /// This is the top-down scoring path: encode all four layers, compute pairwise
 /// energies, compute novelty z-score, determine mismatch attribution, and
 /// compute confidence.
+#[allow(clippy::too_many_arguments)]
 pub fn score_full(
     policy: &PolicyFeatures,
     strategy: &StrategyFeatures,

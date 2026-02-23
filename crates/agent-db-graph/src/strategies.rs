@@ -2556,8 +2556,8 @@ pub fn synthesize_strategy_summary(
                     step_num,
                     extract_communication_summary(
                         message_type,
-                        (*sender).into(),
-                        (*recipient).into(),
+                        *sender,
+                        *recipient,
                         content,
                     )
                 ));
@@ -2907,8 +2907,8 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
                     step: step_num,
                     action: extract_communication_summary(
                         message_type,
-                        (*sender).into(),
-                        (*recipient).into(),
+                        *sender,
+                        *recipient,
                         content,
                     ),
                     condition: String::new(),

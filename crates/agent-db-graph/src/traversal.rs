@@ -1548,7 +1548,7 @@ impl GraphTraversal {
                 let result = louvain.detect_communities(graph)?;
                 // Convert to Vec<Vec<NodeId>> for QueryResult::Communities
                 let mut communities: Vec<Vec<NodeId>> = result.communities.into_values().collect();
-                communities.sort_by(|a, b| b.len().cmp(&a.len())); // largest first
+                communities.sort_by_key(|b| std::cmp::Reverse(b.len())); // largest first
                 Ok(QueryResult::Communities(communities))
             },
             CommunityAlgorithm::LabelPropagation { iterations } => {
@@ -1558,7 +1558,7 @@ impl GraphTraversal {
                 let lp = crate::algorithms::LabelPropagationAlgorithm::with_config(config);
                 let result = lp.detect_communities(graph)?;
                 let mut communities: Vec<Vec<NodeId>> = result.communities.into_values().collect();
-                communities.sort_by(|a, b| b.len().cmp(&a.len()));
+                communities.sort_by_key(|b| std::cmp::Reverse(b.len()));
                 Ok(QueryResult::Communities(communities))
             },
         }
@@ -2127,7 +2127,7 @@ impl<'a> Iterator for DirectedBfsIter<'a> {
             let (current, depth) = self.queue.pop_front()?;
 
             // Expand neighbors if within depth budget
-            let should_expand = self.max_depth.map_or(true, |max| depth < max);
+            let should_expand = self.max_depth.is_none_or(|max| depth < max);
             if should_expand {
                 for neighbor in self.graph.neighbors_directed(current, self.direction) {
                     if self.visited.insert(neighbor) {
@@ -2180,7 +2180,7 @@ impl<'a> Iterator for DirectedDfsIter<'a> {
         loop {
             let (current, depth) = self.stack.pop()?;
 
-            let should_expand = self.max_depth.map_or(true, |max| depth < max);
+            let should_expand = self.max_depth.is_none_or(|max| depth < max);
             if should_expand {
                 for neighbor in self.graph.neighbors_directed(current, self.direction) {
                     if self.visited.insert(neighbor) {
@@ -2475,7 +2475,7 @@ fn execute_collect(graph: &Graph, spec: &TraversalSpec) -> GraphResult<QueryResu
             result.push(current);
         }
 
-        let should_expand = max_depth.map_or(true, |max| depth < max);
+        let should_expand = max_depth.is_none_or(|max| depth < max);
         if !should_expand {
             continue;
         }
@@ -2529,7 +2529,7 @@ fn execute_paths(
             }
         }
 
-        let at_max = max_depth.map_or(false, |max| depth >= max);
+        let at_max = max_depth.is_some_and(|max| depth >= max);
         if at_max {
             if depth >= spec.depth.min_depth() {
                 paths.push(path);
@@ -2607,7 +2607,7 @@ fn execute_shortest(
         }
 
         let current_depth = depth_map.get(&current).copied().unwrap_or(0);
-        if max_depth.map_or(false, |max| current_depth >= max) {
+        if max_depth.is_some_and(|max| current_depth >= max) {
             continue;
         }
 

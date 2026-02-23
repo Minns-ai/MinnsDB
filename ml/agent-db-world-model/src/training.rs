@@ -147,6 +147,7 @@ pub fn train_batch(
 ///
 /// For a positive example (decrease_energy=true): W -= lr * dE/dW
 /// For a negative example (decrease_energy=false): W += lr * dE/dW
+#[allow(clippy::needless_range_loop)]
 fn apply_energy_gradients(
     energy_stack: &mut EnergyStack,
     p_emb: &[f32],
