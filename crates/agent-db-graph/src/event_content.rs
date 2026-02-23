@@ -266,12 +266,8 @@ pub fn build_event_narrative(events: &[Event]) -> String {
                 recipient,
                 content,
             } => {
-                let desc = extract_communication_summary(
-                    message_type,
-                    *sender,
-                    *recipient,
-                    content,
-                );
+                let desc =
+                    extract_communication_summary(message_type, *sender, *recipient, content);
                 format!("{}. Communication: {}", i + 1, desc)
             },
             EventType::Learning { event } => {

@@ -25,7 +25,10 @@
       "Bash(dir:*)",
       "Bash(cargo add:*)",
       "Bash(grep:*)",
-      "Bash(git status:*)"
+      "Bash(git status:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

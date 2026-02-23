@@ -180,8 +180,7 @@ impl GraphEngine {
                             &self.config.planning_config,
                         )
                     {
-                        let scope =
-                            agent_db_planning::repair::determine_repair_scope(&error, 0);
+                        let scope = agent_db_planning::repair::determine_repair_scope(&error, 0);
                         tracing::info!(
                             "World model repair triggered event_id={} total_z={:.2} scope={:?}",
                             ready_event.id,

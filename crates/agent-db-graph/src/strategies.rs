@@ -2554,12 +2554,7 @@ pub fn synthesize_strategy_summary(
                 steps.push(format!(
                     "{}. {}",
                     step_num,
-                    extract_communication_summary(
-                        message_type,
-                        *sender,
-                        *recipient,
-                        content,
-                    )
+                    extract_communication_summary(message_type, *sender, *recipient, content,)
                 ));
                 step_num += 1;
             },
