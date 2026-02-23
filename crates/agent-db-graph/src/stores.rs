@@ -2268,9 +2268,11 @@ mod tests {
         store.store_consolidated_memory(mem3);
 
         // Query with shared_fp: exact-match returns mem1 and mem2 (similarity=1.0)
-        let mut query_ctx = EventContext::default();
-        query_ctx.fingerprint = shared_fp;
-        query_ctx.embeddings = Some(vec![1.0, 0.0, 0.0]);
+        let mut query_ctx = EventContext {
+            fingerprint: shared_fp,
+            embeddings: Some(vec![1.0, 0.0, 0.0]),
+            ..Default::default()
+        };
 
         let results = store.retrieve_by_context_similar(&query_ctx, 10, 0.5, None, None);
         let ids: Vec<MemoryId> = results.iter().map(|m| m.id).collect();

@@ -203,6 +203,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn test_bilinear_gradients_finite_difference() {
         let mut rng = make_rng();
         let energy = BilinearEnergy::new(3, 3, &mut rng);

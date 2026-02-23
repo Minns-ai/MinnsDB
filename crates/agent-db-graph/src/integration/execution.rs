@@ -509,8 +509,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_execution_not_found() {
-        let mut config = GraphEngineConfig::default();
-        config.world_model_mode = agent_db_planning::WorldModelMode::Shadow;
+        let config = GraphEngineConfig {
+            world_model_mode: agent_db_planning::WorldModelMode::Shadow,
+            ..Default::default()
+        };
         let engine = GraphEngine::with_config(config).await.unwrap();
 
         let event = agent_db_events::Event::new(

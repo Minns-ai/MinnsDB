@@ -362,9 +362,11 @@ mod tests {
 
     #[test]
     fn test_confidence_after_warmup() {
-        let mut stats = ScoringStats::default();
-        stats.total_trained = 200; // > warmup_episodes (100)
-                                   // Add enough scoring observations for support
+        let mut stats = ScoringStats {
+            total_trained: 200, // > warmup_episodes (100)
+            ..Default::default()
+        };
+        // Add enough scoring observations for support
         for i in 0..20 {
             stats.total.update(i as f32);
         }

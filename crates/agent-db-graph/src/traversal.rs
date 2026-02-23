@@ -2922,7 +2922,7 @@ mod tests {
     #[test]
     fn directed_bfs_out() {
         let g = build_directed_graph();
-        let nodes: Vec<NodeId> = DirectedBfsIter::new(&g, 1, Direction::Out, Depth::Fixed(2))
+        let nodes: Vec<NodeId> = DirectedBfsIter::new(&g, 1, Direction::Out, Depth::Range(0, 2))
             .map(|(id, _)| id)
             .collect();
         assert!(nodes.contains(&1));
@@ -2935,7 +2935,7 @@ mod tests {
     fn directed_bfs_in() {
         let g = build_directed_graph();
         // From node 3, going In: 3 ← 2 ← 1
-        let nodes: Vec<NodeId> = DirectedBfsIter::new(&g, 3, Direction::In, Depth::Fixed(2))
+        let nodes: Vec<NodeId> = DirectedBfsIter::new(&g, 3, Direction::In, Depth::Range(0, 2))
             .map(|(id, _)| id)
             .collect();
         assert!(nodes.contains(&3));
@@ -2961,7 +2961,7 @@ mod tests {
     #[test]
     fn directed_dfs_both() {
         let g = build_directed_graph();
-        let nodes: Vec<NodeId> = DirectedDfsIter::new(&g, 2, Direction::Both, Depth::Fixed(1))
+        let nodes: Vec<NodeId> = DirectedDfsIter::new(&g, 2, Direction::Both, Depth::Range(0, 1))
             .map(|(id, _)| id)
             .collect();
         assert!(nodes.contains(&2)); // start
@@ -2988,7 +2988,7 @@ mod tests {
         let spec = TraversalSpec {
             start: 1,
             direction: Direction::Out,
-            depth: Depth::Fixed(2),
+            depth: Depth::Range(0, 2),
             instruction: Instruction::Collect,
             node_filter: None,
             edge_filter: None,
@@ -3040,7 +3040,7 @@ mod tests {
         let spec = TraversalSpec {
             start: 1,
             direction: Direction::Out,
-            depth: Depth::Fixed(2),
+            depth: Depth::Range(0, 2),
             instruction: Instruction::Collect,
             node_filter: Some(Arc::new(|node: &GraphNode| node.id != 4)),
             edge_filter: None,
@@ -3088,7 +3088,7 @@ mod tests {
         let spec = TraversalSpec {
             start: 1,
             direction: Direction::Out,
-            depth: Depth::Fixed(3),
+            depth: Depth::Range(0, 3),
             instruction: Instruction::Collect,
             node_filter: None,
             edge_filter: None,
@@ -3113,7 +3113,7 @@ mod tests {
         let spec = TraversalSpec {
             start: 1,
             direction: Direction::Out,
-            depth: Depth::Fixed(3),
+            depth: Depth::Range(0, 3),
             instruction: Instruction::Path { max_paths: 10 },
             node_filter: None,
             edge_filter: None,
@@ -3209,7 +3209,7 @@ mod tests {
                 GraphQuery::DirectedTraversal {
                     start: 1,
                     direction: Direction::Out,
-                    depth: Depth::Fixed(1),
+                    depth: Depth::Range(0, 1),
                 },
             )
             .unwrap();
@@ -3233,7 +3233,7 @@ mod tests {
                 GraphQuery::RecursiveTraversal(TraversalRequest {
                     start: 1,
                     direction: Direction::Out,
-                    depth: Depth::Fixed(2),
+                    depth: Depth::Range(0, 2),
                     instruction: Instruction::Collect,
                     node_filters: vec![],
                     edge_filters: vec![],

@@ -305,10 +305,10 @@ mod tests {
         n3.updated_at = 300;
         let id3 = g.add_node(n3).unwrap();
 
-        let mut e12 = make_edge(id1, id2, 150);
+        let e12 = make_edge(id1, id2, 150);
         g.add_edge(e12);
 
-        let mut e23 = make_edge(id2, id3, 250);
+        let e23 = make_edge(id2, id3, 250);
         g.add_edge(e23);
 
         g

@@ -383,7 +383,7 @@ mod tests {
         use agent_db_events::core::{Event, EventContext, EventType, LearningEvent};
 
         let base_event = || Event {
-            id: 1u128.into(),
+            id: 1u128,
             timestamp: Timestamp::from(1000u64),
             agent_id: AgentId::from(1u64),
             agent_type: "test".to_string(),

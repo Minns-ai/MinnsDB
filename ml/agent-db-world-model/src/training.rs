@@ -399,7 +399,7 @@ mod tests {
 
         // Create training data: same context + goal (positive) vs corrupted
         let pos = make_positive_tuple(100, 200, 1.0);
-        let negs = generate_negatives(&pos, &[pos.clone()], 4, &mut rng);
+        let negs = generate_negatives(&pos, std::slice::from_ref(&pos), 4, &mut rng);
 
         let mut batch: Vec<TrainingTuple> = vec![pos.clone()];
         batch.extend(negs);
@@ -451,7 +451,7 @@ mod tests {
         let mut stats = ScoringStats::default();
 
         let pos = make_positive_tuple(100, 200, 1.0);
-        let negs = generate_negatives(&pos, &[pos.clone()], 4, &mut rng);
+        let negs = generate_negatives(&pos, std::slice::from_ref(&pos), 4, &mut rng);
 
         // Measure positive energy before training
         let p = encoders.policy.encode(&pos.policy_features);

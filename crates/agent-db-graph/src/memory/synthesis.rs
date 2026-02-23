@@ -403,9 +403,9 @@ mod tests {
             id: 1,
             episode_version: 1,
             agent_id: AgentId::from(1u64),
-            start_event: 1u128.into(),
-            end_event: Some(2u128.into()),
-            events: vec![1u128.into(), 2u128.into()],
+            start_event: 1u128,
+            end_event: Some(2u128),
+            events: vec![1u128, 2u128],
             session_id: SessionId::from(1u64),
             context_signature: 0,
             context: EventContext::default(),
@@ -423,7 +423,7 @@ mod tests {
 
     fn make_event(event_type: EventType) -> Event {
         Event {
-            id: 1u128.into(),
+            id: 1u128,
             timestamp: Timestamp::from(1000u64),
             agent_id: AgentId::from(1u64),
             agent_type: "test".to_string(),
