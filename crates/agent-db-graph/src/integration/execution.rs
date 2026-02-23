@@ -87,11 +87,7 @@ impl GraphEngine {
         self.active_executions
             .insert(exec_id, Arc::new(RwLock::new(state)));
 
-        tracing::info!(
-            exec_id,
-            session_id,
-            "Started execution"
-        );
+        tracing::info!(exec_id, session_id, "Started execution");
 
         Ok(exec_id)
     }
@@ -108,17 +104,16 @@ impl GraphEngine {
         let exec_arc = self
             .active_executions
             .get(&exec_id)
-            .ok_or_else(|| {
-                GraphError::OperationError(format!("Execution {} not found", exec_id))
-            })?
+            .ok_or_else(|| GraphError::OperationError(format!("Execution {} not found", exec_id)))?
             .clone();
 
         let exec_state = exec_arc.read().await;
 
         // Need world model for prediction error
-        let wm = self.world_model.as_ref().ok_or_else(|| {
-            GraphError::OperationError("World model not initialized".to_string())
-        })?;
+        let wm = self
+            .world_model
+            .as_ref()
+            .ok_or_else(|| GraphError::OperationError("World model not initialized".to_string()))?;
 
         let wm_guard = wm.read().await;
 
@@ -156,8 +151,7 @@ impl GraphEngine {
         drop(wm_guard);
 
         // Check if repair is needed
-        let should_repair =
-            repair::should_repair(&error, &self.config.planning_config);
+        let should_repair = repair::should_repair(&error, &self.config.planning_config);
 
         if !should_repair {
             return Ok(ExecutionValidationResult {
@@ -212,7 +206,7 @@ impl GraphEngine {
                     repaired_actions: repaired,
                     repaired_strategies: vec![],
                 })
-            }
+            },
             RepairScope::StrategyRevision => {
                 let revised = self.revise_execution_strategy(exec_id, error).await?;
                 // Reset action repair counter on strategy revision
@@ -226,7 +220,7 @@ impl GraphEngine {
                     repaired_actions: vec![],
                     repaired_strategies: revised,
                 })
-            }
+            },
             RepairScope::PolicyObservation => {
                 tracing::warn!(
                     exec_id,
@@ -238,7 +232,7 @@ impl GraphEngine {
                     repaired_actions: vec![],
                     repaired_strategies: vec![],
                 })
-            }
+            },
         }
     }
 
@@ -251,9 +245,7 @@ impl GraphEngine {
         let exec_arc = self
             .active_executions
             .get(&exec_id)
-            .ok_or_else(|| {
-                GraphError::OperationError(format!("Execution {} not found", exec_id))
-            })?
+            .ok_or_else(|| GraphError::OperationError(format!("Execution {} not found", exec_id)))?
             .clone();
 
         let exec_state = exec_arc.read().await;
@@ -285,9 +277,7 @@ impl GraphEngine {
         let repaired = ag
             .repair(step, error, &request)
             .await
-            .map_err(|e| {
-                GraphError::OperationError(format!("Action repair failed: {}", e))
-            })?;
+            .map_err(|e| GraphError::OperationError(format!("Action repair failed: {}", e)))?;
 
         tracing::info!(
             exec_id,
@@ -307,9 +297,7 @@ impl GraphEngine {
         let exec_arc = self
             .active_executions
             .get(&exec_id)
-            .ok_or_else(|| {
-                GraphError::OperationError(format!("Execution {} not found", exec_id))
-            })?
+            .ok_or_else(|| GraphError::OperationError(format!("Execution {} not found", exec_id)))?
             .clone();
 
         let exec_state = exec_arc.read().await;
@@ -334,9 +322,7 @@ impl GraphEngine {
         let revised = sg
             .revise(&exec_state.strategy, &diagnostics, &request)
             .await
-            .map_err(|e| {
-                GraphError::OperationError(format!("Strategy revision failed: {}", e))
-            })?;
+            .map_err(|e| GraphError::OperationError(format!("Strategy revision failed: {}", e)))?;
 
         tracing::info!(
             exec_id,
@@ -354,9 +340,7 @@ impl GraphEngine {
         let exec_arc = self
             .active_executions
             .get(&exec_id)
-            .ok_or_else(|| {
-                GraphError::OperationError(format!("Execution {} not found", exec_id))
-            })?
+            .ok_or_else(|| GraphError::OperationError(format!("Execution {} not found", exec_id)))?
             .clone();
 
         let mut state = exec_arc.write().await;
@@ -385,9 +369,7 @@ impl GraphEngine {
         let exec_arc = self
             .active_executions
             .get(&exec_id)
-            .ok_or_else(|| {
-                GraphError::OperationError(format!("Execution {} not found", exec_id))
-            })?
+            .ok_or_else(|| GraphError::OperationError(format!("Execution {} not found", exec_id)))?
             .clone();
 
         let mut state = exec_arc.write().await;
@@ -532,9 +514,9 @@ mod tests {
         let engine = GraphEngine::with_config(config).await.unwrap();
 
         let event = agent_db_events::Event::new(
-            1,                          // agent_id
-            "test_agent".to_string(),   // agent_type
-            1,                          // session_id
+            1,                        // agent_id
+            "test_agent".to_string(), // agent_type
+            1,                        // session_id
             agent_db_events::EventType::Action {
                 action_name: "test".to_string(),
                 parameters: serde_json::json!({}),

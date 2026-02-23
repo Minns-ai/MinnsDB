@@ -21,7 +21,11 @@
       "WebFetch(domain:example.com)",
       "Bash(cargo search:*)",
       "Bash(git stash:*)",
-      "Bash(git stash pop:*)"
+      "Bash(git stash pop:*)",
+      "Bash(dir:*)",
+      "Bash(cargo add:*)",
+      "Bash(grep:*)",
+      "Bash(git status:*)"
     ]
   }
 }

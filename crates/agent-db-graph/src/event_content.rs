@@ -14,7 +14,7 @@ fn humanize_action_name(name: &str) -> String {
                 Some(c) => {
                     let upper: String = c.to_uppercase().collect();
                     format!("{}{}", upper, chars.as_str())
-                }
+                },
                 None => String::new(),
             }
         })
@@ -46,7 +46,7 @@ pub fn humanize_json_value(value: &serde_json::Value, max_len: usize) -> String 
                 String::new()
             };
             format!("[{}{}]", items.join(", "), suffix)
-        }
+        },
         serde_json::Value::Object(map) => {
             if map.is_empty() {
                 return "{}".to_string();
@@ -85,7 +85,7 @@ pub fn humanize_json_value(value: &serde_json::Value, max_len: usize) -> String 
                 .collect();
             let result = pairs.join(", ");
             truncate_at_boundary(&result, max_len)
-        }
+        },
     }
 }
 
@@ -126,10 +126,15 @@ pub fn extract_action_description(
         ActionOutcome::Success { result } => {
             let result_str = humanize_json_value(result, 100);
             format!("{}{} -> {}", name, param_str, result_str)
-        }
+        },
         ActionOutcome::Failure { error, .. } => {
-            format!("{}{} FAILED: {}", name, param_str, truncate_at_boundary(error, 100))
-        }
+            format!(
+                "{}{} FAILED: {}",
+                name,
+                param_str,
+                truncate_at_boundary(error, 100)
+            )
+        },
         ActionOutcome::Partial { result, issues } => {
             let result_str = humanize_json_value(result, 80);
             let issue_str = issues
@@ -142,7 +147,7 @@ pub fn extract_action_description(
                 "{}{} partially succeeded: {} (issues: {})",
                 name, param_str, result_str, issue_str
             )
-        }
+        },
     }
 }
 
@@ -230,33 +235,31 @@ pub fn build_event_narrative(events: &[Event]) -> String {
             } => {
                 let desc = extract_action_description(action_name, parameters, outcome);
                 format!("{}. Action: {}", i + 1, desc)
-            }
+            },
             EventType::Observation {
                 observation_type,
                 data,
                 confidence,
                 source,
             } => {
-                let desc =
-                    extract_observation_summary(observation_type, data, *confidence, source);
+                let desc = extract_observation_summary(observation_type, data, *confidence, source);
                 format!("{}. Observation: {}", i + 1, desc)
-            }
+            },
             EventType::Cognitive {
                 process_type,
                 input,
                 output,
                 reasoning_trace,
             } => {
-                let desc =
-                    extract_cognitive_summary(process_type, input, output, reasoning_trace);
+                let desc = extract_cognitive_summary(process_type, input, output, reasoning_trace);
                 format!("{}. Cognitive: {}", i + 1, desc)
-            }
+            },
             EventType::Context {
                 text, context_type, ..
             } => {
                 let desc = extract_context_summary(text, context_type);
                 format!("{}. Context: {}", i + 1, desc)
-            }
+            },
             EventType::Communication {
                 message_type,
                 sender,
@@ -270,10 +273,10 @@ pub fn build_event_narrative(events: &[Event]) -> String {
                     content,
                 );
                 format!("{}. Communication: {}", i + 1, desc)
-            }
+            },
             EventType::Learning { event } => {
                 format!("{}. Learning: {:?}", i + 1, event)
-            }
+            },
         };
         lines.push(line);
     }
@@ -357,8 +360,7 @@ mod tests {
             "compared blue-green vs rolling".to_string(),
             "selected blue-green for safety".to_string(),
         ];
-        let desc =
-            extract_cognitive_summary(&CognitiveType::Reasoning, &input, &output, &trace);
+        let desc = extract_cognitive_summary(&CognitiveType::Reasoning, &input, &output, &trace);
         assert!(desc.contains("[Reasoning]"));
         assert!(desc.contains("how to deploy"));
         assert!(desc.contains("blue-green strategy"));

@@ -243,23 +243,16 @@ impl GraphEngine {
                                                     tier: 0,
                                                     strength: 0.5,
                                                     access_count: 1,
-                                                    context_fingerprint: state
-                                                        .context_fingerprint,
-                                                    goal_bucket_id: state
-                                                        .strategy
-                                                        .goal_bucket_id,
+                                                    context_fingerprint: state.context_fingerprint,
+                                                    goal_bucket_id: state.strategy.goal_bucket_id,
                                                 };
                                             let strategy_features =
                                                 agent_db_world_model::StrategyFeatures {
                                                     quality_score: state.strategy.confidence,
-                                                    expected_success: state
-                                                        .strategy
-                                                        .confidence,
+                                                    expected_success: state.strategy.confidence,
                                                     expected_value: 0.5,
                                                     confidence: state.strategy.confidence,
-                                                    goal_bucket_id: state
-                                                        .strategy
-                                                        .goal_bucket_id,
+                                                    goal_bucket_id: state.strategy.goal_bucket_id,
                                                     behavior_signature_hash: 0,
                                                 };
                                             let policy_features =
@@ -268,8 +261,7 @@ impl GraphEngine {
                                                     top_goal_priority: 0.8,
                                                     resource_cpu_percent: 0.0,
                                                     resource_memory_bytes: 0,
-                                                    context_fingerprint: state
-                                                        .context_fingerprint,
+                                                    context_fingerprint: state.context_fingerprint,
                                                 };
 
                                             let error = wm_guard.prediction_error(
@@ -364,13 +356,8 @@ impl GraphEngine {
                         if self.config.effective_world_model_mode() != WorldModelMode::Disabled
                             && self.world_model.is_some()
                         {
-                            if let Err(e) =
-                                self.process_episode_for_world_model(episode).await
-                            {
-                                tracing::warn!(
-                                    "World model training tuple assembly failed: {}",
-                                    e
-                                );
+                            if let Err(e) = self.process_episode_for_world_model(episode).await {
+                                tracing::warn!("World model training tuple assembly failed: {}", e);
                             }
                         }
                     }

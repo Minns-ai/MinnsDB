@@ -130,8 +130,14 @@ impl LouvainAlgorithm {
             // Build the super-graph: aggregate edge weights between communities
             let mut super_edges: HashMap<(NodeId, NodeId), f32> = HashMap::new();
             for edge in graph.get_all_edges() {
-                let cs = node_communities.get(&edge.source).copied().unwrap_or(edge.source);
-                let ct = node_communities.get(&edge.target).copied().unwrap_or(edge.target);
+                let cs = node_communities
+                    .get(&edge.source)
+                    .copied()
+                    .unwrap_or(edge.source);
+                let ct = node_communities
+                    .get(&edge.target)
+                    .copied()
+                    .unwrap_or(edge.target);
                 let ss = comm_to_super.get(&cs).copied().unwrap_or(edge.source);
                 let st = comm_to_super.get(&ct).copied().unwrap_or(edge.target);
                 if ss != st {

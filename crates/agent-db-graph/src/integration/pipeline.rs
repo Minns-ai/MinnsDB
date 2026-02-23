@@ -169,8 +169,7 @@ impl GraphEngine {
                         let store_ref = self.strategy_store.clone();
                         let refinement_ref = refinement.clone();
                         let embedding_client = self.embedding_client.clone();
-                        let event_narrative =
-                            crate::event_content::build_event_narrative(&events);
+                        let event_narrative = crate::event_content::build_event_narrative(&events);
                         tokio::spawn(async move {
                             match refinement_ref
                                 .refine_and_embed_strategy(

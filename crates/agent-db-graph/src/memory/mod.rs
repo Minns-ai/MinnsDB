@@ -10,8 +10,8 @@ use agent_db_core::types::{
     current_timestamp, AgentId, ContextHash, EventId, SessionId, Timestamp,
 };
 use agent_db_events::core::{Event, EventContext};
-use std::collections::HashMap;
 use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
 // Piecewise outcome scoring constants (same keys/values as claims for consistency)
 pub const META_POSITIVE_OUTCOMES: &str = "_positive_outcomes";
@@ -594,7 +594,8 @@ impl MemoryFormation {
         let piecewise_score = memory_outcome_score(memory);
 
         // Blend: preserve formation quality while incorporating outcome feedback
-        memory.strength = (memory.strength * 0.5 + piecewise_score * 0.5).min(self.config.max_strength);
+        memory.strength =
+            (memory.strength * 0.5 + piecewise_score * 0.5).min(self.config.max_strength);
 
         // Adjust relevance score
         if success {
@@ -975,7 +976,11 @@ mod tests {
         assert_eq!(memory_negative_outcomes(m), 1);
         // Bayesian: (3+1)/(4+2) = 4/6 ≈ 0.667
         let score = memory_outcome_score(m);
-        assert!((score - 0.6667).abs() < 0.01, "Bayesian score should be ~0.667, got {}", score);
+        assert!(
+            (score - 0.6667).abs() < 0.01,
+            "Bayesian score should be ~0.667, got {}",
+            score
+        );
 
         // Record 2 more successes to cross Q_KICK_IN threshold (total=6)
         engine.apply_outcome(1, true);
@@ -986,12 +991,19 @@ mod tests {
         assert_eq!(memory_negative_outcomes(m), 1);
         // Now in Q phase — EMA should be well above 0.5 (mostly successes)
         let score = memory_outcome_score(m);
-        assert!(score > 0.5, "Q-value should be >0.5 after mostly successes, got {}", score);
+        assert!(
+            score > 0.5,
+            "Q-value should be >0.5 after mostly successes, got {}",
+            score
+        );
 
         // Strength should reflect piecewise blending (not just flat +/-0.1)
         let final_strength = m.strength;
-        assert!(final_strength > 0.0 && final_strength <= 1.0,
-            "Strength should be in (0,1], got {}", final_strength);
+        assert!(
+            final_strength > 0.0 && final_strength <= 1.0,
+            "Strength should be in (0,1], got {}",
+            final_strength
+        );
     }
 
     #[test]

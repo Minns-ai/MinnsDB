@@ -60,8 +60,8 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000);
 
-    config.community_algorithm = env::var("COMMUNITY_ALGORITHM")
-        .unwrap_or_else(|_| "louvain".to_string());
+    config.community_algorithm =
+        env::var("COMMUNITY_ALGORITHM").unwrap_or_else(|_| "louvain".to_string());
     info!("  Community algorithm: {}", config.community_algorithm);
 
     // Configure semantic memory (always available)
@@ -134,8 +134,8 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
         .ok()
         .or_else(|| env::var("LLM_API_KEY").ok());
 
-    config.planning_llm_provider = env::var("PLANNING_LLM_PROVIDER")
-        .unwrap_or_else(|_| "openai".to_string());
+    config.planning_llm_provider =
+        env::var("PLANNING_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
 
     info!(
         "  World model mode: {:?}",

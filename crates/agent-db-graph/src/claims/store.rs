@@ -8,9 +8,9 @@ use super::types::*;
 use crate::indexing::Bm25Index;
 use anyhow::Result;
 use crossbeam::queue::SegQueue;
+use parking_lot::RwLock;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::path::Path;
-use parking_lot::RwLock;
 use tracing::{debug, info};
 
 const CLAIMS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("claims");

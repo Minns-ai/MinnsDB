@@ -64,12 +64,10 @@ impl Depth {
     /// Validate depth specification. Returns error if Range has min > max.
     pub fn validate(&self) -> crate::GraphResult<()> {
         match self {
-            Depth::Range(min, max) if min > max => {
-                Err(crate::GraphError::InvalidQuery(format!(
-                    "Depth range min ({}) > max ({})",
-                    min, max
-                )))
-            }
+            Depth::Range(min, max) if min > max => Err(crate::GraphError::InvalidQuery(format!(
+                "Depth range min ({}) > max ({})",
+                min, max
+            ))),
             _ => Ok(()),
         }
     }
@@ -116,7 +114,7 @@ impl AdjList {
                 sv.push(existing);
                 sv.push(edge_id);
                 AdjList::Small(sv)
-            }
+            },
             AdjList::Small(mut sv) => {
                 sv.push(edge_id);
                 if sv.len() > ADJ_LARGE_THRESHOLD {
@@ -124,11 +122,11 @@ impl AdjList {
                 } else {
                     AdjList::Small(sv)
                 }
-            }
+            },
             AdjList::Large(mut set) => {
                 set.insert(edge_id);
                 AdjList::Large(set)
-            }
+            },
         };
     }
 
@@ -137,12 +135,12 @@ impl AdjList {
         F: FnMut(&EdgeId) -> bool,
     {
         match self {
-            AdjList::Empty => {}
+            AdjList::Empty => {},
             AdjList::One(eid) => {
                 if !f(eid) {
                     *self = AdjList::Empty;
                 }
-            }
+            },
             AdjList::Small(sv) => {
                 sv.retain(|eid| f(eid));
                 match sv.len() {
@@ -150,13 +148,13 @@ impl AdjList {
                     1 => {
                         let eid = sv[0];
                         *self = AdjList::One(eid);
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
-            }
+            },
             AdjList::Large(set) => {
                 set.retain(|eid| f(eid));
-            }
+            },
         }
     }
 
@@ -721,7 +719,6 @@ pub struct Graph {
     pub(crate) max_graph_size: usize,
 
     // ── Delta tracking for incremental persistence ──
-
     /// Nodes added or modified since last persist
     pub(crate) dirty_nodes: HashSet<NodeId>,
 
@@ -1472,7 +1469,7 @@ impl Graph {
                     }
                 }
                 result
-            }
+            },
         }
     }
 
@@ -1495,7 +1492,7 @@ impl Graph {
                     }
                 }
                 result
-            }
+            },
         }
     }
 

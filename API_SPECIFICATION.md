@@ -922,6 +922,17 @@ client.events().submit(event).await?;
 
 ## Changelog
 
+### v2.0.0 (2026-02-23)
+- Graph algorithms: Louvain communities, label propagation, temporal reachability, centrality, PPR, random walks
+- Planning endpoints: strategy generation, action generation, plan-for-goal, execution tracking, validation
+- World model: energy-based scoring with configurable modes
+- Search: unified keyword/semantic/hybrid with fusion strategies
+- Claims: semantic claim extraction, search, and management
+- Analytics: communities, centrality, PageRank, reachability, causal paths
+- Admin: binary export/import with replace/merge modes
+- Bounded sharding (NUM_SHARDS=256), delta persistence, streaming queries
+- See **[API_REFERENCE.md](API_REFERENCE.md)** for complete endpoint documentation
+
 ### v1.0.0 (2026-01-20)
 - Initial API release
 - Event ingestion endpoints

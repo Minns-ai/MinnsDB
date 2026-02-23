@@ -68,10 +68,8 @@ impl CentralityMeasures {
             // Stack of nodes in order of non-decreasing distance from s
             let mut stack: Vec<NodeId> = Vec::new();
             // Predecessors on shortest paths from s
-            let mut pred: HashMap<NodeId, Vec<NodeId>> = nodes
-                .iter()
-                .map(|&v| (v, Vec::new()))
-                .collect();
+            let mut pred: HashMap<NodeId, Vec<NodeId>> =
+                nodes.iter().map(|&v| (v, Vec::new())).collect();
             // σ[t] = number of shortest paths from s to t
             let mut sigma: HashMap<NodeId, f64> = nodes.iter().map(|&v| (v, 0.0)).collect();
             *sigma.get_mut(&s).unwrap() = 1.0;
@@ -454,20 +452,46 @@ mod tests {
         // Line graph: A -> B -> C -> D
         // B and C are the only intermediate nodes — they should have highest betweenness.
         let mut graph = Graph::new();
-        let a = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1, event_type: "t".into(), significance: 0.5,
-        })).unwrap();
-        let b = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2, event_type: "t".into(), significance: 0.5,
-        })).unwrap();
-        let c = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 3, event_type: "t".into(), significance: 0.5,
-        })).unwrap();
-        let d = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 4, event_type: "t".into(), significance: 0.5,
-        })).unwrap();
+        let a = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "t".into(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let b = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "t".into(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let c = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 3,
+                event_type: "t".into(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let d = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 4,
+                event_type: "t".into(),
+                significance: 0.5,
+            }))
+            .unwrap();
 
-        let edge = |s, t| GraphEdge::new(s, t, EdgeType::Causality { strength: 1.0, lag_ms: 10 }, 1.0);
+        let edge = |s, t| {
+            GraphEdge::new(
+                s,
+                t,
+                EdgeType::Causality {
+                    strength: 1.0,
+                    lag_ms: 10,
+                },
+                1.0,
+            )
+        };
         graph.add_edge(edge(a, b));
         graph.add_edge(edge(b, c));
         graph.add_edge(edge(c, d));
@@ -480,8 +504,16 @@ mod tests {
         assert_eq!(bc[&d], 0.0);
 
         // B and C are intermediaries — positive betweenness
-        assert!(bc[&b] > 0.0, "B should have positive betweenness, got {}", bc[&b]);
-        assert!(bc[&c] > 0.0, "C should have positive betweenness, got {}", bc[&c]);
+        assert!(
+            bc[&b] > 0.0,
+            "B should have positive betweenness, got {}",
+            bc[&b]
+        );
+        assert!(
+            bc[&c] > 0.0,
+            "C should have positive betweenness, got {}",
+            bc[&c]
+        );
     }
 
     #[test]
@@ -489,16 +521,34 @@ mod tests {
         // Star: center connected to 4 leaves (bidirectional edges).
         // Center sits on ALL shortest paths between leaves.
         let mut graph = Graph::new();
-        let center = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 100, event_type: "t".into(), significance: 0.5,
-        })).unwrap();
+        let center = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 100,
+                event_type: "t".into(),
+                significance: 0.5,
+            }))
+            .unwrap();
         let mut leaves = Vec::new();
         for i in 1..=4 {
-            let leaf = graph.add_node(GraphNode::new(NodeType::Event {
-                event_id: i, event_type: "t".into(), significance: 0.5,
-            })).unwrap();
+            let leaf = graph
+                .add_node(GraphNode::new(NodeType::Event {
+                    event_id: i,
+                    event_type: "t".into(),
+                    significance: 0.5,
+                }))
+                .unwrap();
             leaves.push(leaf);
-            let edge = |s, t| GraphEdge::new(s, t, EdgeType::Causality { strength: 1.0, lag_ms: 10 }, 1.0);
+            let edge = |s, t| {
+                GraphEdge::new(
+                    s,
+                    t,
+                    EdgeType::Causality {
+                        strength: 1.0,
+                        lag_ms: 10,
+                    },
+                    1.0,
+                )
+            };
             graph.add_edge(edge(center, leaf));
             graph.add_edge(edge(leaf, center));
         }
@@ -511,7 +561,9 @@ mod tests {
             assert!(
                 bc[&center] > bc[leaf],
                 "Center betweenness {} should exceed leaf {} betweenness {}",
-                bc[&center], leaf, bc[leaf]
+                bc[&center],
+                leaf,
+                bc[leaf]
             );
         }
 
@@ -532,22 +584,42 @@ mod tests {
 
         // Single node
         let mut graph = Graph::new();
-        let _n = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1, event_type: "t".into(), significance: 0.5,
-        })).unwrap();
+        let _n = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "t".into(),
+                significance: 0.5,
+            }))
+            .unwrap();
         let bc = calc.betweenness_centrality(&graph).unwrap();
         assert_eq!(bc.len(), 1);
         assert_eq!(*bc.values().next().unwrap(), 0.0);
 
         // Two nodes
         let mut graph = Graph::new();
-        let n1 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 1, event_type: "t".into(), significance: 0.5,
-        })).unwrap();
-        let n2 = graph.add_node(GraphNode::new(NodeType::Event {
-            event_id: 2, event_type: "t".into(), significance: 0.5,
-        })).unwrap();
-        graph.add_edge(GraphEdge::new(n1, n2, EdgeType::Causality { strength: 1.0, lag_ms: 10 }, 1.0));
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 1,
+                event_type: "t".into(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Event {
+                event_id: 2,
+                event_type: "t".into(),
+                significance: 0.5,
+            }))
+            .unwrap();
+        graph.add_edge(GraphEdge::new(
+            n1,
+            n2,
+            EdgeType::Causality {
+                strength: 1.0,
+                lag_ms: 10,
+            },
+            1.0,
+        ));
         let bc = calc.betweenness_centrality(&graph).unwrap();
         assert_eq!(bc[&n1], 0.0);
         assert_eq!(bc[&n2], 0.0);

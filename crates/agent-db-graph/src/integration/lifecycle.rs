@@ -369,11 +369,9 @@ impl GraphEngine {
                                 agent_db_storage::CURRENT_DATA_VERSION,
                                 &bytes,
                             );
-                            if let Err(e) = backend.put_raw(
-                                table_names::WORLD_MODEL,
-                                b"__weights__",
-                                &wrapped,
-                            ) {
+                            if let Err(e) =
+                                backend.put_raw(table_names::WORLD_MODEL, b"__weights__", &wrapped)
+                            {
                                 tracing::warn!("World model checkpoint failed: {:?}", e);
                             } else {
                                 tracing::info!(

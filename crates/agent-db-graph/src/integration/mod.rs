@@ -12,25 +12,28 @@
 
 mod constructor;
 mod event_processing;
+mod execution;
 mod export_import;
 mod graph_analytics;
 mod graph_building;
 mod lifecycle;
 mod persistence;
 mod pipeline;
+mod planning;
+pub(crate) mod planning_llm_adapter;
 mod queries;
 mod stats;
 mod world_model;
-mod planning;
-pub(crate) mod planning_llm_adapter;
-mod execution;
 
 pub use stats::{
     ClaimMetrics, GraphHealthMetrics, GraphMetricsSummary, MemoryMetrics, StoreMetrics,
     StrategyMetrics,
 };
 
-use crate::algorithms::{CentralityMeasures, LabelPropagationAlgorithm, LouvainAlgorithm, RandomWalker, TemporalReachability};
+use crate::algorithms::{
+    CentralityMeasures, LabelPropagationAlgorithm, LouvainAlgorithm, RandomWalker,
+    TemporalReachability,
+};
 use crate::analytics::GraphAnalytics;
 use crate::episodes::{Episode, EpisodeDetector, EpisodeDetectorConfig, EpisodeOutcome};
 use crate::event_ordering::{EventOrderingEngine, OrderingConfig};
@@ -49,15 +52,15 @@ use crate::structures::{
     NodeType,
 };
 use crate::transitions::{TransitionModel, TransitionModelConfig};
-use agent_db_world_model::{EbmWorldModel, WorldModelConfig, WorldModelCritic};
-use agent_db_planning::{PlanningConfig, WorldModelMode};
-use agent_db_planning::orchestrator::PlanningOrchestrator;
 use crate::traversal::{ActionSuggestion, GraphQuery, GraphTraversal, QueryResult};
 use crate::{GraphError, GraphResult};
 use agent_db_core::types::{AgentId, AgentType, ContextHash, EventId, SessionId};
 use agent_db_events::core::LearningEvent;
 use agent_db_events::{Event, EventType};
+use agent_db_planning::orchestrator::PlanningOrchestrator;
+use agent_db_planning::{PlanningConfig, WorldModelMode};
 use agent_db_storage::{table_names, BatchOperation, RedbBackend, RedbConfig};
+use agent_db_world_model::{EbmWorldModel, WorldModelConfig, WorldModelCritic};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -425,7 +428,8 @@ pub struct GraphEngine {
 
     // ========== Execution State ==========
     /// Active plan executions keyed by execution ID
-    pub(crate) active_executions: Arc<dashmap::DashMap<u64, Arc<RwLock<execution::ExecutionState>>>>,
+    pub(crate) active_executions:
+        Arc<dashmap::DashMap<u64, Arc<RwLock<execution::ExecutionState>>>>,
     /// Monotonic counter for generating unique execution IDs
     pub(crate) next_execution_id: Arc<std::sync::atomic::AtomicU64>,
 }

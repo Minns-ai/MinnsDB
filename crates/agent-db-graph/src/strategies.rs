@@ -9,8 +9,8 @@ use crate::episodes::{Episode, EpisodeId, EpisodeOutcome};
 use crate::GraphResult;
 use agent_db_core::types::{current_timestamp, AgentId, ContextHash, Timestamp};
 use agent_db_events::core::{ActionOutcome, CognitiveType, Event, EventType, MetadataValue};
-use serde_json::json;
 use rustc_hash::FxHashMap;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
 /// Unique identifier for a strategy
@@ -2257,7 +2257,8 @@ impl StrategyExtractor {
         let mut to_merge: Vec<(StrategyId, StrategyId)> = Vec::new(); // (victim, survivor)
 
         // Group strategies by (agent_id, goal_bucket_id, strategy_type)
-        let mut groups: FxHashMap<(AgentId, u64, StrategyType), Vec<StrategyId>> = FxHashMap::default();
+        let mut groups: FxHashMap<(AgentId, u64, StrategyType), Vec<StrategyId>> =
+            FxHashMap::default();
         for s in self.strategies.values() {
             groups
                 .entry((s.agent_id, s.goal_bucket_id, s.strategy_type))
@@ -2454,7 +2455,10 @@ pub fn synthesize_strategy_summary(
         },
         StrategyType::Constraint => {
             if !goal_desc.is_empty() {
-                parts.push(format!("Constraint: avoid this pattern when pursuing: {}", goal_desc.join("; ")));
+                parts.push(format!(
+                    "Constraint: avoid this pattern when pursuing: {}",
+                    goal_desc.join("; ")
+                ));
             } else {
                 parts.push("Constraint: avoid this pattern (led to failure).".to_string());
             }
@@ -2681,7 +2685,10 @@ fn synthesize_when_to_use(
                 parts.push(format!("Watch out when the goal is: {}", goals.join("; ")));
             }
             if let Some(reasoning) = cognitive_hint {
-                parts.push(format!("Agent reasoning that led to failure: {}", reasoning));
+                parts.push(format!(
+                    "Agent reasoning that led to failure: {}",
+                    reasoning
+                ));
             }
             parts.push(
                 "Applies when the agent is about to repeat a pattern that previously failed"
@@ -2796,7 +2803,8 @@ fn build_playbook(events: &[Event], strategy_type: &StrategyType) -> Vec<Playboo
             } => {
                 let mut branches = Vec::new();
                 let mut recovery = String::new();
-                let action_desc = extract_action_description(action_name, parameters, action_outcome);
+                let action_desc =
+                    extract_action_description(action_name, parameters, action_outcome);
 
                 match action_outcome {
                     ActionOutcome::Failure { error, .. } => {
@@ -3263,7 +3271,11 @@ mod tests {
         // Q-value should be in metadata
         assert!(s.metadata.contains_key(META_Q_VALUE));
         let q: f32 = s.metadata.get(META_Q_VALUE).unwrap().parse().unwrap();
-        assert!(q > 0.5, "Q should be above 0.5 after 3 successes, got {}", q);
+        assert!(
+            q > 0.5,
+            "Q should be above 0.5 after 3 successes, got {}",
+            q
+        );
         // Confidence should reflect both sample size and outcome quality
         assert!(s.confidence > 0.0, "Confidence should be positive");
 
@@ -3279,6 +3291,10 @@ mod tests {
         let q: f32 = s.metadata.get(META_Q_VALUE).unwrap().parse().unwrap();
         assert!(q > 0.5, "Q should still be >0.5, got {}", q);
         // Confidence = sample_confidence * piecewise_score, should be substantial
-        assert!(s.confidence > 0.3, "Confidence should be substantial, got {}", s.confidence);
+        assert!(
+            s.confidence > 0.3,
+            "Confidence should be substantial, got {}",
+            s.confidence
+        );
     }
 }

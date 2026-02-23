@@ -1,6 +1,7 @@
 # Rust
 /target/
 **/*.rs.bk
+ml/
 
 # Cargo.lock should be committed for applications (uncommented)
 

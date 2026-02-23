@@ -196,16 +196,12 @@ impl GraphEngine {
                         .iter()
                         .enumerate()
                         .map(|(i, s)| {
-                            let score = ppr_scores
-                                .get(&s.action_node_id)
-                                .copied()
-                                .unwrap_or(0.0);
+                            let score = ppr_scores.get(&s.action_node_id).copied().unwrap_or(0.0);
                             (i, score)
                         })
                         .collect();
-                    indexed_scores.sort_by(|a, b| {
-                        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    indexed_scores
+                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
                     let mut rank_scores = vec![0.0f64; n];
                     for (rank, &(idx, _)) in indexed_scores.iter().enumerate() {

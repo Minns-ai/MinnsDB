@@ -68,7 +68,7 @@ impl GraphEngine {
                         node.touch();
                     }
                 }
-            }
+            },
             _ => {
                 // Default: Louvain
                 let communities = self.louvain.detect_communities(graph)?;
@@ -79,7 +79,7 @@ impl GraphEngine {
                         node.touch();
                     }
                 }
-            }
+            },
         }
 
         Ok(())
@@ -121,10 +121,7 @@ impl GraphEngine {
     }
 
     /// Compute PersonalizedPageRank scores from a source node.
-    pub async fn personalized_pagerank(
-        &self,
-        source: NodeId,
-    ) -> GraphResult<HashMap<NodeId, f64>> {
+    pub async fn personalized_pagerank(&self, source: NodeId) -> GraphResult<HashMap<NodeId, f64>> {
         let inference = self.inference.read().await;
         let graph = inference.graph();
         self.random_walker.personalized_pagerank(graph, source)

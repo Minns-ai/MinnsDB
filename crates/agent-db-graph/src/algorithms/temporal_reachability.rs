@@ -12,8 +12,8 @@
 use crate::structures::{Graph, NodeId};
 use crate::GraphResult;
 use agent_db_core::types::Timestamp;
-use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 /// Configuration for temporal reachability analysis.
 #[derive(Debug, Clone)]
@@ -97,7 +97,11 @@ impl TemporalReachability {
     /// The algorithm explores outgoing edges in arrival-time order, only
     /// following edges whose `created_at >= predecessor's arrival_time`
     /// (temporal monotonicity). Each node records the earliest arrival.
-    pub fn propagate(&self, graph: &Graph, source: NodeId) -> GraphResult<TemporalReachabilityResult> {
+    pub fn propagate(
+        &self,
+        graph: &Graph,
+        source: NodeId,
+    ) -> GraphResult<TemporalReachabilityResult> {
         let source_node = graph.get_node(source).ok_or_else(|| {
             crate::GraphError::NodeNotFound(format!("source node {} not found", source))
         })?;
@@ -495,7 +499,7 @@ mod tests {
         let result = tr.propagate(&graph, a).unwrap();
 
         assert!(!result.reachable.contains_key(&b)); // filtered out
-        assert!(result.reachable.contains_key(&c));   // passes filter
+        assert!(result.reachable.contains_key(&c)); // passes filter
     }
 
     #[test]

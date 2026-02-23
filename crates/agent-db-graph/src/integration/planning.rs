@@ -48,7 +48,8 @@ impl GraphEngine {
         context_fp: u64,
         session_id: u64,
     ) -> GraphResult<PlanningResult> {
-        if self.config.planning_config.generation_mode == agent_db_planning::GenerationMode::Disabled
+        if self.config.planning_config.generation_mode
+            == agent_db_planning::GenerationMode::Disabled
         {
             return Err(GraphError::OperationError(
                 "Planning is disabled (GenerationMode::Disabled)".to_string(),
@@ -56,7 +57,9 @@ impl GraphEngine {
         }
 
         // Populate context from stores
-        let memories = self.get_planning_memories(goal_bucket_id, context_fp, 5).await;
+        let memories = self
+            .get_planning_memories(goal_bucket_id, context_fp, 5)
+            .await;
         let strategies = self.get_planning_strategies(goal_bucket_id, 3).await;
         let events = self.get_planning_events(session_id, 10).await;
         let transition_hints = self.get_transition_hints(goal_bucket_id, 10).await;
@@ -87,23 +90,23 @@ impl GraphEngine {
             .await?;
 
         // Generate action candidates for best strategy's first step
-        let action_candidates =
-            if self.config.planning_config.enable_action_generation && !strategy_candidates.is_empty()
+        let action_candidates = if self.config.planning_config.enable_action_generation
+            && !strategy_candidates.is_empty()
+        {
+            let best_strategy = &strategy_candidates[0].plan;
+            match self
+                .generate_action_candidates(best_strategy, 0, context_fp)
+                .await
             {
-                let best_strategy = &strategy_candidates[0].plan;
-                match self
-                    .generate_action_candidates(best_strategy, 0, context_fp)
-                    .await
-                {
-                    Ok(actions) => actions,
-                    Err(e) => {
-                        tracing::warn!("Action generation failed (continuing without): {}", e);
-                        vec![]
-                    }
-                }
-            } else {
-                vec![]
-            };
+                Ok(actions) => actions,
+                Err(e) => {
+                    tracing::warn!("Action generation failed (continuing without): {}", e);
+                    vec![]
+                },
+            }
+        } else {
+            vec![]
+        };
 
         Ok(PlanningResult {
             strategy_candidates,
@@ -179,7 +182,7 @@ impl GraphEngine {
                     std::mem::discriminant(&decision),
                 );
                 Ok(scored)
-            }
+            },
             Err(e) => Err(GraphError::OperationError(format!(
                 "Strategy generation failed: {}",
                 e
@@ -202,7 +205,7 @@ impl GraphEngine {
             Err(e) => {
                 tracing::warn!("Failed to retrieve avoidance claims: {}", e);
                 vec![]
-            }
+            },
         }
     }
 
@@ -247,8 +250,16 @@ impl GraphEngine {
                 summary: m.summary.clone(),
                 tier: format!("{:?}", m.tier),
                 strength: m.strength,
-                takeaway: if m.takeaway.is_empty() { None } else { Some(m.takeaway.clone()) },
-                causal_note: if m.causal_note.is_empty() { None } else { Some(m.causal_note.clone()) },
+                takeaway: if m.takeaway.is_empty() {
+                    None
+                } else {
+                    Some(m.takeaway.clone())
+                },
+                causal_note: if m.causal_note.is_empty() {
+                    None
+                } else {
+                    Some(m.causal_note.clone())
+                },
             })
             .collect()
     }
@@ -310,16 +321,16 @@ impl GraphEngine {
                         let outcome = match outcome {
                             agent_db_events::core::ActionOutcome::Success { .. } => {
                                 "success".to_string()
-                            }
+                            },
                             agent_db_events::core::ActionOutcome::Failure { error, .. } => {
                                 format!("failure: {}", error)
-                            }
+                            },
                             agent_db_events::core::ActionOutcome::Partial { .. } => {
                                 "partial".to_string()
-                            }
+                            },
                         };
                         (Some(action_name.clone()), Some(outcome))
-                    }
+                    },
                     _ => (None, None),
                 };
                 agent_db_planning::EventContext {
@@ -346,13 +357,15 @@ impl GraphEngine {
         tm.top_transitions(goal_bucket_id, limit)
             .into_iter()
             .filter(|(_, _, _, stats)| stats.count >= 2)
-            .map(|(state, action, next_state, stats)| agent_db_planning::TransitionHint {
-                from_state: state,
-                action,
-                to_state: next_state,
-                success_rate: stats.posterior_success(config),
-                observation_count: stats.count,
-            })
+            .map(
+                |(state, action, next_state, stats)| agent_db_planning::TransitionHint {
+                    from_state: state,
+                    action,
+                    to_state: next_state,
+                    success_rate: stats.posterior_success(config),
+                    observation_count: stats.count,
+                },
+            )
             .collect()
     }
 
@@ -402,7 +415,10 @@ impl GraphEngine {
 
         // Use world model as critic if available and warmed up
         let result: Result<
-            (Vec<agent_db_planning::ScoredCandidate>, agent_db_planning::SelectionDecision),
+            (
+                Vec<agent_db_planning::ScoredCandidate>,
+                agent_db_planning::SelectionDecision,
+            ),
             agent_db_planning::PlanningError,
         > = if let Some(ref wm) = self.world_model {
             let wm_guard = wm.read().await;
@@ -426,7 +442,7 @@ impl GraphEngine {
                     std::mem::discriminant(&decision),
                 );
                 Ok(scored)
-            }
+            },
             Err(e) => Err(GraphError::OperationError(format!(
                 "Strategy generation failed: {}",
                 e
@@ -506,7 +522,7 @@ impl GraphEngine {
                     step_index,
                 );
                 Ok(scored)
-            }
+            },
             Err(e) => Err(GraphError::OperationError(format!(
                 "Action generation failed: {}",
                 e
@@ -526,10 +542,7 @@ mod tests {
             .generate_strategy_candidates("test goal", 1, 42)
             .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not initialized"));
+        assert!(result.unwrap_err().to_string().contains("not initialized"));
     }
 
     #[tokio::test]

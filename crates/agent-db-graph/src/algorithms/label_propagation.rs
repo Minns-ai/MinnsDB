@@ -113,12 +113,7 @@ impl LabelPropagationAlgorithm {
     /// Find the label held by the majority of node's neighbours (both
     /// incoming and outgoing, treating the graph as undirected).
     /// Ties are broken by choosing the smallest label.
-    fn majority_label(
-        &self,
-        graph: &Graph,
-        node: NodeId,
-        labels: &HashMap<NodeId, u64>,
-    ) -> u64 {
+    fn majority_label(&self, graph: &Graph, node: NodeId, labels: &HashMap<NodeId, u64>) -> u64 {
         let mut label_weights: HashMap<u64, f32> = HashMap::new();
 
         // Outgoing neighbours
@@ -275,7 +270,11 @@ mod tests {
         let result = lp.detect_communities(&graph).unwrap();
 
         // Should converge in very few iterations
-        assert!(result.iterations < 10, "Should converge quickly, took {} iterations", result.iterations);
+        assert!(
+            result.iterations < 10,
+            "Should converge quickly, took {} iterations",
+            result.iterations
+        );
         // Both nodes should be in the same community
         assert_eq!(result.node_labels[&a], result.node_labels[&b]);
     }

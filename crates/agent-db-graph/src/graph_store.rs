@@ -9,8 +9,8 @@
 
 use crate::structures::{AdjList, EdgeId, GoalBucketId, NodeId};
 use agent_db_core::types::Timestamp;
-use serde::{Deserialize, Serialize};
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 
 // Re-export structures.rs types so downstream can `use graph_store::{GraphNode, ..}`
 pub use crate::structures::{EdgeType, GraphEdge, GraphNode, NodeType};
@@ -1328,7 +1328,7 @@ impl GraphStore for ShardedGraphStore {
                     size_bytes: 0,
                     last_modified: 0,
                 })
-            }
+            },
             None => Ok(BucketInfo {
                 bucket_id: bucket,
                 node_count: 0,

@@ -246,10 +246,7 @@ impl RefinementEngine {
 
         // Step 1: LLM refinement
         if self.is_llm_available() {
-            match self
-                .refine_memory(&memory, event_data.as_deref())
-                .await
-            {
+            match self.refine_memory(&memory, event_data.as_deref()).await {
                 Ok(refined) => {
                     info!(
                         "Refined memory {} summary: {} -> {}",

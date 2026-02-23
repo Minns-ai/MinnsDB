@@ -764,10 +764,13 @@ impl MemoryStore for RedbMemoryStore {
             let similarity = if m.context.fingerprint == context.fingerprint {
                 1.0
             } else {
-                match (context.embeddings.as_deref(), m.context.embeddings.as_deref()) {
+                match (
+                    context.embeddings.as_deref(),
+                    m.context.embeddings.as_deref(),
+                ) {
                     (Some(q), Some(e)) if !q.is_empty() && !e.is_empty() => {
                         agent_db_core::utils::cosine_similarity(q, e)
-                    }
+                    },
                     _ => 0.0,
                 }
             };
@@ -824,7 +827,8 @@ impl MemoryStore for RedbMemoryStore {
         let piecewise_score = memory_outcome_score(&memory);
 
         // Blend: preserve formation quality while incorporating outcome feedback
-        memory.strength = (memory.strength * 0.5 + piecewise_score * 0.5).min(self.config.max_strength);
+        memory.strength =
+            (memory.strength * 0.5 + piecewise_score * 0.5).min(self.config.max_strength);
 
         // Adjust relevance score
         if success {
@@ -2146,12 +2150,12 @@ pub fn build_strategy_index_ops(strategy: &Strategy) -> StorageResult<Vec<BatchO
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::episodes::EpisodeOutcome;
     use crate::memory::{
         memory_negative_outcomes, memory_outcome_score, memory_positive_outcomes,
         ConsolidationStatus, MemoryTier, MemoryType,
     };
     use agent_db_events::core::EventContext;
-    use crate::episodes::EpisodeOutcome;
 
     /// Helper: create a minimal Memory for testing
     fn make_test_memory(id: MemoryId) -> Memory {
@@ -2272,7 +2276,10 @@ mod tests {
         let ids: Vec<MemoryId> = results.iter().map(|m| m.id).collect();
         assert!(ids.contains(&1), "mem1 should match (exact fingerprint)");
         assert!(ids.contains(&2), "mem2 should match (exact fingerprint)");
-        assert!(!ids.contains(&3), "mem3 should NOT match (different fingerprint)");
+        assert!(
+            !ids.contains(&3),
+            "mem3 should NOT match (different fingerprint)"
+        );
 
         // Query with fp=999: only mem3 is a candidate, exact match → passes
         query_ctx.fingerprint = 999;
@@ -2282,8 +2289,14 @@ mod tests {
 
         // Verify cosine utility works correctly (unit-level sanity check)
         let sim = agent_db_core::utils::cosine_similarity(&[1.0, 0.0, 0.0], &[0.0, 0.0, 1.0]);
-        assert!(sim.abs() < 0.01, "orthogonal vectors should have ~0.0 similarity");
+        assert!(
+            sim.abs() < 0.01,
+            "orthogonal vectors should have ~0.0 similarity"
+        );
         let sim2 = agent_db_core::utils::cosine_similarity(&[1.0, 0.0, 0.0], &[0.9, 0.1, 0.0]);
-        assert!(sim2 > 0.9, "similar vectors should have high cosine similarity");
+        assert!(
+            sim2 > 0.9,
+            "similar vectors should have high cosine similarity"
+        );
     }
 }

@@ -166,10 +166,7 @@ impl RandomWalker {
 
     /// Perform random walks from every node in the graph.
     /// Returns walks grouped by source node.
-    pub fn walk_all(
-        &self,
-        graph: &Graph,
-    ) -> GraphResult<HashMap<NodeId, RandomWalkResult>> {
+    pub fn walk_all(&self, graph: &Graph) -> GraphResult<HashMap<NodeId, RandomWalkResult>> {
         let nodes = graph.get_all_node_ids();
         let mut results = HashMap::with_capacity(nodes.len());
 
@@ -252,11 +249,7 @@ impl RandomWalker {
     }
 
     /// Select a neighbor proportional to edge weight.
-    fn weighted_select(
-        &self,
-        edges: &[&crate::structures::GraphEdge],
-        rng: &mut Rng,
-    ) -> NodeId {
+    fn weighted_select(&self, edges: &[&crate::structures::GraphEdge], rng: &mut Rng) -> NodeId {
         let total_weight: f64 = edges.iter().map(|e| e.weight.max(0.0) as f64).sum();
 
         if total_weight <= 0.0 {
@@ -418,8 +411,16 @@ mod tests {
         // B and C should be heavily visited due to the cycle
         let b_visits = result.visit_counts.get(&b).copied().unwrap_or(0);
         let c_visits = result.visit_counts.get(&c).copied().unwrap_or(0);
-        assert!(b_visits > 10, "B should be frequently visited: {}", b_visits);
-        assert!(c_visits > 10, "C should be frequently visited: {}", c_visits);
+        assert!(
+            b_visits > 10,
+            "B should be frequently visited: {}",
+            b_visits
+        );
+        assert!(
+            c_visits > 10,
+            "C should be frequently visited: {}",
+            c_visits
+        );
     }
 
     #[test]
@@ -555,7 +556,10 @@ mod tests {
 
         // Same seed → same walks
         for (w1, w2) in result1.walks.iter().zip(result2.walks.iter()) {
-            assert_eq!(w1.nodes, w2.nodes, "Walks should be identical with same seed");
+            assert_eq!(
+                w1.nodes, w2.nodes,
+                "Walks should be identical with same seed"
+            );
         }
     }
 }

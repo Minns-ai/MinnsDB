@@ -1,50 +1,71 @@
-# Agentic Database
+# EventGraphDB
 
-**An event-driven contextual graph database with memory-inspired learning**
-
-[![CI](https://github.com/your-org/agent-database/workflows/CI/badge.svg)](https://github.com/your-org/agent-database/actions)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+**An event-driven contextual graph database with memory-inspired learning, graph algorithms, and generative planning.**
 
 ## Overview
 
-The Agentic Database is a specialized database system designed to capture, learn from, and enhance agent behavior through contextual memory formation. Unlike traditional databases that store static data, this system creates dynamic memory structures that evolve based on agent experiences and outcomes.
+EventGraphDB is a specialized database that captures, learns from, and enhances agent behavior through contextual memory formation. Events flow in, a knowledge graph grows, memories consolidate, strategies emerge, and the system tells your agent what to do next.
 
 ### Key Features
 
-🎯 **Event-First Architecture**: All knowledge derives from immutable event streams  
-🧠 **Memory-Inspired**: Formation, consolidation, and decay processes mimic biological memory  
-🕸️ **Contextual Graph**: Relationships emerge from actual agent experiences  
-🔍 **Pattern Learning**: Real-time discovery and adaptive optimization  
-⚡ **High Performance**: 100K+ events/sec, <50ms memory retrieval  
-🦀 **Rust Implementation**: Memory-safe, concurrent, and high-performance  
+- **Event-First Architecture** - All knowledge derives from immutable event streams
+- **Memory-Inspired** - Episodic/Semantic/Schema tiers with consolidation and decay
+- **Contextual Graph** - Relationships emerge from actual agent experiences
+- **Graph Algorithms** - Louvain communities, temporal reachability, PageRank, centrality, random walks
+- **Generative Planning** - LLM-based strategy/action generation with energy-based world model scoring
+- **Semantic Search** - BM25 + vector hybrid search over claims and entities
+- **NER Pipeline** - Named entity recognition with claim extraction and embedding
+- **Bounded Sharding** - Per-goal-bucket partitions with capped shard count (256 max)
+- **Delta Persistence** - Only dirty nodes/edges written to disk on save
+- **Streaming Queries** - Batched iteration with early termination
+- **Pure Rust** - No Python, no GPU, no external ML frameworks
 
 ## Quick Start
 
 ### Prerequisites
 
 - Rust 1.70+
-- 8+ CPU cores (recommended)
-- 32+ GB RAM (recommended)
-- SSD storage
+- NER service running (see [NER Setup](#ner-service))
+- LLM API key (optional, for claim extraction + planning)
 
 ### Installation
 
 ```bash
-git clone https://github.com/your-org/agent-database.git
-cd agent-database
+git clone https://github.com/your-org/eventgraphdb.git
+cd eventgraphdb
 cargo build --release
 ```
 
-### Basic Usage
+### Environment
+
+```bash
+cp .env.example .env
+# Edit .env with your settings:
+#   NER_SERVICE_URL=http://192.168.1.100:8081/ner  (full URL with protocol)
+#   LLM_API_KEY=sk-your-key                         (optional)
+```
+
+### Run the Server
+
+```bash
+cargo run --release -p eventgraphdb-server
+# Listening on http://0.0.0.0:8080
+```
+
+### Docker
+
+```bash
+docker compose up -d
+```
+
+### Basic Rust Usage
 
 ```rust
 use agent_db_graph::{GraphEngine, GraphEngineConfig};
 use agent_db_events::{Event, EventType, ActionOutcome};
 
-// Create integrated engine (all self-evolution features automatic)
 let engine = GraphEngine::new().await?;
 
-// Process events - automatic learning happens!
 let event = Event {
     id: generate_event_id(),
     timestamp: current_timestamp(),
@@ -62,187 +83,172 @@ let event = Event {
     causality_chain: vec![],
     context: your_context,
     metadata: HashMap::new(),
+    ..Default::default()
 };
 
-// Process event - automatic episode detection, memory formation,
-// strategy extraction, and reinforcement learning!
 engine.process_event(event).await?;
 
-// Query learned knowledge
-let memories = engine.get_agent_memories(agent_id, 10).await;
-let strategies = engine.get_agent_strategies(agent_id, 10).await;
+// Query what the system learned
+let memories = engine.get_agent_memories(1, 10).await;
+let strategies = engine.get_agent_strategies(1, 10).await;
 let suggestions = engine.get_next_action_suggestions(context_hash, None, 5).await?;
-
-// "What should I do next?"
-for suggestion in suggestions {
-    println!("{}: {:.1}% success",
-        suggestion.action_name,
-        suggestion.success_probability * 100.0
-    );
-}
 ```
-
-**See [API_REFERENCE.md](API_REFERENCE.md) for complete documentation and examples.**
 
 ## Architecture
 
-### System Components
-
 ```
-┌─────────────────┐    ┌─────────────────┐
-│   Agent SDKs    │    │  Admin Tools    │
-└─────────────────┘    └─────────────────┘
-         │                       │
-┌────────┼───────────────────────┼────────┐
-│        │    Core Database      │        │
-│        │                       │        │
-│  ┌─────▼──┐  ┌──────────┐  ┌───▼───┐    │
-│  │Event   │  │Graph     │  │Memory │    │
-│  │Timeline│  │Inference │  │System │    │
-│  └────────┘  └──────────┘  └───────┘    │
-│                                         │
-│           ┌──────────┐                  │
-│           │ Storage  │                  │
-│           │ Engine   │                  │
-│           └──────────┘                  │
-└─────────────────────────────────────────┘
+SDK / Agent ──HTTP──▶ REST API Server (axum)
+                           │
+                     ┌─────▼──────┐
+                     │ GraphEngine │ ◀── Central Hub
+                     └─────┬──────┘
+           ┌───────┬───────┼───────┬──────────┐
+           ▼       ▼       ▼       ▼          ▼
+        Events   Graph   Memory  Strategy   Planning
+        Pipeline Store   System  Extractor  (LLM+EBM)
+           │       │       │       │          │
+           └───────┴───────┴───────┴──────────┘
+                           │
+                     ┌─────▼──────┐
+                     │   ReDB     │ ◀── Persistent Storage
+                     │  (embedded)│
+                     └────────────┘
 ```
 
 ### Data Flow
 
 ```
-Agent Actions → Event Storage → Graph Inference → Memory Formation → Pattern Learning
-     ↑                                                                      ↓
-     └── Enhanced Behavior ← Memory Retrieval ← Context Matching ← Patterns ─┘
+Events → Graph Construction → Episode Detection → Memory Formation → Strategy Extraction
+  ↑                                                                         ↓
+  └── Action Suggestions ← Context Matching ← Memory Retrieval ← Patterns ─┘
 ```
 
-## Performance
+### Crate Structure
 
-### Target Performance (MVP)
+```
+eventgraphdb/
+├── crates/
+│   ├── agent-db-core/      # Core types: AgentId, Timestamp, EventId, etc.
+│   ├── agent-db-events/    # Event, EventType, EventContext, ActionOutcome
+│   ├── agent-db-storage/   # ReDB backend, versioned serialization
+│   ├── agent-db-graph/     # Graph engine, algorithms, memory, strategies
+│   └── agent-db-ner/       # NER service client, entity extraction
+├── ml/
+│   ├── agent-db-world-model/  # Energy-based model (~30K params)
+│   └── agent-db-planning/     # LLM generator + critic architecture
+├── server/                 # Axum REST API server
+└── examples/               # Usage examples
+```
 
-- **Event Ingestion**: 50,000 events/second
-- **Memory Retrieval**: <50ms latency
-- **Graph Traversal**: <10ms for depth 6
-- **Scale**: 100K nodes, 1M edges
-- **Storage**: 5:1 compression ratio
+## REST API
 
-### Benchmarks
+**Base URL:** `http://localhost:8080`
 
-Run benchmarks with:
+See **[API_REFERENCE.md](API_REFERENCE.md)** for complete endpoint documentation with request/response examples.
 
-```bash
-cargo bench
+### Endpoint Summary
+
+| Method | Path | Description |
+|--------|------|-------------|
+| **Events** | | |
+| `POST` | `/api/events` | Process full event through pipeline |
+| `POST` | `/api/events/simple` | Simplified event submission |
+| `GET` | `/api/events` | List recent events |
+| `GET` | `/api/episodes` | List completed episodes |
+| **Memories** | | |
+| `GET` | `/api/memories/agent/:agent_id` | Get agent memories |
+| `POST` | `/api/memories/context` | Find memories by context similarity |
+| **Strategies** | | |
+| `GET` | `/api/strategies/agent/:agent_id` | Get agent strategies |
+| `POST` | `/api/strategies/similar` | Find similar strategies |
+| `GET` | `/api/suggestions` | Get next-action suggestions |
+| **Graph** | | |
+| `GET` | `/api/graph` | Get graph structure |
+| `GET` | `/api/graph/context` | Get graph for context |
+| `POST` | `/api/graph/persist` | Force persist to disk |
+| `GET` | `/api/stats` | Engine statistics |
+| **Analytics** | | |
+| `GET` | `/api/analytics` | Graph analytics (components, clustering, modularity) |
+| `GET` | `/api/communities` | Community detection (Louvain / Label Propagation) |
+| `GET` | `/api/centrality` | Node centrality scores (degree, betweenness, pagerank) |
+| `GET` | `/api/ppr` | Personalized PageRank from source node |
+| `GET` | `/api/reachability` | Temporal reachability from source |
+| `GET` | `/api/causal-path` | Causal path between two nodes |
+| `GET` | `/api/indexes` | Index performance stats |
+| **Search** | | |
+| `POST` | `/api/search` | Unified search (keyword/semantic/hybrid) |
+| **Claims** | | |
+| `GET` | `/api/claims` | List active claims |
+| `GET` | `/api/claims/:id` | Get claim by ID |
+| `POST` | `/api/claims/search` | Semantic claim search |
+| `POST` | `/api/embeddings/process` | Process pending embeddings |
+| **Planning** | | |
+| `POST` | `/api/planning/strategies` | Generate strategy candidates |
+| `POST` | `/api/planning/actions` | Generate action candidates |
+| `POST` | `/api/planning/plan` | Full planning pipeline for a goal |
+| `POST` | `/api/planning/execute` | Start execution tracking |
+| `POST` | `/api/planning/validate` | Validate event against prediction |
+| `GET` | `/api/world-model/stats` | World model statistics |
+| **Admin** | | |
+| `POST` | `/api/admin/export` | Export database (streaming binary) |
+| `POST` | `/api/admin/import` | Import database (replace/merge) |
+| `GET` | `/api/health` | Health check |
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NER_SERVICE_URL` | `http://localhost:8081/ner` | NER service URL (full URL with protocol) |
+| `NER_REQUEST_TIMEOUT_MS` | `5000` | NER request timeout |
+| `LLM_API_KEY` | - | OpenAI-compatible API key for claims + planning |
+| `LLM_MODEL` | `gpt-4o-mini` | LLM model name |
+| `PLANNING_LLM_API_KEY` | falls back to `LLM_API_KEY` | Separate key for planning |
+| `PLANNING_LLM_PROVIDER` | `openai` | LLM provider |
+| `SERVER_HOST` | `0.0.0.0` | Server bind address |
+| `SERVER_PORT` | `8080` | Server port |
+| `RUST_LOG` | `info` | Log level |
+| `REDB_CACHE_SIZE_MB` | `256` | ReDB cache size |
+| `MEMORY_CACHE_SIZE` | `10000` | In-memory cache size |
+| `STRATEGY_CACHE_SIZE` | `5000` | Strategy cache size |
+| `ENABLE_WORLD_MODEL` | `false` | Enable energy-based world model |
+| `WORLD_MODEL_MODE` | `Disabled` | Shadow/ScoringOnly/ScoringAndReranking/Full |
+| `ENABLE_STRATEGY_GENERATION` | `false` | Enable LLM strategy generation |
+| `ENABLE_ACTION_GENERATION` | `false` | Enable LLM action generation |
+| `REPAIR_ENABLED` | `false` | Enable auto-repair on prediction error |
+
+### NER Service
+
+The NER service runs separately (GPU-accelerated). The `NER_SERVICE_URL` must be a full URL with protocol:
+
+```
+NER_SERVICE_URL=http://192.168.1.100:8081/ner
 ```
 
 ## Development
 
-### Project Structure
-
-```
-agent-database/
-├── crates/
-│   ├── agent-db-core/      # Core traits and types
-│   ├── agent-db-events/    # Event system
-│   ├── agent-db-storage/   # Storage engine
-│   └── agent-db-graph/     # Graph operations
-├── benches/                # Benchmarks
-├── tests/                  # Integration tests
-└── examples/               # Usage examples
-```
-
-### Building
-
 ```bash
-# Debug build
+# Build
 cargo build
 
-# Release build
-cargo build --release
+# Test (431+ tests across workspace)
+cargo test --workspace
 
-# Run tests
-cargo test
+# Clippy
+cargo clippy --workspace
 
-# Run with optimizations
-cargo test --release
+# Format
+cargo fmt --all
 ```
-
-### Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass
-6. Submit a pull request
-
-### Code Style
-
-- Use `cargo fmt` for formatting
-- Use `cargo clippy` for linting
-- Write comprehensive tests
-- Document public APIs
 
 ## Documentation
 
-- **[API Reference](API_REFERENCE.md)** ⭐ **NEW!** - Complete API documentation with examples
-- [Technical Writeup](TECHNICAL_WRITEUP.md) - Deep technical details and algorithms
-- [Progress Report](PROGRESS_REPORT.md) - Development progress and status
-- [Technical Specification](TECHNICAL_SPECIFICATION.md) - System architecture
-- [MVP Specification](MVP_SPECIFICATION.md) - Requirements and targets
-- [Implementation Plan](IMPLEMENTATION_PLAN.md) - Development roadmap
+- **[API_REFERENCE.md](API_REFERENCE.md)** - Complete REST API with request/response schemas
+- [TECHNICAL_SPECIFICATION.md](TECHNICAL_SPECIFICATION.md) - System architecture
+- [MVP_SPECIFICATION.md](MVP_SPECIFICATION.md) - Requirements and targets
+- [Gplan.md](Gplan.md) - Graph layer improvement plan (Phases 1-4 complete)
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Roadmap
-
-### Phase 1: Foundation (Weeks 1-8) ✅
-- Core event system
-- Basic storage layer
-- Simple graph operations
-
-### Phase 2: Storage Engine (Weeks 9-16)
-- Advanced storage optimization
-- Temporal indexing
-- Memory management
-
-### Phase 3: Graph System (Weeks 17-24)
-- Graph inference algorithms
-- Advanced traversal operations
-- Graph storage optimization
-
-### Phase 4: Memory System (Weeks 25-32)
-- Memory formation framework
-- Context-based retrieval
-- Memory consolidation
-
-### Phase 5: Pattern Learning (Weeks 33-40)
-- Pattern discovery algorithms
-- Online learning capabilities
-- Pattern validation framework
-
-### Phase 6: APIs (Weeks 41-48)
-- Production APIs
-- SDK development
-- Documentation
-
-### Phase 7: Performance (Weeks 49-56)
-- Performance optimization
-- Scalability testing
-- Distributed support
-
-### Phase 8: Production (Weeks 57-64)
-- Security hardening
-- Operational tools
-- Enterprise features
-
-## Support
-
-- [GitHub Issues](https://github.com/your-org/agent-database/issues)
-- [Discussions](https://github.com/your-org/agent-database/discussions)
-- [Documentation](https://your-org.github.io/agent-database)
-
----
-
-**Built with ❤️ in Rust**
+MIT License - see [LICENSE](LICENSE) for details.

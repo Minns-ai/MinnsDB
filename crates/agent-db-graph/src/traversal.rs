@@ -216,28 +216,28 @@ fn query_cache_key(query: &GraphQuery) -> u64 {
         GraphQuery::ShortestPath { start, end } => {
             start.hash(&mut h);
             end.hash(&mut h);
-        }
+        },
         GraphQuery::NeighborsWithinDistance {
             start,
             max_distance,
         } => {
             start.hash(&mut h);
             max_distance.hash(&mut h);
-        }
-        GraphQuery::StronglyConnectedComponents => {}
+        },
+        GraphQuery::StronglyConnectedComponents => {},
         GraphQuery::NodesByProperty { key, value } => {
             key.hash(&mut h);
             // serde_json::Value doesn't impl Hash — hash its compact JSON bytes
             let json = serde_json::to_string(value).unwrap_or_default();
             json.hash(&mut h);
-        }
+        },
         GraphQuery::EdgesByType {
             edge_type,
             min_weight,
         } => {
             edge_type.hash(&mut h);
             min_weight.to_bits().hash(&mut h);
-        }
+        },
         GraphQuery::PathQuery {
             start,
             end,
@@ -248,7 +248,7 @@ fn query_cache_key(query: &GraphQuery) -> u64 {
             for c in constraints {
                 hash_path_constraint(c, &mut h);
             }
-        }
+        },
         GraphQuery::Subgraph {
             center,
             radius,
@@ -257,38 +257,38 @@ fn query_cache_key(query: &GraphQuery) -> u64 {
             center.hash(&mut h);
             radius.hash(&mut h);
             node_types.hash(&mut h);
-        }
+        },
         GraphQuery::PageRank {
             iterations,
             damping_factor,
         } => {
             iterations.hash(&mut h);
             damping_factor.to_bits().hash(&mut h);
-        }
+        },
         GraphQuery::CommunityDetection { algorithm } => {
             hash_community_algorithm(algorithm, &mut h);
-        }
+        },
         GraphQuery::AStarPath { start, end } => {
             start.hash(&mut h);
             end.hash(&mut h);
-        }
+        },
         GraphQuery::KShortestPaths { start, end, k } => {
             start.hash(&mut h);
             end.hash(&mut h);
             k.hash(&mut h);
-        }
+        },
         GraphQuery::BidirectionalPath { start, end } => {
             start.hash(&mut h);
             end.hash(&mut h);
-        }
+        },
         GraphQuery::NearestByCost { start, k } => {
             start.hash(&mut h);
             k.hash(&mut h);
-        }
+        },
         GraphQuery::DeepReachability { start, max_depth } => {
             start.hash(&mut h);
             max_depth.hash(&mut h);
-        }
+        },
         GraphQuery::DirectedTraversal {
             start,
             direction,
@@ -297,7 +297,7 @@ fn query_cache_key(query: &GraphQuery) -> u64 {
             start.hash(&mut h);
             direction.hash(&mut h);
             depth.hash(&mut h);
-        }
+        },
         GraphQuery::RecursiveTraversal(ref req) => {
             0x01u8.hash(&mut h); // version byte
             req.start.hash(&mut h);
@@ -314,7 +314,7 @@ fn query_cache_key(query: &GraphQuery) -> u64 {
             req.max_nodes_visited.hash(&mut h);
             req.max_edges_traversed.hash(&mut h);
             req.time_window.hash(&mut h);
-        }
+        },
     }
 
     h.finish()
@@ -332,7 +332,7 @@ fn hash_path_constraint(c: &PathConstraint, h: &mut impl Hasher) {
         PathConstraint::CustomFilter(f) => {
             // fn pointers are just addresses — hash the raw pointer
             (*f as usize).hash(h);
-        }
+        },
     }
 }
 
@@ -341,7 +341,7 @@ fn hash_community_algorithm(alg: &CommunityAlgorithm, h: &mut impl Hasher) {
     match alg {
         CommunityAlgorithm::Louvain { resolution } => resolution.to_bits().hash(h),
         CommunityAlgorithm::LabelPropagation { iterations } => iterations.hash(h),
-        CommunityAlgorithm::ConnectedComponents => {}
+        CommunityAlgorithm::ConnectedComponents => {},
     }
 }
 
@@ -1491,8 +1491,10 @@ impl GraphTraversal {
             return Ok(QueryResult::Rankings(Vec::new()));
         }
 
-        let mut pagerank: FxHashMap<NodeId, f32> = FxHashMap::with_capacity_and_hasher(all_nodes.len(), Default::default());
-        let mut new_pagerank: FxHashMap<NodeId, f32> = FxHashMap::with_capacity_and_hasher(all_nodes.len(), Default::default());
+        let mut pagerank: FxHashMap<NodeId, f32> =
+            FxHashMap::with_capacity_and_hasher(all_nodes.len(), Default::default());
+        let mut new_pagerank: FxHashMap<NodeId, f32> =
+            FxHashMap::with_capacity_and_hasher(all_nodes.len(), Default::default());
 
         // Initialize PageRank scores
         let init = 1.0 / n;
@@ -1536,7 +1538,7 @@ impl GraphTraversal {
         match algorithm {
             CommunityAlgorithm::ConnectedComponents => {
                 self.find_strongly_connected_components(graph)
-            }
+            },
             CommunityAlgorithm::Louvain { resolution } => {
                 let config = crate::algorithms::LouvainConfig {
                     resolution: *resolution,
@@ -1548,7 +1550,7 @@ impl GraphTraversal {
                 let mut communities: Vec<Vec<NodeId>> = result.communities.into_values().collect();
                 communities.sort_by(|a, b| b.len().cmp(&a.len())); // largest first
                 Ok(QueryResult::Communities(communities))
-            }
+            },
             CommunityAlgorithm::LabelPropagation { iterations } => {
                 let config = crate::algorithms::LabelPropagationConfig {
                     max_iterations: *iterations,
@@ -1558,7 +1560,7 @@ impl GraphTraversal {
                 let mut communities: Vec<Vec<NodeId>> = result.communities.into_values().collect();
                 communities.sort_by(|a, b| b.len().cmp(&a.len()));
                 Ok(QueryResult::Communities(communities))
-            }
+            },
         }
     }
 
@@ -2053,7 +2055,11 @@ pub struct ActionSuggestion {
 // ============================================================================
 
 /// Helper: expand neighbors + costs for a given direction.
-fn expand_directed_costs(graph: &Graph, node_id: NodeId, direction: Direction) -> Vec<(NodeId, f32)> {
+fn expand_directed_costs(
+    graph: &Graph,
+    node_id: NodeId,
+    direction: Direction,
+) -> Vec<(NodeId, f32)> {
     match direction {
         Direction::Out => graph
             .get_edges_from(node_id)
@@ -2082,7 +2088,7 @@ fn expand_directed_costs(graph: &Graph, node_id: NodeId, direction: Direction) -
                 }
             }
             best.into_iter().collect()
-        }
+        },
     }
 }
 
@@ -2261,7 +2267,9 @@ pub type NodePredicate = Arc<dyn Fn(&GraphNode) -> bool + Send + Sync>;
 pub type EdgePredicate = Arc<dyn Fn(&GraphEdge) -> bool + Send + Sync>;
 
 /// Serializable node filter expression for the public query API.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum NodeFilterExpr {
     /// Match nodes whose `type_name()` equals the given string.
     ByType(String),
@@ -2274,7 +2282,9 @@ pub enum NodeFilterExpr {
 }
 
 /// Serializable edge filter expression for the public query API.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum EdgeFilterExpr {
     /// Match edges whose type name equals the given string.
     ByType(String),
@@ -2396,7 +2406,7 @@ fn edge_neighbor(edge: &GraphEdge, current: NodeId, direction: Direction) -> Nod
             } else {
                 edge.source
             }
-        }
+        },
     }
 }
 
@@ -2588,9 +2598,7 @@ fn execute_shortest(
     {
         if current == target {
             return Ok(QueryResult::Path(GraphTraversal::reconstruct_path(
-                &came_from,
-                spec.start,
-                target,
+                &came_from, spec.start, target,
             )));
         }
 
@@ -2730,7 +2738,7 @@ impl<I: Iterator> StreamingQuery<I> {
                         .items_yielded
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     batch.push(item);
-                }
+                },
                 None => break,
             }
         }
@@ -2939,10 +2947,9 @@ mod tests {
     fn directed_bfs_depth_range() {
         let g = build_directed_graph();
         // Depth Range(1, 2): skip depth 0 (start node), collect depths 1 and 2
-        let nodes: Vec<NodeId> =
-            DirectedBfsIter::new(&g, 1, Direction::Out, Depth::Range(1, 2))
-                .map(|(id, _)| id)
-                .collect();
+        let nodes: Vec<NodeId> = DirectedBfsIter::new(&g, 1, Direction::Out, Depth::Range(1, 2))
+            .map(|(id, _)| id)
+            .collect();
         assert!(!nodes.contains(&1)); // depth 0, skipped
         assert!(nodes.contains(&2)); // depth 1
         assert!(nodes.contains(&4)); // depth 1
@@ -2996,7 +3003,7 @@ mod tests {
                 assert!(nodes.contains(&2));
                 assert!(nodes.contains(&3));
                 assert!(nodes.contains(&4));
-            }
+            },
             _ => panic!("Expected Nodes"),
         }
     }
@@ -3022,7 +3029,7 @@ mod tests {
                 assert!(nodes.contains(&2)); // depth 1
                 assert!(nodes.contains(&4)); // depth 1
                 assert!(!nodes.contains(&3)); // depth 2
-            }
+            },
             _ => panic!("Expected Nodes"),
         }
     }
@@ -3046,7 +3053,7 @@ mod tests {
             QueryResult::Nodes(nodes) => {
                 assert!(!nodes.contains(&4));
                 assert!(nodes.contains(&2));
-            }
+            },
             _ => panic!("Expected Nodes"),
         }
     }
@@ -3069,7 +3076,7 @@ mod tests {
         match result {
             QueryResult::Nodes(nodes) => {
                 assert!(nodes.len() <= 2);
-            }
+            },
             _ => panic!("Expected Nodes"),
         }
     }
@@ -3095,7 +3102,7 @@ mod tests {
                 assert!(nodes.contains(&1)); // t=100, in range
                 assert!(nodes.contains(&2)); // t=200, in range; edge t=150 in range
                 assert!(!nodes.contains(&3)); // t=300, out of range
-            }
+            },
             _ => panic!("Expected Nodes"),
         }
     }
@@ -3122,7 +3129,7 @@ mod tests {
                 for path in &paths {
                     assert_eq!(path[0], 1);
                 }
-            }
+            },
             _ => panic!("Expected Paths"),
         }
     }
@@ -3146,7 +3153,7 @@ mod tests {
             QueryResult::Path(path) => {
                 assert_eq!(path[0], 1);
                 assert_eq!(*path.last().unwrap(), 3);
-            }
+            },
             _ => panic!("Expected Path"),
         }
     }
@@ -3211,7 +3218,7 @@ mod tests {
                 assert!(nodes.contains(&1));
                 assert!(nodes.contains(&2));
                 assert!(nodes.contains(&4));
-            }
+            },
             _ => panic!("Expected Nodes"),
         }
     }
@@ -3239,7 +3246,7 @@ mod tests {
         match result {
             QueryResult::Nodes(nodes) => {
                 assert!(nodes.len() >= 3);
-            }
+            },
             _ => panic!("Expected Nodes"),
         }
     }

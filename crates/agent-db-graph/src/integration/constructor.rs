@@ -231,18 +231,19 @@ impl GraphEngine {
             };
 
             // Create LLM client
-            let client: Arc<dyn crate::claims::LlmClient> =
-                if let Some(key) = &config.openai_api_key {
-                    Arc::new(crate::claims::OpenAiClient::new(
-                        key.clone(),
-                        config.llm_model.clone(),
-                    ))
-                } else {
-                    tracing::warn!(
+            let client: Arc<dyn crate::claims::LlmClient> = if let Some(key) =
+                &config.openai_api_key
+            {
+                Arc::new(crate::claims::OpenAiClient::new(
+                    key.clone(),
+                    config.llm_model.clone(),
+                ))
+            } else {
+                tracing::warn!(
                         "No LLM_API_KEY set — claims extraction will use MockClient (no real claims produced)"
                     );
-                    Arc::new(crate::claims::MockClient::new())
-                };
+                Arc::new(crate::claims::MockClient::new())
+            };
 
             // Create embedding client
             let embedding_client: Arc<dyn crate::claims::EmbeddingClient> =
@@ -348,7 +349,10 @@ impl GraphEngine {
 
         // Initialize world model (mode-aware)
         let world_model = if config.effective_world_model_mode() != WorldModelMode::Disabled {
-            tracing::info!("Initializing world model (mode={:?})", config.effective_world_model_mode());
+            tracing::info!(
+                "Initializing world model (mode={:?})",
+                config.effective_world_model_mode()
+            );
             Some(Arc::new(RwLock::new(EbmWorldModel::new(
                 config.world_model_config.clone(),
             ))))
@@ -371,38 +375,35 @@ impl GraphEngine {
                     );
                     let llm_client: Arc<dyn agent_db_planning::llm_client::PlanningLlmClient> =
                         match config.planning_llm_provider.as_str() {
-                            "anthropic" => Arc::new(
-                                super::planning_llm_adapter::AnthropicPlanningClient::new(
+                            "anthropic" => {
+                                Arc::new(super::planning_llm_adapter::AnthropicPlanningClient::new(
                                     api_key.clone(),
                                     config.planning_config.llm_model.clone(),
-                                ),
-                            ),
-                            _ => Arc::new(
-                                super::planning_llm_adapter::OpenAiPlanningClient::new(
-                                    api_key.clone(),
-                                    config.planning_config.llm_model.clone(),
-                                ),
-                            ),
+                                ))
+                            },
+                            _ => Arc::new(super::planning_llm_adapter::OpenAiPlanningClient::new(
+                                api_key.clone(),
+                                config.planning_config.llm_model.clone(),
+                            )),
                         };
-                    let sg: Arc<dyn agent_db_planning::StrategyGenerator> = Arc::new(
-                        agent_db_planning::llm_generator::LlmStrategyGenerator::new(
+                    let sg: Arc<dyn agent_db_planning::StrategyGenerator> =
+                        Arc::new(agent_db_planning::llm_generator::LlmStrategyGenerator::new(
                             llm_client.clone(),
                             config.planning_config.clone(),
-                        ),
-                    );
-                    let ag: Arc<dyn agent_db_planning::ActionGenerator> = Arc::new(
-                        agent_db_planning::llm_generator::LlmActionGenerator::new(
+                        ));
+                    let ag: Arc<dyn agent_db_planning::ActionGenerator> =
+                        Arc::new(agent_db_planning::llm_generator::LlmActionGenerator::new(
                             llm_client,
                             config.planning_config.clone(),
-                        ),
-                    );
+                        ));
                     (Some(orch), Some(sg), Some(ag))
                 } else {
                     tracing::info!("Using mock generators (no planning LLM API key)");
-                    let sg: Arc<dyn agent_db_planning::StrategyGenerator> =
-                        Arc::new(agent_db_planning::mock_generator::MockStrategyGenerator::new(
+                    let sg: Arc<dyn agent_db_planning::StrategyGenerator> = Arc::new(
+                        agent_db_planning::mock_generator::MockStrategyGenerator::new(
                             config.planning_config.strategy_candidates_k,
-                        ));
+                        ),
+                    );
                     let ag: Arc<dyn agent_db_planning::ActionGenerator> =
                         Arc::new(agent_db_planning::mock_generator::MockActionGenerator::new(
                             config.planning_config.action_candidates_n,

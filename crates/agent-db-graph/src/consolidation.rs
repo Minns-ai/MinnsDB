@@ -15,8 +15,8 @@ use crate::episodes::EpisodeOutcome;
 use crate::memory::{ConsolidationStatus, Memory, MemoryId, MemoryTier, MemoryType};
 use crate::stores::MemoryStore;
 use agent_db_core::types::current_timestamp;
-use std::collections::HashMap;
 use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
 /// How Phase 2 groups semantic memories into schemas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -553,7 +553,10 @@ impl ConsolidationEngine {
                 parts.push(".".to_string());
             }
             if !success_takeaways.is_empty() {
-                parts.push(format!(" Partial success when: {}.", success_takeaways.join(". ")));
+                parts.push(format!(
+                    " Partial success when: {}.",
+                    success_takeaways.join(". ")
+                ));
             }
             parts.join("")
         };
@@ -690,7 +693,9 @@ impl ConsolidationEngine {
         }
         summary_parts.push(format!(
             "Validated across {} episodes ({}/{} succeeded).",
-            total_source_count, success, semantics.len()
+            total_source_count,
+            success,
+            semantics.len()
         ));
         let summary = summary_parts.join(" ");
 
@@ -704,7 +709,11 @@ impl ConsolidationEngine {
         let takeaway = if all_takeaways.is_empty() {
             format!("Core rule for {}.", goals_label)
         } else {
-            format!("Core rule for {}: {}", goals_label, all_takeaways.join(". "))
+            format!(
+                "Core rule for {}: {}",
+                goals_label,
+                all_takeaways.join(". ")
+            )
         };
 
         // Build causal note
@@ -717,7 +726,11 @@ impl ConsolidationEngine {
                 parts.push(format!("Fails when: {}.", failure_causes.join(". ")));
             }
             if parts.is_empty() {
-                format!("Schema from {} semantic memories for {}.", semantics.len(), goals_label)
+                format!(
+                    "Schema from {} semantic memories for {}.",
+                    semantics.len(),
+                    goals_label
+                )
             } else {
                 parts.join(" ")
             }

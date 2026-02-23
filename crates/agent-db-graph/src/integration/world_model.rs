@@ -55,7 +55,12 @@ pub(super) fn extract_event_features_raw(event: &Event) -> EventFeatures {
         },
         EventType::Observation {
             observation_type, ..
-        } => (hash_str("Observation"), hash_str(observation_type), 0.5, 0.0),
+        } => (
+            hash_str("Observation"),
+            hash_str(observation_type),
+            0.5,
+            0.0,
+        ),
         EventType::Cognitive { .. } => (hash_str("Cognitive"), 0, 0.5, 0.0),
         EventType::Communication { .. } => (hash_str("Communication"), 0, 0.5, 0.0),
         EventType::Learning { .. } => (hash_str("Learning"), 0, 0.5, 0.0),

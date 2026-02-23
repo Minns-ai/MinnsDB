@@ -282,10 +282,7 @@ impl GraphEngine {
                 stats: graph.stats.clone(),
             };
             let meta_value = agent_db_storage::serialize_versioned(&meta).map_err(|e| {
-                GraphError::OperationError(format!(
-                    "Failed to serialize graph metadata: {}",
-                    e
-                ))
+                GraphError::OperationError(format!("Failed to serialize graph metadata: {}", e))
             })?;
             ops.push(BatchOperation::Put {
                 table_name: table_names::GRAPH_ADJACENCY.to_string(),

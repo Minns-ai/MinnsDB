@@ -77,7 +77,7 @@ pub async fn generate_strategies(
                 "candidates": results,
             }))
             .into_response()
-        }
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -105,8 +105,11 @@ pub async fn generate_actions(
     State(state): State<AppState>,
     Json(body): Json<GenerateActionsRequest>,
 ) -> impl IntoResponse {
-    let strategy =
-        build_minimal_strategy(body.goal_bucket_id, body.goal_description.clone(), body.step_index);
+    let strategy = build_minimal_strategy(
+        body.goal_bucket_id,
+        body.goal_description.clone(),
+        body.step_index,
+    );
 
     match state
         .engine
@@ -130,7 +133,7 @@ pub async fn generate_actions(
                 "actions": results,
             }))
             .into_response()
-        }
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -205,7 +208,7 @@ pub async fn plan_for_goal(
                 "action_candidates": actions,
             }))
             .into_response()
-        }
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -282,7 +285,7 @@ pub async fn validate_execution_event(
                 })),
             )
                 .into_response();
-        }
+        },
     };
 
     match state

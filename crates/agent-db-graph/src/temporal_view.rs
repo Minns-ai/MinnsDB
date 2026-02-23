@@ -87,7 +87,7 @@ impl<'a> GraphAtSnapshot<'a> {
                     }
                 }
                 result
-            }
+            },
         }
     }
 

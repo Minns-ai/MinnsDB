@@ -1028,8 +1028,7 @@ impl GraphStore for RedbGraphStore {
 
         // Direction-encoded prefix scan: single pass
         let prefix = make_dir_out_prefix(bucket, node_id);
-        let results =
-            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
+        let results = self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
         if !results.is_empty() {
             let mut neighbors: Vec<NodeId> =
                 results.into_iter().map(|(_, edge)| edge.target).collect();
@@ -1083,11 +1082,9 @@ impl GraphStore for RedbGraphStore {
 
         // Direction-encoded prefix scan: single pass
         let prefix = make_dir_in_prefix(bucket, node_id);
-        let results =
-            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
+        let results = self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
         if !results.is_empty() {
-            let mut preds: Vec<NodeId> =
-                results.into_iter().map(|(_, edge)| edge.source).collect();
+            let mut preds: Vec<NodeId> = results.into_iter().map(|(_, edge)| edge.source).collect();
             preds.sort();
             preds.dedup();
             return Ok(preds);
@@ -1135,8 +1132,7 @@ impl GraphStore for RedbGraphStore {
 
         // Direction-encoded prefix scan: single pass, no adjacency list lookup
         let prefix = make_dir_out_prefix(bucket, node_id);
-        let results =
-            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
+        let results = self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
         if !results.is_empty() {
             return Ok(results.into_iter().map(|(_, edge)| edge).collect());
         }
@@ -1181,8 +1177,7 @@ impl GraphStore for RedbGraphStore {
 
         // Direction-encoded prefix scan: single pass, no adjacency list lookup
         let prefix = make_dir_in_prefix(bucket, node_id);
-        let results =
-            self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
+        let results = self.scan_prefix_json::<Vec<u8>, GraphEdge>(TABLE_GRAPH_EDGES, prefix)?;
         if !results.is_empty() {
             return Ok(results.into_iter().map(|(_, edge)| edge).collect());
         }
