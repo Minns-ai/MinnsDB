@@ -1,0 +1,18 @@
+[package]
+name = "agent-db-planning"
+version = "0.1.0"
+edition = "2021"
+description = "Generative strategy/action planning engine for EventGraphDB"
+
+[dependencies]
+agent-db-core = { path = "../../crates/agent-db-core" }
+agent-db-events = { path = "../../crates/agent-db-events" }
+agent-db-world-model = { path = "../agent-db-world-model" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = "0.1"
+tracing = "0.1"
+thiserror = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1.28", features = ["full"] }
