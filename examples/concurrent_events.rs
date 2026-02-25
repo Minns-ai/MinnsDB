@@ -157,6 +157,7 @@ async fn create_event_scenario(
             metadata: std::collections::HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         Event {
             id: generate_event_id(),
@@ -177,6 +178,7 @@ async fn create_event_scenario(
             metadata: std::collections::HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         Event {
             id: generate_event_id(),
@@ -197,6 +199,7 @@ async fn create_event_scenario(
             metadata: std::collections::HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         // Agent B sequence: start_analysis → generate_report
         Event {
@@ -218,6 +221,7 @@ async fn create_event_scenario(
             metadata: std::collections::HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         // Agent C sequence: monitor_system → alert_threshold
         Event {
@@ -237,6 +241,7 @@ async fn create_event_scenario(
             metadata: std::collections::HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         // Agent B Event 2
         Event {
@@ -258,6 +263,7 @@ async fn create_event_scenario(
             metadata: std::collections::HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         // Agent C Event 2
         Event {
@@ -279,6 +285,7 @@ async fn create_event_scenario(
             metadata: std::collections::HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
     ]
 }

@@ -250,6 +250,19 @@ pub struct GraphEngineConfig {
 
     /// LLM provider for planning ("openai" or "anthropic")
     pub planning_llm_provider: String,
+
+    // ========== NLQ Hint Classifier ==========
+    /// Enable LLM hint classifier for NLQ intent routing
+    pub enable_nlq_hint: bool,
+
+    /// API key for the NLQ hint classifier (falls back to `openai_api_key`)
+    pub nlq_hint_api_key: Option<String>,
+
+    /// LLM provider for the NLQ hint classifier ("openai" or "anthropic")
+    pub nlq_hint_provider: String,
+
+    /// Model name for the NLQ hint classifier
+    pub nlq_hint_model: String,
 }
 
 impl GraphEngineConfig {
@@ -381,6 +394,13 @@ pub struct GraphEngine {
     /// Label propagation for community detection
     pub(crate) label_propagation: Arc<LabelPropagationAlgorithm>,
 
+    // ========== Multi-Signal Retrieval BM25 Indexes ==========
+    /// BM25 index for memory text search (keyed by MemoryId)
+    pub(crate) memory_bm25_index: Arc<RwLock<crate::indexing::Bm25Index>>,
+
+    /// BM25 index for strategy text search (keyed by StrategyId)
+    pub(crate) strategy_bm25_index: Arc<RwLock<crate::indexing::Bm25Index>>,
+
     // ========== Semantic Memory (Optional) ==========
     /// NER extraction queue (optional, when semantic memory is enabled)
     pub(crate) ner_queue: Option<Arc<agent_db_ner::NerExtractionQueue>>,
@@ -425,6 +445,20 @@ pub struct GraphEngine {
     pub(crate) strategy_generator: Option<Arc<dyn agent_db_planning::StrategyGenerator>>,
     /// Action generator (mock for now, LLM later)
     pub(crate) action_generator: Option<Arc<dyn agent_db_planning::ActionGenerator>>,
+
+    // ========== Structured Memory ==========
+    /// Structured memory store for templated data (ledgers, trees, state machines, preferences)
+    pub(crate) structured_memory: Arc<RwLock<crate::structured_memory::StructuredMemoryStore>>,
+
+    // ========== Natural Language Query ==========
+    /// NLQ pipeline for translating questions into graph queries
+    pub(crate) nlq_pipeline: crate::nlq::NlqPipeline,
+
+    /// Conversational context for NLQ sessions (keyed by session_id)
+    pub(crate) nlq_contexts: tokio::sync::Mutex<HashMap<String, crate::nlq::ConversationContext>>,
+
+    /// Optional LLM hint client for NLQ intent routing
+    pub(crate) nlq_hint_client: Option<Arc<dyn crate::nlq::llm_hint::NlqHintClient>>,
 
     // ========== Execution State ==========
     /// Active plan executions keyed by execution ID
@@ -517,6 +551,11 @@ impl Default for GraphEngineConfig {
             planning_config: PlanningConfig::default(),
             planning_llm_api_key: None,
             planning_llm_provider: "openai".to_string(),
+            // NLQ hint classifier (disabled by default)
+            enable_nlq_hint: false,
+            nlq_hint_api_key: None,
+            nlq_hint_provider: "openai".to_string(),
+            nlq_hint_model: "gpt-4o-mini".to_string(),
         }
     }
 }

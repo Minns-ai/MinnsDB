@@ -65,6 +65,13 @@ pub fn humanize_json_value(value: &serde_json::Value, max_len: usize) -> String 
                 "response",
                 "output",
                 "summary",
+                "code",
+                "source",
+                "source_code",
+                "snippet",
+                "body",
+                "function_name",
+                "class_name",
             ];
             for key in SEMANTIC_KEYS {
                 if let Some(v) = map.get(*key) {
@@ -89,13 +96,41 @@ pub fn humanize_json_value(value: &serde_json::Value, max_len: usize) -> String 
     }
 }
 
+/// Truncate a string at a line boundary (for code content).
+///
+/// Breaks at `\n` rather than sentence boundaries, preserving whole lines.
+pub fn truncate_at_line_boundary(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    // Find a valid char boundary at or before max_len
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let slice = &s[..end];
+    if let Some(pos) = slice.rfind('\n') {
+        return s[..pos].to_string();
+    }
+    // No newline found — fall back to word boundary
+    if let Some(pos) = slice.rfind(' ') {
+        return format!("{}...", &s[..pos]);
+    }
+    format!("{}...", slice)
+}
+
 /// Truncate a string intelligently at sentence or word boundaries.
 fn truncate_at_boundary(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         return s.to_string();
     }
+    // Find a valid char boundary at or before max_len
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let slice = &s[..end];
     // Try to break at a sentence boundary
-    let slice = &s[..max_len];
     if let Some(pos) = slice.rfind(". ") {
         return format!("{}.", &s[..pos]);
     }
@@ -398,6 +433,7 @@ mod tests {
             metadata: Default::default(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         };
 
         let events = vec![

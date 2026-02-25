@@ -11,6 +11,19 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+/// Truncate a string to `max_len` characters, appending "..." if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
+}
+
 /// Unique identifier for graph nodes
 pub type NodeId = u64;
 
@@ -421,6 +434,15 @@ pub enum ConceptType {
     Event,
     /// Miscellaneous named entity (NER label: MISC, NORP, WORK_OF_ART, etc.)
     NamedEntity,
+    // ── Code-derived concept types ──
+    /// Function or method (code-derived)
+    Function,
+    /// Class, struct, or type (code-derived)
+    Class,
+    /// Module, package, or crate (code-derived)
+    Module,
+    /// Variable or constant (code-derived)
+    Variable,
 }
 
 impl ConceptType {
@@ -434,6 +456,10 @@ impl ConceptType {
             "DATE" | "TIME" => ConceptType::DateTime,
             "EVENT" => ConceptType::Event,
             "MISC" | "NORP" | "WORK_OF_ART" | "LAW" | "LANGUAGE" => ConceptType::NamedEntity,
+            "FUNCTION" | "METHOD" | "FUNC" => ConceptType::Function,
+            "CLASS" | "STRUCT" | "TYPE" | "INTERFACE" => ConceptType::Class,
+            "MODULE" | "PACKAGE" | "CRATE" | "NAMESPACE" => ConceptType::Module,
+            "VARIABLE" | "CONST" | "VAR" | "PARAM" => ConceptType::Variable,
             _ => ConceptType::ContextualAssociation,
         }
     }
@@ -728,6 +754,9 @@ pub struct Graph {
 
     /// Whether adjacency metadata blob needs re-persisting
     pub(crate) adjacency_dirty: bool,
+
+    /// Running sum of all node degrees for O(1) avg_degree computation.
+    pub(crate) total_degree: u64,
 }
 
 /// Graph statistics for monitoring and optimization
@@ -775,6 +804,45 @@ impl GraphNode {
             NodeType::Tool { .. } => "Tool",
             NodeType::Result { .. } => "Result",
             NodeType::Claim { .. } => "Claim",
+        }
+    }
+
+    /// Return a human-readable label for this node.
+    pub fn label(&self) -> String {
+        match &self.node_type {
+            NodeType::Agent {
+                agent_type,
+                agent_id,
+                ..
+            } => {
+                if agent_type.is_empty() {
+                    format!("Agent {}", agent_id)
+                } else {
+                    agent_type.clone()
+                }
+            },
+            NodeType::Event {
+                event_id,
+                event_type,
+                ..
+            } => {
+                if event_type.is_empty() {
+                    format!("Event {}", event_id)
+                } else {
+                    truncate_str(event_type, 40)
+                }
+            },
+            NodeType::Context { context_hash, .. } => {
+                format!("Context {}", context_hash)
+            },
+            NodeType::Concept { concept_name, .. } => concept_name.clone(),
+            NodeType::Goal { description, .. } => truncate_str(description, 60),
+            NodeType::Episode { episode_id, .. } => format!("Episode {}", episode_id),
+            NodeType::Memory { memory_id, .. } => format!("Memory {}", memory_id),
+            NodeType::Strategy { name, .. } => name.clone(),
+            NodeType::Tool { tool_name, .. } => tool_name.clone(),
+            NodeType::Result { result_key, .. } => result_key.clone(),
+            NodeType::Claim { claim_text, .. } => truncate_str(claim_text, 60),
         }
     }
 
@@ -971,6 +1039,7 @@ impl Graph {
             deleted_nodes: HashSet::new(),
             deleted_edges: HashSet::new(),
             adjacency_dirty: false,
+            total_degree: 0,
         }
     }
 
@@ -1081,6 +1150,7 @@ impl Graph {
         }
 
         // Extract searchable text from common property keys
+        let mut found_code_key = false;
         for (key, value) in &node.properties {
             let key_lower = key.to_lowercase();
             if key_lower.contains("text")
@@ -1089,17 +1159,42 @@ impl Graph {
                 || key_lower.contains("name")
                 || key_lower.contains("summary")
                 || key_lower == "data"
+                || key_lower == "code"
+                || key_lower == "source"
+                || key_lower == "source_code"
+                || key_lower == "snippet"
+                || key_lower == "body"
+                || key_lower == "function_name"
+                || key_lower == "class_name"
             {
+                // Track whether a code-specific key was found
+                if matches!(
+                    key_lower.as_str(),
+                    "code" | "source" | "source_code" | "snippet" | "function_name" | "class_name"
+                ) {
+                    found_code_key = true;
+                }
                 if let Some(text) = value.as_str() {
                     text_parts.push(text);
                 }
             }
         }
 
-        // Index combined text if available
+        // Index combined text if available, routing to code or natural tokenizer
         if !text_parts.is_empty() {
             let combined_text = text_parts.join(" ");
-            self.bm25_index.index_document(node_id, &combined_text);
+            let is_code_content = node
+                .properties
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "code")
+                .unwrap_or(false);
+
+            if is_code_content || found_code_key {
+                self.bm25_index.index_document_code(node_id, &combined_text);
+            } else {
+                self.bm25_index.index_document(node_id, &combined_text);
+            }
         }
 
         self.nodes.insert(node_id, node);
@@ -1129,10 +1224,12 @@ impl Graph {
         // Update node degrees
         if let Some(source_node) = self.nodes.get_mut(&edge.source) {
             source_node.degree += 1;
+            self.total_degree += 1;
             source_node.touch();
         }
         if let Some(target_node) = self.nodes.get_mut(&edge.target) {
             target_node.degree += 1;
+            self.total_degree += 1;
             target_node.touch();
         }
 
@@ -1232,15 +1329,15 @@ impl Graph {
         None // No path found
     }
 
-    /// Update graph statistics
+    /// Update graph statistics (O(1) — uses incremental total_degree).
     fn update_stats(&mut self) {
         self.stats.node_count = self.nodes.len();
         self.stats.edge_count = self.edges.len();
 
         if !self.nodes.is_empty() {
-            let total_degree: u32 = self.nodes.values().map(|n| n.degree).sum();
-            self.stats.avg_degree = total_degree as f32 / self.nodes.len() as f32;
-            self.stats.max_degree = self.nodes.values().map(|n| n.degree).max().unwrap_or(0);
+            self.stats.avg_degree = self.total_degree as f32 / self.nodes.len() as f32;
+        } else {
+            self.stats.avg_degree = 0.0;
         }
 
         self.stats.last_updated = std::time::SystemTime::now()
@@ -1249,9 +1346,19 @@ impl Graph {
             .as_nanos() as Timestamp;
     }
 
-    /// Get graph statistics
+    /// Get graph statistics.
+    ///
+    /// Note: `max_degree` is computed lazily on access (O(N) scan) rather than
+    /// being maintained on every mutation. Call `refresh_max_degree()` first
+    /// if you need an up-to-date value.
     pub fn stats(&self) -> &GraphStats {
         &self.stats
+    }
+
+    /// Recompute `max_degree` by scanning all nodes. O(N).
+    /// Call this before reading `stats().max_degree` if accuracy is needed.
+    pub fn refresh_max_degree(&mut self) {
+        self.stats.max_degree = self.nodes.values().map(|n| n.degree).max().unwrap_or(0);
     }
 
     /// Get node by ID
@@ -1509,6 +1616,9 @@ impl Graph {
     pub fn remove_node(&mut self, node_id: NodeId) -> Option<GraphNode> {
         let node = self.nodes.remove(&node_id)?;
 
+        // Subtract the removed node's degree from the running total
+        self.total_degree = self.total_degree.saturating_sub(node.degree as u64);
+
         // Remove from type index (u8 discriminant key)
         let disc = node.node_type.discriminant();
         if let Some(set) = self.type_index.get_mut(&disc) {
@@ -1584,6 +1694,7 @@ impl Graph {
                     }
                     if let Some(target) = self.nodes.get_mut(&edge.target) {
                         target.degree = target.degree.saturating_sub(1);
+                        self.total_degree = self.total_degree.saturating_sub(1);
                         self.dirty_nodes.insert(edge.target);
                     }
                 }
@@ -1601,6 +1712,7 @@ impl Graph {
                     }
                     if let Some(source) = self.nodes.get_mut(&edge.source) {
                         source.degree = source.degree.saturating_sub(1);
+                        self.total_degree = self.total_degree.saturating_sub(1);
                         self.dirty_nodes.insert(edge.source);
                     }
                 }
@@ -1762,11 +1874,15 @@ impl Graph {
         // Remove absorbed node (this cleans up all remaining references)
         self.remove_node(absorbed_id);
 
-        // Update survivor degree
+        // Update survivor degree and total_degree
         if let Some(survivor) = self.nodes.get_mut(&survivor_id) {
+            let old_degree = survivor.degree as u64;
             let out_count = self.adjacency_out.get(&survivor_id).map_or(0, |v| v.len());
             let in_count = self.adjacency_in.get(&survivor_id).map_or(0, |v| v.len());
             survivor.degree = (out_count + in_count) as u32;
+            let new_degree = survivor.degree as u64;
+            // Adjust total_degree for the difference
+            self.total_degree = self.total_degree.saturating_sub(old_degree) + new_degree;
         }
 
         Ok(self.nodes[&survivor_id].clone())
@@ -1848,6 +1964,7 @@ impl Graph {
             NodeType::Episode { outcome, .. } => text_parts.push(outcome.as_str()),
             _ => {},
         }
+        let mut found_code_key = false;
         for (key, value) in &node.properties {
             let key_lower = key.to_lowercase();
             if key_lower.contains("text")
@@ -1856,7 +1973,20 @@ impl Graph {
                 || key_lower.contains("name")
                 || key_lower.contains("summary")
                 || key_lower == "data"
+                || key_lower == "code"
+                || key_lower == "source"
+                || key_lower == "source_code"
+                || key_lower == "snippet"
+                || key_lower == "body"
+                || key_lower == "function_name"
+                || key_lower == "class_name"
             {
+                if matches!(
+                    key_lower.as_str(),
+                    "code" | "source" | "source_code" | "snippet" | "function_name" | "class_name"
+                ) {
+                    found_code_key = true;
+                }
                 if let Some(text) = value.as_str() {
                     text_parts.push(text);
                 }
@@ -1864,7 +1994,18 @@ impl Graph {
         }
         if !text_parts.is_empty() {
             let combined = text_parts.join(" ");
-            self.bm25_index.index_document(node_id, &combined);
+            let is_code_content = node
+                .properties
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "code")
+                .unwrap_or(false);
+
+            if is_code_content || found_code_key {
+                self.bm25_index.index_document_code(node_id, &combined);
+            } else {
+                self.bm25_index.index_document(node_id, &combined);
+            }
         }
 
         // Initialize adjacency if needed
@@ -1902,9 +2043,11 @@ impl Graph {
 
         if let Some(source) = self.nodes.get_mut(&edge.source) {
             source.degree += 1;
+            self.total_degree += 1;
         }
         if let Some(target) = self.nodes.get_mut(&edge.target) {
             target.degree += 1;
+            self.total_degree += 1;
         }
 
         if edge_id >= self.next_edge_id {
@@ -1943,5 +2086,155 @@ impl Graph {
         self.deleted_nodes.clear();
         self.deleted_edges.clear();
         self.adjacency_dirty = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_concept_type_from_ner_label_code_types() {
+        assert!(matches!(
+            ConceptType::from_ner_label("FUNCTION"),
+            ConceptType::Function
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("METHOD"),
+            ConceptType::Function
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("FUNC"),
+            ConceptType::Function
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("CLASS"),
+            ConceptType::Class
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("STRUCT"),
+            ConceptType::Class
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("TYPE"),
+            ConceptType::Class
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("INTERFACE"),
+            ConceptType::Class
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("MODULE"),
+            ConceptType::Module
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("PACKAGE"),
+            ConceptType::Module
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("CRATE"),
+            ConceptType::Module
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("NAMESPACE"),
+            ConceptType::Module
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("VARIABLE"),
+            ConceptType::Variable
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("CONST"),
+            ConceptType::Variable
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("VAR"),
+            ConceptType::Variable
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("PARAM"),
+            ConceptType::Variable
+        ));
+    }
+
+    #[test]
+    fn test_concept_type_from_ner_label_existing() {
+        // Ensure existing NER labels still work
+        assert!(matches!(
+            ConceptType::from_ner_label("PERSON"),
+            ConceptType::Person
+        ));
+        assert!(matches!(
+            ConceptType::from_ner_label("ORG"),
+            ConceptType::Organization
+        ));
+    }
+
+    #[test]
+    fn test_node_indexing_routing_code_content_type() {
+        let mut graph = Graph::new();
+        let mut node = GraphNode::new(NodeType::Tool {
+            tool_name: "myFunction".to_string(),
+            tool_type: "code".to_string(),
+        });
+        node.properties
+            .insert("content_type".to_string(), serde_json::json!("code"));
+        node.properties
+            .insert("code".to_string(), serde_json::json!("fn getUserName()"));
+
+        let node_id = graph.add_node(node).unwrap();
+
+        // Should be indexed via code tokenizer — query with snake_case
+        let results = graph.bm25_index.search_code("get_user_name", 10);
+        assert!(
+            results.iter().any(|(id, _)| *id == node_id),
+            "Node with content_type=code should be findable via code search"
+        );
+    }
+
+    #[test]
+    fn test_node_indexing_routing_code_key_fallback() {
+        let mut graph = Graph::new();
+        let mut node = GraphNode::new(NodeType::Concept {
+            concept_name: "helper".to_string(),
+            concept_type: ConceptType::Function,
+            confidence: 0.9,
+        });
+        // No content_type, but has code-specific key "snippet"
+        node.properties
+            .insert("snippet".to_string(), serde_json::json!("fn parseJSON()"));
+
+        let node_id = graph.add_node(node).unwrap();
+
+        // Should be indexed via code tokenizer due to code-specific key
+        let results = graph.bm25_index.search_code("parse", 10);
+        assert!(
+            results.iter().any(|(id, _)| *id == node_id),
+            "Node with code-specific key should be findable via code search"
+        );
+    }
+
+    #[test]
+    fn test_node_indexing_routing_natural_default() {
+        let mut graph = Graph::new();
+        let mut node = GraphNode::new(NodeType::Goal {
+            goal_id: 1,
+            description: "improve system performance".to_string(),
+            priority: 0.5,
+            status: GoalStatus::Active,
+        });
+        node.properties.insert(
+            "description".to_string(),
+            serde_json::json!("improve system performance"),
+        );
+
+        let node_id = graph.add_node(node).unwrap();
+
+        // Should be indexed via natural tokenizer
+        let results = graph.bm25_index.search("performance", 10);
+        assert!(
+            results.iter().any(|(id, _)| *id == node_id),
+            "Node without code signals should be findable via natural search"
+        );
     }
 }

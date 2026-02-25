@@ -383,6 +383,20 @@ impl GraphInference {
         node.properties
             .insert("goal_ids".to_string(), json!(goal_ids));
 
+        // Propagate code content signal
+        if event.is_code {
+            node.properties
+                .insert("content_type".to_string(), json!("code"));
+        }
+        // Propagate language hint when available (from Context variant or metadata)
+        if let EventType::Context {
+            language: Some(ref lang),
+            ..
+        } = &event.event_type
+        {
+            node.properties.insert("language".to_string(), json!(lang));
+        }
+
         let node_id = self.graph.add_node(node)?;
         self.stats.nodes_created += 1;
         Ok(node_id)

@@ -56,6 +56,12 @@ pub struct Event {
     /// Format: "segment://{bucket}/{key}" or None for inline storage
     #[serde(default)]
     pub segment_pointer: Option<String>,
+
+    /// Whether this event contains code content.
+    /// When true, the system uses code-aware tokenization for BM25 indexing,
+    /// preserving identifiers, operators, and qualified names.
+    #[serde(default)]
+    pub is_code: bool,
 }
 
 /// Different types of events the system can handle
@@ -374,6 +380,7 @@ impl Event {
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         }
     }
 
@@ -1261,5 +1268,52 @@ mod tests {
         );
         context.fingerprint = context.compute_fingerprint();
         context
+    }
+
+    #[test]
+    fn test_backward_compat_deserialization_no_is_code() {
+        // Old JSON without is_code field should deserialize with is_code=false
+        let json_str = r#"{
+            "id": "1",
+            "timestamp": "1000",
+            "agent_id": 1,
+            "agent_type": "test",
+            "session_id": 1,
+            "event_type": { "Context": { "text": "hello", "context_type": "test", "language": null } },
+            "causality_chain": [],
+            "context": { "environment": { "variables": {}, "spatial": null, "temporal": { "time_of_day": null, "deadlines": [], "patterns": [] } }, "active_goals": [], "resources": { "computational": { "cpu_percent": "0.0", "memory_bytes": "0", "storage_bytes": "0", "network_bandwidth": "0" }, "external": {} }, "fingerprint": "0", "goal_bucket_id": "0", "embeddings": null },
+            "metadata": {},
+            "context_size_bytes": "0",
+            "segment_pointer": null
+        }"#;
+        let event: Event = serde_json::from_str(json_str).unwrap();
+        assert!(
+            !event.is_code,
+            "Old events without is_code should default to false"
+        );
+    }
+
+    #[test]
+    fn test_is_code_roundtrip() {
+        let context = create_test_context();
+        let mut event = Event::new(
+            1,
+            "test".to_string(),
+            1,
+            EventType::Context {
+                text: "fn main() {}".to_string(),
+                context_type: "code".to_string(),
+                language: Some("rust".to_string()),
+            },
+            context,
+        );
+        event.is_code = true;
+
+        let json_str = serde_json::to_string(&event).unwrap();
+        let deserialized: Event = serde_json::from_str(&json_str).unwrap();
+        assert!(
+            deserialized.is_code,
+            "is_code=true should roundtrip through JSON"
+        );
     }
 }

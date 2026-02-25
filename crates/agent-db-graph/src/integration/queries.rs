@@ -365,11 +365,259 @@ impl GraphEngine {
         self.memory_store.write().await.apply_decay();
     }
 
+    /// Retrieve memories using multi-signal fusion (semantic + BM25 + context +
+    /// temporal + PPR + access frequency), with tier boosts.
+    ///
+    /// This is the recommended retrieval method when multiple signals are
+    /// available. Falls back gracefully when signals are missing.
+    pub async fn retrieve_memories_multi_signal(
+        &self,
+        query: crate::retrieval::MemoryRetrievalQuery,
+        config: Option<crate::retrieval::MemoryRetrievalConfig>,
+    ) -> Vec<Memory> {
+        let config = config.unwrap_or_default();
+
+        // Load candidates from store
+        let candidates = {
+            let store = self.memory_store.read().await;
+            store.list_all_memories()
+        };
+
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute PPR if anchor node provided
+        let ppr_scores = if let Some(anchor) = query.anchor_node {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            self.random_walker.personalized_pagerank(graph, anchor).ok()
+        } else {
+            None
+        };
+
+        // Get memory→node mapping
+        let memory_to_node = {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            graph.memory_index.clone()
+        };
+
+        // Run the pipeline
+        let bm25 = self.memory_bm25_index.read().await;
+        let ranked = crate::retrieval::MemoryRetrievalPipeline::retrieve(
+            &candidates,
+            &query,
+            &config,
+            Some(&*bm25),
+            ppr_scores.as_ref(),
+            Some(&memory_to_node),
+        );
+
+        // Resolve IDs to Memory objects
+        let limit = query.limit;
+        let store = self.memory_store.read().await;
+        let mut results = Vec::with_capacity(ranked.len().min(limit));
+        for (memory_id, _score) in ranked.into_iter().take(limit) {
+            if let Some(mem) = store.get_memory(memory_id) {
+                results.push(mem);
+            }
+        }
+        results
+    }
+
+    /// Retrieve strategies using multi-signal fusion (semantic + BM25 + Jaccard +
+    /// temporal + PPR + quality×confidence).
+    ///
+    /// Falls back gracefully when signals are missing.
+    pub async fn retrieve_strategies_multi_signal(
+        &self,
+        query: crate::retrieval::StrategyRetrievalQuery,
+        config: Option<crate::retrieval::StrategyRetrievalConfig>,
+    ) -> Vec<Strategy> {
+        let config = config.unwrap_or_default();
+
+        // Load candidates from store
+        let candidates = {
+            let store = self.strategy_store.read().await;
+            store.list_all_strategies()
+        };
+
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute PPR if anchor node provided
+        let ppr_scores = if let Some(anchor) = query.anchor_node {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            self.random_walker.personalized_pagerank(graph, anchor).ok()
+        } else {
+            None
+        };
+
+        // Get strategy→node mapping
+        let strategy_to_node = {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            graph.strategy_index.clone()
+        };
+
+        // Run the pipeline (no pre-computed Jaccard for now — pass None)
+        let bm25 = self.strategy_bm25_index.read().await;
+        let ranked = crate::retrieval::StrategyRetrievalPipeline::retrieve(
+            &candidates,
+            None,
+            &query,
+            &config,
+            Some(&*bm25),
+            ppr_scores.as_ref(),
+            Some(&strategy_to_node),
+        );
+
+        // Resolve IDs to Strategy objects
+        let limit = query.limit;
+        let store = self.strategy_store.read().await;
+        let mut results = Vec::with_capacity(ranked.len().min(limit));
+        for (strategy_id, _score) in ranked.into_iter().take(limit) {
+            if let Some(strat) = store.get_strategy(strategy_id) {
+                results.push(strat);
+            }
+        }
+        results
+    }
+
     /// Get the most recent events from the in-memory event store
     pub async fn get_recent_events(&self, limit: usize) -> Vec<Event> {
         let store = self.event_store.read().await;
         let mut events: Vec<Event> = store.values().cloned().collect();
         events.sort_by_key(|event| std::cmp::Reverse(event.timestamp));
         events.into_iter().take(limit).collect()
+    }
+
+    /// Get a reference to the structured memory store (for server handlers).
+    pub fn structured_memory(
+        &self,
+    ) -> &Arc<RwLock<crate::structured_memory::StructuredMemoryStore>> {
+        &self.structured_memory
+    }
+
+    /// Execute a natural language query against the graph.
+    ///
+    /// Translates the question into a `GraphQuery`, executes it, and returns
+    /// a human-readable answer along with raw results and metadata.
+    ///
+    /// Supports pagination and conversational context via `session_id`.
+    pub async fn natural_language_query(
+        &self,
+        question: &str,
+        pagination: &crate::nlq::NlqPagination,
+        session_id: Option<&str>,
+    ) -> GraphResult<crate::nlq::NlqResponse> {
+        let start = std::time::Instant::now();
+
+        // Resolve follow-up questions using conversational context
+        let effective_question = if let Some(sid) = session_id {
+            let contexts = self.nlq_contexts.lock().await;
+            if let Some(ctx) = contexts.get(sid) {
+                crate::nlq::resolve_followup(question, ctx).unwrap_or_else(|| question.to_string())
+            } else {
+                question.to_string()
+            }
+        } else {
+            question.to_string()
+        };
+
+        // LLM hint classifier: run rule-based + LLM in parallel, merge results
+        let intent_override = if let Some(ref hint_client) = self.nlq_hint_client {
+            let rule_based = crate::nlq::intent::classify_intent_full(&effective_question);
+            let llm_result = tokio::time::timeout(
+                Duration::from_secs(5),
+                hint_client.classify(&effective_question),
+            )
+            .await;
+            let llm_hint = match llm_result {
+                Ok(Ok(hint)) => hint,
+                Ok(Err(e)) => {
+                    tracing::warn!("NLQ hint classifier error: {}", e);
+                    None
+                },
+                Err(_) => {
+                    tracing::warn!("NLQ hint classifier timed out (5s)");
+                    None
+                },
+            };
+            let merged = crate::nlq::llm_hint::merge_classification(rule_based, llm_hint);
+            if merged.llm_overrode {
+                tracing::info!(
+                    "NLQ hint classifier overrode rule-based intent to {:?}",
+                    crate::nlq::intent::intent_display_name(&merged.intent.intent),
+                );
+            }
+            Some(merged.intent)
+        } else {
+            None
+        };
+
+        let response = {
+            let inference = self.inference.read().await;
+            let mut traversal = self.traversal.write().await;
+            let sm_guard = self.structured_memory.read().await;
+            self.nlq_pipeline.execute_with_hint(
+                &effective_question,
+                inference.graph(),
+                &mut traversal,
+                pagination,
+                Some(&sm_guard),
+                intent_override,
+            )?
+        };
+
+        // Push exchange to conversational context
+        if let Some(sid) = session_id {
+            let mut contexts = self.nlq_contexts.lock().await;
+            let ctx = contexts
+                .entry(sid.to_string())
+                .or_insert_with(crate::nlq::ConversationContext::new);
+            ctx.push(crate::nlq::ConversationExchange {
+                question: effective_question.clone(),
+                intent: crate::nlq::intent::intent_display_name(&response.intent).to_string(),
+                entities: response
+                    .entities_resolved
+                    .iter()
+                    .map(|e| e.mention.text.clone())
+                    .collect(),
+                timestamp: crate::nlq::now_millis(),
+            });
+
+            // LRU eviction: cap at 1000 sessions to prevent unbounded growth
+            const MAX_NLQ_SESSIONS: usize = 1000;
+            if contexts.len() > MAX_NLQ_SESSIONS {
+                if let Some(oldest_key) = contexts
+                    .iter()
+                    .min_by_key(|(_, ctx)| ctx.last_activity())
+                    .map(|(k, _)| k.clone())
+                {
+                    contexts.remove(&oldest_key);
+                }
+            }
+        }
+
+        // Log feedback
+        let feedback = crate::nlq::feedback::NlqFeedback {
+            question: question.to_string(),
+            intent: crate::nlq::intent::intent_display_name(&response.intent).to_string(),
+            entities_found: response.entities_resolved.len(),
+            template_used: Some(format!("{:?}", response.query_used)),
+            query_built: true,
+            validation_result: "Valid".to_string(),
+            execution_success: true,
+            result_count: crate::nlq::formatter::result_count(&response.result),
+            confidence: response.confidence,
+            execution_time_ms: start.elapsed().as_millis() as u64,
+        };
+        crate::nlq::feedback::log_nlq_feedback(&feedback);
+
+        Ok(response)
     }
 }

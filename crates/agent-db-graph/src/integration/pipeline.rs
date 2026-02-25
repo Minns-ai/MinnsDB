@@ -1,4 +1,24 @@
 use super::*;
+use agent_db_events::core::MetadataValue;
+
+/// Extract a string from a MetadataValue.
+fn metadata_as_str(v: &MetadataValue) -> Option<String> {
+    match v {
+        MetadataValue::String(s) => Some(s.clone()),
+        MetadataValue::Json(serde_json::Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Extract a float from a MetadataValue.
+fn metadata_as_f64(v: &MetadataValue) -> Option<f64> {
+    match v {
+        MetadataValue::Float(f) => Some(*f),
+        MetadataValue::Integer(i) => Some(*i as f64),
+        MetadataValue::Json(serde_json::Value::Number(n)) => n.as_f64(),
+        _ => None,
+    }
+}
 
 impl GraphEngine {
     /// Process episode for memory formation
@@ -47,6 +67,23 @@ impl GraphEngine {
                 );
                 self.attach_memory_to_graph(episode, &memory).await?;
 
+                // Index into memory BM25 for multi-signal retrieval
+                let has_code = events.iter().any(|e| e.is_code);
+                {
+                    let text = format!(
+                        "{} {} {}",
+                        memory.summary, memory.takeaway, memory.causal_note
+                    );
+                    if !text.trim().is_empty() {
+                        let mut idx = self.memory_bm25_index.write().await;
+                        if has_code {
+                            idx.index_document_code(upsert.id, &text);
+                        } else {
+                            idx.index_document(upsert.id, &text);
+                        }
+                    }
+                }
+
                 // Fire-and-forget: async LLM refinement + embedding
                 if let Some(ref refinement) = self.refinement_engine {
                     let memory_id = upsert.id;
@@ -54,6 +91,8 @@ impl GraphEngine {
                     let refinement_ref = refinement.clone();
                     let embedding_client = self.embedding_client.clone();
                     let event_narrative = crate::event_content::build_event_narrative(&events);
+                    let bm25_ref = self.memory_bm25_index.clone();
+                    let has_code_for_reindex = has_code;
                     tokio::spawn(async move {
                         if let Err(e) = refinement_ref
                             .refine_and_embed_memory(
@@ -65,6 +104,24 @@ impl GraphEngine {
                             .await
                         {
                             tracing::warn!("Memory refinement failed for {}: {}", memory_id, e);
+                        } else {
+                            // Re-index after refinement updates the summary text
+                            let store = store_ref.read().await;
+                            if let Some(refined) = store.get_memory(memory_id) {
+                                let text = format!(
+                                    "{} {} {}",
+                                    refined.summary, refined.takeaway, refined.causal_note
+                                );
+                                if !text.trim().is_empty() {
+                                    let mut idx = bm25_ref.write().await;
+                                    idx.remove_document(memory_id);
+                                    if has_code_for_reindex {
+                                        idx.index_document_code(memory_id, &text);
+                                    } else {
+                                        idx.index_document(memory_id, &text);
+                                    }
+                                }
+                            }
                         }
                     });
                 }
@@ -80,6 +137,7 @@ impl GraphEngine {
                 *self.episodes_since_consolidation.write().await = 0;
                 let store_ref = self.memory_store.clone();
                 let engine_ref = self.consolidation_engine.clone();
+                let bm25_ref = self.memory_bm25_index.clone();
                 tokio::spawn(async move {
                     let mut store = store_ref.write().await;
                     let mut engine = engine_ref.write().await;
@@ -91,6 +149,16 @@ impl GraphEngine {
                             result.schema_created,
                             result.consolidated_episode_ids.len()
                         );
+                    }
+                    // Clean up BM25 entries for deleted memories
+                    if result.episodes_deleted > 0 {
+                        let mut idx = bm25_ref.write().await;
+                        for id in &result.consolidated_episode_ids {
+                            idx.remove_document(*id);
+                        }
+                        for id in &result.consolidated_semantic_ids {
+                            idx.remove_document(*id);
+                        }
                     }
                 });
             }
@@ -162,6 +230,23 @@ impl GraphEngine {
                     );
                     self.attach_strategy_to_graph(episode, &strategy).await?;
 
+                    // Index into strategy BM25 for multi-signal retrieval
+                    let has_code = events.iter().any(|e| e.is_code);
+                    {
+                        let text = format!(
+                            "{} {} {}",
+                            strategy.summary, strategy.when_to_use, strategy.action_hint
+                        );
+                        if !text.trim().is_empty() {
+                            let mut idx = self.strategy_bm25_index.write().await;
+                            if has_code {
+                                idx.index_document_code(upsert.id, &text);
+                            } else {
+                                idx.index_document(upsert.id, &text);
+                            }
+                        }
+                    }
+
                     // Fire-and-forget: async LLM refinement + embedding for strategy
                     if let Some(ref refinement) = self.refinement_engine {
                         let strategy_id = upsert.id;
@@ -170,6 +255,8 @@ impl GraphEngine {
                         let refinement_ref = refinement.clone();
                         let embedding_client = self.embedding_client.clone();
                         let event_narrative = crate::event_content::build_event_narrative(&events);
+                        let bm25_ref = self.strategy_bm25_index.clone();
+                        let has_code_for_reindex = has_code;
                         tokio::spawn(async move {
                             match refinement_ref
                                 .refine_and_embed_strategy(
@@ -180,6 +267,20 @@ impl GraphEngine {
                                 .await
                             {
                                 Ok(refined) => {
+                                    // Re-index with refined text
+                                    let text = format!(
+                                        "{} {} {}",
+                                        refined.summary, refined.when_to_use, refined.action_hint
+                                    );
+                                    if !text.trim().is_empty() {
+                                        let mut idx = bm25_ref.write().await;
+                                        idx.remove_document(strategy_id);
+                                        if has_code_for_reindex {
+                                            idx.index_document_code(strategy_id, &text);
+                                        } else {
+                                            idx.index_document(strategy_id, &text);
+                                        }
+                                    }
                                     let mut store = store_ref.write().await;
                                     if let Err(e) = store.update_strategy(refined) {
                                         tracing::warn!(
@@ -313,6 +414,258 @@ impl GraphEngine {
                 events.len(),
                 episode.salience_score,
             );
+        }
+
+        Ok(())
+    }
+
+    /// Process episode for automatic state tracking and ledger extraction.
+    ///
+    /// Scans episode events for state-change and transaction signals, then
+    /// updates the structured memory store.
+    pub(super) async fn process_episode_for_state_tracking(
+        &self,
+        episode: &Episode,
+    ) -> GraphResult<()> {
+        let events: Vec<Event> = {
+            let store = self.event_store.read().await;
+            episode
+                .events
+                .iter()
+                .filter_map(|id| store.get(id).cloned())
+                .collect()
+        };
+
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        // Pre-resolve all entity names to NodeIds while holding inference lock,
+        // then drop it before acquiring structured_memory write lock to avoid deadlock.
+        struct StateCandidate {
+            entity: String,
+            new_state: String,
+            old_state: Option<String>,
+            node_id: NodeId,
+            trigger: String,
+            timestamp: u64,
+        }
+        struct LedgerCandidate {
+            from: String,
+            to: String,
+            from_id: NodeId,
+            to_id: NodeId,
+            amount: f64,
+            description: String,
+            direction: crate::structured_memory::LedgerDirection,
+            timestamp: u64,
+        }
+
+        let (state_candidates, ledger_candidates) = {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+
+            let mut state_candidates = Vec::new();
+            let mut ledger_candidates = Vec::new();
+
+            for event in &events {
+                // ---- State change detection ----
+                let entity_name = event.metadata.get("entity").and_then(metadata_as_str);
+                let new_state = event
+                    .metadata
+                    .get("new_state")
+                    .or_else(|| event.metadata.get("entity_state"))
+                    .and_then(metadata_as_str);
+                let old_state = event.metadata.get("old_state").and_then(metadata_as_str);
+
+                // Recognized event patterns for state changes
+                let is_state_event = matches!(&event.event_type, EventType::Context { context_type, .. } if context_type == "state_update")
+                    || event.metadata.contains_key("entity_state")
+                    || event.metadata.contains_key("new_state")
+                    || match &event.event_type {
+                        EventType::Action { action_name, .. } => {
+                            action_name.contains("update_status")
+                                || action_name.contains("set_state")
+                                || action_name.contains("transition")
+                        },
+                        EventType::Observation {
+                            observation_type, ..
+                        } => observation_type == "state_change",
+                        _ => false,
+                    };
+
+                // Section E guards: ALL must pass
+                if let (Some(ref entity), Some(ref new_st)) = (&entity_name, &new_state) {
+                    if !entity.is_empty()
+                        && !new_st.is_empty()
+                        && is_state_event
+                        && event.timestamp > 0
+                    {
+                        if let Some(&node_id) = graph.concept_index.get(entity.as_str()) {
+                            let trigger = match &event.event_type {
+                                EventType::Action { action_name, .. } => action_name.clone(),
+                                _ => "auto".to_string(),
+                            };
+                            state_candidates.push(StateCandidate {
+                                entity: entity.clone(),
+                                new_state: new_st.clone(),
+                                old_state: old_state.clone(),
+                                node_id,
+                                trigger,
+                                timestamp: event.timestamp,
+                            });
+                        } else {
+                            tracing::debug!(
+                                "State tracking: entity '{}' not found in graph indices",
+                                entity
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            "State tracking guard rejected: entity_empty={} state_empty={} is_state_event={} ts={}",
+                            entity.is_empty(),
+                            new_st.is_empty(),
+                            is_state_event,
+                            event.timestamp
+                        );
+                    }
+                }
+
+                // ---- Ledger/transaction detection ----
+                let amount = event.metadata.get("amount").and_then(metadata_as_f64);
+                let from_entity = event.metadata.get("from").and_then(metadata_as_str);
+                let to_entity = event.metadata.get("to").and_then(metadata_as_str);
+
+                let is_transaction_event = event.metadata.contains_key("amount")
+                    || event.metadata.contains_key("transaction");
+
+                if let (Some(amt), Some(ref from), Some(ref to)) =
+                    (amount, &from_entity, &to_entity)
+                {
+                    if !from.is_empty()
+                        && !to.is_empty()
+                        && is_transaction_event
+                        && event.timestamp > 0
+                        && amt.is_finite()
+                    {
+                        let from_id = graph.concept_index.get(from.as_str()).copied();
+                        let to_id = graph.concept_index.get(to.as_str()).copied();
+
+                        if let (Some(fid), Some(tid)) = (from_id, to_id) {
+                            let description = event
+                                .metadata
+                                .get("description")
+                                .and_then(metadata_as_str)
+                                .unwrap_or_else(|| "auto-extracted".to_string());
+
+                            // Detect direction from metadata, default to Credit
+                            let direction = event
+                                .metadata
+                                .get("direction")
+                                .and_then(metadata_as_str)
+                                .map(|d| {
+                                    if d.eq_ignore_ascii_case("debit") {
+                                        crate::structured_memory::LedgerDirection::Debit
+                                    } else {
+                                        crate::structured_memory::LedgerDirection::Credit
+                                    }
+                                })
+                                .unwrap_or(crate::structured_memory::LedgerDirection::Credit);
+
+                            ledger_candidates.push(LedgerCandidate {
+                                from: from.clone(),
+                                to: to.clone(),
+                                from_id: fid,
+                                to_id: tid,
+                                amount: amt,
+                                description,
+                                direction,
+                                timestamp: event.timestamp,
+                            });
+                        } else {
+                            tracing::debug!(
+                                "Ledger tracking: entities '{}' or '{}' not found in graph",
+                                from,
+                                to
+                            );
+                        }
+                    }
+                }
+            }
+
+            (state_candidates, ledger_candidates)
+        };
+        // inference lock is now dropped
+
+        // Apply state changes and ledger entries under structured_memory write lock
+        if !state_candidates.is_empty() || !ledger_candidates.is_empty() {
+            let mut sm = self.structured_memory.write().await;
+
+            for sc in state_candidates {
+                let key = crate::structured_memory::state_key(sc.node_id);
+
+                // Create state machine if not exists
+                if sm.get(&key).is_none() {
+                    let initial_state = sc.old_state.as_deref().unwrap_or("unknown");
+                    sm.upsert(
+                        &key,
+                        crate::structured_memory::MemoryTemplate::StateMachine {
+                            entity: sc.entity.clone(),
+                            current_state: initial_state.to_string(),
+                            history: vec![],
+                            provenance: crate::structured_memory::MemoryProvenance::EpisodePipeline,
+                        },
+                    );
+                }
+
+                if let Err(e) = sm.state_transition(&key, &sc.new_state, &sc.trigger, sc.timestamp)
+                {
+                    tracing::debug!("State transition failed for {}: {}", key, e);
+                } else {
+                    tracing::debug!(
+                        "Auto state transition: {} -> {} (entity={})",
+                        sc.old_state.as_deref().unwrap_or("?"),
+                        sc.new_state,
+                        sc.entity
+                    );
+                }
+            }
+
+            for lc in ledger_candidates {
+                let key = crate::structured_memory::ledger_key(lc.from_id, lc.to_id);
+
+                // Create ledger if not exists
+                if sm.get(&key).is_none() {
+                    sm.upsert(
+                        &key,
+                        crate::structured_memory::MemoryTemplate::Ledger {
+                            entity_pair: (lc.from.clone(), lc.to.clone()),
+                            entries: vec![],
+                            balance: 0.0,
+                            provenance: crate::structured_memory::MemoryProvenance::EpisodePipeline,
+                        },
+                    );
+                }
+
+                let entry = crate::structured_memory::LedgerEntry {
+                    timestamp: lc.timestamp,
+                    amount: lc.amount,
+                    description: lc.description,
+                    direction: lc.direction,
+                };
+
+                if let Err(e) = sm.ledger_append(&key, entry) {
+                    tracing::debug!("Ledger append failed for {}: {}", key, e);
+                } else {
+                    tracing::debug!(
+                        "Auto ledger entry: {} -> {} amount={} (key={})",
+                        lc.from,
+                        lc.to,
+                        lc.amount,
+                        key
+                    );
+                }
+            }
         }
 
         Ok(())

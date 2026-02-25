@@ -460,6 +460,7 @@ fn create_development_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         Event {
             id: generate_event_id(),
@@ -480,6 +481,7 @@ fn create_development_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         Event {
             id: generate_event_id(),
@@ -500,6 +502,7 @@ fn create_development_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
     ]
 }
@@ -530,6 +533,7 @@ fn create_analysis_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         Event {
             id: generate_event_id(),
@@ -552,6 +556,7 @@ fn create_analysis_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
     ]
 }
@@ -580,6 +585,7 @@ fn create_monitoring_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         Event {
             id: generate_event_id(),
@@ -600,6 +606,7 @@ fn create_monitoring_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
     ]
 }
@@ -632,6 +639,7 @@ fn create_task_management_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
         Event {
             id: generate_event_id(),
@@ -655,6 +663,7 @@ fn create_task_management_events(
             metadata: HashMap::new(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         },
     ]
 }

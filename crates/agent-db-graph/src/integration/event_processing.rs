@@ -339,6 +339,9 @@ impl GraphEngine {
                             self.process_episode_for_memory(episode).await?;
                         }
 
+                        // Structured memory: auto-extract state changes and ledger entries
+                        self.process_episode_for_state_tracking(episode).await?;
+
                         if self.config.auto_strategy_extraction {
                             self.process_episode_for_strategy(episode).await?;
                         }

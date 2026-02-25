@@ -71,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metadata: std::collections::HashMap::new(),
         context_size_bytes: 0,
         segment_pointer: None,
+        is_code: false,
     };
 
     // Event 2: Agent 2 responds (with slight delay)
@@ -91,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metadata: std::collections::HashMap::new(),
         context_size_bytes: 0,
         segment_pointer: None,
+        is_code: false,
     };
 
     // Event 3: Agent 1 performs an action
@@ -113,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metadata: std::collections::HashMap::new(),
         context_size_bytes: 0,
         segment_pointer: None,
+        is_code: false,
     };
 
     println!("📝 Processing events through graph engine...");

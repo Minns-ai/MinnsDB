@@ -554,7 +554,96 @@ impl Bm25Index {
         idf * normalized_tf
     }
 
-    /// Tokenize text into terms
+    /// Index a document containing code using code-aware tokenization.
+    ///
+    /// Preserves identifiers, operators, qualified names, and short tokens
+    /// that the natural tokenizer would destroy.
+    pub fn index_document_code(&mut self, node_id: NodeId, text: &str) {
+        let terms = tokenize_code(text);
+        let length = terms.len();
+
+        let mut term_frequencies = HashMap::new();
+        for term in &terms {
+            *term_frequencies.entry(term.clone()).or_insert(0) += 1;
+        }
+
+        self.corpus_stats.total_docs += 1;
+
+        for term in term_frequencies.keys() {
+            *self
+                .corpus_stats
+                .doc_frequencies
+                .entry(term.clone())
+                .or_insert(0) += 1;
+        }
+
+        let total_length: usize = self.documents.values().map(|d| d.length).sum::<usize>() + length;
+        self.corpus_stats.avg_doc_length =
+            total_length as f32 / self.corpus_stats.total_docs as f32;
+
+        self.documents.insert(
+            node_id,
+            DocumentStats {
+                length,
+                term_frequencies,
+            },
+        );
+    }
+
+    /// Search using code-aware tokenization.
+    ///
+    /// Tokenizes the query with `tokenize_code()` and scores against all documents.
+    pub fn search_code(&self, query: &str, limit: usize) -> Vec<(NodeId, f32)> {
+        let query_terms = tokenize_code(query);
+        if query_terms.is_empty() {
+            return Vec::new();
+        }
+
+        let mut scores: HashMap<NodeId, f32> = HashMap::new();
+
+        for (&node_id, doc_stats) in &self.documents {
+            let mut score = 0.0;
+            for term in &query_terms {
+                score += self.bm25_term_score(term, doc_stats);
+            }
+            if score > 0.0 {
+                scores.insert(node_id, score);
+            }
+        }
+
+        let mut results: Vec<(NodeId, f32)> = scores.into_iter().collect();
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+        results
+    }
+
+    /// Search using both natural and code tokenizers, merging candidate sets.
+    ///
+    /// Runs both search paths independently with an expanded candidate pool,
+    /// then merges by taking `max(natural_score, code_score)` per node.
+    pub fn search_mixed(&self, query: &str, limit: usize) -> Vec<(NodeId, f32)> {
+        let pool = limit.clamp(7, 60) * 3; // internal candidate pool
+        let natural_results = self.search(query, pool);
+        let code_results = self.search_code(query, pool);
+
+        let mut merged: HashMap<NodeId, f32> = HashMap::new();
+        for (node_id, score) in natural_results {
+            merged.insert(node_id, score);
+        }
+        for (node_id, score) in code_results {
+            let entry = merged.entry(node_id).or_insert(0.0);
+            if score > *entry {
+                *entry = score;
+            }
+        }
+
+        let mut results: Vec<(NodeId, f32)> = merged.into_iter().collect();
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+        results
+    }
+
+    /// Tokenize text into terms (natural language).
     ///
     /// Simple tokenization: lowercase, split on whitespace, filter short words
     fn tokenize(text: &str) -> Vec<String> {
@@ -589,6 +678,217 @@ pub struct Bm25Stats {
     pub total_docs: usize,
     pub unique_terms: usize,
     pub avg_doc_length: f32,
+}
+
+// ============================================================================
+// Code-Aware Tokenization
+// ============================================================================
+
+/// Multi-character operators mapped to synthetic tokens (longest-match-first order).
+const OPERATOR_TABLE: &[(&str, &str)] = &[
+    ("::", "op_scope"),
+    ("=>", "op_fat_arrow"),
+    ("->", "op_arrow"),
+    (">=", "op_gte"),
+    ("<=", "op_lte"),
+    ("!=", "op_neq"),
+    ("==", "op_eq"),
+    ("&&", "op_and"),
+    ("||", "op_or"),
+];
+
+/// Tokenize text containing code identifiers, operators, and qualified names.
+///
+/// Produces lowercased tokens with min-length 1 (preserving `fn`, `id`, `x`).
+/// - camelCase/PascalCase split: `getUserName` → `["get", "user", "name", "getusername"]`
+/// - snake_case split: `get_user_name` → `["get", "user", "name", "get_user_name"]`
+/// - Qualified names: split on `.`, recursively tokenize each segment
+/// - Operators: longest-match scan → synthetic `op_*` tokens
+/// - String literals: tokenize content (first 64 chars per literal)
+pub fn tokenize_code(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+
+    // Phase 1: Scan for operator tokens, collect non-operator chunks
+    let mut chunks: Vec<String> = Vec::new();
+    let mut i = 0;
+    let mut chunk_start = 0;
+
+    while i < text.len() {
+        // Skip positions that are not character boundaries (mid-UTF-8 byte)
+        if !text.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        // Try longest-match operator
+        let mut matched = false;
+        for &(op, tok) in OPERATOR_TABLE {
+            if text[i..].starts_with(op) {
+                // Flush the chunk before the operator
+                if chunk_start < i {
+                    chunks.push(text[chunk_start..i].to_string());
+                }
+                tokens.push(tok.to_string());
+                i += op.len();
+                chunk_start = i;
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            i += 1;
+        }
+    }
+    if chunk_start < text.len() {
+        chunks.push(text[chunk_start..].to_string());
+    }
+
+    // Phase 2: Tokenize each non-operator chunk
+    for chunk in &chunks {
+        // Split on whitespace first
+        for word in chunk.split_whitespace() {
+            // Strip common delimiters but keep underscores and dots
+            let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
+            if cleaned.is_empty() {
+                continue;
+            }
+
+            // Check for string literal content (quoted strings)
+            if (word.starts_with('"') || word.starts_with('\''))
+                && (word.ends_with('"') || word.ends_with('\''))
+                && word.len() > 2
+            {
+                let inner = &word[1..word.len() - 1];
+                let bounded = if inner.len() > 64 {
+                    &inner[..64]
+                } else {
+                    inner
+                };
+                tokenize_identifier(&mut tokens, bounded);
+                continue;
+            }
+
+            // Handle qualified names (contains dots separating identifier parts)
+            if cleaned.contains('.') {
+                tokenize_qualified_name(&mut tokens, cleaned);
+            } else {
+                tokenize_identifier(&mut tokens, cleaned);
+            }
+        }
+    }
+
+    tokens
+}
+
+/// Tokenize a qualified name like `auth.service.UserService`.
+///
+/// Splits on `.`, recursively tokenizes each segment, then adds a normalized
+/// joined variant (e.g., `"auth.service.userservice"`).
+fn tokenize_qualified_name(tokens: &mut Vec<String>, name: &str) {
+    let segments: Vec<&str> = name.split('.').filter(|s| !s.is_empty()).collect();
+    for segment in &segments {
+        tokenize_identifier(tokens, segment);
+    }
+    // Add normalized joined variant
+    let joined: String = segments
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(".");
+    if !joined.is_empty() {
+        tokens.push(joined);
+    }
+}
+
+/// Tokenize a single identifier, splitting camelCase/PascalCase and snake_case.
+///
+/// `getUserName` → `["get", "user", "name", "getusername"]`
+/// `get_user_name` → `["get", "user", "name", "get_user_name"]`
+fn tokenize_identifier(tokens: &mut Vec<String>, ident: &str) {
+    let lower = ident.to_lowercase();
+
+    // Snake_case split
+    if ident.contains('_') {
+        let parts: Vec<&str> = ident.split('_').filter(|s| !s.is_empty()).collect();
+        if parts.len() > 1 {
+            for part in &parts {
+                let pl = part.to_lowercase();
+                if !pl.is_empty() {
+                    tokens.push(pl);
+                }
+            }
+            // Add the full joined form (without underscores)
+            let joined: String = parts.iter().map(|p| p.to_lowercase()).collect();
+            if !joined.is_empty() {
+                tokens.push(joined);
+            }
+            // Also add the original snake_case form
+            tokens.push(lower);
+            return;
+        }
+    }
+
+    // camelCase / PascalCase split
+    let camel_parts = split_camel_case(ident);
+    if camel_parts.len() > 1 {
+        for part in &camel_parts {
+            let pl = part.to_lowercase();
+            if !pl.is_empty() {
+                tokens.push(pl);
+            }
+        }
+        // Add full lowercased form
+        tokens.push(lower);
+        return;
+    }
+
+    // Single token (already lowercased)
+    if !lower.is_empty() {
+        tokens.push(lower);
+    }
+}
+
+/// Split a camelCase or PascalCase identifier into parts.
+///
+/// `getUserName` → `["get", "User", "Name"]`
+/// `HTTPClient` → `["HTTP", "Client"]`
+fn split_camel_case(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut start = 0;
+
+    for i in 1..len {
+        let split = if chars[i].is_uppercase() && chars[i - 1].is_lowercase() {
+            // camelCase boundary: lower→upper (e.g., "get|User")
+            true
+        } else if chars[i].is_uppercase()
+            && i + 1 < len
+            && chars[i + 1].is_lowercase()
+            && chars[i - 1].is_uppercase()
+        {
+            // Acronym→word boundary: upper+upper→lower (e.g., "HTT|P|Client" → "HTTP|Client")
+            true
+        } else {
+            false
+        };
+
+        if split {
+            let part: String = chars[start..i].iter().collect();
+            if !part.is_empty() {
+                parts.push(part);
+            }
+            start = i;
+        }
+    }
+    // Last segment
+    if start < len {
+        let part: String = chars[start..].iter().collect();
+        if !part.is_empty() {
+            parts.push(part);
+        }
+    }
+
+    parts
 }
 
 // ============================================================================
@@ -987,5 +1287,165 @@ mod tests {
         // Node 2 gets (5.0 * 0.7 + 0.9 * 0.3 = 3.5 + 0.27 = 3.77)
         assert_eq!(fused[0].0, 1);
         assert!(fused[0].1 > 6.0);
+    }
+
+    // ========================================================================
+    // Code-aware tokenizer tests
+    // ========================================================================
+
+    #[test]
+    fn test_tokenize_code_camel_case() {
+        let tokens = tokenize_code("getUserName");
+        assert!(tokens.contains(&"get".to_string()));
+        assert!(tokens.contains(&"user".to_string()));
+        assert!(tokens.contains(&"name".to_string()));
+        assert!(tokens.contains(&"getusername".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_code_snake_case() {
+        let tokens = tokenize_code("get_user_name");
+        assert!(tokens.contains(&"get".to_string()));
+        assert!(tokens.contains(&"user".to_string()));
+        assert!(tokens.contains(&"name".to_string()));
+        assert!(tokens.contains(&"get_user_name".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_code_qualified_name() {
+        let tokens = tokenize_code("auth.service.UserService");
+        assert!(tokens.contains(&"auth".to_string()));
+        assert!(tokens.contains(&"service".to_string()));
+        assert!(tokens.contains(&"user".to_string()));
+        // The full joined variant
+        assert!(tokens.contains(&"auth.service.userservice".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_code_operators() {
+        let tokens = tokenize_code("x >= 10 && y != 0");
+        assert!(tokens.contains(&"op_gte".to_string()));
+        assert!(tokens.contains(&"op_and".to_string()));
+        assert!(tokens.contains(&"op_neq".to_string()));
+        assert!(tokens.contains(&"x".to_string()));
+        assert!(tokens.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_code_operator_no_conflict() {
+        // `=>` should become op_fat_arrow, not `=` + `>`
+        let tokens = tokenize_code("a => b");
+        assert!(tokens.contains(&"op_fat_arrow".to_string()));
+        assert!(!tokens.contains(&"op_gte".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_code_short_identifiers_preserved() {
+        let tokens = tokenize_code("fn id x i");
+        assert!(tokens.contains(&"fn".to_string()));
+        assert!(tokens.contains(&"id".to_string()));
+        assert!(tokens.contains(&"x".to_string()));
+        assert!(tokens.contains(&"i".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_code_string_literal() {
+        let tokens = tokenize_code("\"USER_CREATED\"");
+        assert!(
+            tokens.contains(&"user".to_string()) || tokens.contains(&"usercreated".to_string()),
+            "String literal content should be tokenized: {:?}",
+            tokens
+        );
+    }
+
+    #[test]
+    fn test_index_document_code_and_search_code() {
+        let mut index = Bm25Index::new();
+        index.index_document_code(1, "fn getUserName() { return self.user_name; }");
+        index.index_document_code(2, "class AuthService { fn login() {} }");
+        index.index_document(3, "The user logged in successfully");
+
+        // Code search should find getUserName
+        let results = index.search_code("get_user_name", 10);
+        assert!(!results.is_empty(), "search_code should find getUserName");
+        assert_eq!(results[0].0, 1);
+    }
+
+    #[test]
+    fn test_cross_format_matching() {
+        let mut index = Bm25Index::new();
+        index.index_document_code(1, "getUserName");
+        // Searching with snake_case should match camelCase
+        let results = index.search_code("get_user_name", 10);
+        assert!(
+            !results.is_empty(),
+            "search_code(get_user_name) should match indexed getUserName"
+        );
+    }
+
+    #[test]
+    fn test_search_mixed_returns_both_paths() {
+        let mut index = Bm25Index::new();
+        // Natural language document
+        index.index_document(1, "the authentication service handles login requests");
+        // Code document
+        index.index_document_code(2, "fn handleLoginRequest(auth_service: AuthService)");
+
+        let results = index.search_mixed("authentication login", 10);
+        assert!(results.len() >= 1, "search_mixed should find results");
+        // Both docs should be candidates
+        let ids: Vec<u64> = results.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&1), "Natural doc should be found");
+    }
+
+    #[test]
+    fn test_search_mixed_bounded_pool() {
+        let mut index = Bm25Index::new();
+        for i in 0..100 {
+            index.index_document_code(i, &format!("fn method_{} {{ code }}", i));
+        }
+        let results = index.search_mixed("method", 5);
+        assert!(results.len() <= 5, "search_mixed should respect limit");
+    }
+
+    #[test]
+    fn test_qualified_name_partial_query() {
+        let mut index = Bm25Index::new();
+        index.index_document_code(1, "auth.service.UserService");
+
+        // Query for just "UserService"
+        let results = index.search_code("UserService", 10);
+        assert!(
+            !results.is_empty(),
+            "Should find via partial qualified name"
+        );
+        assert_eq!(results[0].0, 1);
+
+        // Query for "auth.service"
+        let results2 = index.search_code("auth.service", 10);
+        assert!(
+            !results2.is_empty(),
+            "Should find via prefix qualified name"
+        );
+    }
+
+    #[test]
+    fn test_split_camel_case_acronym() {
+        let parts = split_camel_case("HTTPClient");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "HTTP");
+        assert_eq!(parts[1], "Client");
+    }
+
+    #[test]
+    fn test_split_camel_case_simple() {
+        let parts = split_camel_case("getUserName");
+        assert_eq!(parts, vec!["get", "User", "Name"]);
+    }
+
+    #[test]
+    fn test_split_camel_case_single() {
+        let parts = split_camel_case("name");
+        assert_eq!(parts, vec!["name"]);
     }
 }

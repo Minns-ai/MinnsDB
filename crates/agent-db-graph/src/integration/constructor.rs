@@ -414,6 +414,77 @@ impl GraphEngine {
                 (None, None, None)
             };
 
+        // Initialize NLQ hint client if enabled
+        let nlq_hint_client: Option<Arc<dyn crate::nlq::llm_hint::NlqHintClient>> = if config
+            .enable_nlq_hint
+        {
+            let hint_key = config
+                .nlq_hint_api_key
+                .clone()
+                .or_else(|| config.openai_api_key.clone());
+            if let Some(key) = hint_key {
+                let client: Arc<dyn crate::nlq::llm_hint::NlqHintClient> =
+                    match config.nlq_hint_provider.as_str() {
+                        "anthropic" => Arc::new(crate::nlq::llm_hint::AnthropicHintClient::new(
+                            key,
+                            config.nlq_hint_model.clone(),
+                        )),
+                        _ => Arc::new(crate::nlq::llm_hint::OpenAiHintClient::new(
+                            key,
+                            config.nlq_hint_model.clone(),
+                        )),
+                    };
+                tracing::info!(
+                    "NLQ hint classifier enabled (provider={}, model={})",
+                    config.nlq_hint_provider,
+                    config.nlq_hint_model,
+                );
+                Some(client)
+            } else {
+                tracing::warn!(
+                        "NLQ hint enabled but no API key found (nlq_hint_api_key / openai_api_key) — hint disabled"
+                    );
+                None
+            }
+        } else {
+            None
+        };
+
+        // Initialize multi-signal retrieval BM25 indexes and populate from existing stores
+        let memory_bm25_index = {
+            let mut idx = crate::indexing::Bm25Index::new();
+            let store = memory_store.read().await;
+            for mem in store.list_all_memories() {
+                let text = format!("{} {} {}", mem.summary, mem.takeaway, mem.causal_note);
+                if !text.trim().is_empty() {
+                    idx.index_document(mem.id, &text);
+                }
+            }
+            let count = idx.stats().total_docs;
+            if count > 0 {
+                tracing::info!("Memory BM25 index populated with {} documents", count);
+            }
+            Arc::new(RwLock::new(idx))
+        };
+        let strategy_bm25_index = {
+            let mut idx = crate::indexing::Bm25Index::new();
+            let store = strategy_store.read().await;
+            for strat in store.list_all_strategies() {
+                let text = format!(
+                    "{} {} {}",
+                    strat.summary, strat.when_to_use, strat.action_hint
+                );
+                if !text.trim().is_empty() {
+                    idx.index_document(strat.id, &text);
+                }
+            }
+            let count = idx.stats().total_docs;
+            if count > 0 {
+                tracing::info!("Strategy BM25 index populated with {} documents", count);
+            }
+            Arc::new(RwLock::new(idx))
+        };
+
         // Initialize RedbGraphStore alongside the existing backend
         let graph_store = if let Some(ref backend) = redb_backend {
             let store = crate::redb_graph_store::RedbGraphStore::new(
@@ -450,6 +521,8 @@ impl GraphEngine {
             random_walker,
             temporal_reachability,
             label_propagation,
+            memory_bm25_index,
+            strategy_bm25_index,
             ner_queue,
             ner_store,
             claim_queue,
@@ -465,6 +538,12 @@ impl GraphEngine {
             planning_orchestrator,
             strategy_generator: strategy_generator_arc,
             action_generator: action_generator_arc,
+            structured_memory: Arc::new(RwLock::new(
+                crate::structured_memory::StructuredMemoryStore::new(),
+            )),
+            nlq_pipeline: crate::nlq::NlqPipeline::new(),
+            nlq_contexts: tokio::sync::Mutex::new(HashMap::new()),
+            nlq_hint_client,
             active_executions: Arc::new(dashmap::DashMap::new()),
             next_execution_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };

@@ -69,6 +69,7 @@ fn create_cognitive_event(
         metadata: HashMap::new(),
         context_size_bytes: 0,
         segment_pointer: None,
+        is_code: false,
     }
 }
 
@@ -104,6 +105,7 @@ fn create_action_event(
         metadata: HashMap::new(),
         context_size_bytes: 0,
         segment_pointer: None,
+        is_code: false,
     }
 }
 

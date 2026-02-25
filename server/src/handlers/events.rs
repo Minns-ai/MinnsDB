@@ -112,6 +112,7 @@ pub async fn process_simple_event(
         metadata: Default::default(),
         context_size_bytes: 0,
         segment_pointer: None,
+        is_code: false,
     };
 
     // Process the event through the standard pipeline

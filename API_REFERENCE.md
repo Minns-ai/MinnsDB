@@ -2,8 +2,8 @@
 
 **Complete REST API documentation for SDK integration**
 
-Version: 2.0.0
-Last Updated: 2026-02-23
+Version: 2.1.0
+Last Updated: 2026-02-25
 
 ---
 
@@ -17,12 +17,14 @@ Last Updated: 2026-02-23
 6. [Graph](#graph)
 7. [Analytics](#analytics)
 8. [Search](#search)
-9. [Claims](#claims)
-10. [Planning & World Model](#planning--world-model)
-11. [Admin](#admin)
-12. [Health](#health)
-13. [Error Handling](#error-handling)
-14. [Configuration](#configuration)
+9. [Natural Language Query (NLQ)](#natural-language-query-nlq)
+10. [Claims](#claims)
+11. [Structured Memory](#structured-memory)
+12. [Planning & World Model](#planning--world-model)
+13. [Admin](#admin)
+14. [Health](#health)
+15. [Error Handling](#error-handling)
+16. [Configuration](#configuration)
 
 ---
 
@@ -55,7 +57,8 @@ All IDs are numeric:
   "context": { ... },
   "metadata": {},
   "context_size_bytes": 0,
-  "segment_pointer": null
+  "segment_pointer": null,
+  "is_code": false
 }
 ```
 
@@ -187,6 +190,29 @@ One of: `"GoalFormation"`, `"Planning"`, `"Reasoning"`, `"MemoryRetrieval"`, `"L
 ```
 
 `fingerprint` and `goal_bucket_id` are auto-computed if set to 0.
+
+### Event.is_code
+
+Set `"is_code": true` on events containing source code. This activates:
+- **Code tokenizer:** camelCase/PascalCase splitting, snake_case splitting, qualified name recursion, operator tokenization
+- **Code BM25 indexing:** Separate code-aware BM25 index with `search_code()` and `search_mixed()` queries
+- **Code concept types:** `Function`, `Class`, `Module`, `Variable` node types extracted from code events
+- **NLQ code routing:** Entity extraction recognizes code identifiers; BM25 searches route through the code index
+
+```json
+{
+  "is_code": true,
+  "event_type": {
+    "Context": {
+      "text": "fn process_event(&self, event: Event) -> Result<()> { ... }",
+      "context_type": "code",
+      "language": "rust"
+    }
+  }
+}
+```
+
+The field defaults to `false` and is backward-compatible (older events without it are treated as natural language).
 
 ---
 
@@ -722,6 +748,79 @@ Unified search with three modes.
 
 ---
 
+## Natural Language Query (NLQ)
+
+Ask questions about the graph in plain English. The pipeline classifies intent, resolves entities, builds a graph query, executes it, and returns a human-readable answer.
+
+When `ENABLE_NLQ_HINT=true`, an LLM advisory classifier runs alongside the rule-based classifier. It improves routing accuracy for ambiguous queries (especially structured memory types) while gracefully falling back to rules on any LLM failure.
+
+### POST /api/nlq
+
+**Request:**
+```json
+{
+  "question": "What are the neighbors of Alice?",
+  "limit": 10,
+  "offset": 0,
+  "session_id": "user-session-1"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `question` | string | yes | Natural language question |
+| `limit` | integer | no | Pagination limit |
+| `offset` | integer | no | Pagination offset |
+| `session_id` | string | no | Session ID for conversational context (follow-up questions) |
+
+**Response (200):**
+```json
+{
+  "answer": "Neighbors of Alice: Bob (Association)",
+  "intent": "FindNeighbors",
+  "entities_resolved": [
+    {
+      "text": "Alice",
+      "node_id": 1,
+      "node_type": "Concept",
+      "confidence": 0.95
+    }
+  ],
+  "confidence": 0.87,
+  "result_count": 1,
+  "execution_time_ms": 5,
+  "query_used": "NeighborsWithinDistance { source: 1, max_distance: 1, direction: Both }",
+  "explanation": [
+    "Intent classified as FindNeighbors",
+    "1 entity mention(s) extracted",
+    "Resolved 'Alice' -> Concept #1 (0.95)",
+    "Matched template 'neighbors_any'",
+    "Built query: NeighborsWithinDistance",
+    "Query validated successfully"
+  ],
+  "total_count": 1
+}
+```
+
+**Supported intent types:**
+- `FindNeighbors` — "Who connects to X?", "neighbors of X"
+- `FindPath` — "shortest path from A to B"
+- `FilteredTraversal` — "What tools did agent X use?"
+- `Subgraph` — "Show me everything about X"
+- `TemporalChain` — "What happened after event X?"
+- `Ranking` — "Most important nodes", "top nodes by PageRank"
+- `SimilaritySearch` — "Find similar to X"
+- `Aggregate` — "How many nodes?", "average degree", "sum of amount between A and B"
+- `StructuredMemoryQuery` — "What is the balance between A and B?", "current state of X"
+
+**Conversational follow-ups:** When `session_id` is provided, the pipeline maintains context (up to 5 exchanges). Follow-ups like "What about Bob?" or "Show them" resolve pronouns and entity substitutions using the previous exchange.
+
+**Compound queries:** Questions containing " and " or " or " are split into sub-queries and merged (intersection/union).
+
+**Negation:** "not connected to X" inverts the result set.
+
+---
+
 ## Claims
 
 Claims are semantic assertions extracted by the NER + LLM pipeline from events.
@@ -789,6 +888,169 @@ Process pending claims to generate embeddings (batch processing).
   "claims_processed": 5,
   "success": true
 }
+```
+
+---
+
+## Structured Memory
+
+Templated data structures (ledgers, trees, state machines, preference lists) for domain-specific memory patterns that don't fit the general graph model.
+
+### POST /api/structured-memory
+
+Upsert a structured memory template.
+
+**Request:**
+```json
+{
+  "key": "ledger:1:2",
+  "template": {
+    "Ledger": {
+      "entries": [],
+      "balance": 0.0,
+      "provenance": "Manual"
+    }
+  }
+}
+```
+
+**Template types:**
+
+```json
+// Ledger — append-only double-entry accounting
+{ "Ledger": { "entries": [], "balance": 0.0, "provenance": "Manual" } }
+
+// StateMachine — entity state tracking
+{ "StateMachine": { "current_state": "idle", "history": [], "provenance": "Manual" } }
+
+// PreferenceList — ranked items
+{ "PreferenceList": { "ranked_items": [], "provenance": "Manual" } }
+
+// Tree — hierarchical data
+{ "Tree": { "nodes": {}, "provenance": "Manual" } }
+```
+
+**Provenance:** `"Manual"`, `"EpisodePipeline"`, `"NlqUpsert"`
+
+**Response (200):**
+```json
+{ "success": true, "key": "ledger:1:2" }
+```
+
+### GET /api/structured-memory?prefix=ledger
+
+List all keys, optionally filtered by prefix.
+
+**Response (200):**
+```json
+{ "keys": ["ledger:1:2", "ledger:3:4"], "count": 2 }
+```
+
+### GET /api/structured-memory/:key
+
+Get a structured memory by key.
+
+**Response (200):**
+```json
+{
+  "key": "ledger:1:2",
+  "template": { "Ledger": { "entries": [...], "balance": 50.0, "provenance": "Manual" } }
+}
+```
+
+### DELETE /api/structured-memory/:key
+
+Remove a structured memory.
+
+**Response (200):**
+```json
+{ "success": true, "key": "ledger:1:2" }
+```
+
+### POST /api/structured-memory/ledger/:key/append
+
+Append a ledger entry. The balance is recomputed on every append.
+
+**Request:**
+```json
+{
+  "amount": 25.0,
+  "description": "Payment for services",
+  "direction": "Credit"
+}
+```
+
+**`direction`:** `"Credit"` (adds) or `"Debit"` (subtracts)
+
+**Response (200):**
+```json
+{ "success": true, "balance": 75.0 }
+```
+
+### GET /api/structured-memory/ledger/:key/balance
+
+**Response (200):**
+```json
+{ "key": "ledger:1:2", "balance": 75.0 }
+```
+
+### POST /api/structured-memory/state/:key/transition
+
+Transition a state machine to a new state.
+
+**Request:**
+```json
+{
+  "new_state": "active",
+  "trigger": "user_login"
+}
+```
+
+**Response (200):**
+```json
+{ "success": true, "new_state": "active" }
+```
+
+### GET /api/structured-memory/state/:key/current
+
+**Response (200):**
+```json
+{ "key": "state:42", "current_state": "active" }
+```
+
+### POST /api/structured-memory/preference/:key/update
+
+Update or insert a preference ranking.
+
+**Request:**
+```json
+{
+  "item": "pizza",
+  "rank": 1,
+  "score": 9.5
+}
+```
+
+**Response (200):**
+```json
+{ "success": true }
+```
+
+### POST /api/structured-memory/tree/:key/add-child
+
+Add a child node to a tree.
+
+**Request:**
+```json
+{
+  "parent": "root",
+  "child": "category-a"
+}
+```
+
+**Response (200):**
+```json
+{ "success": true }
 ```
 
 ---
@@ -1066,6 +1328,10 @@ HTTP status codes:
 | `ENABLE_STRATEGY_GENERATION` | `false` | Enable LLM strategy generation |
 | `ENABLE_ACTION_GENERATION` | `false` | Enable LLM action generation |
 | `REPAIR_ENABLED` | `false` | Auto-repair on high prediction error |
+| `ENABLE_NLQ_HINT` | `false` | Enable LLM advisory classifier for NLQ intent routing |
+| `NLQ_HINT_API_KEY` | `LLM_API_KEY` | API key for NLQ hint classifier (falls back to `LLM_API_KEY`) |
+| `NLQ_HINT_PROVIDER` | `openai` | LLM provider for NLQ hint (`openai` or `anthropic`) |
+| `NLQ_HINT_MODEL` | `gpt-4o-mini` | Model name for NLQ hint classifier |
 
 ### World Model Modes
 
@@ -1086,4 +1352,8 @@ HTTP status codes:
 3. **Strategy-aware:** Add `GET /api/strategies/agent/:id` and `POST /api/strategies/similar`
 4. **Full telemetry:** Use `Learning` events (`MemoryUsed`, `StrategyUsed`, `Outcome`) to close the feedback loop
 5. **Semantic search:** Enable `enable_semantic: true` on events, then use `POST /api/search` with Hybrid mode
-6. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
+6. **Natural language queries:** Use `POST /api/nlq` to ask questions in plain English. Pass `session_id` for conversational follow-ups
+7. **Structured memory:** Use `/api/structured-memory/*` endpoints for domain-specific data (ledgers, state machines, preference lists, trees)
+8. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
+9. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
+10. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)

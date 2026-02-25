@@ -65,6 +65,7 @@ fn create_cognitive_event(agent_id: AgentId, timestamp: u64, reasoning: Vec<Stri
         metadata: HashMap::new(),
         context_size_bytes: 0,
         segment_pointer: None,
+        is_code: false,
     }
 }
 
@@ -95,6 +96,7 @@ fn create_action_event(agent_id: AgentId, timestamp: u64, success: bool) -> Even
         metadata: HashMap::new(),
         context_size_bytes: 0,
         segment_pointer: None,
+        is_code: false,
     }
 }
 

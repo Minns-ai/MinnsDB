@@ -88,6 +88,15 @@ pub mod temporal_view;
 // String interning pool
 pub mod intern;
 
+// Multi-signal retrieval for memories and strategies
+pub mod retrieval;
+
+// Natural Language to Graph Query pipeline
+pub mod nlq;
+
+// Dynamic structured memory templates (ledgers, trees, state machines, preferences)
+pub mod structured_memory;
+
 // Background maintenance (decay, pruning, dedup)
 pub mod maintenance;
 
@@ -167,4 +176,22 @@ pub use stores::{build_memory_index_ops, build_strategy_index_ops};
 pub use claims::{
     ClaimExtractionRequest, ClaimExtractionResult, ClaimId, ClaimStatus, ClaimType, DerivedClaim,
     EvidenceSpan, RejectedClaim, RejectionReason, ThreadId,
+};
+
+// Multi-signal retrieval
+pub use retrieval::{
+    MemoryRetrievalConfig, MemoryRetrievalPipeline, MemoryRetrievalQuery, StrategyRetrievalConfig,
+    StrategyRetrievalPipeline, StrategyRetrievalQuery,
+};
+
+// Natural Language Query
+pub use nlq::{
+    intent::QueryIntent, ConversationContext, ConversationExchange, NlqPagination, NlqPipeline,
+    NlqResponse,
+};
+
+// Structured Memory
+pub use structured_memory::{
+    LedgerDirection, LedgerEntry, MemoryProvenance, MemoryTemplate, PreferenceItem,
+    StateTransition, StructuredMemoryStore,
 };

@@ -137,6 +137,19 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
     config.planning_llm_provider =
         env::var("PLANNING_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
 
+    // NLQ hint classifier configuration
+    config.enable_nlq_hint = env::var("ENABLE_NLQ_HINT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(false);
+    config.nlq_hint_api_key = env::var("NLQ_HINT_API_KEY")
+        .ok()
+        .or_else(|| env::var("LLM_API_KEY").ok());
+    config.nlq_hint_provider =
+        env::var("NLQ_HINT_PROVIDER").unwrap_or_else(|_| "openai".to_string());
+    config.nlq_hint_model =
+        env::var("NLQ_HINT_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+
     info!(
         "  World model mode: {:?}",
         config.effective_world_model_mode()
@@ -159,6 +172,18 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
             format!("{} (key set)", config.planning_llm_provider)
         } else {
             "mock (no API key)".to_string()
+        }
+    );
+
+    info!(
+        "  NLQ hint classifier: {}",
+        if config.enable_nlq_hint {
+            format!(
+                "ENABLED ({}/{})",
+                config.nlq_hint_provider, config.nlq_hint_model
+            )
+        } else {
+            "disabled".to_string()
         }
     );
 

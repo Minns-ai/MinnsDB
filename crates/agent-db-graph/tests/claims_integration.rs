@@ -30,6 +30,7 @@ fn build_context_event(text: &str) -> Event {
         metadata: Default::default(),
         context_size_bytes: text.len(),
         segment_pointer: None,
+        is_code: false,
     }
 }
 

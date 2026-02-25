@@ -3121,6 +3121,7 @@ mod tests {
             metadata: Default::default(),
             context_size_bytes: 0,
             segment_pointer: None,
+            is_code: false,
         }
     }
 

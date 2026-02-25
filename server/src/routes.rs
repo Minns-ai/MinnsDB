@@ -72,6 +72,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/causal-path", get(handlers::get_causal_path))
         // Search
         .route("/api/search", post(handlers::search))
+        // Natural language query
+        .route("/api/nlq", post(handlers::nlq_query))
         // Semantic memory / claims
         .route("/api/claims", get(handlers::list_claims))
         .route("/api/claims/:id", get(handlers::get_claim))
@@ -79,6 +81,39 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/embeddings/process",
             post(handlers::process_embeddings),
+        )
+        // Structured Memory
+        .route(
+            "/api/structured-memory",
+            post(handlers::upsert_structured_memory).get(handlers::list_structured_memory_keys),
+        )
+        .route(
+            "/api/structured-memory/:key",
+            get(handlers::get_structured_memory).delete(handlers::delete_structured_memory),
+        )
+        .route(
+            "/api/structured-memory/ledger/:key/append",
+            post(handlers::ledger_append),
+        )
+        .route(
+            "/api/structured-memory/ledger/:key/balance",
+            get(handlers::ledger_balance),
+        )
+        .route(
+            "/api/structured-memory/state/:key/transition",
+            post(handlers::state_transition),
+        )
+        .route(
+            "/api/structured-memory/state/:key/current",
+            get(handlers::state_current),
+        )
+        .route(
+            "/api/structured-memory/preference/:key/update",
+            post(handlers::preference_update),
+        )
+        .route(
+            "/api/structured-memory/tree/:key/add-child",
+            post(handlers::tree_add_child),
         )
         // Admin: Export/Import
         .route("/api/admin/export", post(handlers::export_handler))

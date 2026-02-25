@@ -598,3 +598,86 @@ fn default_top_k() -> usize {
 fn default_min_similarity() -> f32 {
     0.7
 }
+
+// ============================================================================
+// Natural Language Query
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct NlqRequest {
+    pub question: String,
+    /// Optional pagination limit.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Optional pagination offset.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Optional session ID for conversational context.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NlqResponseBody {
+    pub answer: String,
+    pub intent: String,
+    pub entities_resolved: Vec<NlqEntity>,
+    pub confidence: f32,
+    pub result_count: usize,
+    pub execution_time_ms: u64,
+    pub query_used: String,
+    /// Step-by-step pipeline explanation.
+    pub explanation: Vec<String>,
+    /// Total result count before pagination.
+    pub total_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NlqEntity {
+    pub text: String,
+    pub node_id: u64,
+    pub node_type: String,
+    pub confidence: f32,
+}
+
+// ============================================================================
+// Structured Memory
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StructuredMemoryRequest {
+    pub key: String,
+    pub template: agent_db_graph::MemoryTemplate,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StructuredMemoryKeyQuery {
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LedgerAppendRequest {
+    pub amount: f64,
+    pub description: String,
+    pub direction: agent_db_graph::LedgerDirection,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StateTransitionRequest {
+    pub new_state: String,
+    pub trigger: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PreferenceUpdateRequest {
+    pub item: String,
+    pub rank: usize,
+    pub score: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TreeAddChildRequest {
+    pub parent: String,
+    pub child: String,
+}
