@@ -462,9 +462,7 @@ impl GraphEngine {
                             .map(|(k, v)| (k.clone(), metadata_value_preview(v)))
                             .collect();
                         match tokio::time::timeout(
-                            Duration::from_millis(
-                                self.config.metadata_normalization_timeout_ms,
-                            ),
+                            Duration::from_millis(self.config.metadata_normalization_timeout_ms),
                             llm.normalize_keys(&pairs),
                         )
                         .await
@@ -475,25 +473,22 @@ impl GraphEngine {
                                     &event.metadata,
                                     &normalized,
                                 );
-                            }
-                            Ok(Ok(None)) => {}
+                            },
+                            Ok(Ok(None)) => {},
                             Ok(Err(e)) => {
                                 tracing::warn!("Metadata LLM normalizer error: {}", e)
-                            }
+                            },
                             Err(_) => {
                                 tracing::warn!("Metadata LLM normalizer timed out")
-                            }
+                            },
                         }
                     }
                 }
 
                 // ---- State change detection ----
-                let entity_name =
-                    normalized.get_str(MetadataRole::Entity, &event.metadata);
-                let new_state =
-                    normalized.get_str(MetadataRole::NewState, &event.metadata);
-                let old_state =
-                    normalized.get_str(MetadataRole::OldState, &event.metadata);
+                let entity_name = normalized.get_str(MetadataRole::Entity, &event.metadata);
+                let new_state = normalized.get_str(MetadataRole::NewState, &event.metadata);
+                let old_state = normalized.get_str(MetadataRole::OldState, &event.metadata);
 
                 // Recognized event patterns for state changes
                 let is_state_event = matches!(&event.event_type, EventType::Context { context_type, .. } if context_type == "state_update")
@@ -551,12 +546,9 @@ impl GraphEngine {
                 }
 
                 // ---- Ledger/transaction detection ----
-                let amount =
-                    normalized.get_f64(MetadataRole::Amount, &event.metadata);
-                let from_entity =
-                    normalized.get_str(MetadataRole::From, &event.metadata);
-                let to_entity =
-                    normalized.get_str(MetadataRole::To, &event.metadata);
+                let amount = normalized.get_f64(MetadataRole::Amount, &event.metadata);
+                let from_entity = normalized.get_str(MetadataRole::From, &event.metadata);
+                let to_entity = normalized.get_str(MetadataRole::To, &event.metadata);
 
                 let is_transaction_event = event.metadata.contains_key("amount")
                     || event.metadata.contains_key("transaction")

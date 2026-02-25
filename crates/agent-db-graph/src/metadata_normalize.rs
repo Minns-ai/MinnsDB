@@ -94,11 +94,7 @@ impl NormalizedMetadata {
     }
 
     /// Get a float value for a resolved role.
-    pub fn get_f64(
-        &self,
-        role: MetadataRole,
-        md: &HashMap<String, MetadataValue>,
-    ) -> Option<f64> {
+    pub fn get_f64(&self, role: MetadataRole, md: &HashMap<String, MetadataValue>) -> Option<f64> {
         let resolved = self.roles.get(&role)?;
         let val = md.get(&resolved.original_key)?;
         metadata_as_f64(val)
@@ -364,9 +360,7 @@ impl MetadataNormalizer {
                         continue;
                     }
                     let sim = ngram_similarity(&lower, alias, 2);
-                    if sim > 0.5
-                        && (best_bigram.is_none() || sim > best_bigram.unwrap().1)
-                    {
+                    if sim > 0.5 && (best_bigram.is_none() || sim > best_bigram.unwrap().1) {
                         best_bigram = Some((role, sim));
                     }
                 }
@@ -530,7 +524,7 @@ pub fn metadata_value_preview(v: &MetadataValue) -> String {
             } else {
                 s.clone()
             }
-        }
+        },
         MetadataValue::Integer(i) => i.to_string(),
         MetadataValue::Float(f) => f.to_string(),
         MetadataValue::Boolean(b) => b.to_string(),
@@ -541,7 +535,7 @@ pub fn metadata_value_preview(v: &MetadataValue) -> String {
             } else {
                 s
             }
-        }
+        },
     }
 }
 
@@ -556,8 +550,7 @@ pub fn tokenize_key(key: &str) -> Vec<String> {
                 tokens.push(std::mem::take(&mut current));
             }
         } else if ch.is_ascii_digit() {
-            if !current.is_empty() && !current.chars().last().is_some_and(|c| c.is_ascii_digit())
-            {
+            if !current.is_empty() && !current.chars().last().is_some_and(|c| c.is_ascii_digit()) {
                 tokens.push(std::mem::take(&mut current));
             }
             current.push(ch);
@@ -836,10 +829,7 @@ mod tests {
     }
 
     fn md(pairs: Vec<(&str, MetadataValue)>) -> HashMap<String, MetadataValue> {
-        pairs
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect()
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
     }
 
     fn s(val: &str) -> MetadataValue {

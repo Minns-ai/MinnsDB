@@ -470,13 +470,11 @@ impl GraphEngine {
                 let client: Arc<dyn crate::metadata_normalize::MetadataLlmNormalizer> =
                     match config.nlq_hint_provider.as_str() {
                         "anthropic" => Arc::new(
-                            crate::metadata_normalize::AnthropicMetadataNormalizer::new(
-                                key, model,
-                            ),
+                            crate::metadata_normalize::AnthropicMetadataNormalizer::new(key, model),
                         ),
-                        _ => Arc::new(
-                            crate::metadata_normalize::OpenAiMetadataNormalizer::new(key, model),
-                        ),
+                        _ => Arc::new(crate::metadata_normalize::OpenAiMetadataNormalizer::new(
+                            key, model,
+                        )),
                     };
                 tracing::info!(
                     "Metadata LLM normalizer enabled (provider={})",

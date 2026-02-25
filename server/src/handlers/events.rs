@@ -292,10 +292,7 @@ pub async fn process_transaction_event(
     metadata.insert("from".to_string(), MetadataValue::String(payload.from));
     metadata.insert("to".to_string(), MetadataValue::String(payload.to));
     metadata.insert("amount".to_string(), MetadataValue::Float(payload.amount));
-    metadata.insert(
-        "transaction".to_string(),
-        MetadataValue::Boolean(true),
-    );
+    metadata.insert("transaction".to_string(), MetadataValue::Boolean(true));
 
     if let Some(direction) = payload.direction {
         metadata.insert("direction".to_string(), MetadataValue::String(direction));
