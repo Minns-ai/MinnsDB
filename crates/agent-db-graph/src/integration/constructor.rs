@@ -450,6 +450,49 @@ impl GraphEngine {
             None
         };
 
+        // Initialize metadata normalizer (alias matching is always on)
+        let metadata_normalizer =
+            crate::metadata_normalize::MetadataNormalizer::new(&config.metadata_alias_config);
+
+        // Initialize LLM metadata normalizer if enabled
+        let metadata_llm_normalizer: Option<
+            Arc<dyn crate::metadata_normalize::MetadataLlmNormalizer>,
+        > = if config.enable_metadata_normalization {
+            let hint_key = config
+                .nlq_hint_api_key
+                .clone()
+                .or_else(|| config.openai_api_key.clone());
+            let model = config
+                .metadata_normalization_model
+                .clone()
+                .unwrap_or_else(|| config.nlq_hint_model.clone());
+            if let Some(key) = hint_key {
+                let client: Arc<dyn crate::metadata_normalize::MetadataLlmNormalizer> =
+                    match config.nlq_hint_provider.as_str() {
+                        "anthropic" => Arc::new(
+                            crate::metadata_normalize::AnthropicMetadataNormalizer::new(
+                                key, model,
+                            ),
+                        ),
+                        _ => Arc::new(
+                            crate::metadata_normalize::OpenAiMetadataNormalizer::new(key, model),
+                        ),
+                    };
+                tracing::info!(
+                    "Metadata LLM normalizer enabled (provider={})",
+                    config.nlq_hint_provider,
+                );
+                Some(client)
+            } else {
+                tracing::warn!(
+                    "Metadata normalization enabled but no API key found — LLM fallback disabled"
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         // Initialize multi-signal retrieval BM25 indexes and populate from existing stores
         let memory_bm25_index = {
             let mut idx = crate::indexing::Bm25Index::new();
@@ -544,6 +587,8 @@ impl GraphEngine {
             nlq_pipeline: crate::nlq::NlqPipeline::new(),
             nlq_contexts: tokio::sync::Mutex::new(HashMap::new()),
             nlq_hint_client,
+            metadata_normalizer,
+            metadata_llm_normalizer,
             active_executions: Arc::new(dashmap::DashMap::new()),
             next_execution_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };

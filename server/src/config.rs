@@ -150,6 +150,17 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
     config.nlq_hint_model =
         env::var("NLQ_HINT_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
 
+    // Metadata normalization configuration
+    config.enable_metadata_normalization = env::var("ENABLE_METADATA_NORMALIZATION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(false);
+    config.metadata_normalization_timeout_ms = env::var("METADATA_NORMALIZATION_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000);
+    config.metadata_normalization_model = env::var("METADATA_NORMALIZATION_MODEL").ok();
+
     info!(
         "  World model mode: {:?}",
         config.effective_world_model_mode()
@@ -184,6 +195,22 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
             )
         } else {
             "disabled".to_string()
+        }
+    );
+
+    info!(
+        "  Metadata normalization LLM: {}",
+        if config.enable_metadata_normalization {
+            format!(
+                "ENABLED (model={}, timeout={}ms)",
+                config
+                    .metadata_normalization_model
+                    .as_deref()
+                    .unwrap_or(&config.nlq_hint_model),
+                config.metadata_normalization_timeout_ms
+            )
+        } else {
+            "disabled (alias matching always active)".to_string()
         }
     );
 

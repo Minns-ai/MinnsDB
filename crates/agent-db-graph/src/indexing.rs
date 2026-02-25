@@ -1392,7 +1392,7 @@ mod tests {
         index.index_document_code(2, "fn handleLoginRequest(auth_service: AuthService)");
 
         let results = index.search_mixed("authentication login", 10);
-        assert!(results.len() >= 1, "search_mixed should find results");
+        assert!(!results.is_empty(), "search_mixed should find results");
         // Both docs should be candidates
         let ids: Vec<u64> = results.iter().map(|(id, _)| *id).collect();
         assert!(ids.contains(&1), "Natural doc should be found");

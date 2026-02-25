@@ -263,6 +263,19 @@ pub struct GraphEngineConfig {
 
     /// Model name for the NLQ hint classifier
     pub nlq_hint_model: String,
+
+    // ========== Metadata Normalization ==========
+    /// Custom alias mappings for metadata key normalization
+    pub metadata_alias_config: crate::metadata_normalize::AliasConfig,
+
+    /// Enable LLM-based metadata normalization fallback
+    pub enable_metadata_normalization: bool,
+
+    /// Timeout in milliseconds for LLM metadata normalization
+    pub metadata_normalization_timeout_ms: u64,
+
+    /// Model name for metadata normalization (falls back to nlq_hint_model)
+    pub metadata_normalization_model: Option<String>,
 }
 
 impl GraphEngineConfig {
@@ -460,6 +473,14 @@ pub struct GraphEngine {
     /// Optional LLM hint client for NLQ intent routing
     pub(crate) nlq_hint_client: Option<Arc<dyn crate::nlq::llm_hint::NlqHintClient>>,
 
+    // ========== Metadata Normalization ==========
+    /// Metadata key normalizer (alias matching, always active)
+    pub(crate) metadata_normalizer: crate::metadata_normalize::MetadataNormalizer,
+
+    /// Optional LLM-based metadata normalizer
+    pub(crate) metadata_llm_normalizer:
+        Option<Arc<dyn crate::metadata_normalize::MetadataLlmNormalizer>>,
+
     // ========== Execution State ==========
     /// Active plan executions keyed by execution ID
     pub(crate) active_executions:
@@ -556,6 +577,11 @@ impl Default for GraphEngineConfig {
             nlq_hint_api_key: None,
             nlq_hint_provider: "openai".to_string(),
             nlq_hint_model: "gpt-4o-mini".to_string(),
+            // Metadata normalization (alias matching always on, LLM fallback disabled by default)
+            metadata_alias_config: crate::metadata_normalize::AliasConfig::default(),
+            enable_metadata_normalization: false,
+            metadata_normalization_timeout_ms: 3000,
+            metadata_normalization_model: None,
         }
     }
 }

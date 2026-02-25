@@ -1,24 +1,5 @@
 use super::*;
-use agent_db_events::core::MetadataValue;
-
-/// Extract a string from a MetadataValue.
-fn metadata_as_str(v: &MetadataValue) -> Option<String> {
-    match v {
-        MetadataValue::String(s) => Some(s.clone()),
-        MetadataValue::Json(serde_json::Value::String(s)) => Some(s.clone()),
-        _ => None,
-    }
-}
-
-/// Extract a float from a MetadataValue.
-fn metadata_as_f64(v: &MetadataValue) -> Option<f64> {
-    match v {
-        MetadataValue::Float(f) => Some(*f),
-        MetadataValue::Integer(i) => Some(*i as f64),
-        MetadataValue::Json(serde_json::Value::Number(n)) => n.as_f64(),
-        _ => None,
-    }
-}
+use crate::metadata_normalize::{metadata_value_preview, MetadataRole};
 
 impl GraphEngine {
     /// Process episode for memory formation
@@ -469,19 +450,57 @@ impl GraphEngine {
             let mut ledger_candidates = Vec::new();
 
             for event in &events {
+                // ---- Normalize metadata keys via alias matching ----
+                let mut normalized = self.metadata_normalizer.normalize(&event.metadata);
+
+                // LLM fallback: if alias resolved < 2 roles and event has >= 2 metadata keys
+                if normalized.roles.len() < 2 && event.metadata.len() >= 2 {
+                    if let Some(ref llm) = self.metadata_llm_normalizer {
+                        let pairs: Vec<(String, String)> = event
+                            .metadata
+                            .iter()
+                            .map(|(k, v)| (k.clone(), metadata_value_preview(v)))
+                            .collect();
+                        match tokio::time::timeout(
+                            Duration::from_millis(
+                                self.config.metadata_normalization_timeout_ms,
+                            ),
+                            llm.normalize_keys(&pairs),
+                        )
+                        .await
+                        {
+                            Ok(Ok(Some(mappings))) => {
+                                normalized = self.metadata_normalizer.apply_llm_mappings(
+                                    &mappings,
+                                    &event.metadata,
+                                    &normalized,
+                                );
+                            }
+                            Ok(Ok(None)) => {}
+                            Ok(Err(e)) => {
+                                tracing::warn!("Metadata LLM normalizer error: {}", e)
+                            }
+                            Err(_) => {
+                                tracing::warn!("Metadata LLM normalizer timed out")
+                            }
+                        }
+                    }
+                }
+
                 // ---- State change detection ----
-                let entity_name = event.metadata.get("entity").and_then(metadata_as_str);
-                let new_state = event
-                    .metadata
-                    .get("new_state")
-                    .or_else(|| event.metadata.get("entity_state"))
-                    .and_then(metadata_as_str);
-                let old_state = event.metadata.get("old_state").and_then(metadata_as_str);
+                let entity_name =
+                    normalized.get_str(MetadataRole::Entity, &event.metadata);
+                let new_state =
+                    normalized.get_str(MetadataRole::NewState, &event.metadata);
+                let old_state =
+                    normalized.get_str(MetadataRole::OldState, &event.metadata);
 
                 // Recognized event patterns for state changes
                 let is_state_event = matches!(&event.event_type, EventType::Context { context_type, .. } if context_type == "state_update")
                     || event.metadata.contains_key("entity_state")
                     || event.metadata.contains_key("new_state")
+                    || (normalized.has_role(MetadataRole::Entity)
+                        && normalized.has_role(MetadataRole::NewState))
                     || match &event.event_type {
                         EventType::Action { action_name, .. } => {
                             action_name.contains("update_status")
@@ -532,12 +551,18 @@ impl GraphEngine {
                 }
 
                 // ---- Ledger/transaction detection ----
-                let amount = event.metadata.get("amount").and_then(metadata_as_f64);
-                let from_entity = event.metadata.get("from").and_then(metadata_as_str);
-                let to_entity = event.metadata.get("to").and_then(metadata_as_str);
+                let amount =
+                    normalized.get_f64(MetadataRole::Amount, &event.metadata);
+                let from_entity =
+                    normalized.get_str(MetadataRole::From, &event.metadata);
+                let to_entity =
+                    normalized.get_str(MetadataRole::To, &event.metadata);
 
                 let is_transaction_event = event.metadata.contains_key("amount")
-                    || event.metadata.contains_key("transaction");
+                    || event.metadata.contains_key("transaction")
+                    || (normalized.has_role(MetadataRole::Amount)
+                        && (normalized.has_role(MetadataRole::From)
+                            || normalized.has_role(MetadataRole::To)));
 
                 if let (Some(amt), Some(ref from), Some(ref to)) =
                     (amount, &from_entity, &to_entity)
@@ -552,17 +577,13 @@ impl GraphEngine {
                         let to_id = graph.concept_index.get(to.as_str()).copied();
 
                         if let (Some(fid), Some(tid)) = (from_id, to_id) {
-                            let description = event
-                                .metadata
-                                .get("description")
-                                .and_then(metadata_as_str)
+                            let description = normalized
+                                .get_str(MetadataRole::Description, &event.metadata)
                                 .unwrap_or_else(|| "auto-extracted".to_string());
 
                             // Detect direction from metadata, default to Credit
-                            let direction = event
-                                .metadata
-                                .get("direction")
-                                .and_then(metadata_as_str)
+                            let direction = normalized
+                                .get_str(MetadataRole::Direction, &event.metadata)
                                 .map(|d| {
                                     if d.eq_ignore_ascii_case("debit") {
                                         crate::structured_memory::LedgerDirection::Debit

@@ -681,3 +681,50 @@ pub struct TreeAddChildRequest {
     pub parent: String,
     pub child: String,
 }
+
+// ============================================================================
+// SDK Helper Event Types
+// ============================================================================
+
+/// POST /api/events/state-change — typed state-change event submission
+#[serde_as]
+#[derive(Debug, Deserialize)]
+pub struct StateChangeEventRequest {
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    pub agent_id: AgentId,
+    pub agent_type: AgentType,
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    pub session_id: SessionId,
+    pub entity: String,
+    pub new_state: String,
+    #[serde(default)]
+    pub old_state: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub extra_metadata: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub enable_semantic: bool,
+}
+
+/// POST /api/events/transaction — typed transaction event submission
+#[serde_as]
+#[derive(Debug, Deserialize)]
+pub struct TransactionEventRequest {
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    pub agent_id: AgentId,
+    pub agent_type: AgentType,
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    pub session_id: SessionId,
+    pub from: String,
+    pub to: String,
+    pub amount: f64,
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub extra_metadata: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub enable_semantic: bool,
+}

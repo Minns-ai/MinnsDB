@@ -277,6 +277,74 @@ Simplified event submission for quick integration.
 
 **Response:** Same as `POST /api/events`.
 
+### POST /api/events/state-change
+
+Typed state-change event submission. The server maps the fields into event metadata with canonical keys (`entity`, `new_state`, `old_state`) and processes through the pipeline. The pipeline's metadata normalizer detects state changes automatically and updates structured memory state machines.
+
+**Request:**
+```json
+{
+  "agent_id": 1,
+  "agent_type": "workflow-engine",
+  "session_id": 42,
+  "entity": "Order-123",
+  "new_state": "shipped",
+  "old_state": "processing",
+  "trigger": "warehouse_confirmation",
+  "extra_metadata": {"warehouse": "US-West"},
+  "enable_semantic": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_id` | integer | yes | Agent identifier |
+| `agent_type` | string | yes | Agent type label |
+| `session_id` | integer | yes | Session identifier |
+| `entity` | string | yes | Entity whose state is changing |
+| `new_state` | string | yes | Target state |
+| `old_state` | string | no | Previous state (for history tracking) |
+| `trigger` | string | no | What caused the transition |
+| `extra_metadata` | object | no | Additional key-value pairs (canonical keys `entity`, `new_state`, `old_state` are ignored if duplicated here) |
+| `enable_semantic` | boolean | no | Enable NER + claim extraction |
+
+**Response:** Same as `POST /api/events`.
+
+### POST /api/events/transaction
+
+Typed transaction event submission. Maps fields into event metadata with canonical keys (`from`, `to`, `amount`, `direction`, `description`, `transaction`) and processes through the pipeline. The pipeline's metadata normalizer detects transactions and auto-appends to structured memory ledgers.
+
+**Request:**
+```json
+{
+  "agent_id": 1,
+  "agent_type": "payment-service",
+  "session_id": 42,
+  "from": "Alice",
+  "to": "Bob",
+  "amount": 25.0,
+  "direction": "Credit",
+  "description": "Payment for services",
+  "extra_metadata": {"invoice_id": "INV-456"},
+  "enable_semantic": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_id` | integer | yes | Agent identifier |
+| `agent_type` | string | yes | Agent type label |
+| `session_id` | integer | yes | Session identifier |
+| `from` | string | yes | Source entity |
+| `to` | string | yes | Destination entity |
+| `amount` | number | yes | Transaction amount (must be finite) |
+| `direction` | string | no | `"Credit"` (adds) or `"Debit"` (subtracts). Default: Credit |
+| `description` | string | no | Human-readable description |
+| `extra_metadata` | object | no | Additional key-value pairs (canonical keys `from`, `to`, `amount`, `direction`, `description`, `transaction` are ignored if duplicated here) |
+| `enable_semantic` | boolean | no | Enable NER + claim extraction |
+
+**Response:** Same as `POST /api/events`.
+
 ### GET /api/events?limit=10
 
 **Response (200):**
@@ -1332,6 +1400,9 @@ HTTP status codes:
 | `NLQ_HINT_API_KEY` | `LLM_API_KEY` | API key for NLQ hint classifier (falls back to `LLM_API_KEY`) |
 | `NLQ_HINT_PROVIDER` | `openai` | LLM provider for NLQ hint (`openai` or `anthropic`) |
 | `NLQ_HINT_MODEL` | `gpt-4o-mini` | Model name for NLQ hint classifier |
+| `ENABLE_METADATA_NORMALIZATION` | `false` | Enable LLM fallback for metadata key normalization |
+| `METADATA_NORMALIZATION_MODEL` | `NLQ_HINT_MODEL` | Model name for metadata normalization LLM (falls back to `NLQ_HINT_MODEL`) |
+| `METADATA_NORMALIZATION_TIMEOUT_MS` | `3000` | Timeout for LLM metadata normalization calls |
 
 ### World Model Modes
 
@@ -1342,6 +1413,28 @@ HTTP status codes:
 | `ScoringOnly` | Score and log, no re-ranking |
 | `ScoringAndReranking` | Score and re-rank strategy candidates |
 | `Full` | Score, re-rank, and trigger repair on prediction error |
+
+### Metadata Normalization
+
+The pipeline includes a multi-tier metadata key normalizer that automatically maps arbitrary metadata keys to canonical roles for structured memory detection (state machines and ledgers). This works transparently — SDKs can send events with any key naming convention and the pipeline will resolve them.
+
+**Resolution tiers (highest priority first):**
+
+| Tier | Method | Example |
+|------|--------|---------|
+| 1 | Exact canonical match | `"entity"` → Entity, `"amount"` → Amount |
+| 2 | Built-in alias match | `"sender"` → From, `"recipient"` → To, `"status"` → NewState |
+| 3 | Token-aware stem match | `"order_status"` → NewState (token "status" matches stem) |
+| 4 | Bigram similarity (≥0.5) | `"recipent"` (typo) → To (bigram match to "recipient") |
+| 5 | LLM fallback (if enabled) | Foreign/custom keys resolved via LLM JSON mapping |
+
+**Canonical roles:** `entity`, `new_state`, `old_state`, `from`, `to`, `amount`, `direction`, `description`
+
+**Type guards:** The `amount` role requires a numeric value — string values like `"ten"` are rejected even if the key matches.
+
+**Custom aliases:** Configure `metadata_alias_config.custom_mappings` to map domain-specific keys (e.g., `"absender"` → `"from"` for German metadata).
+
+When `ENABLE_METADATA_NORMALIZATION=true`, an LLM fallback activates for events where alias resolution finds fewer than 2 roles but the event has 2+ metadata keys. The LLM classifies remaining keys with a 3-second timeout (configurable). Results are cached (LRU, 500 entries) to avoid repeated calls for the same key sets.
 
 ---
 
@@ -1354,6 +1447,9 @@ HTTP status codes:
 5. **Semantic search:** Enable `enable_semantic: true` on events, then use `POST /api/search` with Hybrid mode
 6. **Natural language queries:** Use `POST /api/nlq` to ask questions in plain English. Pass `session_id` for conversational follow-ups
 7. **Structured memory:** Use `/api/structured-memory/*` endpoints for domain-specific data (ledgers, state machines, preference lists, trees)
-8. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
-9. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
-10. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)
+8. **Typed state changes:** Use `POST /api/events/state-change` to emit state transitions — auto-detected and tracked in structured memory state machines
+9. **Typed transactions:** Use `POST /api/events/transaction` to emit financial/quantity transactions — auto-detected and appended to structured memory ledgers
+10. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
+11. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
+12. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)
+13. **Metadata normalization:** Alias-based normalization is always active. Set `ENABLE_METADATA_NORMALIZATION=true` for LLM fallback on unrecognized metadata keys

@@ -97,6 +97,9 @@ pub mod nlq;
 // Dynamic structured memory templates (ledgers, trees, state machines, preferences)
 pub mod structured_memory;
 
+// Resilient metadata normalization for structured memory auto-detection
+pub mod metadata_normalize;
+
 // Background maintenance (decay, pruning, dedup)
 pub mod maintenance;
 
@@ -194,4 +197,9 @@ pub use nlq::{
 pub use structured_memory::{
     LedgerDirection, LedgerEntry, MemoryProvenance, MemoryTemplate, PreferenceItem,
     StateTransition, StructuredMemoryStore,
+};
+
+// Metadata Normalization
+pub use metadata_normalize::{
+    AliasConfig, MetadataNormalizer, MetadataRole, NormalizedMetadata, ResolutionMethod,
 };

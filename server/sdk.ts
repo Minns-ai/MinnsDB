@@ -199,6 +199,54 @@ export * from "./intent_sidecar.js";
     }
 
     /**
+     * Define a state-change event. Shortcut that builds an Observation event
+     * with canonical metadata keys for structured memory auto-detection.
+     */
+    stateChange(entity: string, newState: string, options: { oldState?: string; trigger?: string } = {}): this {
+      this.eventPayload = {
+        Observation: {
+          observation_type: "state_update",
+          data: { entity, new_state: newState, old_state: options.oldState },
+          confidence: 1.0,
+          source: "agent"
+        }
+      };
+      this.metadata = {
+        ...this.metadata,
+        entity,
+        new_state: newState,
+        ...(options.oldState ? { old_state: options.oldState } : {}),
+        ...(options.trigger ? { trigger: options.trigger } : {}),
+      };
+      return this;
+    }
+
+    /**
+     * Define a transaction event. Shortcut that builds an Action event
+     * with canonical metadata keys for structured memory ledger auto-detection.
+     */
+    transaction(from: string, to: string, amount: number, options: { direction?: "Credit" | "Debit"; description?: string } = {}): this {
+      this.eventPayload = {
+        Action: {
+          action_name: "transaction",
+          parameters: { from, to, amount },
+          outcome: { Success: { result: "ok" } },
+          duration_ns: 0
+        }
+      };
+      this.metadata = {
+        ...this.metadata,
+        from,
+        to,
+        amount,
+        transaction: true,
+        ...(options.direction ? { direction: options.direction } : {}),
+        ...(options.description ? { description: options.description } : {}),
+      };
+      return this;
+    }
+
+    /**
      * Define a Context/Text event for claim extraction.
      */
     context(text: string, type: string = "general"): this {
@@ -777,6 +825,72 @@ export * from "./intent_sidecar.js";
       return this.request<GraphTraverseResponse>("GET", `/api/v1/graph/traverse?${params.toString()}`);
     }
   
+    // ==========================================================================
+    // Typed Event Shortcuts
+    // ==========================================================================
+
+    /**
+     * Emit a state-change event. The server maps the fields to canonical metadata
+     * keys and the pipeline auto-detects state transitions for structured memory.
+     */
+    async stateChange(params: {
+      agentId: AgentId;
+      agentType: string;
+      sessionId: SessionId;
+      entity: string;
+      newState: string;
+      oldState?: string;
+      trigger?: string;
+      extraMetadata?: Record<string, unknown>;
+      enableSemantic?: boolean;
+    }): Promise<ProcessEventResponse> {
+      return this.request<ProcessEventResponse>("POST", "/api/events/state-change", {
+        agent_id: params.agentId,
+        agent_type: params.agentType,
+        session_id: params.sessionId,
+        entity: params.entity,
+        new_state: params.newState,
+        old_state: params.oldState,
+        trigger: params.trigger,
+        extra_metadata: params.extraMetadata ?? {},
+        enable_semantic: params.enableSemantic ?? false,
+      });
+    }
+
+    /**
+     * Emit a transaction event. The server maps the fields to canonical metadata
+     * keys and the pipeline auto-detects ledger entries for structured memory.
+     */
+    async transaction(params: {
+      agentId: AgentId;
+      agentType: string;
+      sessionId: SessionId;
+      from: string;
+      to: string;
+      amount: number;
+      direction?: "Credit" | "Debit";
+      description?: string;
+      extraMetadata?: Record<string, unknown>;
+      enableSemantic?: boolean;
+    }): Promise<ProcessEventResponse> {
+      return this.request<ProcessEventResponse>("POST", "/api/events/transaction", {
+        agent_id: params.agentId,
+        agent_type: params.agentType,
+        session_id: params.sessionId,
+        from: params.from,
+        to: params.to,
+        amount: params.amount,
+        direction: params.direction,
+        description: params.description,
+        extra_metadata: params.extraMetadata ?? {},
+        enable_semantic: params.enableSemantic ?? false,
+      });
+    }
+
+    // ==========================================================================
+    // System
+    // ==========================================================================
+
     /**
      * Health check endpoint to verify system status.
      */
