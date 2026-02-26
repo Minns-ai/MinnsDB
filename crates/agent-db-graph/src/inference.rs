@@ -791,7 +791,9 @@ impl GraphInference {
             EventType::Context { text, .. } => {
                 Some(("context".to_string(), self.truncate_summary(text)))
             },
-            EventType::Conversation { speaker, content, .. } => Some((
+            EventType::Conversation {
+                speaker, content, ..
+            } => Some((
                 "conversation".to_string(),
                 self.truncate_summary(&format!("{}: {}", speaker, content)),
             )),

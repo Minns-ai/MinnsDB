@@ -144,7 +144,7 @@ fn parse_llm_transaction(
             }
             all.sort();
             (SplitMode::Equal, ParticipantsScope::EveryoneKnown)
-        }
+        },
         "sole" => (SplitMode::SoleBeneficiary, ParticipantsScope::Explicit),
         _ => (SplitMode::Equal, ParticipantsScope::Explicit),
     };
@@ -243,9 +243,7 @@ fn parse_llm_preference(
     let category = data["category"]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            super::parsers::infer_preference_category(&item, session_topic)
-        });
+        .unwrap_or_else(|| super::parsers::infer_preference_category(&item, session_topic));
     let sentiment = data["sentiment"].as_f64().unwrap_or(0.7) as f32;
 
     let pref = PreferenceData {
@@ -282,7 +280,11 @@ mod tests {
         participants.insert("Bob".to_string());
 
         let result = classifier
-            .classify_and_extract("Alice: Paid €50 for dinner - split with Bob", &participants, None)
+            .classify_and_extract(
+                "Alice: Paid €50 for dinner - split with Bob",
+                &participants,
+                None,
+            )
             .await;
 
         assert!(result.is_some());
@@ -315,9 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_classify_chitchat() {
-        let mock = MockLlmClient::new(vec![
-            r#"{"category": "chitchat", "data": {}}"#.to_string(),
-        ]);
+        let mock = MockLlmClient::new(vec![r#"{"category": "chitchat", "data": {}}"#.to_string()]);
         let classifier = ConversationLlmClassifier::new(Arc::new(mock));
 
         let result = classifier

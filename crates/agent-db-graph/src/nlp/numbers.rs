@@ -95,17 +95,18 @@ pub fn parse_numeric_token(s: &str) -> Option<f64> {
     }
 
     // Check for SI suffix at end
-    let (num_part, multiplier) = if let Some(stripped) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {
-        (stripped, 1_000.0)
-    } else if let Some(stripped) = s.strip_suffix('M') {
-        (stripped, 1_000_000.0)
-    } else if let Some(stripped) = s.strip_suffix('B') {
-        (stripped, 1_000_000_000.0)
-    } else if let Some(stripped) = s.strip_suffix("bn") {
-        (stripped, 1_000_000_000.0)
-    } else {
-        (s, 1.0)
-    };
+    let (num_part, multiplier) =
+        if let Some(stripped) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {
+            (stripped, 1_000.0)
+        } else if let Some(stripped) = s.strip_suffix('M') {
+            (stripped, 1_000_000.0)
+        } else if let Some(stripped) = s.strip_suffix('B') {
+            (stripped, 1_000_000_000.0)
+        } else if let Some(stripped) = s.strip_suffix("bn") {
+            (stripped, 1_000_000_000.0)
+        } else {
+            (s, 1.0)
+        };
 
     // Strip commas for parsing
     let cleaned = num_part.replace(',', "");
@@ -153,7 +154,9 @@ fn parse_word_number(tokens: &[&str]) -> Option<(f64, usize)> {
         if token.contains('-') {
             let parts: Vec<&str> = token.split('-').collect();
             if parts.len() == 2 {
-                if let (Some(tens_val), Some(ones_val)) = (lookup_word(parts[0]), lookup_word(parts[1])) {
+                if let (Some(tens_val), Some(ones_val)) =
+                    (lookup_word(parts[0]), lookup_word(parts[1]))
+                {
                     current += tens_val + ones_val;
                     consumed = i + 1;
                     found_any = true;
@@ -262,10 +265,7 @@ mod tests {
 
     #[test]
     fn test_hundred_compound() {
-        assert_eq!(
-            parse_number(&["one", "hundred", "fifty"]),
-            Some((150.0, 3))
-        );
+        assert_eq!(parse_number(&["one", "hundred", "fifty"]), Some((150.0, 3)));
         assert_eq!(
             parse_number(&["two", "hundred", "and", "fifty-three"]),
             Some((253.0, 4))

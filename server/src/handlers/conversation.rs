@@ -152,10 +152,7 @@ pub async fn ingest_conversation(
     State(state): State<AppState>,
     Json(request): Json<ConversationIngestRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let case_id = request
-        .case_id
-        .clone()
-        .unwrap_or_else(uuid_v4_simple);
+    let case_id = request.case_id.clone().unwrap_or_else(uuid_v4_simple);
 
     info!("Ingesting conversation case_id={}", case_id);
 
@@ -221,7 +218,7 @@ pub async fn ingest_conversation(
             Ok(_) => events_processed += 1,
             Err(e) => {
                 tracing::debug!("Event pipeline error: {}", e);
-            }
+            },
         }
     }
 
@@ -281,9 +278,13 @@ pub async fn query_conversation(
         let query_type = match &cq {
             agent_db_graph::conversation::ConversationQueryType::Numeric { .. } => "numeric",
             agent_db_graph::conversation::ConversationQueryType::State { .. } => "state",
-            agent_db_graph::conversation::ConversationQueryType::EntitySummary { .. } => "entity_summary",
+            agent_db_graph::conversation::ConversationQueryType::EntitySummary { .. } => {
+                "entity_summary"
+            },
             agent_db_graph::conversation::ConversationQueryType::Preference { .. } => "preference",
-            agent_db_graph::conversation::ConversationQueryType::RelationshipPath { .. } => "relationship",
+            agent_db_graph::conversation::ConversationQueryType::RelationshipPath { .. } => {
+                "relationship"
+            },
         };
         return Ok(Json(json!({
             "answer": answer,
@@ -300,7 +301,11 @@ pub async fn query_conversation(
     let pagination = agent_db_graph::nlq::NlqPagination::default();
     match state
         .engine
-        .natural_language_query(&request.question, &pagination, request.session_id.as_deref())
+        .natural_language_query(
+            &request.question,
+            &pagination,
+            request.session_id.as_deref(),
+        )
         .await
     {
         Ok(response) => Ok(Json(json!({
@@ -328,7 +333,10 @@ async fn retrieve_related_memories(
         now: None,
         limit: 5,
     };
-    let memories = state.engine.retrieve_memories_multi_signal(query, None).await;
+    let memories = state
+        .engine
+        .retrieve_memories_multi_signal(query, None)
+        .await;
     memories
         .iter()
         .map(agent_db_graph::MemorySummary::from_memory)

@@ -58,7 +58,7 @@ pub fn compute_net_balances(store: &StructuredMemoryStore) -> HashMap<(String, S
                         *balances
                             .entry((name_b.clone(), currency.clone()))
                             .or_insert(0.0) -= entry.amount;
-                    }
+                    },
                     LedgerDirection::Debit => {
                         // entity_a is debited → entity_b is owed money, entity_a owes
                         *balances
@@ -67,7 +67,7 @@ pub fn compute_net_balances(store: &StructuredMemoryStore) -> HashMap<(String, S
                         *balances
                             .entry((name_b.clone(), currency.clone()))
                             .or_insert(0.0) += entry.amount;
-                    }
+                    },
                 }
             }
         }
@@ -171,18 +171,13 @@ fn round_cents(v: f64) -> f64 {
 /// Sum of all entries in a specific ledger.
 pub fn ledger_sum(store: &StructuredMemoryStore, key: &str) -> Option<f64> {
     match store.get(key)? {
-        MemoryTemplate::Ledger { entries, .. } => {
-            Some(entries.iter().map(|e| e.amount).sum())
-        }
+        MemoryTemplate::Ledger { entries, .. } => Some(entries.iter().map(|e| e.amount).sum()),
         _ => None,
     }
 }
 
 /// Sum entries matching a description filter.
-pub fn ledger_sum_by_label(
-    store: &StructuredMemoryStore,
-    label_filter: &str,
-) -> f64 {
+pub fn ledger_sum_by_label(store: &StructuredMemoryStore, label_filter: &str) -> f64 {
     let lower_filter = label_filter.to_lowercase();
     let mut total = 0.0;
     for key in store.list_keys("ledger:") {
@@ -198,10 +193,7 @@ pub fn ledger_sum_by_label(
 }
 
 /// Group ledger entries by a grouping function and sum amounts.
-pub fn ledger_group_by<F>(
-    store: &StructuredMemoryStore,
-    group_fn: F,
-) -> HashMap<String, f64>
+pub fn ledger_group_by<F>(store: &StructuredMemoryStore, group_fn: F) -> HashMap<String, f64>
 where
     F: Fn(&str) -> String,
 {
@@ -232,11 +224,9 @@ pub fn state_current(
 }
 
 /// Get all state keys for an entity.
-pub fn state_keys_for_entity(
-    store: &StructuredMemoryStore,
-    entity_id: u64,
-) -> Vec<String> {
-    store.list_keys(&format!("state:{}:", entity_id))
+pub fn state_keys_for_entity(store: &StructuredMemoryStore, entity_id: u64) -> Vec<String> {
+    store
+        .list_keys(&format!("state:{}:", entity_id))
         .into_iter()
         .map(|s| s.to_string())
         .collect()
@@ -254,12 +244,10 @@ pub fn rank_preferences(
 ) -> Vec<(String, f32)> {
     let key = crate::structured_memory::prefs_key(entity_id, category);
     match store.get(&key) {
-        Some(MemoryTemplate::PreferenceList { ranked_items, .. }) => {
-            ranked_items
-                .iter()
-                .map(|item| (item.name.clone(), item.score.unwrap_or(0.5) as f32))
-                .collect()
-        }
+        Some(MemoryTemplate::PreferenceList { ranked_items, .. }) => ranked_items
+            .iter()
+            .map(|item| (item.name.clone(), item.score.unwrap_or(0.5) as f32))
+            .collect(),
         _ => vec![],
     }
 }
@@ -348,12 +336,7 @@ pub fn format_transfers(transfers: &[Transfer]) -> String {
 
     let mut parts: Vec<String> = transfers
         .iter()
-        .map(|t| {
-            format!(
-                "{} -> {} : {:.2} {}",
-                t.from, t.to, t.amount, t.currency,
-            )
-        })
+        .map(|t| format!("{} -> {} : {:.2} {}", t.from, t.to, t.amount, t.currency,))
         .collect();
     parts.sort();
     format!("Settlement: {}", parts.join(", "))
@@ -555,14 +538,12 @@ mod tests {
 
     #[test]
     fn test_format_transfers() {
-        let transfers = vec![
-            Transfer {
-                from: "Bob".to_string(),
-                to: "Alice".to_string(),
-                amount: 45.50,
-                currency: "EUR".to_string(),
-            },
-        ];
+        let transfers = vec![Transfer {
+            from: "Bob".to_string(),
+            to: "Alice".to_string(),
+            amount: 45.50,
+            currency: "EUR".to_string(),
+        }];
         let formatted = format_transfers(&transfers);
         assert_eq!(formatted, "Settlement: Bob -> Alice : 45.50 EUR");
     }

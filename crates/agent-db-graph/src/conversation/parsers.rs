@@ -159,7 +159,10 @@ fn try_tipped_format(original: &str, lower: &str) -> Option<TransactionData> {
     let (amount, currency) = extract_currency_amount(rest)?;
 
     let description = if let Some(at_pos) = lower.find(" at ") {
-        original[at_pos + 4..].trim_end_matches('.').trim().to_string()
+        original[at_pos + 4..]
+            .trim_end_matches('.')
+            .trim()
+            .to_string()
     } else {
         "tip".to_string()
     };
@@ -191,9 +194,7 @@ fn try_verbose_speaker_format(
     let rest_lower = rest.to_lowercase();
 
     // Must contain a payment verb
-    let verb_patterns = [
-        "i paid", "i covered", "i bought", "i purchased", "i got",
-    ];
+    let verb_patterns = ["i paid", "i covered", "i bought", "i purchased", "i got"];
     let has_verb = verb_patterns.iter().any(|p| rest_lower.starts_with(p));
     if !has_verb {
         return None;
@@ -241,7 +242,8 @@ fn try_amount_was_cost_format(
     let rest_lower = rest.to_lowercase();
 
     // Must have "was €X" or "cost €X" or "cost me €X" or "were €X"
-    let has_was_cost = rest_lower.contains(" was ") || rest_lower.contains(" cost ")
+    let has_was_cost = rest_lower.contains(" was ")
+        || rest_lower.contains(" cost ")
         || rest_lower.contains(" were ");
     if !has_was_cost {
         return None;
@@ -403,22 +405,22 @@ fn try_owe_me_in_text(
     let is_each = after_owe_lower.contains("each");
 
     // First try amount from the "owe me" clause specifically
-    let (amount, currency) = extract_currency_amount(after_owe)
-        .or_else(|| extract_currency_amount(text))?;
+    let (amount, currency) =
+        extract_currency_amount(after_owe).or_else(|| extract_currency_amount(text))?;
 
     // Extract names immediately before "owe me" in the same sentence.
     // Find the start of the sentence containing "owe me"
-    let sentence_start = text[..owe_pos]
-        .rfind(". ")
-        .map(|p| p + 2)
-        .unwrap_or(0);
+    let sentence_start = text[..owe_pos].rfind(". ").map(|p| p + 2).unwrap_or(0);
     let before_owe_sentence = text[sentence_start..owe_pos].trim();
 
     // First, try to find known participants in the sentence before "owe me"
     let mut beneficiaries: Vec<String> = known_participants
         .iter()
         .filter(|p| {
-            *p != payer && before_owe_sentence.to_lowercase().contains(&p.to_lowercase())
+            *p != payer
+                && before_owe_sentence
+                    .to_lowercase()
+                    .contains(&p.to_lowercase())
         })
         .cloned()
         .collect();
@@ -614,8 +616,7 @@ fn extract_verbose_description(text: &str) -> String {
         let after_for = &text[for_pos + 5..];
         // Truncate at split clause, amount, or sentence end
         let terminators = [
-            " - split", " split", ". split", " shared", ". shared",
-            " owe me", " among", " equally",
+            " - split", " split", ". split", " shared", ". shared", " owe me", " among", " equally",
         ];
         let mut end = after_for.len();
         for t in &terminators {
@@ -766,11 +767,7 @@ fn extract_split_info(
             beneficiaries.push(payer.to_string());
         }
         beneficiaries.sort();
-        return (
-            beneficiaries,
-            SplitMode::Equal,
-            ParticipantsScope::Explicit,
-        );
+        return (beneficiaries, SplitMode::Equal, ParticipantsScope::Explicit);
     }
 
     // "for Name's thing" (possessive = sole beneficiary)
@@ -801,11 +798,7 @@ fn extract_split_info(
                 beneficiaries.push(payer.to_string());
             }
             beneficiaries.sort();
-            return (
-                beneficiaries,
-                SplitMode::Equal,
-                ParticipantsScope::Explicit,
-            );
+            return (beneficiaries, SplitMode::Equal, ParticipantsScope::Explicit);
         }
     }
 
@@ -822,10 +815,9 @@ pub fn extract_names_from_text(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     let words: Vec<&str> = text.split_whitespace().collect();
     let skip_words = [
-        "Paid", "Refund", "The", "This", "That", "I", "My", "It", "A", "An", "For", "With",
-        "And", "Or", "But", "Is", "Are", "Was", "Were", "Has", "Have", "Had", "Do", "Does",
-        "Did", "In", "On", "At", "To", "From", "By", "Of", "About", "Split", "Each", "All",
-        "Between", "Among",
+        "Paid", "Refund", "The", "This", "That", "I", "My", "It", "A", "An", "For", "With", "And",
+        "Or", "But", "Is", "Are", "Was", "Were", "Has", "Have", "Had", "Do", "Does", "Did", "In",
+        "On", "At", "To", "From", "By", "Of", "About", "Split", "Each", "All", "Between", "Among",
     ];
 
     let mut i = 0;
@@ -1012,7 +1004,10 @@ fn extract_location_after(content: &str, pattern: &str) -> Option<String> {
         }
     }
 
-    let location = after[..end].trim().trim_end_matches('.').trim_end_matches(',');
+    let location = after[..end]
+        .trim()
+        .trim_end_matches('.')
+        .trim_end_matches(',');
     if location.is_empty() {
         return None;
     }
@@ -1071,7 +1066,9 @@ pub fn parse_relationship(content: &str) -> Option<RelationshipData> {
     // "X is a colleague of Y"
     if let Some(pos) = lower.find("colleague of") {
         // Find the subject: everything before "is a colleague of"
-        let is_pos = lower[..pos].rfind("is a ").or_else(|| lower[..pos].rfind("is "))?;
+        let is_pos = lower[..pos]
+            .rfind("is a ")
+            .or_else(|| lower[..pos].rfind("is "))?;
         let subject = extract_name_before(content, is_pos);
         let object = extract_name_after(content, pos + "colleague of".len());
         if !subject.is_empty() && !object.is_empty() {
@@ -1189,12 +1186,19 @@ pub fn parse_preference(content: &str, session_topic: Option<&str>) -> Option<Pr
     } else if let Some(rest) = strip_prefix_ci(&lower, "i enjoy ") {
         (0.7, extract_item_from_rest(content, "i enjoy ", rest.len()))
     } else if let Some(rest) = strip_prefix_ci(&lower, "i prefer ") {
-        (0.8, extract_item_from_rest(content, "i prefer ", rest.len()))
+        (
+            0.8,
+            extract_item_from_rest(content, "i prefer ", rest.len()),
+        )
     } else if let Some(rest) = strip_prefix_ci(&lower, "i hate ") {
         (0.0, extract_item_from_rest(content, "i hate ", rest.len()))
     } else if let Some(rest) = strip_prefix_ci(&lower, "i dislike ") {
-        (0.2, extract_item_from_rest(content, "i dislike ", rest.len()))
-    } else if lower.starts_with("saw ") || lower.contains("visited ") || lower.contains("went to ") {
+        (
+            0.2,
+            extract_item_from_rest(content, "i dislike ", rest.len()),
+        )
+    } else if lower.starts_with("saw ") || lower.contains("visited ") || lower.contains("went to ")
+    {
         // Implicit positive from visiting
         let item = extract_visited_item(content);
         (0.6, item)
@@ -1278,47 +1282,101 @@ pub fn infer_preference_category(item: &str, session_topic: Option<&str>) -> Str
 
     // Art-related
     let art_signals = [
-        "monet", "rodin", "michelangelo", "cezanne", "cézanne", "van gogh", "picasso",
-        "david", "water lilies", "starry night", "sculpture", "painting", "gallery",
-        "museum", "canvas", "exhibition", "fresco", "art",
+        "monet",
+        "rodin",
+        "michelangelo",
+        "cezanne",
+        "cézanne",
+        "van gogh",
+        "picasso",
+        "david",
+        "water lilies",
+        "starry night",
+        "sculpture",
+        "painting",
+        "gallery",
+        "museum",
+        "canvas",
+        "exhibition",
+        "fresco",
+        "art",
     ];
-    if art_signals.iter().any(|s| lower.contains(s) || topic_lower.contains(s)) {
+    if art_signals
+        .iter()
+        .any(|s| lower.contains(s) || topic_lower.contains(s))
+    {
         return "art".to_string();
     }
 
     // Music
-    let music_signals = ["album", "song", "band", "concert", "music", "symphony", "jazz"];
-    if music_signals.iter().any(|s| lower.contains(s) || topic_lower.contains(s)) {
+    let music_signals = [
+        "album", "song", "band", "concert", "music", "symphony", "jazz",
+    ];
+    if music_signals
+        .iter()
+        .any(|s| lower.contains(s) || topic_lower.contains(s))
+    {
         return "music".to_string();
     }
 
     // Movies
     let movie_signals = ["movie", "film", "cinema", "director", "actor"];
-    if movie_signals.iter().any(|s| lower.contains(s) || topic_lower.contains(s)) {
+    if movie_signals
+        .iter()
+        .any(|s| lower.contains(s) || topic_lower.contains(s))
+    {
         return "movies".to_string();
     }
 
     // Books
     let book_signals = ["book", "novel", "author", "read", "chapter"];
-    if book_signals.iter().any(|s| lower.contains(s) || topic_lower.contains(s)) {
+    if book_signals
+        .iter()
+        .any(|s| lower.contains(s) || topic_lower.contains(s))
+    {
         return "books".to_string();
     }
 
     // Food
-    let food_signals = ["food", "restaurant", "cafe", "bakery", "dish", "cuisine", "coffee"];
-    if food_signals.iter().any(|s| lower.contains(s) || topic_lower.contains(s)) {
+    let food_signals = [
+        "food",
+        "restaurant",
+        "cafe",
+        "bakery",
+        "dish",
+        "cuisine",
+        "coffee",
+    ];
+    if food_signals
+        .iter()
+        .any(|s| lower.contains(s) || topic_lower.contains(s))
+    {
         return "food".to_string();
     }
 
     // Sports
-    let sports_signals = ["sport", "game", "team", "play", "match", "board game", "boardgame"];
-    if sports_signals.iter().any(|s| lower.contains(s) || topic_lower.contains(s)) {
+    let sports_signals = [
+        "sport",
+        "game",
+        "team",
+        "play",
+        "match",
+        "board game",
+        "boardgame",
+    ];
+    if sports_signals
+        .iter()
+        .any(|s| lower.contains(s) || topic_lower.contains(s))
+    {
         return "sports".to_string();
     }
 
     // TV Series
     let series_signals = ["series", "show", "episode", "season", "tv"];
-    if series_signals.iter().any(|s| lower.contains(s) || topic_lower.contains(s)) {
+    if series_signals
+        .iter()
+        .any(|s| lower.contains(s) || topic_lower.contains(s))
+    {
         return "series".to_string();
     }
 
@@ -1344,28 +1402,20 @@ pub fn classify_and_parse(
     let result = super::classifier::classify(ctx, state, content, role);
 
     let parsed = match result.category {
-        MessageCategory::Transaction => {
-            parse_transaction(content, &state.known_participants)
-                .map(ParsedPayload::Transaction)
-                .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string()))
-        }
-        MessageCategory::StateChange => {
-            parse_state_change(content)
-                .into_iter()
-                .next()
-                .map(ParsedPayload::StateChange)
-                .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string()))
-        }
-        MessageCategory::Relationship => {
-            parse_relationship(content)
-                .map(ParsedPayload::Relationship)
-                .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string()))
-        }
-        MessageCategory::Preference => {
-            parse_preference(content, session_topic)
-                .map(ParsedPayload::Preference)
-                .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string()))
-        }
+        MessageCategory::Transaction => parse_transaction(content, &state.known_participants)
+            .map(ParsedPayload::Transaction)
+            .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string())),
+        MessageCategory::StateChange => parse_state_change(content)
+            .into_iter()
+            .next()
+            .map(ParsedPayload::StateChange)
+            .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string())),
+        MessageCategory::Relationship => parse_relationship(content)
+            .map(ParsedPayload::Relationship)
+            .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string())),
+        MessageCategory::Preference => parse_preference(content, session_topic)
+            .map(ParsedPayload::Preference)
+            .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string())),
         MessageCategory::Chitchat => ParsedPayload::Chitchat(content.to_string()),
     };
 
@@ -1445,7 +1495,8 @@ mod tests {
     #[test]
     fn parse_tx_split_with_named() {
         let known = participants_abc();
-        let tx = parse_transaction("Bob: Paid €87 for snacks - split with Charlie", &known).unwrap();
+        let tx =
+            parse_transaction("Bob: Paid €87 for snacks - split with Charlie", &known).unwrap();
         assert_eq!(tx.payer, "Bob");
         assert!(tx.beneficiaries.contains(&"Charlie".to_string()));
         assert!(tx.beneficiaries.contains(&"Bob".to_string()));

@@ -61,11 +61,7 @@ pub fn ingest_incremental(
     for session in &data.sessions {
         for (idx, msg) in session.messages.iter().enumerate() {
             // Idempotency check
-            let dedup_key = (
-                case_id.clone(),
-                session.session_id.clone(),
-                idx,
-            );
+            let dedup_key = (case_id.clone(), session.session_id.clone(), idx);
             if state.processed_messages.contains(&dedup_key) {
                 continue;
             }
@@ -93,32 +89,29 @@ pub fn ingest_incremental(
                 ParsedPayload::Transaction(tx) => {
                     bridge_transaction(tx, state, store);
                     result.transactions_found += 1;
-                }
+                },
                 ParsedPayload::StateChange(sc) => {
                     bridge_state_change(sc, state, store);
                     result.state_changes_found += 1;
-                }
+                },
                 ParsedPayload::Relationship(rel) => {
                     bridge_relationship(rel, state, store);
                     result.relationships_found += 1;
-                }
+                },
                 ParsedPayload::Preference(pref) => {
                     bridge_preference(pref, state, store);
                     result.preferences_found += 1;
-                }
+                },
                 ParsedPayload::Chitchat(_) => {
                     result.chitchat_skipped += 1;
-                }
+                },
             }
         }
 
         // Bridge fact_quote from session metadata into preferences
         if session.contains_fact == Some(true) {
-            if let (Some(ref quote), Some(ref fact_id)) =
-                (&session.fact_quote, &session.fact_id)
-            {
-                let category =
-                    parsers::infer_preference_category(quote, session.topic.as_deref());
+            if let (Some(ref quote), Some(ref fact_id)) = (&session.fact_quote, &session.fact_id) {
+                let category = parsers::infer_preference_category(quote, session.topic.as_deref());
                 let sentiment = if fact_id.contains("negative") {
                     0.2
                 } else if fact_id.contains("mixed") {
@@ -226,7 +219,7 @@ pub async fn ingest_with_llm_incremental(
                         llm_msg.message_index = ctx.message_index;
                         llm_msg.original_content = msg.content.clone();
                         llm_msg
-                    }
+                    },
                     None => {
                         tracing::debug!("LLM classify failed, falling back to keyword path");
                         parsers::classify_and_parse(
@@ -236,7 +229,7 @@ pub async fn ingest_with_llm_incremental(
                             &msg.role,
                             session.topic.as_deref(),
                         )
-                    }
+                    },
                 }
             } else {
                 parsers::classify_and_parse(
@@ -254,32 +247,29 @@ pub async fn ingest_with_llm_incremental(
                 ParsedPayload::Transaction(tx) => {
                     bridge_transaction(tx, state, store);
                     result.transactions_found += 1;
-                }
+                },
                 ParsedPayload::StateChange(sc) => {
                     bridge_state_change(sc, state, store);
                     result.state_changes_found += 1;
-                }
+                },
                 ParsedPayload::Relationship(rel) => {
                     bridge_relationship(rel, state, store);
                     result.relationships_found += 1;
-                }
+                },
                 ParsedPayload::Preference(pref) => {
                     bridge_preference(pref, state, store);
                     result.preferences_found += 1;
-                }
+                },
                 ParsedPayload::Chitchat(_) => {
                     result.chitchat_skipped += 1;
-                }
+                },
             }
         }
 
         // Bridge fact_quote from session metadata
         if session.contains_fact == Some(true) {
-            if let (Some(ref quote), Some(ref fact_id)) =
-                (&session.fact_quote, &session.fact_id)
-            {
-                let category =
-                    parsers::infer_preference_category(quote, session.topic.as_deref());
+            if let (Some(ref quote), Some(ref fact_id)) = (&session.fact_quote, &session.fact_id) {
+                let category = parsers::infer_preference_category(quote, session.topic.as_deref());
                 let sentiment = if fact_id.contains("negative") {
                     0.2
                 } else if fact_id.contains("mixed") {
@@ -363,22 +353,22 @@ pub fn ingest_per_session(
                 ParsedPayload::Transaction(tx) => {
                     bridge_transaction(tx, &mut state, &mut store);
                     result.transactions_found += 1;
-                }
+                },
                 ParsedPayload::StateChange(sc) => {
                     bridge_state_change(sc, &mut state, &mut store);
                     result.state_changes_found += 1;
-                }
+                },
                 ParsedPayload::Relationship(rel) => {
                     bridge_relationship(rel, &mut state, &mut store);
                     result.relationships_found += 1;
-                }
+                },
                 ParsedPayload::Preference(pref) => {
                     bridge_preference(pref, &mut state, &mut store);
                     result.preferences_found += 1;
-                }
+                },
                 ParsedPayload::Chitchat(_) => {
                     result.chitchat_skipped += 1;
-                }
+                },
             }
         }
 
@@ -450,10 +440,7 @@ fn collect_participants(content: &str, participants: &mut HashSet<String>) {
 
     // Names before "owe me" / "owes me" — find the sentence containing "owe me"
     if let Some(owe_pos) = lower.find("owe me").or_else(|| lower.find("owes me")) {
-        let sentence_start = content[..owe_pos]
-            .rfind(". ")
-            .map(|p| p + 2)
-            .unwrap_or(0);
+        let sentence_start = content[..owe_pos].rfind(". ").map(|p| p + 2).unwrap_or(0);
         let before = &content[sentence_start..owe_pos];
         let names = extract_person_names_only(before);
         for name in names {
@@ -466,13 +453,71 @@ fn collect_participants(content: &str, participants: &mut HashSet<String>) {
 /// first names, not place names or other proper nouns).
 fn extract_person_names_only(text: &str) -> Vec<String> {
     let skip_words = [
-        "Paid", "Refund", "The", "This", "That", "I", "My", "It", "A", "An", "For", "With",
-        "And", "Or", "But", "Is", "Are", "Was", "Were", "Has", "Have", "Had", "Do", "Does",
-        "Did", "In", "On", "At", "To", "From", "By", "Of", "About", "Split", "Each", "All",
-        "Between", "Among", "Yes", "No", "Shared", "Equally", "Three", "Should", "Their",
-        "Our", "Everyone", "Total", "Cost", "Hotel", "Dinner", "Lunch", "Breakfast",
-        "Museum", "Tour", "Taxi", "Train", "Coffee", "Italian", "French", "German",
-        "Berlin", "Paris", "London", "Amsterdam",
+        "Paid",
+        "Refund",
+        "The",
+        "This",
+        "That",
+        "I",
+        "My",
+        "It",
+        "A",
+        "An",
+        "For",
+        "With",
+        "And",
+        "Or",
+        "But",
+        "Is",
+        "Are",
+        "Was",
+        "Were",
+        "Has",
+        "Have",
+        "Had",
+        "Do",
+        "Does",
+        "Did",
+        "In",
+        "On",
+        "At",
+        "To",
+        "From",
+        "By",
+        "Of",
+        "About",
+        "Split",
+        "Each",
+        "All",
+        "Between",
+        "Among",
+        "Yes",
+        "No",
+        "Shared",
+        "Equally",
+        "Three",
+        "Should",
+        "Their",
+        "Our",
+        "Everyone",
+        "Total",
+        "Cost",
+        "Hotel",
+        "Dinner",
+        "Lunch",
+        "Breakfast",
+        "Museum",
+        "Tour",
+        "Taxi",
+        "Train",
+        "Coffee",
+        "Italian",
+        "French",
+        "German",
+        "Berlin",
+        "Paris",
+        "London",
+        "Amsterdam",
     ];
 
     let mut names = Vec::new();
@@ -594,7 +639,7 @@ fn bridge_transaction(
         SplitMode::Percentage(_) => {
             // Will be handled per-beneficiary below
             0.0 // placeholder
-        }
+        },
         SplitMode::ExplicitShares(_) => 0.0,
         SplitMode::SoleBeneficiary => tx.amount,
         SplitMode::Unknown => tx.amount / num_beneficiaries,
@@ -623,14 +668,14 @@ fn bridge_transaction(
                 } else {
                     per_person
                 }
-            }
+            },
             SplitMode::ExplicitShares(shares) => {
                 if let Some((_, amt)) = shares.iter().find(|(n, _)| n == beneficiary_name) {
                     *amt
                 } else {
                     per_person
                 }
-            }
+            },
             _ => per_person,
         };
 
@@ -762,10 +807,20 @@ fn bridge_relationship(
 
     // Add bidirectional edges: subject → object and object → subject
     if let Err(e) = store.tree_add_child(&key, &rel.subject, &rel.object) {
-        tracing::warn!("Failed to add tree child ({} → {}): {}", rel.subject, rel.object, e);
+        tracing::warn!(
+            "Failed to add tree child ({} → {}): {}",
+            rel.subject,
+            rel.object,
+            e
+        );
     }
     if let Err(e) = store.tree_add_child(&key, &rel.object, &rel.subject) {
-        tracing::warn!("Failed to add tree child ({} → {}): {}", rel.object, rel.subject, e);
+        tracing::warn!(
+            "Failed to add tree child ({} → {}): {}",
+            rel.object,
+            rel.subject,
+            e
+        );
     }
 }
 
@@ -794,9 +849,7 @@ fn bridge_preference(
 
     // Rank by insertion order (lower = earlier = higher preference)
     // Score represents sentiment
-    let rank = if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) =
-        store.get(&key)
-    {
+    let rank = if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&key) {
         ranked_items.len()
     } else {
         0
@@ -822,9 +875,7 @@ pub fn ingest_to_events(
     data: &ConversationIngest,
     options: &IngestOptions,
 ) -> (Vec<agent_db_events::Event>, ConversationState, IngestResult) {
-    use agent_db_events::core::{
-        ActionOutcome, EventContext, EventType, MetadataValue,
-    };
+    use agent_db_events::core::{ActionOutcome, EventContext, EventType, MetadataValue};
     use std::collections::HashMap;
 
     let case_id = data
@@ -910,23 +961,24 @@ pub fn ingest_to_events(
                     result.transactions_found += 1;
                     // Emit one event per beneficiary pair
                     let payer_name = sanitize_name(&tx.payer);
-                    let beneficiaries: Vec<String> = if tx.participants_scope == ParticipantsScope::EveryoneKnown {
-                        let mut all: Vec<String> = state
-                            .known_participants
-                            .iter()
-                            .map(|n| sanitize_name(n))
-                            .filter(|n| !n.is_empty())
-                            .collect();
-                        all.sort();
-                        all.dedup();
-                        all
-                    } else {
-                        tx.beneficiaries
-                            .iter()
-                            .map(|n| sanitize_name(n))
-                            .filter(|n| !n.is_empty())
-                            .collect()
-                    };
+                    let beneficiaries: Vec<String> =
+                        if tx.participants_scope == ParticipantsScope::EveryoneKnown {
+                            let mut all: Vec<String> = state
+                                .known_participants
+                                .iter()
+                                .map(|n| sanitize_name(n))
+                                .filter(|n| !n.is_empty())
+                                .collect();
+                            all.sort();
+                            all.dedup();
+                            all
+                        } else {
+                            tx.beneficiaries
+                                .iter()
+                                .map(|n| sanitize_name(n))
+                                .filter(|n| !n.is_empty())
+                                .collect()
+                        };
 
                     let num_beneficiaries = beneficiaries.len().max(1) as f64;
                     let per_person = tx.amount / num_beneficiaries;
@@ -937,11 +989,23 @@ pub fn ingest_to_events(
                         }
                         let share = per_person;
                         let mut meta = HashMap::new();
-                        meta.insert("from".to_string(), MetadataValue::String(payer_name.clone()));
-                        meta.insert("to".to_string(), MetadataValue::String(beneficiary_name.clone()));
+                        meta.insert(
+                            "from".to_string(),
+                            MetadataValue::String(payer_name.clone()),
+                        );
+                        meta.insert(
+                            "to".to_string(),
+                            MetadataValue::String(beneficiary_name.clone()),
+                        );
                         meta.insert("amount".to_string(), MetadataValue::Float(share));
-                        meta.insert("transaction".to_string(), MetadataValue::String("true".to_string()));
-                        meta.insert("description".to_string(), MetadataValue::String(tx.description.clone()));
+                        meta.insert(
+                            "transaction".to_string(),
+                            MetadataValue::String("true".to_string()),
+                        );
+                        meta.insert(
+                            "description".to_string(),
+                            MetadataValue::String(tx.description.clone()),
+                        );
 
                         let evt = agent_db_events::Event {
                             id: agent_db_core::types::generate_event_id(),
@@ -950,7 +1014,13 @@ pub fn ingest_to_events(
                             agent_type: "conversation_agent".to_string(),
                             session_id: session_id_hash,
                             event_type: EventType::Conversation {
-                                speaker: parsed.original_content.split(':').next().unwrap_or("unknown").trim().to_string(),
+                                speaker: parsed
+                                    .original_content
+                                    .split(':')
+                                    .next()
+                                    .unwrap_or("unknown")
+                                    .trim()
+                                    .to_string(),
                                 content: msg.content.clone(),
                                 category: "transaction".to_string(),
                             },
@@ -964,42 +1034,81 @@ pub fn ingest_to_events(
                         events.push(evt);
                     }
                     continue; // Already pushed events per-beneficiary
-                }
+                },
                 ParsedPayload::StateChange(sc) => {
                     result.state_changes_found += 1;
                     let mut meta = HashMap::new();
-                    meta.insert("entity".to_string(), MetadataValue::String(sc.entity.clone()));
-                    meta.insert("new_state".to_string(), MetadataValue::String(sc.new_value.clone()));
-                    meta.insert("entity_state".to_string(), MetadataValue::String("true".to_string()));
+                    meta.insert(
+                        "entity".to_string(),
+                        MetadataValue::String(sc.entity.clone()),
+                    );
+                    meta.insert(
+                        "new_state".to_string(),
+                        MetadataValue::String(sc.new_value.clone()),
+                    );
+                    meta.insert(
+                        "entity_state".to_string(),
+                        MetadataValue::String("true".to_string()),
+                    );
                     ("state_change".to_string(), meta)
-                }
+                },
                 ParsedPayload::Relationship(rel) => {
                     result.relationships_found += 1;
                     let mut meta = HashMap::new();
-                    meta.insert("subject".to_string(), MetadataValue::String(rel.subject.clone()));
-                    meta.insert("object".to_string(), MetadataValue::String(rel.object.clone()));
-                    meta.insert("relation_type".to_string(), MetadataValue::String(rel.relation_type.clone()));
-                    meta.insert("relationship".to_string(), MetadataValue::String("true".to_string()));
+                    meta.insert(
+                        "subject".to_string(),
+                        MetadataValue::String(rel.subject.clone()),
+                    );
+                    meta.insert(
+                        "object".to_string(),
+                        MetadataValue::String(rel.object.clone()),
+                    );
+                    meta.insert(
+                        "relation_type".to_string(),
+                        MetadataValue::String(rel.relation_type.clone()),
+                    );
+                    meta.insert(
+                        "relationship".to_string(),
+                        MetadataValue::String("true".to_string()),
+                    );
                     ("relationship".to_string(), meta)
-                }
+                },
                 ParsedPayload::Preference(pref) => {
                     result.preferences_found += 1;
                     let mut meta = HashMap::new();
-                    meta.insert("entity".to_string(), MetadataValue::String(pref.entity.clone()));
+                    meta.insert(
+                        "entity".to_string(),
+                        MetadataValue::String(pref.entity.clone()),
+                    );
                     meta.insert("item".to_string(), MetadataValue::String(pref.item.clone()));
-                    meta.insert("category".to_string(), MetadataValue::String(pref.category.clone()));
-                    meta.insert("sentiment".to_string(), MetadataValue::Float(pref.sentiment as f64));
-                    meta.insert("preference".to_string(), MetadataValue::String("true".to_string()));
+                    meta.insert(
+                        "category".to_string(),
+                        MetadataValue::String(pref.category.clone()),
+                    );
+                    meta.insert(
+                        "sentiment".to_string(),
+                        MetadataValue::Float(pref.sentiment as f64),
+                    );
+                    meta.insert(
+                        "preference".to_string(),
+                        MetadataValue::String("true".to_string()),
+                    );
                     ("preference".to_string(), meta)
-                }
+                },
                 ParsedPayload::Chitchat(_) => {
                     result.chitchat_skipped += 1;
                     ("chitchat".to_string(), HashMap::new())
-                }
+                },
             };
 
             // Extract speaker from message content
-            let speaker = msg.content.split(':').next().unwrap_or(&msg.role).trim().to_string();
+            let speaker = msg
+                .content
+                .split(':')
+                .next()
+                .unwrap_or(&msg.role)
+                .trim()
+                .to_string();
 
             let evt = agent_db_events::Event {
                 id: agent_db_core::types::generate_event_id(),
@@ -1056,11 +1165,8 @@ pub fn ingest_to_events(
 
         // Bridge fact_quote from session metadata
         if session.contains_fact == Some(true) {
-            if let (Some(ref quote), Some(ref fact_id)) =
-                (&session.fact_quote, &session.fact_id)
-            {
-                let category =
-                    parsers::infer_preference_category(quote, session.topic.as_deref());
+            if let (Some(ref quote), Some(ref fact_id)) = (&session.fact_quote, &session.fact_id) {
+                let category = parsers::infer_preference_category(quote, session.topic.as_deref());
                 let sentiment = if fact_id.contains("negative") {
                     0.2
                 } else if fact_id.contains("mixed") {
@@ -1069,11 +1175,20 @@ pub fn ingest_to_events(
                     0.8
                 };
                 let mut meta = HashMap::new();
-                meta.insert("entity".to_string(), MetadataValue::String("user".to_string()));
-                meta.insert("item".to_string(), MetadataValue::String(format!("[{}] {}", fact_id, quote)));
+                meta.insert(
+                    "entity".to_string(),
+                    MetadataValue::String("user".to_string()),
+                );
+                meta.insert(
+                    "item".to_string(),
+                    MetadataValue::String(format!("[{}] {}", fact_id, quote)),
+                );
                 meta.insert("category".to_string(), MetadataValue::String(category));
                 meta.insert("sentiment".to_string(), MetadataValue::Float(sentiment));
-                meta.insert("preference".to_string(), MetadataValue::String("true".to_string()));
+                meta.insert(
+                    "preference".to_string(),
+                    MetadataValue::String("true".to_string()),
+                );
 
                 let fact_evt = agent_db_events::Event {
                     id: agent_db_core::types::generate_event_id(),
@@ -1155,7 +1270,10 @@ mod tests {
     fn bridge_relationship_chain() {
         let data = make_ingest(vec![
             ("user", "Johnny Fisher works with Christopher Peterson."),
-            ("user", "Christopher Peterson is a colleague of Kathleen Herrera."),
+            (
+                "user",
+                "Christopher Peterson is a colleague of Kathleen Herrera.",
+            ),
         ]);
         let mut store = StructuredMemoryStore::new();
         let result = ingest(&data, &mut store, &IngestOptions::default());
@@ -1166,7 +1284,9 @@ mod tests {
         let key = "tree:relations:colleague";
         let children = store.tree_children(key, "Johnny Fisher");
         assert!(children.is_some());
-        assert!(children.unwrap().contains(&"Christopher Peterson".to_string()));
+        assert!(children
+            .unwrap()
+            .contains(&"Christopher Peterson".to_string()));
 
         // Check reverse direction
         let children = store.tree_children(key, "Christopher Peterson");
@@ -1178,9 +1298,7 @@ mod tests {
 
     #[test]
     fn bridge_state_change_location() {
-        let data = make_ingest(vec![
-            ("user", "I live in Alfama, Lisbon."),
-        ]);
+        let data = make_ingest(vec![("user", "I live in Alfama, Lisbon.")]);
         let mut store = StructuredMemoryStore::new();
         let result = ingest(&data, &mut store, &IngestOptions::default());
 
@@ -1197,12 +1315,12 @@ mod tests {
             sessions: vec![ConversationSession {
                 session_id: "s1".to_string(),
                 topic: Some("Monet's Water Lilies".to_string()),
-                messages: vec![
-                    ConversationMessage {
-                        role: "user".to_string(),
-                        content: "Monet's Water Lilies series captures light in a way that feels alive.".to_string(),
-                    },
-                ],
+                messages: vec![ConversationMessage {
+                    role: "user".to_string(),
+                    content:
+                        "Monet's Water Lilies series captures light in a way that feels alive."
+                            .to_string(),
+                }],
                 contains_fact: None,
                 fact_id: None,
                 fact_quote: None,
@@ -1220,9 +1338,10 @@ mod tests {
 
     #[test]
     fn bridge_idempotency() {
-        let data = make_ingest(vec![
-            ("user", "Alice: Paid €100 for dinner - split among all"),
-        ]);
+        let data = make_ingest(vec![(
+            "user",
+            "Alice: Paid €100 for dinner - split among all",
+        )]);
         let mut store = StructuredMemoryStore::new();
         let r1 = ingest(&data, &mut store, &IngestOptions::default());
         // Ingesting the same data again should process messages again
@@ -1247,9 +1366,10 @@ mod tests {
     #[test]
     fn test_incremental_preserves_registry() {
         // First batch: Alice and Bob
-        let data1 = make_ingest(vec![
-            ("user", "Alice: Paid €100 for dinner - split with Bob"),
-        ]);
+        let data1 = make_ingest(vec![(
+            "user",
+            "Alice: Paid €100 for dinner - split with Bob",
+        )]);
         let mut store = StructuredMemoryStore::new();
         let mut state = ConversationState::new();
         let r1 = ingest_incremental(&data1, &mut store, &IngestOptions::default(), &mut state);
@@ -1293,7 +1413,10 @@ mod tests {
 
         // Ledger keys should be distinct (no collisions)
         let ledger_keys = store.list_keys("ledger:");
-        assert!(ledger_keys.len() >= 2, "Should have at least 2 distinct ledgers");
+        assert!(
+            ledger_keys.len() >= 2,
+            "Should have at least 2 distinct ledgers"
+        );
     }
 
     #[test]
@@ -1344,19 +1467,24 @@ mod tests {
 
     #[test]
     fn test_ingest_to_events_transaction() {
-        let data = make_ingest_for_events(vec![
-            ("user", "Alice: Paid €100 for dinner - split with Bob"),
-        ]);
+        let data = make_ingest_for_events(vec![(
+            "user",
+            "Alice: Paid €100 for dinner - split with Bob",
+        )]);
         let (events, _state, result) = ingest_to_events(&data, &IngestOptions::default());
 
         assert_eq!(result.transactions_found, 1);
         // Should have at least 1 transaction event + 1 sentinel
-        assert!(events.len() >= 2, "Expected at least 2 events, got {}", events.len());
+        assert!(
+            events.len() >= 2,
+            "Expected at least 2 events, got {}",
+            events.len()
+        );
 
         // Find a transaction event
-        let tx_event = events.iter().find(|e| {
-            e.metadata.contains_key("transaction")
-        });
+        let tx_event = events
+            .iter()
+            .find(|e| e.metadata.contains_key("transaction"));
         assert!(tx_event.is_some(), "Expected a transaction event");
         let tx = tx_event.unwrap();
         assert!(tx.metadata.contains_key("from"));
@@ -1366,15 +1494,13 @@ mod tests {
 
     #[test]
     fn test_ingest_to_events_state_change() {
-        let data = make_ingest_for_events(vec![
-            ("user", "Alice: I'm moving to Paris"),
-        ]);
+        let data = make_ingest_for_events(vec![("user", "Alice: I'm moving to Paris")]);
         let (events, _state, result) = ingest_to_events(&data, &IngestOptions::default());
 
         assert_eq!(result.state_changes_found, 1);
-        let state_event = events.iter().find(|e| {
-            e.metadata.contains_key("entity_state")
-        });
+        let state_event = events
+            .iter()
+            .find(|e| e.metadata.contains_key("entity_state"));
         assert!(state_event.is_some(), "Expected a state change event");
         let se = state_event.unwrap();
         assert!(se.metadata.contains_key("entity"));
@@ -1383,15 +1509,13 @@ mod tests {
 
     #[test]
     fn test_ingest_to_events_relationship() {
-        let data = make_ingest_for_events(vec![
-            ("user", "Alice works with Bob"),
-        ]);
+        let data = make_ingest_for_events(vec![("user", "Alice works with Bob")]);
         let (events, _state, result) = ingest_to_events(&data, &IngestOptions::default());
 
         assert_eq!(result.relationships_found, 1);
-        let rel_event = events.iter().find(|e| {
-            e.metadata.contains_key("relationship")
-        });
+        let rel_event = events
+            .iter()
+            .find(|e| e.metadata.contains_key("relationship"));
         assert!(rel_event.is_some(), "Expected a relationship event");
         let re = rel_event.unwrap();
         assert!(re.metadata.contains_key("subject"));
@@ -1401,15 +1525,13 @@ mod tests {
 
     #[test]
     fn test_ingest_to_events_preference() {
-        let data = make_ingest_for_events(vec![
-            ("user", "Alice: I love sushi"),
-        ]);
+        let data = make_ingest_for_events(vec![("user", "Alice: I love sushi")]);
         let (events, _state, result) = ingest_to_events(&data, &IngestOptions::default());
 
         assert_eq!(result.preferences_found, 1);
-        let pref_event = events.iter().find(|e| {
-            e.metadata.contains_key("preference")
-        });
+        let pref_event = events
+            .iter()
+            .find(|e| e.metadata.contains_key("preference"));
         assert!(pref_event.is_some(), "Expected a preference event");
         let pe = pref_event.unwrap();
         assert!(pe.metadata.contains_key("entity"));
@@ -1418,9 +1540,7 @@ mod tests {
 
     #[test]
     fn test_ingest_to_events_sentinel() {
-        let data = make_ingest_for_events(vec![
-            ("user", "Alice: Hello there"),
-        ]);
+        let data = make_ingest_for_events(vec![("user", "Alice: Hello there")]);
         let (events, _state, _result) = ingest_to_events(&data, &IngestOptions::default());
 
         // Last event should be the session_complete sentinel
@@ -1428,7 +1548,7 @@ mod tests {
         match &last.event_type {
             agent_db_events::core::EventType::Action { action_name, .. } => {
                 assert_eq!(action_name, "session_complete");
-            }
+            },
             other => panic!("Expected Action sentinel, got {:?}", other),
         }
     }
@@ -1455,9 +1575,7 @@ mod tests {
 
     #[test]
     fn test_ingest_to_events_agent_id_high_bit() {
-        let data = make_ingest_for_events(vec![
-            ("user", "Alice: Hello"),
-        ]);
+        let data = make_ingest_for_events(vec![("user", "Alice: Hello")]);
         let (events, _state, _result) = ingest_to_events(&data, &IngestOptions::default());
 
         for event in &events {
@@ -1471,9 +1589,10 @@ mod tests {
 
     #[test]
     fn test_ingest_to_events_participants_collected() {
-        let data = make_ingest_for_events(vec![
-            ("user", "Alice: Paid €50 for lunch - split with Bob and Carol"),
-        ]);
+        let data = make_ingest_for_events(vec![(
+            "user",
+            "Alice: Paid €50 for lunch - split with Bob and Carol",
+        )]);
         let (_events, state, _result) = ingest_to_events(&data, &IngestOptions::default());
 
         assert!(

@@ -29,13 +29,23 @@ pub enum ConversationQueryType {
     /// Numeric reasoning over ledgers
     Numeric { op: NumericOp },
     /// "where is X", "current state of X"
-    State { entity: Option<String>, attribute: Option<String> },
+    State {
+        entity: Option<String>,
+        attribute: Option<String>,
+    },
     /// "who is X", "tell me about X"
     EntitySummary { entity: String },
     /// "what does X like", "recommend"
-    Preference { entity: Option<String>, category: Option<String> },
+    Preference {
+        entity: Option<String>,
+        category: Option<String>,
+    },
     /// "are X and Y related through colleagues"
-    RelationshipPath { from: String, to: String, relation: Option<String> },
+    RelationshipPath {
+        from: String,
+        to: String,
+        relation: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -50,8 +60,10 @@ pub fn classify_conversation_query(question: &str) -> Option<ConversationQueryTy
 
     // Numeric queries
     if is_numeric_query(&lower) {
-        let op = if lower.contains("settle") || lower.contains("minimum transfer")
-            || lower.contains("simplif") || lower.contains("how to pay")
+        let op = if lower.contains("settle")
+            || lower.contains("minimum transfer")
+            || lower.contains("simplif")
+            || lower.contains("how to pay")
         {
             NumericOp::TransferMinimize
         } else if lower.contains("total") || lower.contains("sum") || lower.contains("how much") {
@@ -96,16 +108,28 @@ pub fn classify_conversation_query(question: &str) -> Option<ConversationQueryTy
         return Some(ConversationQueryType::Preference { entity, category });
     }
 
-    tracing::debug!(question, "classify_conversation_query: no conversation-specific pattern matched");
+    tracing::debug!(
+        question,
+        "classify_conversation_query: no conversation-specific pattern matched"
+    );
     None
 }
 
 fn is_numeric_query(lower: &str) -> bool {
     let patterns = [
-        "owes", "owe", "balance", "settle", "total spent",
-        "how much did", "how much does", "how much was",
-        "minimum transfer", "simplif", "debt",
-        "who pays", "who needs to pay",
+        "owes",
+        "owe",
+        "balance",
+        "settle",
+        "total spent",
+        "how much did",
+        "how much does",
+        "how much was",
+        "minimum transfer",
+        "simplif",
+        "debt",
+        "who pays",
+        "who needs to pay",
     ];
     patterns.iter().any(|p| lower.contains(p))
 }
@@ -133,27 +157,45 @@ fn is_relationship_query(lower: &str) -> bool {
 
 fn is_state_query(lower: &str) -> bool {
     let patterns = [
-        "where is", "where do", "where does", "where am i",
-        "current status", "current state", "state of",
-        "location of", "what should i do",
-        "what do you have every", "what do i have every",
+        "where is",
+        "where do",
+        "where does",
+        "where am i",
+        "current status",
+        "current state",
+        "state of",
+        "location of",
+        "what should i do",
+        "what do you have every",
+        "what do i have every",
     ];
     patterns.iter().any(|p| lower.contains(p))
 }
 
 fn is_entity_summary_query(lower: &str) -> bool {
     let patterns = [
-        "who is", "tell me about", "what do you know about",
-        "describe", "summary of",
+        "who is",
+        "tell me about",
+        "what do you know about",
+        "describe",
+        "summary of",
     ];
     patterns.iter().any(|p| lower.contains(p))
 }
 
 fn is_preference_query(lower: &str) -> bool {
     let patterns = [
-        "recommend", "suggest", "favorite", "favourite",
-        "what do i like", "what does", "do i like",
-        "preference", "which .* do i like", "rank", "rating",
+        "recommend",
+        "suggest",
+        "favorite",
+        "favourite",
+        "what do i like",
+        "what does",
+        "do i like",
+        "preference",
+        "which .* do i like",
+        "rank",
+        "rating",
     ];
     patterns.iter().any(|p| {
         if p.contains(".*") {
@@ -196,7 +238,10 @@ fn extract_pair_names(question: &str) -> (String, String) {
         let after = &question[between_pos + 8..];
         if let Some(and_pos) = after.to_lowercase().find(" and ") {
             let from_str = after[..and_pos].trim();
-            let to_str = after[and_pos + 5..].trim().trim_end_matches('?').trim_end_matches('.');
+            let to_str = after[and_pos + 5..]
+                .trim()
+                .trim_end_matches('?')
+                .trim_end_matches('.');
             return (from_str.to_string(), to_str.to_string());
         }
     }
@@ -210,14 +255,23 @@ fn extract_entity_from_question(question: &str) -> Option<String> {
 
     // "who is X" / "tell me about X" / "where is X"
     let prefixes = [
-        "who is ", "tell me about ", "what do you know about ",
-        "where is ", "where does ", "describe ", "summary of ",
+        "who is ",
+        "tell me about ",
+        "what do you know about ",
+        "where is ",
+        "where does ",
+        "describe ",
+        "summary of ",
     ];
 
     for prefix in &prefixes {
         if let Some(pos) = lower.find(prefix) {
             let after = &question[pos + prefix.len()..];
-            let name = after.trim().trim_end_matches('?').trim_end_matches('.').trim();
+            let name = after
+                .trim()
+                .trim_end_matches('?')
+                .trim_end_matches('.')
+                .trim();
             if !name.is_empty() {
                 return Some(name.to_string());
             }
@@ -230,8 +284,16 @@ fn extract_entity_from_question(question: &str) -> Option<String> {
 /// Extract a category from a preference question.
 fn extract_category_from_question(lower: &str) -> Option<String> {
     let categories = [
-        "art", "music", "movie", "film", "book", "food",
-        "sport", "series", "game", "boardgame",
+        "art",
+        "music",
+        "movie",
+        "film",
+        "book",
+        "food",
+        "sport",
+        "series",
+        "game",
+        "boardgame",
     ];
     for cat in &categories {
         if lower.contains(cat) {
@@ -254,19 +316,23 @@ pub fn execute_conversation_query(
 ) -> String {
     match query {
         ConversationQueryType::Numeric { op } => execute_numeric(op, store),
-        ConversationQueryType::State { entity, attribute } => {
-            execute_state(entity.as_deref(), attribute.as_deref(), store, name_registry, question)
-        }
+        ConversationQueryType::State { entity, attribute } => execute_state(
+            entity.as_deref(),
+            attribute.as_deref(),
+            store,
+            name_registry,
+            question,
+        ),
         ConversationQueryType::EntitySummary { entity } => {
             execute_entity_summary(entity, store, name_registry)
-        }
+        },
         ConversationQueryType::Preference { entity, category } => {
             execute_preference(entity.as_deref(), category.as_deref(), store, name_registry)
-        }
+        },
         ConversationQueryType::RelationshipPath { from, to, relation } => {
             let rel = relation.as_deref().unwrap_or("colleague");
             execute_relationship_path(from, to, rel, store)
-        }
+        },
     }
 }
 
@@ -279,7 +345,7 @@ fn execute_numeric(op: &NumericOp, store: &StructuredMemoryStore) -> String {
                 return "No financial transactions recorded.".to_string();
             }
             numeric_reasoning::format_balances(&balances)
-        }
+        },
         NumericOp::Sum => {
             let total: f64 = store
                 .list_keys("ledger:")
@@ -287,14 +353,14 @@ fn execute_numeric(op: &NumericOp, store: &StructuredMemoryStore) -> String {
                 .filter_map(|key| numeric_reasoning::ledger_sum(store, key))
                 .sum();
             format!("Total across all ledgers: {:.2}", total)
-        }
+        },
         NumericOp::TransferMinimize => {
             if balances.is_empty() {
                 return "No debts to settle.".to_string();
             }
             let transfers = numeric_reasoning::minimize_transfers(&balances, "EUR");
             numeric_reasoning::format_transfers(&transfers)
-        }
+        },
     }
 }
 
@@ -313,11 +379,14 @@ fn execute_state(
             match name_registry.id_for_name("user") {
                 Some(id) => id,
                 None => {
-                    tracing::debug!(entity = entity_name, "No state information found for entity");
+                    tracing::debug!(
+                        entity = entity_name,
+                        "No state information found for entity"
+                    );
                     return format!("No state information found for '{}'.", entity_name);
-                }
+                },
             }
-        }
+        },
     };
 
     let lower_q = question.to_lowercase();
@@ -384,7 +453,8 @@ fn execute_state(
 
         // Add nearby landmarks
         let landmarks_key = format!("prefs:{}:landmarks", entity_id);
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&landmarks_key) {
+        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&landmarks_key)
+        {
             for item in ranked_items.iter().take(2) {
                 suggestions.push(format!("Near: {}", item.name));
             }
@@ -464,15 +534,13 @@ fn execute_entity_summary(
 ) -> String {
     let entity_id = match name_registry.id_for_name(entity) {
         Some(id) => id,
-        None => {
-            match name_registry.id_for_name("user") {
-                Some(id) => id,
-                None => {
-                    tracing::debug!(entity, "No information found for entity");
-                    return format!("No information found for '{}'.", entity);
-                }
-            }
-        }
+        None => match name_registry.id_for_name("user") {
+            Some(id) => id,
+            None => {
+                tracing::debug!(entity, "No information found for entity");
+                return format!("No information found for '{}'.", entity);
+            },
+        },
     };
 
     let mut sections = Vec::new();
@@ -540,12 +608,10 @@ fn execute_preference(
     let entity_name = entity.unwrap_or("user");
     let entity_id = match name_registry.id_for_name(entity_name) {
         Some(id) => id,
-        None => {
-            match name_registry.id_for_name("user") {
-                Some(id) => id,
-                None => return "No preferences found.".to_string(),
-            }
-        }
+        None => match name_registry.id_for_name("user") {
+            Some(id) => id,
+            None => return "No preferences found.".to_string(),
+        },
     };
 
     if let Some(cat) = category {
@@ -595,7 +661,7 @@ fn execute_relationship_path(
                 "Yes, {} and {} are connected through {} relations.\nPath: {}",
                 from, to, relation_type, chain
             )
-        }
+        },
         None => format!(
             "No {} connection found between {} and {}.",
             relation_type, from, to
@@ -617,7 +683,9 @@ mod tests {
         assert!(q.is_some());
         assert!(matches!(
             q.unwrap(),
-            ConversationQueryType::Numeric { op: NumericOp::NetBalance }
+            ConversationQueryType::Numeric {
+                op: NumericOp::NetBalance
+            }
         ));
     }
 
@@ -627,7 +695,9 @@ mod tests {
         assert!(q.is_some());
         assert!(matches!(
             q.unwrap(),
-            ConversationQueryType::Numeric { op: NumericOp::TransferMinimize }
+            ConversationQueryType::Numeric {
+                op: NumericOp::TransferMinimize
+            }
         ));
     }
 
@@ -664,9 +734,8 @@ mod tests {
 
     #[test]
     fn extract_pair_names_from_question() {
-        let (from, to) = extract_pair_names(
-            "Are Brenda Nguyen and Johnny Fisher related to each other?",
-        );
+        let (from, to) =
+            extract_pair_names("Are Brenda Nguyen and Johnny Fisher related to each other?");
         assert_eq!(from, "Brenda Nguyen");
         assert_eq!(to, "Johnny Fisher");
     }

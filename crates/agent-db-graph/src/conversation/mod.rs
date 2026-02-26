@@ -22,8 +22,13 @@ pub mod parsers;
 pub mod types;
 
 // Re-export key types
-pub use answer_composer::{gather_memory_context, MemoryContextEntry, MemorySummary, StrategySummary};
-pub use bridge::{ingest, ingest_incremental, ingest_per_session, ingest_to_events, ingest_with_llm, ingest_with_llm_incremental};
+pub use answer_composer::{
+    gather_memory_context, MemoryContextEntry, MemorySummary, StrategySummary,
+};
+pub use bridge::{
+    ingest, ingest_incremental, ingest_per_session, ingest_to_events, ingest_with_llm,
+    ingest_with_llm_incremental,
+};
 pub use nlq_ext::{classify_conversation_query, execute_conversation_query, ConversationQueryType};
 pub use types::{
     ConversationIngest, ConversationMessage, ConversationSession, ConversationState, IngestOptions,

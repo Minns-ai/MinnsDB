@@ -308,7 +308,9 @@ pub fn build_event_narrative(events: &[Event]) -> String {
             EventType::Learning { event } => {
                 format!("{}. Learning: {:?}", i + 1, event)
             },
-            EventType::Conversation { speaker, content, .. } => {
+            EventType::Conversation {
+                speaker, content, ..
+            } => {
                 let truncated = &content[..80.min(content.len())];
                 format!("{}. Conversation [{}]: {}", i + 1, speaker, truncated)
             },

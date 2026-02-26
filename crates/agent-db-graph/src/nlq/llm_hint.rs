@@ -4,7 +4,7 @@
 //! intent classifier when it detects structured memory types or when rules
 //! return Unknown.
 
-use crate::llm_client::{LlmClient, LlmRequest, parse_json_from_llm};
+use crate::llm_client::{parse_json_from_llm, LlmClient, LlmRequest};
 use crate::nlq::intent::{ClassifiedIntent, QueryIntent, StructuredQueryType};
 use serde::{Deserialize, Serialize};
 

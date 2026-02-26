@@ -3,8 +3,8 @@
 //! Collects relevant structured memory backing a conversation query result,
 //! returning serializable context entries alongside the computed answer.
 
-use super::numeric_reasoning;
 use super::nlq_ext::ConversationQueryType;
+use super::numeric_reasoning;
 use super::types::NameRegistry;
 use crate::structured_memory::{MemoryTemplate, StructuredMemoryStore};
 use serde::Serialize;
@@ -134,14 +134,18 @@ pub fn gather_memory_context(
 ) -> Vec<MemoryContextEntry> {
     match query {
         ConversationQueryType::Numeric { .. } => gather_numeric(store),
-        ConversationQueryType::State { entity, .. } => gather_state(entity.as_deref(), store, registry),
-        ConversationQueryType::EntitySummary { entity } => gather_entity_summary(entity, store, registry),
+        ConversationQueryType::State { entity, .. } => {
+            gather_state(entity.as_deref(), store, registry)
+        },
+        ConversationQueryType::EntitySummary { entity } => {
+            gather_entity_summary(entity, store, registry)
+        },
         ConversationQueryType::Preference { entity, category } => {
             gather_preference(entity.as_deref(), category.as_deref(), store, registry)
-        }
+        },
         ConversationQueryType::RelationshipPath { from, to, relation } => {
             gather_relationship(from, to, relation.as_deref(), store)
-        }
+        },
     }
 }
 
@@ -222,10 +226,7 @@ fn gather_entity_summary(
 
     // 2. All preference lists
     for key in store.list_keys(&format!("prefs:{}:", entity_id)) {
-        if let Some(MemoryTemplate::PreferenceList {
-            ranked_items, ..
-        }) = store.get(key)
-        {
+        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
             let category = key.rsplit(':').next().unwrap_or("general").to_string();
             entries.push(MemoryContextEntry::Preference {
                 key: key.to_string(),
@@ -296,10 +297,7 @@ fn gather_preference(
     } else {
         // All preference lists for this entity
         for key in store.list_keys(&format!("prefs:{}:", entity_id)) {
-            if let Some(MemoryTemplate::PreferenceList {
-                ranked_items, ..
-            }) = store.get(key)
-            {
+            if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
                 let cat = key.rsplit(':').next().unwrap_or("general").to_string();
                 entries.push(MemoryContextEntry::Preference {
                     key: key.to_string(),
@@ -397,10 +395,7 @@ fn gather_pref_list(
     out: &mut Vec<MemoryContextEntry>,
 ) {
     let key = format!("prefs:{}:{}", entity_id, category);
-    if let Some(MemoryTemplate::PreferenceList {
-        ranked_items, ..
-    }) = store.get(&key)
-    {
+    if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&key) {
         out.push(MemoryContextEntry::Preference {
             key,
             entity: entity_name.to_string(),
@@ -433,7 +428,7 @@ mod tests {
     fn make_registry() -> NameRegistry {
         let mut r = NameRegistry::new();
         r.get_or_create("Alice"); // id=1
-        r.get_or_create("Bob");   // id=2
+        r.get_or_create("Bob"); // id=2
         r.get_or_create("Charlie"); // id=3
         r
     }
@@ -613,9 +608,15 @@ mod tests {
         let ctx = gather_memory_context(&query, &store, &registry);
 
         // Should have state + preference + ledger(s) involving Alice
-        let has_state = ctx.iter().any(|e| matches!(e, MemoryContextEntry::State { .. }));
-        let has_pref = ctx.iter().any(|e| matches!(e, MemoryContextEntry::Preference { .. }));
-        let has_ledger = ctx.iter().any(|e| matches!(e, MemoryContextEntry::Ledger { .. }));
+        let has_state = ctx
+            .iter()
+            .any(|e| matches!(e, MemoryContextEntry::State { .. }));
+        let has_pref = ctx
+            .iter()
+            .any(|e| matches!(e, MemoryContextEntry::Preference { .. }));
+        let has_ledger = ctx
+            .iter()
+            .any(|e| matches!(e, MemoryContextEntry::Ledger { .. }));
 
         assert!(has_state, "Should include state machines");
         assert!(has_pref, "Should include preferences");
@@ -657,12 +658,15 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, MemoryContextEntry::Preference { .. }))
             .count();
-        assert!(pref_count >= 1, "Should have at least the music preference list");
+        assert!(
+            pref_count >= 1,
+            "Should have at least the music preference list"
+        );
 
         // Verify items
-        let music = ctx.iter().find(|e| {
-            matches!(e, MemoryContextEntry::Preference { category, .. } if category == "music")
-        });
+        let music = ctx.iter().find(
+            |e| matches!(e, MemoryContextEntry::Preference { category, .. } if category == "music"),
+        );
         assert!(music.is_some());
         if let Some(MemoryContextEntry::Preference { items, .. }) = music {
             assert_eq!(items.len(), 2);

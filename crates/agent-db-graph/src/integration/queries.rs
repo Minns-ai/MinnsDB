@@ -503,7 +503,9 @@ impl GraphEngine {
     }
 
     /// Get a reference to the persistent conversation states (for incremental ingestion).
-    pub fn conversation_states(&self) -> &tokio::sync::Mutex<HashMap<String, crate::conversation::ConversationState>> {
+    pub fn conversation_states(
+        &self,
+    ) -> &tokio::sync::Mutex<HashMap<String, crate::conversation::ConversationState>> {
         &self.conversation_states
     }
 
@@ -587,7 +589,10 @@ impl GraphEngine {
                 let rule_based = crate::nlq::intent::classify_intent_full(&effective_question);
                 let llm_result = tokio::time::timeout(
                     Duration::from_secs(5),
-                    crate::nlq::llm_hint::classify_with_llm(llm_client.as_ref(), &effective_question),
+                    crate::nlq::llm_hint::classify_with_llm(
+                        llm_client.as_ref(),
+                        &effective_question,
+                    ),
                 )
                 .await;
                 let llm_hint = match llm_result {

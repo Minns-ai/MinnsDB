@@ -117,11 +117,18 @@ fn score_transaction(_original: &str, lower: &str) -> f32 {
     }
 
     // Split signals (boost)
-    if lower.contains("split") || lower.contains("shared between") || lower.contains("shared equally") || lower.contains("split three ways") {
+    if lower.contains("split")
+        || lower.contains("shared between")
+        || lower.contains("shared equally")
+        || lower.contains("split three ways")
+    {
         score += 0.1;
     }
-    if lower.contains("for all") || lower.contains("for everyone") || lower.contains("among all")
-        || lower.contains("for our group") || lower.contains("for all three")
+    if lower.contains("for all")
+        || lower.contains("for everyone")
+        || lower.contains("among all")
+        || lower.contains("for our group")
+        || lower.contains("for all three")
     {
         score += 0.05;
     }
@@ -138,9 +145,7 @@ fn score_transaction(_original: &str, lower: &str) -> f32 {
 fn has_verbose_paid_pattern(lower: &str) -> bool {
     if let Some(colon_pos) = lower.find(':') {
         let after_colon = lower[colon_pos + 1..].trim_start();
-        let verb_patterns = [
-            "i paid", "i covered", "i bought", "i purchased", "i got",
-        ];
+        let verb_patterns = ["i paid", "i covered", "i bought", "i purchased", "i got"];
         for pat in &verb_patterns {
             if after_colon.starts_with(pat) {
                 return true;
@@ -187,9 +192,7 @@ fn contains_currency_amount(s: &str) -> bool {
         }
     }
     // Check for digit followed by currency word
-    let currency_words = [
-        "usd", "eur", "gbp", "jpy", "dollar", "euro", "pound", "yen",
-    ];
+    let currency_words = ["usd", "eur", "gbp", "jpy", "dollar", "euro", "pound", "yen"];
     for word in &currency_words {
         if s.contains(word) {
             return true;
@@ -227,8 +230,8 @@ fn score_state_change(_original: &str, lower: &str) -> f32 {
 
     // Landmark proximity
     if lower.contains("near ") || lower.contains("close to ") {
-        let has_cap_after =
-            has_capitalized_word_after(lower, "near ") || has_capitalized_word_after(lower, "close to ");
+        let has_cap_after = has_capitalized_word_after(lower, "near ")
+            || has_capitalized_word_after(lower, "close to ");
         if has_cap_after {
             score = score.max(0.6);
         }
@@ -244,9 +247,7 @@ fn score_state_change(_original: &str, lower: &str) -> f32 {
 
     // "enjoy" + location-ish context
     if (lower.contains("i enjoy") || lower.contains("i love"))
-        && (lower.contains("watching")
-            || lower.contains("walking")
-            || lower.contains("from "))
+        && (lower.contains("watching") || lower.contains("walking") || lower.contains("from "))
     {
         score = score.max(0.55);
     }
@@ -369,8 +370,7 @@ fn score_preference(_original: &str, lower: &str) -> f32 {
     }
 
     // General positive/negative art critique
-    if lower.contains("meditative") || lower.contains("overwhelming") || lower.contains("genius")
-    {
+    if lower.contains("meditative") || lower.contains("overwhelming") || lower.contains("genius") {
         score = score.max(0.55);
     }
 
@@ -404,7 +404,12 @@ mod tests {
     fn classify_transaction_paid_pattern() {
         let ctx = test_ctx();
         let state = test_state();
-        let r = classify(&ctx, &state, "Alice: Paid €179 for museum - split with Bob", "user");
+        let r = classify(
+            &ctx,
+            &state,
+            "Alice: Paid €179 for museum - split with Bob",
+            "user",
+        );
         assert_eq!(r.category, MessageCategory::Transaction);
         assert!(r.confidence >= 0.9);
     }
@@ -501,12 +506,7 @@ mod tests {
     fn classify_chitchat() {
         let ctx = test_ctx();
         let state = test_state();
-        let r = classify(
-            &ctx,
-            &state,
-            "The music makes this trip special!",
-            "user",
-        );
+        let r = classify(&ctx, &state, "The music makes this trip special!", "user");
         assert_eq!(r.category, MessageCategory::Chitchat);
     }
 

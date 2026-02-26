@@ -620,9 +620,18 @@ impl GraphEngine {
 
                 // ---- Relationship detection ----
                 if event.metadata.contains_key("relationship") {
-                    let subject = event.metadata.get("subject").and_then(crate::metadata_normalize::metadata_as_str);
-                    let object = event.metadata.get("object").and_then(crate::metadata_normalize::metadata_as_str);
-                    let relation_type = event.metadata.get("relation_type").and_then(crate::metadata_normalize::metadata_as_str);
+                    let subject = event
+                        .metadata
+                        .get("subject")
+                        .and_then(crate::metadata_normalize::metadata_as_str);
+                    let object = event
+                        .metadata
+                        .get("object")
+                        .and_then(crate::metadata_normalize::metadata_as_str);
+                    let relation_type = event
+                        .metadata
+                        .get("relation_type")
+                        .and_then(crate::metadata_normalize::metadata_as_str);
 
                     if let (Some(subj), Some(obj), Some(rel)) = (subject, object, relation_type) {
                         if !subj.is_empty() && !obj.is_empty() && !rel.is_empty() {
@@ -637,10 +646,22 @@ impl GraphEngine {
 
                 // ---- Preference detection ----
                 if event.metadata.contains_key("preference") {
-                    let entity = event.metadata.get("entity").and_then(crate::metadata_normalize::metadata_as_str);
-                    let item = event.metadata.get("item").and_then(crate::metadata_normalize::metadata_as_str);
-                    let category = event.metadata.get("category").and_then(crate::metadata_normalize::metadata_as_str);
-                    let sentiment = event.metadata.get("sentiment").and_then(crate::metadata_normalize::metadata_as_f64)
+                    let entity = event
+                        .metadata
+                        .get("entity")
+                        .and_then(crate::metadata_normalize::metadata_as_str);
+                    let item = event
+                        .metadata
+                        .get("item")
+                        .and_then(crate::metadata_normalize::metadata_as_str);
+                    let category = event
+                        .metadata
+                        .get("category")
+                        .and_then(crate::metadata_normalize::metadata_as_str);
+                    let sentiment = event
+                        .metadata
+                        .get("sentiment")
+                        .and_then(crate::metadata_normalize::metadata_as_f64)
                         .unwrap_or(0.5);
 
                     if let (Some(ent), Some(itm), Some(cat)) = (entity, item, category) {
@@ -656,7 +677,12 @@ impl GraphEngine {
                 }
             }
 
-            (state_candidates, ledger_candidates, relationship_candidates, preference_candidates)
+            (
+                state_candidates,
+                ledger_candidates,
+                relationship_candidates,
+                preference_candidates,
+            )
         };
         // inference lock is now dropped
 

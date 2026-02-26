@@ -326,4 +326,3 @@ pub struct SessionIngestResult {
     pub name_registry: NameRegistry,
     pub result: IngestResult,
 }
-

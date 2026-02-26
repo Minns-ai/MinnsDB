@@ -422,13 +422,13 @@ impl GraphEngine {
                 .or_else(|| config.openai_api_key.clone());
             if let Some(key) = hint_key {
                 let model = config.nlq_hint_model.clone();
-                let client: Arc<dyn crate::llm_client::LlmClient> =
-                    match config.nlq_hint_provider.as_str() {
-                        "anthropic" => {
-                            Arc::new(crate::llm_client::AnthropicLlmClient::new(key, model))
-                        }
-                        _ => Arc::new(crate::llm_client::OpenAiLlmClient::new(key, model)),
-                    };
+                let client: Arc<dyn crate::llm_client::LlmClient> = match config
+                    .nlq_hint_provider
+                    .as_str()
+                {
+                    "anthropic" => Arc::new(crate::llm_client::AnthropicLlmClient::new(key, model)),
+                    _ => Arc::new(crate::llm_client::OpenAiLlmClient::new(key, model)),
+                };
                 if config.enable_nlq_hint {
                     tracing::info!(
                         "NLQ hint classifier enabled (provider={}, model={})",

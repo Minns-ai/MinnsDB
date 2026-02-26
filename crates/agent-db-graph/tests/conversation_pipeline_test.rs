@@ -45,8 +45,7 @@ async fn test_conversation_pipeline_concept_nodes_in_graph() {
         ],
     );
     let options = IngestOptions::default();
-    let (events, state, _result) =
-        agent_db_graph::conversation::ingest_to_events(&data, &options);
+    let (events, state, _result) = agent_db_graph::conversation::ingest_to_events(&data, &options);
 
     // Pre-create participant Concept nodes
     let participants: Vec<String> = state.known_participants.iter().cloned().collect();
@@ -57,9 +56,7 @@ async fn test_conversation_pipeline_concept_nodes_in_graph() {
 
     // Submit events through pipeline
     for event in events {
-        let _ = engine
-            .process_event_with_options(event, Some(false))
-            .await;
+        let _ = engine.process_event_with_options(event, Some(false)).await;
     }
 
     // Verify concept nodes were created via BM25 search
@@ -92,8 +89,7 @@ async fn test_conversation_pipeline_processes_events() {
         ],
     );
     let options = IngestOptions::default();
-    let (events, state, result) =
-        agent_db_graph::conversation::ingest_to_events(&data, &options);
+    let (events, state, result) = agent_db_graph::conversation::ingest_to_events(&data, &options);
 
     assert!(result.transactions_found >= 2);
 
@@ -107,10 +103,7 @@ async fn test_conversation_pipeline_processes_events() {
     // Process all events
     let mut processed = 0usize;
     for event in events {
-        match engine
-            .process_event_with_options(event, Some(false))
-            .await
-        {
+        match engine.process_event_with_options(event, Some(false)).await {
             Ok(_) => processed += 1,
             Err(e) => eprintln!("Event pipeline error: {}", e),
         }
@@ -140,13 +133,10 @@ async fn test_conversation_pipeline_stores_events_with_metadata() {
 
     let data = make_test_ingest(
         "metadata_test",
-        vec![
-            ("user", "Alice: Paid €100 for dinner - split with Bob"),
-        ],
+        vec![("user", "Alice: Paid €100 for dinner - split with Bob")],
     );
     let options = IngestOptions::default();
-    let (events, state, _result) =
-        agent_db_graph::conversation::ingest_to_events(&data, &options);
+    let (events, state, _result) = agent_db_graph::conversation::ingest_to_events(&data, &options);
 
     let participants: Vec<String> = state.known_participants.iter().cloned().collect();
     engine
@@ -155,9 +145,7 @@ async fn test_conversation_pipeline_stores_events_with_metadata() {
         .unwrap();
 
     for event in events {
-        let _ = engine
-            .process_event_with_options(event, Some(false))
-            .await;
+        let _ = engine.process_event_with_options(event, Some(false)).await;
     }
 
     // Retrieve events and check metadata
@@ -216,8 +204,7 @@ async fn test_conversation_pipeline_multi_session() {
     };
 
     let options = IngestOptions::default();
-    let (events, state, result) =
-        agent_db_graph::conversation::ingest_to_events(&data, &options);
+    let (events, state, result) = agent_db_graph::conversation::ingest_to_events(&data, &options);
 
     // Should have events from both sessions + 2 sentinels
     assert!(result.transactions_found >= 2);
@@ -303,13 +290,10 @@ async fn test_conversation_pipeline_structured_memory_accessible() {
 
     let data = make_test_ingest(
         "sm_access_test",
-        vec![
-            ("user", "Alice: Paid €100 for dinner - split with Bob"),
-        ],
+        vec![("user", "Alice: Paid €100 for dinner - split with Bob")],
     );
     let options = IngestOptions::default();
-    let (events, state, _result) =
-        agent_db_graph::conversation::ingest_to_events(&data, &options);
+    let (events, state, _result) = agent_db_graph::conversation::ingest_to_events(&data, &options);
 
     let participants: Vec<String> = state.known_participants.iter().cloned().collect();
     engine
@@ -318,9 +302,7 @@ async fn test_conversation_pipeline_structured_memory_accessible() {
         .unwrap();
 
     for event in events {
-        let _ = engine
-            .process_event_with_options(event, Some(false))
-            .await;
+        let _ = engine.process_event_with_options(event, Some(false)).await;
     }
 
     // Give async processing a moment
