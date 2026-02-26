@@ -1,7 +1,7 @@
 # EventGraphDB Master API Specification
 
-**Version:** 1.4.0
-**Status:** Comprehensive Type Documentation + Hybrid Search
+**Version:** 1.5.0
+**Status:** Comprehensive Type Documentation + Hybrid Search + Conversation Ingestion
 **Base URL:** `http://localhost:3000` (Default)
 **Port:** `3000` (Configurable via `SERVER_PORT` environment variable)
 
@@ -1198,7 +1198,134 @@ Returns node centrality scores (importance ranking).
 
 ---
 
-## 8. System Endpoints
+## 8. Conversation Ingestion
+
+Ingest multi-session conversations into structured memory and query the results. Messages are automatically classified (transaction, state change, relationship, preference, or chitchat) and bridged into the appropriate structured memory templates (ledgers, state machines, trees, preference lists).
+
+When a unified LLM client is configured, an LLM classifier runs first with Rust-side validation of numbers/currencies. Falls back to keyword-based classification without LLM.
+
+### `POST /api/conversations/ingest`
+
+Ingest conversation sessions into structured memory. Idempotent per `(case_id, session_id, message_index)`.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `case_id` | `String` | No | Case identifier (auto-generated if omitted) |
+| `sessions` | `Array<Session>` | Yes | Conversation sessions to ingest |
+| `include_assistant_facts` | `bool` | No | Extract facts from assistant messages (default `false`) |
+
+**Session Object:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_id` | `String` | Yes | Unique session identifier |
+| `topic` | `String` | No | Topic label for context |
+| `messages` | `Array<Message>` | Yes | Ordered messages |
+| `contains_fact` | `bool` | No | Benchmark metadata (ignored) |
+| `fact_id` | `String` | No | Benchmark metadata (ignored) |
+| `fact_quote` | `String` | No | Benchmark metadata (ignored) |
+
+**Message Object:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `role` | `String` | Yes | `"user"` or `"assistant"` |
+| `content` | `String` | Yes | Message text |
+
+**Request Example:**
+```json
+{
+  "case_id": "trip_2024",
+  "sessions": [
+    {
+      "session_id": "session_01",
+      "topic": "Dinner expenses",
+      "messages": [
+        { "role": "user", "content": "Alice: Paid €179 for museum - split with Bob" },
+        { "role": "user", "content": "Bob: Paid €107 for dinner - split among all" },
+        { "role": "user", "content": "The weather was lovely today!" }
+      ]
+    }
+  ],
+  "include_assistant_facts": false
+}
+```
+
+**Response (200):**
+```json
+{
+  "case_id": "trip_2024",
+  "messages_processed": 3,
+  "transactions_found": 2,
+  "state_changes_found": 0,
+  "relationships_found": 0,
+  "preferences_found": 0,
+  "chitchat_skipped": 1
+}
+```
+
+**Classification Categories:**
+
+| Category | Memory Type | Example |
+|----------|------------|---------|
+| Transaction | `Ledger` | `"Alice: Paid €50 for lunch - split with Bob"` |
+| State change | `StateMachine` | `"I'm moving to NYC"`, `"I live in Lisbon"` |
+| Relationship | `Tree` | `"Johnny Fisher works with Christopher Peterson"` |
+| Preference | `PreferenceList` | `"I love fantasy novels"` |
+| Chitchat | *(skipped)* | `"The weather was lovely!"` |
+
+**Transaction Formats:**
+
+| Format | Example |
+|--------|---------|
+| Colon-paid | `"Alice: Paid €179 for museum - split with Bob"` |
+| Refund | `"Bob: Refund €27 each for all"` |
+| Verbose | `"Alice: I covered dinner, €87 for everyone"` |
+| Name-paid | `"Alice paid $50 for lunch"` |
+| Tipped | `"Charlie tipped $10 at the restaurant"` |
+
+### `POST /api/conversations/query`
+
+Query structured memory populated by ingestion. Tries conversation-specific classification first; falls back to the general NLQ pipeline.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `question` | `String` | Yes | Natural language question |
+| `session_id` | `String` | No | NLQ session for conversational context |
+
+**Request Example:**
+```json
+{
+  "question": "Who owes whom?"
+}
+```
+
+**Response (200):**
+```json
+{
+  "answer": "Settlement: Alice -> Bob : 172.50 EUR, Charlie -> Bob : 60.00 EUR",
+  "query_type": "numeric"
+}
+```
+
+**Query Types:**
+
+| `query_type` | Triggers | Example |
+|--------------|----------|---------|
+| `numeric` | owes, balance, settle, debt | `"Who owes whom?"`, `"How to settle?"` |
+| `state` | where is, current state, location | `"Where is the user?"` |
+| `entity_summary` | who is, tell me about | `"Who is Alice?"` |
+| `preference` | recommend, favorite, what do I like | `"What art do I like?"` |
+| `relationship` | related, connected, path between | `"Are Alice and Bob related?"` |
+| `nlq` | *(fallback)* | Any unmatched question |
+
+---
+
+## 9. System Endpoints
 
 ### `GET /api/health`
 Check server status and engine health metrics.
@@ -1244,7 +1371,7 @@ Redirects to API documentation.
 
 ---
 
-## 9. Event Types Reference (Deep Dive)
+## 10. Event Types Reference (Deep Dive)
 
 Events are the lifeblood of EventGraphDB. Every event should ideally be wrapped in a **Goal** to allow the system to group them into **Episodes**.
 
@@ -1306,7 +1433,7 @@ Events are the lifeblood of EventGraphDB. Every event should ideally be wrapped 
 
 ---
 
-## 10. Important Notes on Field Requirements
+## 11. Important Notes on Field Requirements
 
 ### Server-Generated Fields
 
@@ -1363,7 +1490,7 @@ Understanding the difference between `null` and omitted fields:
 
 ---
 
-## 11. The Role of Goals in Events
+## 12. The Role of Goals in Events
 
 Every event listed above should be sent inside an `Event` object that includes a `context` with `active_goals`. This is how the system knows that a `Communication` event and an `Action` event belong to the same "Booking" task.
 
@@ -1390,7 +1517,7 @@ Every event listed above should be sent inside an `Event` object that includes a
 
 ---
 
-## 12. Querying Deep Dive: Which Search to Use?
+## 13. Querying Deep Dive: Which Search to Use?
 
 EventGraphDB provides six distinct ways to find data. Choosing the right one is critical for AI performance.
 
@@ -1491,7 +1618,7 @@ GET /api/graph?session_id=5001&limit=100
 
 ---
 
-## 13. Query Selection Matrix
+## 14. Query Selection Matrix
 
 | If you want to find... | Use this Search | Accuracy |
 | :--- | :--- | :--- |
@@ -1506,7 +1633,7 @@ GET /api/graph?session_id=5001&limit=100
 
 ---
 
-## 14. Integration Examples (JavaScript/TypeScript)
+## 15. Integration Examples (JavaScript/TypeScript)
 
 ### A. Basic Client Setup
 ```typescript
@@ -1722,7 +1849,7 @@ await compareSearchModes("authentication timeout error");
 
 ---
 
-## 14.5 Semantic Memory Pipeline Architecture
+## 15.5 Semantic Memory Pipeline Architecture
 
 EventGraphDB uses a sophisticated pipeline to extract structured knowledge from events:
 
@@ -1903,7 +2030,7 @@ ner_promotion_threshold: 1024,       // Bytes to trigger NER
 
 ---
 
-## 15. System Limits & Profiles
+## 16. System Limits & Profiles
 
 | Feature | **FREE Profile** | **NORMAL Profile** |
 | :--- | :--- | :--- |

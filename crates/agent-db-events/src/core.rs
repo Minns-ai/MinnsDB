@@ -116,6 +116,16 @@ pub enum EventType {
         /// Optional: language hint for NER ("en", "es", etc.)
         language: Option<String>,
     },
+
+    /// Conversation message event (from conversation ingestion pipeline)
+    Conversation {
+        /// Speaker name
+        speaker: String,
+        /// Message text
+        content: String,
+        /// Classification: "transaction", "state_change", "relationship", "preference", "chitchat"
+        category: String,
+    },
 }
 
 /// Explicit learning telemetry events (no inference)

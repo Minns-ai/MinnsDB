@@ -441,13 +441,26 @@ impl GraphEngine {
             direction: crate::structured_memory::LedgerDirection,
             timestamp: u64,
         }
+        struct RelationshipCandidate {
+            subject: String,
+            object: String,
+            relation_type: String,
+        }
+        struct PreferenceCandidate {
+            entity: String,
+            item: String,
+            category: String,
+            sentiment: f64,
+        }
 
-        let (state_candidates, ledger_candidates) = {
+        let (state_candidates, ledger_candidates, relationship_candidates, preference_candidates) = {
             let inference = self.inference.read().await;
             let graph = inference.graph();
 
             let mut state_candidates = Vec::new();
             let mut ledger_candidates = Vec::new();
+            let mut relationship_candidates = Vec::new();
+            let mut preference_candidates = Vec::new();
 
             for event in &events {
                 // ---- Normalize metadata keys via alias matching ----
@@ -604,14 +617,55 @@ impl GraphEngine {
                         }
                     }
                 }
+
+                // ---- Relationship detection ----
+                if event.metadata.contains_key("relationship") {
+                    let subject = event.metadata.get("subject").and_then(crate::metadata_normalize::metadata_as_str);
+                    let object = event.metadata.get("object").and_then(crate::metadata_normalize::metadata_as_str);
+                    let relation_type = event.metadata.get("relation_type").and_then(crate::metadata_normalize::metadata_as_str);
+
+                    if let (Some(subj), Some(obj), Some(rel)) = (subject, object, relation_type) {
+                        if !subj.is_empty() && !obj.is_empty() && !rel.is_empty() {
+                            relationship_candidates.push(RelationshipCandidate {
+                                subject: subj,
+                                object: obj,
+                                relation_type: rel,
+                            });
+                        }
+                    }
+                }
+
+                // ---- Preference detection ----
+                if event.metadata.contains_key("preference") {
+                    let entity = event.metadata.get("entity").and_then(crate::metadata_normalize::metadata_as_str);
+                    let item = event.metadata.get("item").and_then(crate::metadata_normalize::metadata_as_str);
+                    let category = event.metadata.get("category").and_then(crate::metadata_normalize::metadata_as_str);
+                    let sentiment = event.metadata.get("sentiment").and_then(crate::metadata_normalize::metadata_as_f64)
+                        .unwrap_or(0.5);
+
+                    if let (Some(ent), Some(itm), Some(cat)) = (entity, item, category) {
+                        if !ent.is_empty() && !itm.is_empty() {
+                            preference_candidates.push(PreferenceCandidate {
+                                entity: ent,
+                                item: itm,
+                                category: cat,
+                                sentiment,
+                            });
+                        }
+                    }
+                }
             }
 
-            (state_candidates, ledger_candidates)
+            (state_candidates, ledger_candidates, relationship_candidates, preference_candidates)
         };
         // inference lock is now dropped
 
-        // Apply state changes and ledger entries under structured_memory write lock
-        if !state_candidates.is_empty() || !ledger_candidates.is_empty() {
+        // Apply state changes, ledger entries, relationships, and preferences
+        let has_work = !state_candidates.is_empty()
+            || !ledger_candidates.is_empty()
+            || !relationship_candidates.is_empty()
+            || !preference_candidates.is_empty();
+        if has_work {
             let mut sm = self.structured_memory.write().await;
 
             for sc in state_candidates {
@@ -676,6 +730,70 @@ impl GraphEngine {
                         lc.to,
                         lc.amount,
                         key
+                    );
+                }
+            }
+
+            // ---- Apply relationship candidates ----
+            for rc in relationship_candidates {
+                let key = format!("tree:relations:{}", rc.relation_type);
+                if sm.get(&key).is_none() {
+                    sm.upsert(
+                        &key,
+                        crate::structured_memory::MemoryTemplate::Tree {
+                            root: rc.relation_type.clone(),
+                            children: std::collections::HashMap::new(),
+                            provenance: crate::structured_memory::MemoryProvenance::EpisodePipeline,
+                        },
+                    );
+                }
+                // Bidirectional
+                if let Err(e) = sm.tree_add_child(&key, &rc.subject, &rc.object) {
+                    tracing::debug!("Relationship tree_add_child failed: {}", e);
+                }
+                if let Err(e) = sm.tree_add_child(&key, &rc.object, &rc.subject) {
+                    tracing::debug!("Relationship tree_add_child failed: {}", e);
+                }
+                tracing::debug!(
+                    "Auto relationship: {} <-> {} ({})",
+                    rc.subject,
+                    rc.object,
+                    rc.relation_type
+                );
+            }
+
+            // ---- Apply preference candidates ----
+            for pc in preference_candidates {
+                // Use entity name directly as key (no NodeId needed)
+                let key = format!("prefs:{}:{}", pc.entity, pc.category);
+                if sm.get(&key).is_none() {
+                    sm.upsert(
+                        &key,
+                        crate::structured_memory::MemoryTemplate::PreferenceList {
+                            entity: pc.entity.clone(),
+                            ranked_items: vec![],
+                            provenance: crate::structured_memory::MemoryProvenance::EpisodePipeline,
+                        },
+                    );
+                }
+                let rank = if let Some(crate::structured_memory::MemoryTemplate::PreferenceList {
+                    ranked_items,
+                    ..
+                }) = sm.get(&key)
+                {
+                    ranked_items.len()
+                } else {
+                    0
+                };
+                if let Err(e) = sm.preference_update(&key, &pc.item, rank, Some(pc.sentiment)) {
+                    tracing::debug!("Preference update failed for {}: {}", key, e);
+                } else {
+                    tracing::debug!(
+                        "Auto preference: {} -> {} (category={}, sentiment={})",
+                        pc.entity,
+                        pc.item,
+                        pc.category,
+                        pc.sentiment
                     );
                 }
             }

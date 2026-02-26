@@ -97,6 +97,15 @@ pub mod nlq;
 // Dynamic structured memory templates (ledgers, trees, state machines, preferences)
 pub mod structured_memory;
 
+// Production-grade NLP primitives (tokenizer, POS tagger, chunker, frames)
+pub mod nlp;
+
+// Unified LLM client abstraction
+pub mod llm_client;
+
+// Conversation ingestion layer (NL → structured memory)
+pub mod conversation;
+
 // Resilient metadata normalization for structured memory auto-detection
 pub mod metadata_normalize;
 
@@ -202,4 +211,11 @@ pub use structured_memory::{
 // Metadata Normalization
 pub use metadata_normalize::{
     AliasConfig, MetadataNormalizer, MetadataRole, NormalizedMetadata, ResolutionMethod,
+};
+
+// Conversation Ingestion
+pub use conversation::{
+    gather_memory_context, ingest_incremental, ingest_with_llm_incremental, ConversationIngest,
+    ConversationMessage, ConversationSession, ConversationState, IngestOptions, IngestResult,
+    MemoryContextEntry, MemorySummary, NameRegistry, StrategySummary,
 };

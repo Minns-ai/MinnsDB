@@ -785,6 +785,7 @@ impl EpisodeDetector {
             },
             EventType::Learning { .. } => significance += 0.1,
             EventType::Context { .. } => {},
+            EventType::Conversation { .. } => significance += 0.05,
         }
 
         // Normalize to [0.0, 1.0]
@@ -816,6 +817,7 @@ impl EpisodeDetector {
             } => format!("Observation:{}", observation_type),
             EventType::Learning { .. } => "Learning".to_string(),
             EventType::Context { context_type, .. } => format!("Context:{}", context_type),
+            EventType::Conversation { speaker, .. } => format!("Conversation:{}", speaker),
         };
 
         match self.seen_event_types.get(&event_type_name) {
@@ -873,6 +875,7 @@ impl EpisodeDetector {
             } => format!("Observation:{}", observation_type),
             EventType::Learning { .. } => "Learning".to_string(),
             EventType::Context { context_type, .. } => format!("Context:{}", context_type),
+            EventType::Conversation { speaker, .. } => format!("Conversation:{}", speaker),
         };
         *self.seen_event_types.entry(event_type_name).or_insert(0) += 1;
 

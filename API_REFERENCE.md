@@ -2,29 +2,123 @@
 
 **Complete REST API documentation for SDK integration**
 
-Version: 2.1.0
-Last Updated: 2026-02-25
+Version: 2.3.0
+Last Updated: 2026-02-26
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Core Types](#core-types)
-3. [Events](#events)
-4. [Memories](#memories)
-5. [Strategies](#strategies)
-6. [Graph](#graph)
-7. [Analytics](#analytics)
-8. [Search](#search)
-9. [Natural Language Query (NLQ)](#natural-language-query-nlq)
-10. [Claims](#claims)
-11. [Structured Memory](#structured-memory)
-12. [Planning & World Model](#planning--world-model)
-13. [Admin](#admin)
-14. [Health](#health)
-15. [Error Handling](#error-handling)
-16. [Configuration](#configuration)
+1. [Architecture](#architecture)
+2. [Overview](#overview)
+3. [Core Types](#core-types)
+4. [Events](#events)
+5. [Memories](#memories)
+6. [Strategies](#strategies)
+7. [Graph](#graph)
+8. [Analytics](#analytics)
+9. [Search](#search)
+10. [Natural Language Query (NLQ)](#natural-language-query-nlq)
+11. [Claims](#claims)
+12. [Structured Memory](#structured-memory)
+13. [Conversation Ingestion](#conversation-ingestion)
+14. [Planning & World Model](#planning--world-model)
+15. [Admin](#admin)
+16. [Health](#health)
+17. [Error Handling](#error-handling)
+18. [Configuration](#configuration)
+
+---
+
+## Architecture
+
+EventGraphDB has two data ingestion paths that converge on a shared Structured Memory store and are unified at query time.
+
+### Primary Path: Event Pipeline
+
+The core self-evolution loop. Every event flows through the full pipeline:
+
+```
+Event → Graph Construction → Episode Detection → Memory Formation → Strategy Extraction
+                                    │
+                                    ├→ Reinforcement Learning (edge weights, Q-values)
+                                    ├→ World Model Training (EBM contrastive learning)
+                                    └→ Structured Memory Auto-Detection
+                                       (metadata normalization → ledgers, state machines)
+```
+
+**Entry points:** `POST /api/events`, `POST /api/events/simple`, `POST /api/events/state-change`, `POST /api/events/transaction`
+
+**What it produces:**
+- Graph nodes and edges (actions, observations, concepts, tools, results)
+- Episodes (bounded sequences of related events)
+- Episodic → Semantic → Schema memories (consolidation over time)
+- Strategies (playbooks extracted from successful/failed episodes)
+- Reinforcement signals (transition model, success/failure posteriors)
+- Structured memory entries (auto-detected from event metadata via normalization)
+
+**Entity resolution:** Graph `concept_index` (`HashMap<Arc<str>, NodeId>`) — node IDs assigned by the graph engine during inference.
+
+### Secondary Path: Conversation Ingestion
+
+A fast-path for ingesting multi-turn conversations directly into structured memory, bypassing the event pipeline for efficiency.
+
+```
+ConversationIngest → Classify → Parse → Bridge → StructuredMemoryStore
+                                                   ├→ Ledger (transactions)
+                                                   ├→ StateMachine (state changes)
+                                                   ├→ Tree (relationships)
+                                                   └→ PreferenceList (preferences)
+```
+
+**Entry point:** `POST /api/conversations/ingest`
+
+**What it produces:**
+- Structured memory entries only (ledgers, state machines, trees, preference lists)
+
+**What it does NOT produce:**
+- No Event objects (no event store entries)
+- No graph nodes or edges
+- No episodes, memories, or strategies
+- No reinforcement learning signals
+- No world model training data
+
+**Entity resolution:** `NameRegistry` (`HashMap<String, u64>`) — sequential IDs starting from 1, scoped per `case_id`. Persistent across incremental ingestion calls for the same case.
+
+### Where the Paths Converge
+
+**Structured Memory Store** (`Arc<RwLock<StructuredMemoryStore>>`) is the shared state:
+
+| Source | Provenance Tag | Key Format |
+|--------|---------------|------------|
+| Event pipeline (auto-detected) | `EpisodePipeline` | `ledger:{node_id_a}:{node_id_b}`, `state:{node_id}:{attr}` |
+| Conversation ingestion | `EpisodePipeline` | `ledger:{registry_id_a}:{registry_id_b}`, `state:{registry_id}:{attr}` |
+| Direct API calls | `Manual` | User-defined |
+| NLQ mutations | `NlqUpsert` | Query-derived |
+
+**Important:** The event pipeline and conversation pipeline use different entity ID spaces (graph NodeIds vs NameRegistry sequential IDs). They do not collide because the ID ranges are disjoint — graph NodeIds are assigned from the graph's internal counter, while NameRegistry IDs start from 1 per case.
+
+### Query-Time Unification
+
+The query endpoint (`POST /api/conversations/query`) composes results from all three stores:
+
+```
+Question → Conversation Classifier → Structured Memory (answer + memory_context)
+                │                           │
+                │ (fallback)                ├→ Memory Store (related_memories via BM25)
+                └→ NLQ Pipeline             └→ Strategy Store (related_strategies via BM25)
+```
+
+Every query response is enriched with `related_memories` and `related_strategies` from the episodic memory and strategy stores via BM25-only multi-signal retrieval. This gives downstream LLMs full context across all three knowledge sources.
+
+### Design Rationale
+
+The two-path design is intentional:
+
+- **Event pipeline:** For agent telemetry that needs the full learning loop (episodes, memories, strategies, RL). Higher latency, richer output.
+- **Conversation ingestion:** For bulk structured fact extraction from human conversations. Lower latency, focused on structured data. No experiential learning.
+
+Both paths feed the same structured memory store. Queries search all stores. The system is consistent — it just has two on-ramps.
 
 ---
 
@@ -1123,6 +1217,235 @@ Add a child node to a tree.
 
 ---
 
+## Conversation Ingestion
+
+Ingest multi-session conversations into structured memory and query the results. Messages are automatically classified into categories (transaction, state change, relationship, preference, or chitchat) and bridged into the appropriate structured memory templates.
+
+When a unified LLM client is configured (`LLM_API_KEY` / `NLQ_HINT_API_KEY`), an LLM classifier runs first with Rust-side validation of numbers and currencies. Without an LLM, a keyword-based classifier and parser pipeline handles classification as fallback. Both paths produce identical structured memory output.
+
+### Incremental Ingestion
+
+The server maintains a persistent `ConversationState` per `case_id` across API calls. This ensures:
+
+- **Stable entity IDs:** The `NameRegistry` (name→ID mapping) is preserved across calls. Alice always gets the same ID regardless of which batch she first appeared in. This prevents ledger key collisions when messages arrive incrementally.
+- **Idempotency:** Every processed message is tracked by `(case_id, session_id, message_index)`. Re-ingesting the same message in a later call is a no-op (0 messages processed).
+- **Participant accumulation:** Known participants grow across calls, so "split among all" always resolves to the full set.
+
+States are capped at 1,000 per server instance (LRU eviction by fewest processed messages).
+
+**SDK pattern for incremental ingestion:**
+```
+// Call 1: First batch of messages
+POST /api/conversations/ingest { "case_id": "trip_2024", "sessions": [...batch1...] }
+// → Alice=1, Bob=2
+
+// Call 2: More messages arrive later
+POST /api/conversations/ingest { "case_id": "trip_2024", "sessions": [...batch2...] }
+// → Alice still=1, Bob still=2, Charlie=3 (new)
+// → Duplicate messages from batch1 are skipped automatically
+```
+
+### POST /api/conversations/ingest
+
+Ingest one or more conversation sessions. Each message is classified, parsed, and bridged into structured memory (ledgers, state machines, trees, preference lists). Idempotent per `case_id` — re-ingesting the same `(case_id, session_id, message_index)` tuple is a no-op.
+
+**Request:**
+```json
+{
+  "case_id": "trip_expenses_2024",
+  "sessions": [
+    {
+      "session_id": "session_01",
+      "topic": "Dinner expenses",
+      "messages": [
+        { "role": "user", "content": "Alice: Paid €179 for museum - split with Bob" },
+        { "role": "user", "content": "Bob: Paid €107 for dinner - split among all" },
+        { "role": "user", "content": "The weather was lovely today!" },
+        { "role": "assistant", "content": "Sounds like a great trip!" }
+      ],
+      "contains_fact": false,
+      "fact_id": null,
+      "fact_quote": null
+    },
+    {
+      "session_id": "session_02",
+      "topic": "Moving to NYC",
+      "messages": [
+        { "role": "user", "content": "I live in Alfama, Lisbon." },
+        { "role": "user", "content": "I'm moving to Lower Manhattan, NYC." },
+        { "role": "user", "content": "Johnny Fisher works with Christopher Peterson." }
+      ]
+    }
+  ],
+  "include_assistant_facts": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `case_id` | string | no | Case identifier; auto-generated UUID if omitted |
+| `sessions` | array | yes | One or more conversation sessions |
+| `sessions[].session_id` | string | yes | Unique session identifier |
+| `sessions[].topic` | string | no | Topic label for context |
+| `sessions[].messages` | array | yes | Ordered messages (`role` + `content`) |
+| `sessions[].messages[].role` | string | yes | `"user"` or `"assistant"` |
+| `sessions[].messages[].content` | string | yes | Message text |
+| `sessions[].contains_fact` | bool | no | Benchmark metadata (ignored during ingestion) |
+| `sessions[].fact_id` | string | no | Benchmark metadata (ignored during ingestion) |
+| `sessions[].fact_quote` | string | no | Benchmark metadata (ignored during ingestion) |
+| `include_assistant_facts` | bool | no | If `true`, extract facts from assistant messages too (default `false`) |
+
+**Response (200):**
+```json
+{
+  "case_id": "trip_expenses_2024",
+  "messages_processed": 7,
+  "transactions_found": 2,
+  "state_changes_found": 2,
+  "relationships_found": 1,
+  "preferences_found": 0,
+  "chitchat_skipped": 2
+}
+```
+
+**Message classification categories:**
+
+| Category | Structured Memory Type | Example Message |
+|----------|----------------------|-----------------|
+| Transaction | Ledger | `"Alice: Paid €50 for lunch - split with Bob"` |
+| State change | StateMachine | `"I'm moving to NYC"`, `"I live in Lisbon"` |
+| Relationship | Tree | `"Johnny Fisher works with Christopher Peterson"` |
+| Preference | PreferenceList | `"I love fantasy novels"`, `"My favorite is pasta"` |
+| Chitchat | *(skipped)* | `"The weather was lovely!"` |
+
+**Transaction formats recognized:**
+
+| Format | Example |
+|--------|---------|
+| Colon-paid (primary) | `"Alice: Paid €179 for museum - split with Bob"` |
+| Refund | `"Bob: Refund €27 each for all"` |
+| Verbose speaker | `"Alice: I covered the dinner expenses, €87 total for everyone"` |
+| Amount-was-cost | `"Alice: The groceries were €146"` |
+| Name-paid (no colon) | `"Alice paid $50 for lunch"` |
+| Tipped | `"Charlie tipped $10 at the restaurant"` |
+
+**Split modes:**
+
+| Keyword | Behavior |
+|---------|----------|
+| `"split with Name"` | Equal split between payer and named person |
+| `"split among all"` / `"shared equally"` | Equal split among all known participants |
+| `"split among Name1, Name2"` | Equal split among listed names |
+
+### POST /api/conversations/query
+
+Query structured memory populated by conversation ingestion. First attempts conversation-specific classification; falls back to the general NLQ pipeline if no conversation pattern matches.
+
+Every response is enriched with `related_memories` and `related_strategies` from the episodic memory and strategy stores (via BM25 multi-signal retrieval). This gives downstream LLMs full context across structured memory, episodic memories, and learned strategies in a single call.
+
+**Request:**
+```json
+{
+  "question": "Who owes whom?",
+  "session_id": "optional-nlq-session-id"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `question` | string | yes | Natural language question |
+| `session_id` | string | no | Session ID for NLQ conversational context (follow-up resolution) |
+
+**Response (200) — conversation-specific query:**
+```json
+{
+  "answer": "Settlement: Alice -> Bob : 172.50 EUR, Charlie -> Bob : 60.00 EUR",
+  "query_type": "numeric",
+  "memory_context": [
+    {
+      "type": "Ledger",
+      "key": "ledger:1:2",
+      "entity_a": "Alice",
+      "entity_b": "Bob",
+      "balance": 172.5,
+      "entries": [
+        { "timestamp": 0, "amount": 179.0, "description": "museum", "direction": "Credit" }
+      ]
+    }
+  ],
+  "related_memories": [
+    {
+      "id": 42,
+      "summary": "Group expense tracking during European trip",
+      "takeaway": "Split expenses need explicit tracking to avoid disputes",
+      "tier": "Episodic"
+    }
+  ],
+  "related_strategies": [
+    {
+      "id": 7,
+      "name": "expense-reconciliation",
+      "summary": "Track shared expenses with running balances",
+      "when_to_use": "When multiple parties share costs over time"
+    }
+  ]
+}
+```
+
+**Response (200) — NLQ fallback:**
+```json
+{
+  "answer": "Neighbors of Alice: Bob (Association)",
+  "query_type": "nlq",
+  "related_memories": [],
+  "related_strategies": []
+}
+```
+
+**Response fields:**
+
+| Field | Type | Present | Description |
+|-------|------|---------|-------------|
+| `answer` | string | always | Human-readable answer text |
+| `query_type` | string | always | One of: `"numeric"`, `"state"`, `"entity_summary"`, `"preference"`, `"relationship"`, `"nlq"` |
+| `memory_context` | array | conversation queries only | Structured memory backing the answer (ledgers, states, preferences, relationships) |
+| `related_memories` | array | always | Top 5 episodic/semantic/schema memories matching the question (BM25 retrieval) |
+| `related_strategies` | array | always | Top 3 strategies matching the question (BM25 retrieval) |
+
+**`memory_context` entry types:**
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `Ledger` | `key`, `entity_a`, `entity_b`, `balance`, `entries[]` | Double-entry ledger with running balance |
+| `State` | `key`, `entity`, `current_value`, `history_len`, `recent_transitions[]` | State machine with last 5 transitions |
+| `Preference` | `key`, `entity`, `category`, `items[]` | Ranked preference list |
+| `Relationship` | `relation_type`, `path` | BFS path between entities (null if no path) |
+
+**`related_memories` entry fields:** `id` (u64), `summary` (string), `takeaway` (string), `tier` ("Episodic" | "Semantic" | "Schema")
+
+**`related_strategies` entry fields:** `id` (u64), `name` (string), `summary` (string), `when_to_use` (string)
+
+**Conversation query types:**
+
+| `query_type` | Triggers on | Example question | Answer source |
+|--------------|-------------|------------------|---------------|
+| `"numeric"` | owes, balance, settle, debt, total | `"Who owes whom?"`, `"How to settle?"` | Ledger net balances + transfer minimization |
+| `"state"` | where is, current state, location | `"Where is the user?"`, `"What should I do Saturday?"` | StateMachine current values + facts |
+| `"entity_summary"` | who is, tell me about, describe | `"Who is Alice?"` | All stored data for entity |
+| `"preference"` | recommend, favorite, what do I like | `"What art do I like?"` | PreferenceList rankings |
+| `"relationship"` | related, connected, path between | `"Are Alice and Bob related through colleagues?"` | Tree BFS path finding |
+| `"nlq"` | *(fallback)* | Any other question | General graph NLQ pipeline |
+
+**Numeric operations:**
+
+| Question pattern | Operation | Output format |
+|------------------|-----------|---------------|
+| `"who owes"`, `"balance"` | Net balance per entity | `"Alice: +60.00 EUR\nBob: -60.00 EUR"` |
+| `"settle"`, `"simplify"`, `"minimum transfer"` | Greedy debt simplification | `"Settlement: Alice -> Bob : 172.50 EUR"` |
+| `"total"`, `"sum"`, `"how much"` | Sum across all ledgers | `"Total across all ledgers: 450.00"` |
+
+---
+
 ## Planning & World Model
 
 These endpoints require `ENABLE_WORLD_MODEL=true` and/or `ENABLE_STRATEGY_GENERATION=true` in the environment.
@@ -1440,6 +1763,10 @@ When `ENABLE_METADATA_NORMALIZATION=true`, an LLM fallback activates for events 
 
 ## SDK Integration Checklist
 
+### Agent Telemetry (Event Pipeline)
+
+Use this path when your agent needs the full learning loop: events → episodes → memories → strategies → reinforcement learning.
+
 1. **Minimal integration:** `POST /api/events/simple` to send events, `GET /api/suggestions` to get next actions
 2. **Memory-aware:** Add `POST /api/memories/context` to retrieve relevant memories before acting
 3. **Strategy-aware:** Add `GET /api/strategies/agent/:id` and `POST /api/strategies/similar`
@@ -1451,5 +1778,16 @@ When `ENABLE_METADATA_NORMALIZATION=true`, an LLM fallback activates for events 
 9. **Typed transactions:** Use `POST /api/events/transaction` to emit financial/quantity transactions — auto-detected and appended to structured memory ledgers
 10. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
 11. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
-12. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)
-13. **Metadata normalization:** Alias-based normalization is always active. Set `ENABLE_METADATA_NORMALIZATION=true` for LLM fallback on unrecognized metadata keys
+
+### Conversation Ingestion (Fast Path)
+
+Use this path for bulk structured fact extraction from human conversations. No events or episodes are created — data goes directly into structured memory.
+
+12. **Conversation ingestion:** Use `POST /api/conversations/ingest` to ingest multi-session conversations. Use the same `case_id` across calls for incremental ingestion with stable entity IDs and automatic deduplication.
+13. **Multi-source queries:** Use `POST /api/conversations/query` to query structured memory. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment — pass these to your LLM alongside the `answer` and `memory_context`.
+14. **Incremental pattern:** Send messages as they arrive with the same `case_id`. The server preserves name→ID mappings and deduplicates already-processed messages automatically. No client-side state management needed.
+
+### Configuration
+
+15. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)
+16. **Metadata normalization:** Alias-based normalization is always active. Set `ENABLE_METADATA_NORMALIZATION=true` for LLM fallback on unrecognized metadata keys

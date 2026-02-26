@@ -487,7 +487,7 @@ impl MetadataNormalizer {
 // ────────── Helper functions ──────────
 
 /// Extract a string from a MetadataValue.
-fn metadata_as_str(v: &MetadataValue) -> Option<String> {
+pub fn metadata_as_str(v: &MetadataValue) -> Option<String> {
     match v {
         MetadataValue::String(s) => Some(s.clone()),
         MetadataValue::Json(serde_json::Value::String(s)) => Some(s.clone()),
@@ -496,7 +496,7 @@ fn metadata_as_str(v: &MetadataValue) -> Option<String> {
 }
 
 /// Extract a float from a MetadataValue.
-fn metadata_as_f64(v: &MetadataValue) -> Option<f64> {
+pub fn metadata_as_f64(v: &MetadataValue) -> Option<f64> {
     match v {
         MetadataValue::Float(f) => Some(*f),
         MetadataValue::Integer(i) => Some(*i as f64),

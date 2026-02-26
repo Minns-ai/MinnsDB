@@ -325,6 +325,7 @@ impl GraphInference {
                 EventType::Cognitive { .. } => "cognitive_agent",
                 EventType::Learning { .. } => "learning_agent",
                 EventType::Context { .. } => "context_agent",
+                EventType::Conversation { .. } => "conversation_agent",
             };
 
             let node = GraphNode::new(NodeType::Agent {
@@ -350,6 +351,7 @@ impl GraphInference {
             EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
             EventType::Learning { .. } => "LearningTelemetry".to_string(),
             EventType::Context { context_type, .. } => format!("Context:{}", context_type),
+            EventType::Conversation { speaker, .. } => format!("Conversation:{}", speaker),
         };
 
         let significance = self.calculate_event_significance(event);
@@ -446,6 +448,7 @@ impl GraphInference {
             EventType::Cognitive { .. } => InteractionType::Coordination,
             EventType::Learning { .. } => InteractionType::Coordination,
             EventType::Context { .. } => InteractionType::InformationExchange,
+            EventType::Conversation { .. } => InteractionType::Communication,
         };
 
         let edge = GraphEdge::new(
@@ -788,6 +791,10 @@ impl GraphInference {
             EventType::Context { text, .. } => {
                 Some(("context".to_string(), self.truncate_summary(text)))
             },
+            EventType::Conversation { speaker, content, .. } => Some((
+                "conversation".to_string(),
+                self.truncate_summary(&format!("{}: {}", speaker, content)),
+            )),
         }
     }
 
@@ -812,6 +819,7 @@ impl GraphInference {
             EventType::Cognitive { .. } => "Cognitive".to_string(),
             EventType::Learning { .. } => "Learning".to_string(),
             EventType::Context { .. } => "Context".to_string(),
+            EventType::Conversation { .. } => "Conversation".to_string(),
         }
     }
 
@@ -945,6 +953,9 @@ impl GraphInference {
                         EventType::Context { context_type, .. } => {
                             format!("Context:{}", context_type)
                         },
+                        EventType::Conversation { speaker, .. } => {
+                            format!("Conversation:{}", speaker)
+                        },
                     })
                     .collect();
 
@@ -1050,6 +1061,7 @@ impl GraphInference {
             EventType::Observation { .. } => 0.1,
             EventType::Learning { .. } => 0.05,
             EventType::Context { .. } => 0.15,
+            EventType::Conversation { .. } => 0.15,
         };
 
         // Factor in causality chain length

@@ -448,6 +448,7 @@ impl GraphEngine {
             EventType::Communication { .. } => "Communication",
             EventType::Learning { .. } => "Learning",
             EventType::Context { .. } => "Context",
+            EventType::Conversation { .. } => "Conversation",
         }
     }
 

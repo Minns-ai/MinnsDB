@@ -470,8 +470,11 @@ pub struct GraphEngine {
     /// Conversational context for NLQ sessions (keyed by session_id)
     pub(crate) nlq_contexts: tokio::sync::Mutex<HashMap<String, crate::nlq::ConversationContext>>,
 
-    /// Optional LLM hint client for NLQ intent routing
-    pub(crate) nlq_hint_client: Option<Arc<dyn crate::nlq::llm_hint::NlqHintClient>>,
+    /// Persistent conversation states for incremental ingestion (keyed by case_id)
+    pub(crate) conversation_states: tokio::sync::Mutex<HashMap<String, crate::conversation::ConversationState>>,
+
+    /// Unified LLM client for NLQ hint classification, conversation, and other LLM tasks
+    pub(crate) unified_llm_client: Option<Arc<dyn crate::llm_client::LlmClient>>,
 
     // ========== Metadata Normalization ==========
     /// Metadata key normalizer (alias matching, always active)
@@ -487,6 +490,7 @@ pub struct GraphEngine {
         Arc<dashmap::DashMap<u64, Arc<RwLock<execution::ExecutionState>>>>,
     /// Monotonic counter for generating unique execution IDs
     pub(crate) next_execution_id: Arc<std::sync::atomic::AtomicU64>,
+
 }
 
 /// Statistics for the graph engine

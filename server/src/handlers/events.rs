@@ -24,6 +24,7 @@ fn event_type_name(event_type: &EventType) -> &'static str {
         EventType::Communication { .. } => "Communication",
         EventType::Learning { .. } => "Learning",
         EventType::Context { .. } => "Context",
+        EventType::Conversation { .. } => "Conversation",
     }
 }
 

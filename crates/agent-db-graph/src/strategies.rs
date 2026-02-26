@@ -1136,6 +1136,9 @@ impl StrategyExtractor {
                 EventType::Context { .. } => {
                     types.insert("context".to_string());
                 },
+                EventType::Conversation { .. } => {
+                    types.insert("conversation".to_string());
+                },
             }
         }
 
@@ -1372,6 +1375,9 @@ impl StrategyExtractor {
                 EventType::Learning { .. } => skeleton.push("Learn".to_string()),
                 EventType::Context { context_type, .. } => {
                     skeleton.push(format!("Context:{}", context_type));
+                },
+                EventType::Conversation { speaker, .. } => {
+                    skeleton.push(format!("Conv:{}", speaker));
                 },
             }
         }

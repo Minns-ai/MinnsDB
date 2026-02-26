@@ -502,6 +502,59 @@ impl GraphEngine {
         &self.structured_memory
     }
 
+    /// Get a reference to the persistent conversation states (for incremental ingestion).
+    pub fn conversation_states(&self) -> &tokio::sync::Mutex<HashMap<String, crate::conversation::ConversationState>> {
+        &self.conversation_states
+    }
+
+    /// Get a reference to the unified LLM client (for conversation handlers).
+    pub fn unified_llm_client(&self) -> Option<&Arc<dyn crate::llm_client::LlmClient>> {
+        self.unified_llm_client.as_ref()
+    }
+
+    /// Pre-create Concept nodes for conversation participants.
+    ///
+    /// For each name: checks `concept_index`, creates a Concept node if missing
+    /// (ConceptType::Person, confidence 0.8). Returns name→NodeId mapping.
+    pub async fn ensure_conversation_participants(
+        &self,
+        participants: &[String],
+    ) -> GraphResult<Vec<(String, NodeId)>> {
+        use crate::structures::{ConceptType, GraphNode, NodeType};
+
+        let mut inference = self.inference.write().await;
+        let mut mappings = Vec::new();
+
+        for name in participants {
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(&existing_id) = inference.graph().concept_index.get(name.as_str()) {
+                mappings.push((name.clone(), existing_id));
+            } else {
+                let node = GraphNode::new(NodeType::Concept {
+                    concept_name: name.clone(),
+                    concept_type: ConceptType::Person,
+                    confidence: 0.8,
+                });
+                let node_id = inference.graph_mut().add_node(node)?;
+                let interned = inference.graph_mut().interner.intern(name);
+                inference
+                    .graph_mut()
+                    .concept_index
+                    .insert(interned, node_id);
+                mappings.push((name.clone(), node_id));
+                tracing::debug!(
+                    "Pre-created Concept node for participant '{}' (id={})",
+                    name,
+                    node_id
+                );
+            }
+        }
+
+        Ok(mappings)
+    }
+
     /// Execute a natural language query against the graph.
     ///
     /// Translates the question into a `GraphQuery`, executes it, and returns
@@ -529,32 +582,36 @@ impl GraphEngine {
         };
 
         // LLM hint classifier: run rule-based + LLM in parallel, merge results
-        let intent_override = if let Some(ref hint_client) = self.nlq_hint_client {
-            let rule_based = crate::nlq::intent::classify_intent_full(&effective_question);
-            let llm_result = tokio::time::timeout(
-                Duration::from_secs(5),
-                hint_client.classify(&effective_question),
-            )
-            .await;
-            let llm_hint = match llm_result {
-                Ok(Ok(hint)) => hint,
-                Ok(Err(e)) => {
-                    tracing::warn!("NLQ hint classifier error: {}", e);
-                    None
-                },
-                Err(_) => {
-                    tracing::warn!("NLQ hint classifier timed out (5s)");
-                    None
-                },
-            };
-            let merged = crate::nlq::llm_hint::merge_classification(rule_based, llm_hint);
-            if merged.llm_overrode {
-                tracing::info!(
-                    "NLQ hint classifier overrode rule-based intent to {:?}",
-                    crate::nlq::intent::intent_display_name(&merged.intent.intent),
-                );
+        let intent_override = if self.config.enable_nlq_hint {
+            if let Some(ref llm_client) = self.unified_llm_client {
+                let rule_based = crate::nlq::intent::classify_intent_full(&effective_question);
+                let llm_result = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    crate::nlq::llm_hint::classify_with_llm(llm_client.as_ref(), &effective_question),
+                )
+                .await;
+                let llm_hint = match llm_result {
+                    Ok(Ok(hint)) => hint,
+                    Ok(Err(e)) => {
+                        tracing::warn!("NLQ hint classifier error: {}", e);
+                        None
+                    },
+                    Err(_) => {
+                        tracing::warn!("NLQ hint classifier timed out (5s)");
+                        None
+                    },
+                };
+                let merged = crate::nlq::llm_hint::merge_classification(rule_based, llm_hint);
+                if merged.llm_overrode {
+                    tracing::info!(
+                        "NLQ hint classifier overrode rule-based intent to {:?}",
+                        crate::nlq::intent::intent_display_name(&merged.intent.intent),
+                    );
+                }
+                Some(merged.intent)
+            } else {
+                None
             }
-            Some(merged.intent)
         } else {
             None
         };

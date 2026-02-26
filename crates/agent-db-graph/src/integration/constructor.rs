@@ -414,40 +414,37 @@ impl GraphEngine {
                 (None, None, None)
             };
 
-        // Initialize NLQ hint client if enabled
-        let nlq_hint_client: Option<Arc<dyn crate::nlq::llm_hint::NlqHintClient>> = if config
-            .enable_nlq_hint
-        {
+        // Initialize unified LLM client (used for NLQ hint classification, conversation, etc.)
+        let unified_llm_client: Option<Arc<dyn crate::llm_client::LlmClient>> = {
             let hint_key = config
                 .nlq_hint_api_key
                 .clone()
                 .or_else(|| config.openai_api_key.clone());
             if let Some(key) = hint_key {
-                let client: Arc<dyn crate::nlq::llm_hint::NlqHintClient> =
+                let model = config.nlq_hint_model.clone();
+                let client: Arc<dyn crate::llm_client::LlmClient> =
                     match config.nlq_hint_provider.as_str() {
-                        "anthropic" => Arc::new(crate::nlq::llm_hint::AnthropicHintClient::new(
-                            key,
-                            config.nlq_hint_model.clone(),
-                        )),
-                        _ => Arc::new(crate::nlq::llm_hint::OpenAiHintClient::new(
-                            key,
-                            config.nlq_hint_model.clone(),
-                        )),
+                        "anthropic" => {
+                            Arc::new(crate::llm_client::AnthropicLlmClient::new(key, model))
+                        }
+                        _ => Arc::new(crate::llm_client::OpenAiLlmClient::new(key, model)),
                     };
-                tracing::info!(
-                    "NLQ hint classifier enabled (provider={}, model={})",
-                    config.nlq_hint_provider,
-                    config.nlq_hint_model,
-                );
+                if config.enable_nlq_hint {
+                    tracing::info!(
+                        "NLQ hint classifier enabled (provider={}, model={})",
+                        config.nlq_hint_provider,
+                        config.nlq_hint_model,
+                    );
+                }
                 Some(client)
             } else {
-                tracing::warn!(
+                if config.enable_nlq_hint {
+                    tracing::warn!(
                         "NLQ hint enabled but no API key found (nlq_hint_api_key / openai_api_key) — hint disabled"
                     );
+                }
                 None
             }
-        } else {
-            None
         };
 
         // Initialize metadata normalizer (alias matching is always on)
@@ -584,7 +581,8 @@ impl GraphEngine {
             )),
             nlq_pipeline: crate::nlq::NlqPipeline::new(),
             nlq_contexts: tokio::sync::Mutex::new(HashMap::new()),
-            nlq_hint_client,
+            conversation_states: tokio::sync::Mutex::new(HashMap::new()),
+            unified_llm_client,
             metadata_normalizer,
             metadata_llm_normalizer,
             active_executions: Arc::new(dashmap::DashMap::new()),

@@ -117,6 +117,16 @@ impl BasicEventValidator {
                     return Err(DatabaseError::validation("Context type cannot be empty"));
                 }
             },
+            EventType::Conversation {
+                speaker, content, ..
+            } => {
+                if speaker.is_empty() {
+                    return Err(DatabaseError::validation("Conversation speaker cannot be empty"));
+                }
+                if content.is_empty() {
+                    return Err(DatabaseError::validation("Conversation content cannot be empty"));
+                }
+            },
         }
 
         Ok(())

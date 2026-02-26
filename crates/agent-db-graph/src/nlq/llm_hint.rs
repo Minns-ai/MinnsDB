@@ -4,8 +4,8 @@
 //! intent classifier when it detects structured memory types or when rules
 //! return Unknown.
 
+use crate::llm_client::{LlmClient, LlmRequest, parse_json_from_llm};
 use crate::nlq::intent::{ClassifiedIntent, QueryIntent, StructuredQueryType};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// What kind of structured memory the query targets.
@@ -51,14 +51,6 @@ pub struct MergedClassification {
     pub raw_hint: Option<LlmHintResponse>,
 }
 
-/// Trait for LLM hint clients.
-#[async_trait]
-pub trait NlqHintClient: Send + Sync {
-    /// Classify a question into structure + intent hints.
-    /// Returns `Ok(None)` if the LLM response cannot be parsed.
-    async fn classify(&self, question: &str) -> anyhow::Result<Option<LlmHintResponse>>;
-}
-
 const SYSTEM_PROMPT: &str = concat!(
     "You classify graph database queries. Output strict JSON with exactly two fields:\n",
     "- \"structure_hint\": one of \"ledger\", \"tree\", \"state_machine\", \"preference_list\", \"generic_graph\"\n",
@@ -67,125 +59,32 @@ const SYSTEM_PROMPT: &str = concat!(
     "No markdown fences, no explanation, no other fields.",
 );
 
-// ────────── OpenAI client ──────────
+/// Classify a question into structure + intent hints using the unified LLM client.
+///
+/// Returns `Ok(None)` if the LLM response cannot be parsed.
+pub async fn classify_with_llm(
+    client: &dyn LlmClient,
+    question: &str,
+) -> anyhow::Result<Option<LlmHintResponse>> {
+    let request = LlmRequest {
+        system_prompt: SYSTEM_PROMPT.to_string(),
+        user_prompt: question.to_string(),
+        temperature: 0.0,
+        max_tokens: 128,
+        json_mode: true,
+    };
 
-pub struct OpenAiHintClient {
-    api_key: String,
-    model: String,
-    http: reqwest::Client,
+    let response = client.complete(request).await?;
+    Ok(parse_hint_response(&response.content))
 }
-
-impl OpenAiHintClient {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self {
-            api_key,
-            model,
-            http: reqwest::Client::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl NlqHintClient for OpenAiHintClient {
-    async fn classify(&self, question: &str) -> anyhow::Result<Option<LlmHintResponse>> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "temperature": 0.0,
-            "max_tokens": 128,
-            "response_format": { "type": "json_object" },
-            "messages": [
-                { "role": "system", "content": SYSTEM_PROMPT },
-                { "role": "user", "content": question }
-            ]
-        });
-
-        let resp = self
-            .http
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await?;
-
-        let json: serde_json::Value = resp.json().await?;
-        let text = json["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("");
-
-        Ok(parse_hint_response(text))
-    }
-}
-
-// ────────── Anthropic client ──────────
-
-pub struct AnthropicHintClient {
-    api_key: String,
-    model: String,
-    http: reqwest::Client,
-}
-
-impl AnthropicHintClient {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self {
-            api_key,
-            model,
-            http: reqwest::Client::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl NlqHintClient for AnthropicHintClient {
-    async fn classify(&self, question: &str) -> anyhow::Result<Option<LlmHintResponse>> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": 128,
-            "system": SYSTEM_PROMPT,
-            "messages": [
-                { "role": "user", "content": question }
-            ]
-        });
-
-        let resp = self
-            .http
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-
-        let json: serde_json::Value = resp.json().await?;
-        let text = json["content"][0]["text"].as_str().unwrap_or("");
-
-        Ok(parse_hint_response(text))
-    }
-}
-
-// ────────── Parsing ──────────
 
 /// Parse LLM response text into a typed hint.
 ///
 /// Strips markdown fences if present. Returns `None` on any parse error.
 pub fn parse_hint_response(text: &str) -> Option<LlmHintResponse> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    // Strip markdown fences
-    let json_str = if trimmed.starts_with("```") {
-        trimmed
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim()
-    } else {
-        trimmed
-    };
-
-    serde_json::from_str::<LlmHintResponse>(json_str).ok()
+    // Reuse the unified JSON parser, then try to deserialize
+    let value = parse_json_from_llm(text)?;
+    serde_json::from_value::<LlmHintResponse>(value).ok()
 }
 
 // ────────── Merge logic ──────────

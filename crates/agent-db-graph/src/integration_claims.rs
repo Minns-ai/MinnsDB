@@ -520,6 +520,13 @@ impl GraphEngine {
                     message_type, sender, recipient, content
                 )
             },
+
+            // ── Conversation events ─────────────────────────────────────
+            EventType::Conversation {
+                speaker, content, ..
+            } => {
+                format!("{}: {}", speaker, content)
+            },
         };
 
         // Skip empty synthesised text

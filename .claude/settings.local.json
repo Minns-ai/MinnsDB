@@ -29,7 +29,12 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git rm:*)",
-      "Bash(cargo clean:*)"
+      "Bash(cargo clean:*)",
+      "Bash(python:*)",
+      "Bash(Select-String \"FAILED\")",
+      "Bash(python3:*)",
+      "Bash(tasklist)",
+      "Bash(taskkill:*)"
     ]
   }
 }

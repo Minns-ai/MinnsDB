@@ -39,11 +39,15 @@ pub async fn root() -> &'static str {
      GET /api/graph - Get graph visualization data\n\
      GET /api/graph/context - Get context graph visualization data\n\
      GET /api/health - Health check\n\n\
-     NEW - Advanced Graph Features:\n\
+     Advanced Graph Features:\n\
      GET /api/analytics - Graph analytics with learning metrics\n\
      GET /api/indexes - Property index statistics\n\
      GET /api/communities - Community detection (Louvain)\n\
      GET /api/centrality - Node centrality scores\n\n\
+     Natural Language & Conversation:\n\
+     POST /api/nlq - Natural language graph query\n\
+     POST /api/conversations/ingest - Ingest conversation sessions\n\
+     POST /api/conversations/query - Query with conversation context\n\n\
      GET /docs - API documentation"
 }
 

@@ -11,6 +11,7 @@ pub mod nlq;
 pub mod search;
 pub mod strategies;
 pub mod structured_memory;
+pub mod conversation;
 pub mod world_model;
 
 // Re-export all handlers for convenience
@@ -25,4 +26,5 @@ pub use nlq::*;
 pub use search::*;
 pub use strategies::*;
 pub use structured_memory::*;
+pub use conversation::*;
 pub use world_model::*;
