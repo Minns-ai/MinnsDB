@@ -1263,7 +1263,7 @@ mod tests {
         let result = ingest(&data, &mut store, &IngestOptions::default());
 
         assert_eq!(result.transactions_found, 2);
-        assert!(store.len() > 0);
+        assert!(!store.is_empty());
     }
 
     #[test]

@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_simple_digits() {
         assert_eq!(parse_numeric_token("42"), Some(42.0));
-        assert_eq!(parse_numeric_token("3.14"), Some(3.14));
+        assert_eq!(parse_numeric_token("3.25"), Some(3.25));
     }
 
     #[test]
