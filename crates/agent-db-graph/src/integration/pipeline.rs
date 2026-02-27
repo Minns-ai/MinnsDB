@@ -101,6 +101,25 @@ impl GraphEngine {
                     let pre_refine_summary = memory.summary.clone();
                     let pre_refine_takeaway = memory.takeaway.clone();
                     let has_code_for_reindex = has_code;
+
+                    // Gather community context for enrichment
+                    let community_ctx = if self.config.enable_context_enrichment {
+                        let summaries = self.community_summaries.read().await;
+                        if summaries.is_empty() {
+                            None
+                        } else {
+                            let topic = format!("{} {}", memory.summary, memory.takeaway);
+                            let ctx = crate::context_enrichment::community_context_for_topic(
+                                &topic,
+                                &summaries,
+                                &self.config.enrichment_config,
+                            );
+                            if ctx.is_empty() { None } else { Some(ctx) }
+                        }
+                    } else {
+                        None
+                    };
+
                     tokio::spawn(async move {
                         if let Err(e) = refinement_ref
                             .refine_and_embed_memory(
@@ -108,6 +127,7 @@ impl GraphEngine {
                                 &store_ref,
                                 embedding_client.as_ref(),
                                 Some(event_narrative),
+                                community_ctx,
                             )
                             .await
                         {
@@ -276,12 +296,61 @@ impl GraphEngine {
                         let event_narrative = crate::event_content::build_event_narrative(&events);
                         let bm25_ref = self.strategy_bm25_index.clone();
                         let has_code_for_reindex = has_code;
+
+                        // Gather community context for enrichment
+                        let community_ctx = if self.config.enable_context_enrichment {
+                            let summaries = self.community_summaries.read().await;
+                            if summaries.is_empty() {
+                                None
+                            } else {
+                                let topic = format!("{} {}", strategy.summary, strategy.when_to_use);
+                                let ctx = crate::context_enrichment::community_context_for_topic(
+                                    &topic,
+                                    &summaries,
+                                    &self.config.enrichment_config,
+                                );
+                                if ctx.is_empty() { None } else { Some(ctx) }
+                            }
+                        } else {
+                            None
+                        };
+
+                        // Gather similar strategies via BM25
+                        let similar_strat_ctx = if self.config.enable_context_enrichment {
+                            let bm25 = self.strategy_bm25_index.read().await;
+                            let hits = bm25.search(&strategy.summary, 4);
+                            drop(bm25);
+                            let store = self.strategy_store.read().await;
+                            let mut strats: Vec<crate::strategies::Strategy> = Vec::new();
+                            for (id, _) in hits {
+                                if id != strategy.id {
+                                    if let Some(s) = store.get_strategy(id) {
+                                        strats.push(s);
+                                    }
+                                }
+                            }
+                            drop(store);
+                            if strats.is_empty() {
+                                None
+                            } else {
+                                let refs: Vec<&crate::strategies::Strategy> = strats.iter().collect();
+                                Some(crate::context_enrichment::build_strategy_context(
+                                    &refs,
+                                    self.config.enrichment_config.max_similar_strategies,
+                                ))
+                            }
+                        } else {
+                            None
+                        };
+
                         tokio::spawn(async move {
                             match refinement_ref
                                 .refine_and_embed_strategy(
                                     &strategy_clone,
                                     embedding_client.as_ref(),
                                     Some(event_narrative),
+                                    community_ctx,
+                                    similar_strat_ctx,
                                 )
                                 .await
                             {

@@ -318,6 +318,12 @@ pub struct GraphEngineConfig {
     pub enable_drift_search: bool,
     /// Configuration for DRIFT search pipeline.
     pub drift_config: crate::nlq::drift::DriftConfig,
+
+    // ========== Context Enrichment ==========
+    /// Enable community-enriched context injection into formation pipelines. Default: false.
+    pub enable_context_enrichment: bool,
+    /// Configuration for context enrichment.
+    pub enrichment_config: crate::context_enrichment::EnrichmentConfig,
 }
 
 impl GraphEngineConfig {
@@ -666,6 +672,9 @@ impl Default for GraphEngineConfig {
             // DRIFT search (disabled by default)
             enable_drift_search: false,
             drift_config: crate::nlq::drift::DriftConfig::default(),
+            // Context enrichment (disabled by default)
+            enable_context_enrichment: false,
+            enrichment_config: crate::context_enrichment::EnrichmentConfig::default(),
         }
     }
 }

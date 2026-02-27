@@ -121,6 +121,9 @@ pub mod metadata_normalize;
 // Community summaries for graph communities
 pub mod community_summary;
 
+// Community-enriched context injection for formation pipelines
+pub mod context_enrichment;
+
 // Background maintenance (decay, pruning, dedup)
 pub mod maintenance;
 
@@ -223,6 +226,9 @@ pub use goal_store::{GoalDedupDecision, GoalEntry, GoalStore};
 
 // Community Summaries
 pub use community_summary::{CommunitySummary, CommunitySummaryConfig};
+
+// Context Enrichment
+pub use context_enrichment::EnrichmentConfig;
 
 // Natural Language Query
 pub use nlq::{

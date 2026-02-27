@@ -30,6 +30,9 @@ Given raw event data from an agent's episode, produce a JSON response with:
 2. "takeaway": The single most important lesson from this experience (1 sentence)
 3. "causal_note": Why the outcome was what it was — identify the key causal factors (1-2 sentences)
 
+If broader knowledge context is provided, use it to place the memory within the agent's
+overall knowledge graph. Reference relevant communities or patterns when they add context.
+
 Be specific, not generic. Name the actual actions, tools, and outcomes.
 Output ONLY valid JSON, no markdown fences."#;
 
@@ -40,6 +43,9 @@ Given raw strategy data, produce a JSON response with:
 3. "when_not_to_use": Conditions where this strategy should NOT be used (1-2 sentences)
 4. "failure_modes": Array of known failure modes, each as a short sentence (max 3)
 5. "counterfactual": What would have happened differently with an alternative approach (1 sentence)
+
+If broader knowledge context or similar strategies are provided, reference them to identify
+patterns, differentiate from existing strategies, and note complements or conflicts.
 
 Be specific. Reference actual action names, context patterns, and outcomes.
 Output ONLY valid JSON, no markdown fences."#;
@@ -125,6 +131,7 @@ impl RefinementEngine {
         &self,
         memory: &Memory,
         event_data: Option<&str>,
+        community_context: Option<&str>,
     ) -> Result<RefinedMemoryFields> {
         let api_key = self
             .api_key
@@ -136,12 +143,18 @@ impl RefinementEngine {
             None => String::new(),
         };
 
+        let context_section = match community_context {
+            Some(ctx) if !ctx.is_empty() => format!("\n\nBroader knowledge context:\n{}", ctx),
+            _ => String::new(),
+        };
+
         let user_prompt = format!(
-            "Template summary: {}\nTakeaway: {}\nCausal note: {}{}\n\nOutcome: {:?}, Strength: {:.2}, Relevance: {:.2}",
+            "Template summary: {}\nTakeaway: {}\nCausal note: {}{}{}\n\nOutcome: {:?}, Strength: {:.2}, Relevance: {:.2}",
             memory.summary,
             memory.takeaway,
             memory.causal_note,
             event_section,
+            context_section,
             memory.outcome,
             memory.strength,
             memory.relevance_score
@@ -168,6 +181,8 @@ impl RefinementEngine {
         &self,
         strategy: &Strategy,
         event_data: Option<&str>,
+        community_context: Option<&str>,
+        similar_strategies: Option<&str>,
     ) -> Result<RefinedStrategyFields> {
         let api_key = self
             .api_key
@@ -179,8 +194,18 @@ impl RefinementEngine {
             None => String::new(),
         };
 
+        let context_section = match community_context {
+            Some(ctx) if !ctx.is_empty() => format!("\n\nBroader knowledge context:\n{}", ctx),
+            _ => String::new(),
+        };
+
+        let strategy_section = match similar_strategies {
+            Some(s) if !s.is_empty() => format!("\n\n{}", s),
+            _ => String::new(),
+        };
+
         let user_prompt = format!(
-            "Raw strategy data:\n\nSummary: {}\nWhen to use: {}\nWhen not to use: {}\nAction hint: {}\nPrecondition: {}\nSuccess rate: {:.0}%\nQuality: {:.2}\nFailure patterns: {:?}\nPlaybook steps: {}{}",
+            "Raw strategy data:\n\nSummary: {}\nWhen to use: {}\nWhen not to use: {}\nAction hint: {}\nPrecondition: {}\nSuccess rate: {:.0}%\nQuality: {:.2}\nFailure patterns: {:?}\nPlaybook steps: {}{}{}{}",
             strategy.summary,
             strategy.when_to_use,
             strategy.when_not_to_use,
@@ -190,7 +215,9 @@ impl RefinementEngine {
             strategy.quality_score,
             strategy.failure_patterns,
             strategy.playbook.len(),
-            event_section
+            event_section,
+            context_section,
+            strategy_section,
         );
 
         let response = self
@@ -234,6 +261,7 @@ impl RefinementEngine {
         store: &Arc<RwLock<Box<dyn MemoryStore>>>,
         embedding_client: Option<&Arc<dyn EmbeddingClient>>,
         event_data: Option<String>,
+        community_context: Option<String>,
     ) -> Result<()> {
         // Get current memory
         let memory = {
@@ -246,7 +274,10 @@ impl RefinementEngine {
 
         // Step 1: LLM refinement
         if self.is_llm_available() {
-            match self.refine_memory(&memory, event_data.as_deref()).await {
+            match self
+                .refine_memory(&memory, event_data.as_deref(), community_context.as_deref())
+                .await
+            {
                 Ok(refined) => {
                     info!(
                         "Refined memory {} summary: {} -> {}",
@@ -303,12 +334,22 @@ impl RefinementEngine {
         strategy: &Strategy,
         embedding_client: Option<&Arc<dyn EmbeddingClient>>,
         event_data: Option<String>,
+        community_context: Option<String>,
+        similar_strategies: Option<String>,
     ) -> Result<Strategy> {
         let mut updated = strategy.clone();
 
         // Step 1: LLM refinement
         if self.is_llm_available() {
-            match self.refine_strategy(strategy, event_data.as_deref()).await {
+            match self
+                .refine_strategy(
+                    strategy,
+                    event_data.as_deref(),
+                    community_context.as_deref(),
+                    similar_strategies.as_deref(),
+                )
+                .await
+            {
                 Ok(refined) => {
                     info!(
                         "Refined strategy {} summary: {} -> {}",

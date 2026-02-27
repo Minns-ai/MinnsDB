@@ -115,6 +115,8 @@ Rules:
 - Use NONE for redundant or trivial information.
 - Reference existing memories ONLY by their integer index [0], [1], etc.
 - For UPDATE, provide the complete merged text (not just the delta).
+- If knowledge graph context is provided, use it to better determine if a new fact overlaps
+  with existing knowledge. Prefer UPDATE over ADD when the same entity appears across communities.
 
 Respond with a JSON array. Each element has:
   {"action": "ADD"|"UPDATE"|"DELETE"|"NONE", "target_index": <int or null>, "new_text": <string or null>, "fact": <original fact text>}
@@ -220,6 +222,7 @@ fn default_add_all(facts: &[&str]) -> Vec<ClassifiedOperation> {
 /// * `llm` — The LLM client to use for classification.
 /// * `new_facts` — New fact strings to classify.
 /// * `similar_memories` — Existing memories that are semantically similar to the facts.
+/// * `community_context` — Optional community context to improve classification.
 ///
 /// # Returns
 /// A `ClassificationResult` with operations to execute and token usage.
@@ -227,6 +230,7 @@ pub async fn classify_memory_updates(
     llm: &dyn LlmClient,
     new_facts: &[&str],
     similar_memories: &[&Memory],
+    community_context: Option<&str>,
 ) -> anyhow::Result<ClassificationResult> {
     if new_facts.is_empty() {
         return Ok(ClassificationResult {
@@ -237,7 +241,13 @@ pub async fn classify_memory_updates(
 
     let mapper = IdMapper::new(similar_memories);
     let existing_section = mapper.format_existing(similar_memories);
-    let user_prompt = build_user_prompt(&existing_section, new_facts);
+    let mut user_prompt = build_user_prompt(&existing_section, new_facts);
+
+    if let Some(ctx) = community_context {
+        if !ctx.is_empty() {
+            user_prompt.push_str(&format!("\n\nKnowledge graph context:\n{}", ctx));
+        }
+    }
 
     let request = LlmRequest {
         system_prompt: SYSTEM_PROMPT.to_string(),

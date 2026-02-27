@@ -314,6 +314,9 @@ const PLAYBOOK_SYSTEM_PROMPT: &str = r#"You are a retrospective analysis system.
 4. "steps_taken": Brief ordered list of steps actually taken
 5. "confidence": 0.0-1.0
 
+If prior playbook experience is provided, use it to compare approaches and note what was
+done differently this time. Reference prior lessons when relevant.
+
 Output: { "playbooks": [ { "goal_description", "what_worked", "what_didnt_work", "lessons_learned", "steps_taken", "confidence" } ] }
 Rules: One playbook per goal. Empty arrays if goal was barely discussed. Be specific, not generic. Output ONLY valid JSON"#;
 
@@ -899,10 +902,32 @@ pub async fn run_compaction(
         }
     };
 
+    // Enrich transcript with community context if enabled
+    let enriched_transcript = if engine.config.enable_context_enrichment {
+        let summaries = engine.community_summaries.read().await;
+        if summaries.is_empty() {
+            transcript
+        } else {
+            let topic_slice = &transcript[..transcript.len().min(500)];
+            let ctx = crate::context_enrichment::community_context_for_topic(
+                topic_slice,
+                &summaries,
+                &engine.config.enrichment_config,
+            );
+            if ctx.is_empty() {
+                transcript
+            } else {
+                format!("{}\n\n[Knowledge Context]\n{}", transcript, ctx)
+            }
+        }
+    } else {
+        transcript
+    };
+
     // LLM extraction with 30-second timeout
     let extraction = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        extract_compaction_from_transcript(llm.as_ref(), &transcript),
+        extract_compaction_from_transcript(llm.as_ref(), &enriched_transcript),
     )
     .await;
 
@@ -996,9 +1021,32 @@ pub async fn run_compaction(
 
         let similar_refs: Vec<&Memory> = similar_memories.iter().collect();
 
+        // Build community context for classifier enrichment
+        let classifier_ctx = if engine.config.enable_context_enrichment {
+            let summaries = engine.community_summaries.read().await;
+            if summaries.is_empty() {
+                None
+            } else {
+                let topic = classifiable.join(" ");
+                let ctx = crate::context_enrichment::community_context_for_topic(
+                    &topic[..topic.len().min(500)],
+                    &summaries,
+                    &engine.config.enrichment_config,
+                );
+                if ctx.is_empty() { None } else { Some(ctx) }
+            }
+        } else {
+            None
+        };
+
         // Single classify_memory_updates() call (batched)
-        let classification =
-            classify_memory_updates(llm.as_ref(), &classifiable_refs, &similar_refs).await;
+        let classification = classify_memory_updates(
+            llm.as_ref(),
+            &classifiable_refs,
+            &similar_refs,
+            classifier_ctx.as_deref(),
+        )
+        .await;
 
         match classification {
             Ok(class_result) => {
@@ -1156,9 +1204,37 @@ pub async fn run_compaction(
     // ── Playbook extraction (separate LLM call, fail-open, 30s timeout) ──
     if !response.goals.is_empty() {
         let transcript = format_transcript(data);
+
+        // Enrich with prior playbook experience if enabled
+        let enriched_pb_transcript = if engine.config.enable_context_enrichment {
+            let goal_store = engine.goal_store.read().await;
+            let mut existing = Vec::new();
+            for goal in &response.goals {
+                for (id, _score) in goal_store.find_similar(&goal.description, 3) {
+                    if let Some(entry) = goal_store.get(id) {
+                        if let Some(ref pb) = entry.playbook {
+                            existing.push((entry.description.clone(), pb.clone()));
+                        }
+                    }
+                }
+            }
+            drop(goal_store);
+            if existing.is_empty() {
+                transcript.clone()
+            } else {
+                let ctx = crate::context_enrichment::build_playbook_context(
+                    &existing,
+                    engine.config.enrichment_config.max_similar_playbooks,
+                );
+                format!("{}\n\n[Prior Playbook Experience]\n{}", transcript, ctx)
+            }
+        } else {
+            transcript.clone()
+        };
+
         if let Ok(Some(pb_response)) = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            extract_playbooks(llm.as_ref(), &transcript, &response.goals),
+            extract_playbooks(llm.as_ref(), &enriched_pb_transcript, &response.goals),
         )
         .await
         {
