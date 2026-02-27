@@ -262,7 +262,12 @@ mod tests {
         for i in 0..10 {
             summaries.insert(
                 i,
-                make_summary(i, &format!("topic about testing item {}", i), vec!["Entity"]).1,
+                make_summary(
+                    i,
+                    &format!("topic about testing item {}", i),
+                    vec!["Entity"],
+                )
+                .1,
             );
         }
         let result = score_communities("testing items", &summaries, 3);

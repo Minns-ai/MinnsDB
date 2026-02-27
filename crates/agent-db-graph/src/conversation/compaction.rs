@@ -1033,7 +1033,11 @@ pub async fn run_compaction(
                     &summaries,
                     &engine.config.enrichment_config,
                 );
-                if ctx.is_empty() { None } else { Some(ctx) }
+                if ctx.is_empty() {
+                    None
+                } else {
+                    Some(ctx)
+                }
             }
         } else {
             None

@@ -114,7 +114,11 @@ impl GraphEngine {
                                 &summaries,
                                 &self.config.enrichment_config,
                             );
-                            if ctx.is_empty() { None } else { Some(ctx) }
+                            if ctx.is_empty() {
+                                None
+                            } else {
+                                Some(ctx)
+                            }
                         }
                     } else {
                         None
@@ -303,13 +307,18 @@ impl GraphEngine {
                             if summaries.is_empty() {
                                 None
                             } else {
-                                let topic = format!("{} {}", strategy.summary, strategy.when_to_use);
+                                let topic =
+                                    format!("{} {}", strategy.summary, strategy.when_to_use);
                                 let ctx = crate::context_enrichment::community_context_for_topic(
                                     &topic,
                                     &summaries,
                                     &self.config.enrichment_config,
                                 );
-                                if ctx.is_empty() { None } else { Some(ctx) }
+                                if ctx.is_empty() {
+                                    None
+                                } else {
+                                    Some(ctx)
+                                }
                             }
                         } else {
                             None
@@ -333,7 +342,8 @@ impl GraphEngine {
                             if strats.is_empty() {
                                 None
                             } else {
-                                let refs: Vec<&crate::strategies::Strategy> = strats.iter().collect();
+                                let refs: Vec<&crate::strategies::Strategy> =
+                                    strats.iter().collect();
                                 Some(crate::context_enrichment::build_strategy_context(
                                     &refs,
                                     self.config.enrichment_config.max_similar_strategies,

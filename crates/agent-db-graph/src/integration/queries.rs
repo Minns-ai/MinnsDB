@@ -915,12 +915,7 @@ impl GraphEngine {
                 if let Some(summaries) = summaries_snapshot {
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(self.config.drift_config.timeout_secs),
-                        self.run_drift_search(
-                            question,
-                            &summaries,
-                            &fused,
-                            llm_client.as_ref(),
-                        ),
+                        self.run_drift_search(question, &summaries, &fused, llm_client.as_ref()),
                     )
                     .await
                     {
@@ -1029,10 +1024,7 @@ impl GraphEngine {
             let graph = inference.graph();
             let mut seen = std::collections::HashSet::new();
             // Add snippets from initial fused + DRIFT follow-up results
-            let combined_iter = initial_fused
-                .iter()
-                .take(10)
-                .chain(merged.iter().take(10));
+            let combined_iter = initial_fused.iter().take(10).chain(merged.iter().take(10));
             for &(node_id, _score) in combined_iter {
                 let label = graph
                     .get_node(node_id)
