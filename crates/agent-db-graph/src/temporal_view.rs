@@ -275,6 +275,8 @@ mod tests {
             weight: 1.0,
             created_at,
             updated_at: created_at,
+            valid_from: None,
+            valid_until: None,
             observation_count: 1,
             confidence: 0.9,
             properties: HashMap::new(),

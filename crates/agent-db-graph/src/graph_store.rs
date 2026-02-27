@@ -1510,6 +1510,8 @@ mod tests {
             weight: 1.0,
             created_at: 2000,
             updated_at: 2000,
+            valid_from: None,
+            valid_until: None,
             observation_count: 1,
             confidence: 0.9,
             properties: std::collections::HashMap::new(),

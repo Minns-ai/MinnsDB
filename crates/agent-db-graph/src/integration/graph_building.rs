@@ -132,6 +132,7 @@ impl GraphEngine {
         let mut nodes: HashMap<NodeId, GraphNodeData> = HashMap::new();
         let mut edges: Vec<GraphEdgeData> = Vec::new();
 
+        // Phase 1: Traverse from event nodes (existing behavior)
         for (event_id, event) in events.take(limit) {
             if let Some(node) = graph.get_event_node(*event_id) {
                 let label = match &event.event_type {
@@ -149,27 +150,7 @@ impl GraphEngine {
                 // Get edges from this node
                 let outgoing_edges = graph.get_edges_from(node.id);
                 for edge in outgoing_edges.into_iter().take(5) {
-                    let edge_type = match &edge.edge_type {
-                        EdgeType::Temporal { .. } => "Temporal",
-                        EdgeType::Causality { .. } => "Causal",
-                        EdgeType::Contextual { .. } => "Contextual",
-                        EdgeType::Interaction { .. } => "Interaction",
-                        EdgeType::Association { .. } => "Association",
-                        EdgeType::GoalRelation { .. } => "GoalRelation",
-                        EdgeType::Communication { .. } => "Communication",
-                        EdgeType::DerivedFrom { .. } => "DerivedFrom",
-                        EdgeType::SupportedBy { .. } => "SupportedBy",
-                        EdgeType::About { .. } => "About",
-                    };
-
-                    edges.push(GraphEdgeData {
-                        id: edge.id,
-                        from: edge.source,
-                        to: edge.target,
-                        edge_type: edge_type.to_string(),
-                        weight: edge.weight,
-                        confidence: edge.confidence,
-                    });
+                    edges.push(Self::build_edge_data(edge));
 
                     if let Some(target_node) = graph.get_node(edge.target) {
                         nodes
@@ -180,9 +161,73 @@ impl GraphEngine {
             }
         }
 
+        // Phase 2: Include non-event nodes (Concept, Memory, Strategy, Episode, etc.)
+        // that the event traversal above would miss.
+        let remaining = limit.saturating_sub(nodes.len());
+        if remaining > 0 {
+            for (node_id, node) in &graph.nodes {
+                if nodes.len() >= limit {
+                    break;
+                }
+                if nodes.contains_key(node_id) {
+                    continue;
+                }
+                // Skip bare Event nodes not already discovered — they lack labels
+                if matches!(node.node_type, NodeType::Event { .. }) {
+                    continue;
+                }
+                nodes.insert(*node_id, Self::build_graph_node_data(node, None));
+
+                // Include edges from/to this node
+                for edge in graph.get_edges_from(*node_id) {
+                    edges.push(Self::build_edge_data(edge));
+                    if let Some(target) = graph.get_node(edge.target) {
+                        nodes
+                            .entry(target.id)
+                            .or_insert_with(|| Self::build_graph_node_data(target, None));
+                    }
+                }
+                for edge in graph.get_edges_to(*node_id) {
+                    edges.push(Self::build_edge_data(edge));
+                    if let Some(source) = graph.get_node(edge.source) {
+                        nodes
+                            .entry(source.id)
+                            .or_insert_with(|| Self::build_graph_node_data(source, None));
+                    }
+                }
+            }
+        }
+
+        // Deduplicate edges by id
+        edges.sort_by_key(|e| e.id);
+        edges.dedup_by_key(|e| e.id);
+
         GraphStructure {
             nodes: nodes.into_values().collect(),
             edges,
+        }
+    }
+
+    fn build_edge_data(edge: &GraphEdge) -> GraphEdgeData {
+        let edge_type = match &edge.edge_type {
+            EdgeType::Temporal { .. } => "Temporal",
+            EdgeType::Causality { .. } => "Causal",
+            EdgeType::Contextual { .. } => "Contextual",
+            EdgeType::Interaction { .. } => "Interaction",
+            EdgeType::Association { .. } => "Association",
+            EdgeType::GoalRelation { .. } => "GoalRelation",
+            EdgeType::Communication { .. } => "Communication",
+            EdgeType::DerivedFrom { .. } => "DerivedFrom",
+            EdgeType::SupportedBy { .. } => "SupportedBy",
+            EdgeType::About { .. } => "About",
+        };
+        GraphEdgeData {
+            id: edge.id,
+            from: edge.source,
+            to: edge.target,
+            edge_type: edge_type.to_string(),
+            weight: edge.weight,
+            confidence: edge.confidence,
         }
     }
 
@@ -261,6 +306,7 @@ impl GraphEngine {
             Self::build_graph_node_data(context_node, None),
         );
 
+        // Phase 1: edges from/to context node
         let mut candidate_edges = Vec::new();
         candidate_edges.extend(graph.get_edges_from(context_node.id));
         candidate_edges.extend(graph.get_edges_to(context_node.id));
@@ -270,27 +316,7 @@ impl GraphEngine {
                 break;
             }
 
-            let edge_type = match &edge.edge_type {
-                EdgeType::Temporal { .. } => "Temporal",
-                EdgeType::Causality { .. } => "Causal",
-                EdgeType::Contextual { .. } => "Contextual",
-                EdgeType::Interaction { .. } => "Interaction",
-                EdgeType::Association { .. } => "Association",
-                EdgeType::GoalRelation { .. } => "GoalRelation",
-                EdgeType::Communication { .. } => "Communication",
-                EdgeType::DerivedFrom { .. } => "DerivedFrom",
-                EdgeType::SupportedBy { .. } => "SupportedBy",
-                EdgeType::About { .. } => "About",
-            };
-
-            edges.push(GraphEdgeData {
-                id: edge.id,
-                from: edge.source,
-                to: edge.target,
-                edge_type: edge_type.to_string(),
-                weight: edge.weight,
-                confidence: edge.confidence,
-            });
+            edges.push(Self::build_edge_data(edge));
 
             for node_id in [edge.source, edge.target] {
                 if nodes.contains_key(&node_id) {
@@ -307,6 +333,43 @@ impl GraphEngine {
                 }
             }
         }
+
+        // Phase 2: Include non-event nodes not yet discovered
+        let remaining = limit.saturating_sub(nodes.len());
+        if remaining > 0 {
+            for (node_id, node) in &graph.nodes {
+                if nodes.len() >= limit {
+                    break;
+                }
+                if nodes.contains_key(node_id) {
+                    continue;
+                }
+                if matches!(node.node_type, NodeType::Event { .. }) {
+                    continue;
+                }
+                nodes.insert(*node_id, Self::build_graph_node_data(node, None));
+                for edge in graph.get_edges_from(*node_id) {
+                    edges.push(Self::build_edge_data(edge));
+                    if let Some(target) = graph.get_node(edge.target) {
+                        nodes
+                            .entry(target.id)
+                            .or_insert_with(|| Self::build_graph_node_data(target, None));
+                    }
+                }
+                for edge in graph.get_edges_to(*node_id) {
+                    edges.push(Self::build_edge_data(edge));
+                    if let Some(source) = graph.get_node(edge.source) {
+                        nodes
+                            .entry(source.id)
+                            .or_insert_with(|| Self::build_graph_node_data(source, None));
+                    }
+                }
+            }
+        }
+
+        // Deduplicate edges
+        edges.sort_by_key(|e| e.id);
+        edges.dedup_by_key(|e| e.id);
 
         GraphStructure {
             nodes: nodes.into_values().collect(),

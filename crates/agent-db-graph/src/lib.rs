@@ -106,8 +106,20 @@ pub mod llm_client;
 // Conversation ingestion layer (NL → structured memory)
 pub mod conversation;
 
+// Memory audit trail (ADD/UPDATE/DELETE tracking)
+pub mod memory_audit;
+
+// LLM-driven memory update classification (ADD/UPDATE/DELETE/NONE)
+pub mod memory_classifier;
+
+// In-memory goal store with BM25-backed fast deduplication
+pub mod goal_store;
+
 // Resilient metadata normalization for structured memory auto-detection
 pub mod metadata_normalize;
+
+// Community summaries for graph communities
+pub mod community_summary;
 
 // Background maintenance (decay, pruning, dedup)
 pub mod maintenance;
@@ -187,14 +199,30 @@ pub use stores::{build_memory_index_ops, build_strategy_index_ops};
 // Semantic Memory
 pub use claims::{
     ClaimExtractionRequest, ClaimExtractionResult, ClaimId, ClaimStatus, ClaimType, DerivedClaim,
-    EvidenceSpan, RejectedClaim, RejectionReason, ThreadId,
+    EvidenceSpan, RejectedClaim, RejectionReason, SourceRole, TemporalType, ThreadId,
 };
 
 // Multi-signal retrieval
 pub use retrieval::{
-    MemoryRetrievalConfig, MemoryRetrievalPipeline, MemoryRetrievalQuery, StrategyRetrievalConfig,
+    apply_reranking, compute_importance, importance_modulated_decay_score, ImportanceDecayConfig,
+    ImportanceDecayParams, LlmReranker, MemoryRetrievalConfig, MemoryRetrievalPipeline,
+    MemoryRetrievalQuery, RerankedItem, Reranker, RerankerConfig, StrategyRetrievalConfig,
     StrategyRetrievalPipeline, StrategyRetrievalQuery,
 };
+
+// Memory audit trail
+pub use memory_audit::{MemoryAuditEntry, MemoryAuditLog, MemoryMutationType, MutationActor};
+
+// Memory update classifier
+pub use memory_classifier::{
+    classify_memory_updates, ClassificationResult, ClassifiedOperation, MemoryAction,
+};
+
+// Goal store
+pub use goal_store::{GoalDedupDecision, GoalEntry, GoalStore};
+
+// Community Summaries
+pub use community_summary::{CommunitySummary, CommunitySummaryConfig};
 
 // Natural Language Query
 pub use nlq::{
@@ -215,7 +243,8 @@ pub use metadata_normalize::{
 
 // Conversation Ingestion
 pub use conversation::{
-    gather_memory_context, ingest_incremental, ingest_with_llm_incremental, ConversationIngest,
-    ConversationMessage, ConversationSession, ConversationState, IngestOptions, IngestResult,
-    MemoryContextEntry, MemorySummary, NameRegistry, StrategySummary,
+    gather_memory_context, ingest_incremental, ingest_with_llm_incremental, CompactionResult,
+    ConversationIngest, ConversationMessage, ConversationRollingSummary, ConversationSession,
+    ConversationState, GoalPlaybook, IngestOptions, IngestResult, MemoryContextEntry,
+    MemorySummary, NameRegistry, StrategySummary,
 };

@@ -10,6 +10,7 @@
 //! ```
 
 pub mod builder;
+pub mod drift;
 pub mod entity;
 pub mod executor;
 pub mod feedback;
@@ -17,6 +18,7 @@ pub mod formatter;
 pub mod intent;
 pub mod llm_hint;
 pub mod template;
+pub mod unified;
 pub mod validator;
 
 use crate::structures::Graph;
@@ -136,6 +138,11 @@ impl Default for NlqPipeline {
 impl NlqPipeline {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Get a reference to the entity resolver (for use by unified query pipeline).
+    pub fn entity_resolver(&self) -> &EntityResolver {
+        &self.entity_resolver
     }
 
     /// Execute the full NLQ pipeline:
@@ -296,16 +303,34 @@ impl NlqPipeline {
         }
 
         // 5. Match template
-        let (template, params) = self
-            .templates
-            .match_template(&intent, &resolved, question)
-            .ok_or_else(|| {
-                GraphError::InvalidQuery(format!(
-                    "No matching query template for intent {:?} with {} entities",
-                    std::mem::discriminant(&intent),
-                    resolved.len()
-                ))
-            })?;
+        let template_match = self.templates.match_template(&intent, &resolved, question);
+
+        // If no template matches, fall back to BM25 full-text search
+        if template_match.is_none() {
+            explanation.push("No template matched — falling back to BM25 search".to_string());
+            let bm25_hits = graph
+                .bm25_index
+                .search(question, pagination.limit.unwrap_or(10));
+            let total_count = bm25_hits.len();
+            let result = QueryResult::Rankings(bm25_hits);
+            let answer = formatter::format_result(question, &intent, &result, &resolved, graph);
+            return Ok(NlqResponse {
+                answer,
+                query_used: GraphQuery::PageRank {
+                    iterations: 0,
+                    damping_factor: 0.0,
+                },
+                result,
+                entities_resolved: resolved,
+                intent,
+                confidence: 0.5,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                explanation,
+                total_count,
+            });
+        }
+
+        let (template, params) = template_match.unwrap();
         explanation.push(format!("Matched template '{}'", template.name));
 
         // 6. Build query

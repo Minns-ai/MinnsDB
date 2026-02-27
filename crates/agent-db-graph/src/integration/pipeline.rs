@@ -48,6 +48,30 @@ impl GraphEngine {
                 );
                 self.attach_memory_to_graph(episode, &memory).await?;
 
+                // Record in audit trail
+                {
+                    let mut audit = self.memory_audit_log.write().await;
+                    if upsert.is_new {
+                        audit.record_add(
+                            upsert.id,
+                            &memory.summary,
+                            &memory.takeaway,
+                            crate::memory_audit::MutationActor::Pipeline,
+                            Some(format!("episode_id={}", episode.id)),
+                        );
+                    } else {
+                        audit.record_update(
+                            upsert.id,
+                            "", // old summary not available here (already overwritten)
+                            &memory.summary,
+                            "",
+                            &memory.takeaway,
+                            crate::memory_audit::MutationActor::Pipeline,
+                            Some(format!("episode_id={} (update)", episode.id)),
+                        );
+                    }
+                }
+
                 // Index into memory BM25 for multi-signal retrieval
                 let has_code = events.iter().any(|e| e.is_code);
                 {
@@ -73,6 +97,9 @@ impl GraphEngine {
                     let embedding_client = self.embedding_client.clone();
                     let event_narrative = crate::event_content::build_event_narrative(&events);
                     let bm25_ref = self.memory_bm25_index.clone();
+                    let audit_ref = self.memory_audit_log.clone();
+                    let pre_refine_summary = memory.summary.clone();
+                    let pre_refine_takeaway = memory.takeaway.clone();
                     let has_code_for_reindex = has_code;
                     tokio::spawn(async move {
                         if let Err(e) = refinement_ref
@@ -102,6 +129,17 @@ impl GraphEngine {
                                         idx.index_document(memory_id, &text);
                                     }
                                 }
+                                // Record refinement in audit trail
+                                let mut audit = audit_ref.write().await;
+                                audit.record_update(
+                                    memory_id,
+                                    &pre_refine_summary,
+                                    &refined.summary,
+                                    &pre_refine_takeaway,
+                                    &refined.takeaway,
+                                    crate::memory_audit::MutationActor::Refinement,
+                                    Some("LLM refinement".to_string()),
+                                );
                             }
                         }
                     });

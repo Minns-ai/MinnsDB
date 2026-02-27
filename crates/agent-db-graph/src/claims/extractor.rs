@@ -139,6 +139,11 @@ impl ClaimExtractionQueue {
                 text: request.canonical_text.clone(),
                 entities: labeled_entities.clone(),
                 max_claims: config.max_claims_per_input,
+                source_role: request.source_role,
+                custom_instructions: config.custom_instructions.clone(),
+                extraction_includes: config.extraction_includes.clone(),
+                extraction_excludes: config.extraction_excludes.clone(),
+                few_shot_examples: config.few_shot_examples.clone(),
             };
 
             let llm_response = llm_client.extract_claims(llm_request).await?;
@@ -358,13 +363,19 @@ impl ClaimExtractionQueue {
                     request.workspace_id.clone(),
                 );
 
-                // ── Set claim type and subject entity from LLM output ────
+                // ── Set claim type, subject entity, and category from LLM output ────
                 claim.claim_type =
                     crate::claims::types::ClaimType::from_str_loose(&llm_claim.claim_type);
                 claim.subject_entity = llm_claim
                     .subject_entity
                     .as_deref()
                     .map(normalize_entity);
+                claim.category = llm_claim.category.clone();
+                if let Some(ref cat) = claim.category {
+                    claim.metadata.insert("_category".to_string(), cat.clone());
+                }
+                claim.temporal_type =
+                    crate::claims::types::TemporalType::from_str_loose(&llm_claim.temporal_type);
 
                 // ── Attach NER-labeled entities found in the claim text ────
                 {
@@ -551,6 +562,14 @@ pub struct ClaimExtractionConfig {
     pub enable_dedup: bool,
     /// Maintenance config for dedup thresholds (shared with maintenance loop)
     pub maintenance_config: crate::maintenance::MaintenanceConfig,
+    /// Custom natural-language instructions for extraction.
+    pub custom_instructions: Option<String>,
+    /// Types of facts to specifically look for.
+    pub extraction_includes: Vec<String>,
+    /// Types of facts to specifically ignore.
+    pub extraction_excludes: Vec<String>,
+    /// Few-shot examples to include in extraction prompts.
+    pub few_shot_examples: Vec<crate::claims::llm_client::FewShotExample>,
 }
 
 impl Default for ClaimExtractionConfig {
@@ -561,6 +580,10 @@ impl Default for ClaimExtractionConfig {
             min_evidence_length: 10,
             enable_dedup: true,
             maintenance_config: crate::maintenance::MaintenanceConfig::default(),
+            custom_instructions: None,
+            extraction_includes: vec![],
+            extraction_excludes: vec![],
+            few_shot_examples: vec![],
         }
     }
 }

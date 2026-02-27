@@ -54,6 +54,53 @@ pub enum ClaimStatus {
     Superseded,
 }
 
+/// Temporal stability classification for a claim.
+///
+/// Determines how the claim's decay curve behaves:
+///
+/// | Type       | Decay Behavior |
+/// |------------|----------------|
+/// | Static     | No decay — stable facts ("Paris is the capital of France") |
+/// | Dynamic    | Normal type-based decay — can be superseded ("Alice lives in NYC") |
+/// | Atemporal  | No decay — mathematical/logical truths ("2+2=4") |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TemporalType {
+    /// Stable real-world fact that should never decay (e.g., "Paris is the capital of France").
+    Static,
+    /// Fact that can change over time and should decay normally (e.g., "Alice lives in NYC").
+    #[default]
+    Dynamic,
+    /// Mathematical, logical, or definitional truth — permanent (e.g., "2+2=4").
+    Atemporal,
+}
+
+impl TemporalType {
+    /// Attempt to classify from the LLM-provided string.
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_lowercase().trim() {
+            "static" | "permanent" | "stable" => TemporalType::Static,
+            "dynamic" | "changing" | "temporal" => TemporalType::Dynamic,
+            "atemporal" | "timeless" | "mathematical" | "logical" => TemporalType::Atemporal,
+            _ => TemporalType::Dynamic, // default
+        }
+    }
+
+    /// Whether this temporal type should undergo decay at all.
+    pub fn should_decay(&self) -> bool {
+        matches!(self, TemporalType::Dynamic)
+    }
+}
+
+impl std::fmt::Display for TemporalType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemporalType::Static => write!(f, "static"),
+            TemporalType::Dynamic => write!(f, "dynamic"),
+            TemporalType::Atemporal => write!(f, "atemporal"),
+        }
+    }
+}
+
 /// Type of knowledge a claim represents.
 ///
 /// Each type has a different default half-life (temporal decay rate) and
@@ -199,6 +246,15 @@ pub struct DerivedClaim {
     /// e.g. [("John", "PERSON"), ("Google", "ORG")]
     #[serde(default)]
     pub entities: Vec<ClaimEntity>,
+
+    /// Auto-tagged category (e.g., "personal", "preferences", "work").
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// Temporal stability classification (Static/Dynamic/Atemporal).
+    /// Determines whether this claim undergoes temporal decay.
+    #[serde(default)]
+    pub temporal_type: TemporalType,
 }
 
 /// Evidence span within source text
@@ -258,6 +314,22 @@ impl EvidenceSpan {
     }
 }
 
+/// The role/source of the content being extracted from.
+///
+/// Different roles get different extraction prompts to prevent cross-role
+/// pollution (e.g., extracting agent instructions as user preferences).
+/// Inspired by prior work's USER_MEMORY_EXTRACTION_PROMPT vs AGENT_MEMORY_EXTRACTION_PROMPT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceRole {
+    /// Content from a human user — extract personal facts, preferences, intentions.
+    #[default]
+    User,
+    /// Content from an AI assistant — extract capabilities, tool usage patterns, system facts.
+    Assistant,
+    /// Content from system/context — extract environmental facts, constraints, configurations.
+    System,
+}
+
 /// Request structure for claim extraction
 #[derive(Debug, Clone)]
 pub struct ClaimExtractionRequest {
@@ -269,6 +341,9 @@ pub struct ClaimExtractionRequest {
     pub thread_id: Option<ThreadId>,
     pub user_id: Option<String>,
     pub workspace_id: Option<String>,
+    /// Role of the content source for role-aware extraction prompts.
+    #[allow(dead_code)]
+    pub source_role: SourceRole,
 }
 
 /// Result of claim extraction
@@ -344,6 +419,8 @@ impl DerivedClaim {
             expires_at: None,
             superseded_by: None,
             entities: Vec::new(),
+            category: None,
+            temporal_type: TemporalType::Dynamic,
         }
     }
 
@@ -377,8 +454,24 @@ impl DerivedClaim {
     ///
     /// Uses exponential decay: `w(t) = 2^(−age / half_life)`.
     ///
+    /// If `temporal_type` is Static or Atemporal, returns 1.0 (no decay).
     /// If `expires_at` is set and in the past, returns 0.0 immediately.
     pub fn temporal_weight(&self) -> f32 {
+        // Static and Atemporal claims never decay
+        if !self.temporal_type.should_decay() {
+            // Still respect explicit expiry
+            if let Some(exp) = self.expires_at {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if now > exp {
+                    return 0.0;
+                }
+            }
+            return 1.0;
+        }
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -675,6 +768,23 @@ mod tests {
         assert!(claim.superseded_by.is_none());
     }
 
+    #[test]
+    fn test_derived_claim_category_default_none() {
+        let claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(claim.category.is_none());
+    }
+
     // ── P0: Outcome tracking tests ───────────────────────────────────────
 
     #[test]
@@ -961,5 +1071,137 @@ mod tests {
     #[test]
     fn test_avoidance_display() {
         assert_eq!(ClaimType::Avoidance.to_string(), "Avoidance");
+    }
+
+    // ── TemporalType tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_temporal_type_default_is_dynamic() {
+        assert_eq!(TemporalType::default(), TemporalType::Dynamic);
+    }
+
+    #[test]
+    fn test_temporal_type_from_str_loose() {
+        assert_eq!(TemporalType::from_str_loose("static"), TemporalType::Static);
+        assert_eq!(
+            TemporalType::from_str_loose("permanent"),
+            TemporalType::Static
+        );
+        assert_eq!(TemporalType::from_str_loose("stable"), TemporalType::Static);
+        assert_eq!(
+            TemporalType::from_str_loose("dynamic"),
+            TemporalType::Dynamic
+        );
+        assert_eq!(
+            TemporalType::from_str_loose("changing"),
+            TemporalType::Dynamic
+        );
+        assert_eq!(
+            TemporalType::from_str_loose("atemporal"),
+            TemporalType::Atemporal
+        );
+        assert_eq!(
+            TemporalType::from_str_loose("timeless"),
+            TemporalType::Atemporal
+        );
+        assert_eq!(
+            TemporalType::from_str_loose("mathematical"),
+            TemporalType::Atemporal
+        );
+        assert_eq!(
+            TemporalType::from_str_loose("unknown"),
+            TemporalType::Dynamic
+        );
+    }
+
+    #[test]
+    fn test_temporal_type_should_decay() {
+        assert!(!TemporalType::Static.should_decay());
+        assert!(TemporalType::Dynamic.should_decay());
+        assert!(!TemporalType::Atemporal.should_decay());
+    }
+
+    #[test]
+    fn test_temporal_type_display() {
+        assert_eq!(TemporalType::Static.to_string(), "static");
+        assert_eq!(TemporalType::Dynamic.to_string(), "dynamic");
+        assert_eq!(TemporalType::Atemporal.to_string(), "atemporal");
+    }
+
+    #[test]
+    fn test_static_claim_no_decay() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Paris is the capital of France".to_string(),
+            vec![EvidenceSpan::new(0, 5, "Paris")],
+            0.95,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.temporal_type = TemporalType::Static;
+        // Even though created_at is "now", a Static claim should always return 1.0
+        assert!((claim.temporal_weight() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_atemporal_claim_no_decay() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "2+2=4".to_string(),
+            vec![EvidenceSpan::new(0, 5, "2+2=4")],
+            0.99,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.temporal_type = TemporalType::Atemporal;
+        assert!((claim.temporal_weight() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_static_claim_still_respects_expiry() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Static but expired".to_string(),
+            vec![EvidenceSpan::new(0, 6, "Static")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.temporal_type = TemporalType::Static;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        claim.expires_at = Some(now - 1);
+        assert_eq!(claim.temporal_weight(), 0.0);
+    }
+
+    #[test]
+    fn test_new_claim_has_dynamic_temporal_type() {
+        let claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(claim.temporal_type, TemporalType::Dynamic);
     }
 }

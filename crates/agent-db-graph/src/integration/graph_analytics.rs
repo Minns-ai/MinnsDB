@@ -82,6 +82,52 @@ impl GraphEngine {
             },
         }
 
+        // Fire-and-forget community summary generation if enabled
+        if self.config.enable_community_summaries {
+            if let Some(ref llm_client) = self.unified_llm_client {
+                let community_data = crate::community_summary::extract_community_data(graph);
+                // Extract edge descriptions while we still have the graph lock
+                let config = self.config.community_summary_config.clone();
+                let community_with_edges: Vec<(u64, Vec<String>, Vec<String>)> = community_data
+                    .iter()
+                    .filter(|(_, members)| members.len() >= config.min_community_size)
+                    .map(|(&cid, members)| {
+                        let labels: Vec<String> = members.iter().map(|(_, l)| l.clone()).collect();
+                        let edges =
+                            crate::community_summary::extract_edge_descriptions(graph, members);
+                        (cid, labels, edges)
+                    })
+                    .collect();
+
+                let client = llm_client.clone();
+                let summaries_arc = self.community_summaries.clone();
+                tokio::spawn(async move {
+                    let mut results = std::collections::HashMap::new();
+                    let mut sorted = community_with_edges;
+                    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+                    sorted.truncate(config.max_communities_to_summarize);
+
+                    for (cid, labels, edges) in &sorted {
+                        if let Some(summary) = crate::community_summary::generate_community_summary(
+                            client.as_ref(),
+                            *cid,
+                            labels,
+                            edges,
+                            &config,
+                        )
+                        .await
+                        {
+                            results.insert(*cid, summary);
+                        }
+                    }
+                    if !results.is_empty() {
+                        tracing::info!("Generated {} community summaries", results.len());
+                        *summaries_arc.write().await = results;
+                    }
+                });
+            }
+        }
+
         Ok(())
     }
 

@@ -1,12 +1,10 @@
 //! Unified LLM client abstraction.
 //!
-//! Provides a single `LlmClient` trait with OpenAI, Anthropic, and Mock
+//! Provides a single `LlmClient` trait with OpenAI and Anthropic
 //! implementations. Replaces the per-feature LLM clients scattered across
 //! `nlq::llm_hint`, `claims`, etc.
 
 use async_trait::async_trait;
-use std::collections::VecDeque;
-use std::sync::Mutex;
 
 /// Request to send to an LLM.
 #[derive(Debug, Clone)]
@@ -154,47 +152,6 @@ impl LlmClient for AnthropicLlmClient {
     }
 }
 
-// ────────── Mock client (for testing) ──────────
-
-pub struct MockLlmClient {
-    responses: Mutex<VecDeque<String>>,
-    model: String,
-}
-
-impl MockLlmClient {
-    pub fn new(responses: Vec<String>) -> Self {
-        Self {
-            responses: Mutex::new(VecDeque::from(responses)),
-            model: "mock".to_string(),
-        }
-    }
-
-    /// Create a mock that always returns empty.
-    pub fn empty() -> Self {
-        Self::new(vec![])
-    }
-}
-
-#[async_trait]
-impl LlmClient for MockLlmClient {
-    async fn complete(&self, _request: LlmRequest) -> anyhow::Result<LlmResponse> {
-        let content = self
-            .responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_default();
-        Ok(LlmResponse {
-            content,
-            tokens_used: 0,
-        })
-    }
-
-    fn model_name(&self) -> &str {
-        &self.model
-    }
-}
-
 // ────────── Utilities ──────────
 
 /// Parse JSON from LLM response text.
@@ -257,37 +214,5 @@ mod tests {
     #[test]
     fn test_parse_json_from_llm_invalid() {
         assert!(parse_json_from_llm("not json").is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mock_client_returns_canned_responses() {
-        let client = MockLlmClient::new(vec![
-            r#"{"category": "transaction"}"#.to_string(),
-            r#"{"category": "chitchat"}"#.to_string(),
-        ]);
-
-        let req = LlmRequest {
-            system_prompt: "test".to_string(),
-            user_prompt: "test".to_string(),
-            temperature: 0.0,
-            max_tokens: 128,
-            json_mode: true,
-        };
-
-        let r1 = client.complete(req.clone()).await.unwrap();
-        assert!(r1.content.contains("transaction"));
-
-        let r2 = client.complete(req.clone()).await.unwrap();
-        assert!(r2.content.contains("chitchat"));
-
-        // Exhausted — returns empty
-        let r3 = client.complete(req).await.unwrap();
-        assert!(r3.content.is_empty());
-    }
-
-    #[test]
-    fn test_mock_client_model_name() {
-        let client = MockLlmClient::empty();
-        assert_eq!(client.model_name(), "mock");
     }
 }

@@ -60,12 +60,57 @@ impl GraphEngine {
         inference.graph().stats().clone()
     }
 
-    /// Search nodes using BM25 full-text search
+    /// Search nodes using BM25 full-text search across all indexes
+    /// (graph nodes, memories, strategies).
     ///
     /// Returns a list of (NodeId, score) tuples ranked by relevance
     pub async fn search_bm25(&self, query: &str, limit: usize) -> Vec<(u64, f32)> {
         let inference = self.inference.read().await;
-        inference.graph().bm25_index.search(query, limit)
+        let mut results = inference.graph().bm25_index.search(query, limit);
+
+        // Also search memory and strategy BM25 indexes
+        {
+            let mem_idx = self.memory_bm25_index.read().await;
+            let mem_hits = mem_idx.search(query, limit);
+            for (id, score) in mem_hits {
+                // Memory IDs are u64; look up the corresponding graph node
+                if let Some(&node_id) = inference.graph().memory_index.get(&id) {
+                    results.push((node_id, score));
+                } else {
+                    results.push((id, score));
+                }
+            }
+        }
+        {
+            let strat_idx = self.strategy_bm25_index.read().await;
+            let strat_hits = strat_idx.search(query, limit);
+            for (id, score) in strat_hits {
+                if let Some(&node_id) = inference.graph().strategy_index.get(&id) {
+                    results.push((node_id, score));
+                } else {
+                    results.push((id, score));
+                }
+            }
+        }
+
+        // Deduplicate by node_id, keeping highest score
+        results.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        results.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                b.1 = b.1.max(a.1); // keep highest score in b
+                true
+            } else {
+                false
+            }
+        });
+
+        // Re-sort by score descending and truncate to limit
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+        results
     }
 
     /// Get a node by ID for search results
@@ -502,6 +547,16 @@ impl GraphEngine {
         &self.structured_memory
     }
 
+    /// Get a reference to the memory audit log.
+    pub fn memory_audit_log(&self) -> &Arc<RwLock<crate::memory_audit::MemoryAuditLog>> {
+        &self.memory_audit_log
+    }
+
+    /// Get a reference to the goal store.
+    pub fn goal_store(&self) -> &Arc<RwLock<crate::goal_store::GoalStore>> {
+        &self.goal_store
+    }
+
     /// Get a reference to the persistent conversation states (for incremental ingestion).
     pub fn conversation_states(
         &self,
@@ -512,6 +567,39 @@ impl GraphEngine {
     /// Get a reference to the unified LLM client (for conversation handlers).
     pub fn unified_llm_client(&self) -> Option<&Arc<dyn crate::llm_client::LlmClient>> {
         self.unified_llm_client.as_ref()
+    }
+
+    /// Get the rolling conversation summary for a case_id (if one exists).
+    pub async fn conversation_summary(
+        &self,
+        case_id: &str,
+    ) -> Option<crate::conversation::compaction::ConversationRollingSummary> {
+        let summaries = self.conversation_summaries.read().await;
+        summaries.get(case_id).cloned()
+    }
+
+    /// Set (or update) the rolling conversation summary for a case_id.
+    pub async fn set_conversation_summary(
+        &self,
+        summary: crate::conversation::compaction::ConversationRollingSummary,
+    ) {
+        let mut summaries = self.conversation_summaries.write().await;
+        summaries.insert(summary.case_id.clone(), summary);
+    }
+
+    /// Get a snapshot of all community summaries.
+    pub async fn community_summaries(
+        &self,
+    ) -> HashMap<u64, crate::community_summary::CommunitySummary> {
+        self.community_summaries.read().await.clone()
+    }
+
+    /// Replace all community summaries.
+    pub async fn set_community_summaries(
+        &self,
+        summaries: HashMap<u64, crate::community_summary::CommunitySummary>,
+    ) {
+        *self.community_summaries.write().await = summaries;
     }
 
     /// Pre-create Concept nodes for conversation participants.
@@ -621,6 +709,32 @@ impl GraphEngine {
             None
         };
 
+        // Check if this should route through the unified pipeline
+        let is_full_pipeline = self.config.enable_unified_nlq
+            && match &intent_override {
+                Some(ci) => matches!(
+                    ci.intent,
+                    crate::nlq::intent::QueryIntent::KnowledgeQuery
+                        | crate::nlq::intent::QueryIntent::SimilaritySearch
+                        | crate::nlq::intent::QueryIntent::Unknown
+                ),
+                None => {
+                    // Also check rule-based classification for routing
+                    let probe = crate::nlq::intent::classify_intent(&effective_question);
+                    matches!(
+                        probe,
+                        crate::nlq::intent::QueryIntent::KnowledgeQuery
+                            | crate::nlq::intent::QueryIntent::Unknown
+                    )
+                },
+            };
+
+        if is_full_pipeline {
+            return self
+                .execute_unified_query(&effective_question, pagination, session_id)
+                .await;
+        }
+
         let response = {
             let inference = self.inference.read().await;
             let mut traversal = self.traversal.write().await;
@@ -681,5 +795,267 @@ impl GraphEngine {
         crate::nlq::feedback::log_nlq_feedback(&feedback);
 
         Ok(response)
+    }
+
+    /// Execute a unified multi-source query (BM25 + memory + claims + graph + optional DRIFT).
+    ///
+    /// Triggered for KnowledgeQuery, SimilaritySearch, and Unknown intents when
+    /// `enable_unified_nlq` is true.
+    async fn execute_unified_query(
+        &self,
+        question: &str,
+        pagination: &crate::nlq::NlqPagination,
+        session_id: Option<&str>,
+    ) -> GraphResult<crate::nlq::NlqResponse> {
+        let start = std::time::Instant::now();
+        let mut explanation = vec!["Unified NLQ pipeline activated".to_string()];
+        let mut ranked_lists: Vec<Vec<(u64, f32)>> = Vec::new();
+
+        // 1. BM25 search (always available)
+        let bm25 = self.search_bm25(question, 20).await;
+        if !bm25.is_empty() {
+            explanation.push(format!("BM25: {} results", bm25.len()));
+            ranked_lists.push(bm25);
+        }
+
+        // 2. Memory retrieval (BM25-based, no embedding needed)
+        let memories = self
+            .retrieve_memories_multi_signal(
+                crate::retrieval::MemoryRetrievalQuery {
+                    query_text: question.to_string(),
+                    query_embedding: vec![],
+                    context: None,
+                    anchor_node: None,
+                    agent_id: None,
+                    session_id: None,
+                    now: None,
+                    limit: 20,
+                },
+                None,
+            )
+            .await;
+        if !memories.is_empty() {
+            explanation.push(format!("Memory retrieval: {} results", memories.len()));
+            // Convert to ranked list using position-based scoring
+            let memory_ranked: Vec<(u64, f32)> = {
+                let inference = self.inference.read().await;
+                let graph = inference.graph();
+                memories
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, mem)| {
+                        let node_id = graph.memory_index.get(&mem.id).copied().unwrap_or(mem.id);
+                        (node_id, 1.0 / (rank as f32 + 1.0))
+                    })
+                    .collect()
+            };
+            ranked_lists.push(memory_ranked);
+        }
+
+        // 3. Claim search (if semantic memory enabled)
+        if let Ok(claims) = self.search_claims_semantic(question, 20, 0.3).await {
+            if !claims.is_empty() {
+                explanation.push(format!("Claims: {} results", claims.len()));
+                ranked_lists.push(claims);
+            }
+        }
+
+        // 4. Graph entity BFS (resolve entities → 1-hop neighbors)
+        {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            let nlq_pipeline = &self.nlq_pipeline;
+            let intent = crate::nlq::intent::QueryIntent::KnowledgeQuery;
+            let mentions = nlq_pipeline
+                .entity_resolver()
+                .extract_mentions(question, &intent);
+            let resolved = nlq_pipeline.entity_resolver().resolve(&mentions, graph);
+            if !resolved.is_empty() {
+                let mut entity_hits: Vec<(u64, f32)> = Vec::new();
+                for entity in &resolved {
+                    entity_hits.push((entity.node_id, 1.0));
+                    // 1-hop neighbors
+                    for &neighbor_id in graph.get_neighbors(entity.node_id).iter() {
+                        entity_hits.push((neighbor_id, 0.5));
+                    }
+                }
+                if !entity_hits.is_empty() {
+                    explanation.push(format!(
+                        "Entity resolution: {} entities, {} neighbors",
+                        resolved.len(),
+                        entity_hits.len() - resolved.len()
+                    ));
+                    ranked_lists.push(entity_hits);
+                }
+            }
+        }
+
+        // 5. Fuse via RRF
+        let fused = crate::retrieval::multi_list_rrf(&ranked_lists, 60.0);
+
+        // 6. Format answer from top results
+        let answer = {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            crate::nlq::unified::format_unified_results(&fused, question, graph, &memories)
+        };
+
+        // 7. Optionally run DRIFT for synthesized answer
+        let (final_answer, drift_explanation) = if self.config.enable_drift_search {
+            if let Some(ref llm_client) = self.unified_llm_client {
+                let community_summaries = self.community_summaries.read().await;
+                if !community_summaries.is_empty() {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(self.config.drift_config.timeout_secs),
+                        self.run_drift_search(
+                            question,
+                            &community_summaries,
+                            &fused,
+                            llm_client.as_ref(),
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(drift_result) => {
+                            let explain = format!(
+                                "DRIFT: {} communities, {} follow-ups, {} items",
+                                drift_result.primer_communities_used.len(),
+                                drift_result.followup_queries.len(),
+                                drift_result.total_items_retrieved,
+                            );
+                            (drift_result.answer, Some(explain))
+                        },
+                        Err(_) => {
+                            tracing::warn!("DRIFT search timed out, using standard results");
+                            (answer, None)
+                        },
+                    }
+                } else {
+                    (answer, None)
+                }
+            } else {
+                (answer, None)
+            }
+        } else {
+            (answer, None)
+        };
+
+        if let Some(drift_exp) = drift_explanation {
+            explanation.push(drift_exp);
+        }
+
+        // Apply pagination to fused results
+        let limit = pagination.limit.unwrap_or(20);
+        let offset = pagination.offset.unwrap_or(0);
+        let total_count = fused.len();
+        let paginated: Vec<(u64, f32)> = fused.into_iter().skip(offset).take(limit).collect();
+
+        // Push exchange to conversational context
+        if let Some(sid) = session_id {
+            let mut contexts = self.nlq_contexts.lock().await;
+            let ctx = contexts
+                .entry(sid.to_string())
+                .or_insert_with(crate::nlq::ConversationContext::new);
+            ctx.push(crate::nlq::ConversationExchange {
+                question: question.to_string(),
+                intent: "KnowledgeQuery".to_string(),
+                entities: vec![],
+                timestamp: crate::nlq::now_millis(),
+            });
+        }
+
+        Ok(crate::nlq::NlqResponse {
+            answer: final_answer,
+            query_used: crate::traversal::GraphQuery::PageRank {
+                iterations: 0,
+                damping_factor: 0.0,
+            },
+            result: crate::traversal::QueryResult::Rankings(paginated),
+            intent: crate::nlq::intent::QueryIntent::KnowledgeQuery,
+            confidence: 0.8,
+            execution_time_ms: start.elapsed().as_millis() as u64,
+            explanation,
+            total_count,
+            entities_resolved: vec![],
+        })
+    }
+
+    /// Run DRIFT search: primer → follow-up → synthesis.
+    async fn run_drift_search(
+        &self,
+        question: &str,
+        community_summaries: &HashMap<u64, crate::community_summary::CommunitySummary>,
+        initial_fused: &[(u64, f32)],
+        llm_client: &dyn crate::llm_client::LlmClient,
+    ) -> crate::nlq::drift::DriftResult {
+        let config = &self.config.drift_config;
+
+        // Phase 1: Primer — score communities + generate follow-up queries
+        let (primer_communities, followup_queries) =
+            crate::nlq::drift::drift_primer(llm_client, question, community_summaries, config)
+                .await;
+
+        // Phase 2: Follow-up — execute each query and collect results
+        let mut results_per_query = Vec::new();
+        for q in &followup_queries {
+            let bm25 = self.search_bm25(q, config.max_followup_results).await;
+            results_per_query.push(bm25);
+        }
+        let merged = crate::nlq::drift::drift_followup_merge(&results_per_query);
+
+        // Collect text snippets for synthesis
+        let mut community_context = Vec::new();
+        for &cid in &primer_communities {
+            if let Some(summary) = community_summaries.get(&cid) {
+                community_context.push(format!(
+                    "{} (entities: {})",
+                    summary.summary,
+                    summary.key_entities.join(", ")
+                ));
+            }
+        }
+
+        let mut retrieved_snippets = Vec::new();
+        {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            // Add snippets from initial fused results
+            for &(node_id, _score) in initial_fused.iter().take(10) {
+                let label = graph
+                    .get_node(node_id)
+                    .map(|n| n.label())
+                    .unwrap_or_else(|| format!("Node {}", node_id));
+                retrieved_snippets.push(label);
+            }
+            // Add snippets from DRIFT follow-up results
+            for &(node_id, _score) in merged.iter().take(10) {
+                let label = graph
+                    .get_node(node_id)
+                    .map(|n| n.label())
+                    .unwrap_or_else(|| format!("Node {}", node_id));
+                if !retrieved_snippets.contains(&label) {
+                    retrieved_snippets.push(label);
+                }
+            }
+        }
+
+        let total_items = merged.len();
+
+        // Phase 3: Synthesis
+        let answer = crate::nlq::drift::drift_synthesis(
+            llm_client,
+            question,
+            &community_context,
+            &retrieved_snippets,
+            config,
+        )
+        .await;
+
+        crate::nlq::drift::DriftResult {
+            answer,
+            primer_communities_used: primer_communities,
+            followup_queries,
+            total_items_retrieved: total_items,
+        }
     }
 }

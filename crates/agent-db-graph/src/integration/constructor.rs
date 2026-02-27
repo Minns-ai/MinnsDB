@@ -24,6 +24,12 @@ impl GraphEngine {
             config
         };
 
+        // Wire memory TTL from top-level config into memory formation config
+        let mut memory_config = config.memory_config.clone();
+        if config.default_memory_ttl_secs.is_some() && memory_config.default_ttl_secs.is_none() {
+            memory_config.default_ttl_secs = config.default_memory_ttl_secs;
+        }
+
         let mut inf_config = config.inference_config.clone();
         inf_config.max_graph_size = config.max_graph_size;
         let inference = Arc::new(RwLock::new(GraphInference::with_config(inf_config)));
@@ -57,7 +63,7 @@ impl GraphEngine {
             StorageBackend::InMemory => {
                 tracing::info!("Initializing with InMemory storage backend");
                 let mem = Arc::new(RwLock::new(Box::new(InMemoryMemoryStore::new(
-                    config.memory_config.clone(),
+                    memory_config.clone(),
                 )) as Box<dyn MemoryStore>));
                 let strat = Arc::new(RwLock::new(Box::new(InMemoryStrategyStore::new(
                     config.strategy_config.clone(),
@@ -83,7 +89,7 @@ impl GraphEngine {
                 // Create memory store with LRU cache
                 let mut mem_store = RedbMemoryStore::new(
                     backend.clone(),
-                    config.memory_config.clone(),
+                    memory_config.clone(),
                     config.memory_cache_size.max(1000), // Minimum 1000 entries
                 );
                 mem_store.initialize().map_err(|e| {
@@ -264,6 +270,10 @@ impl GraphEngine {
                     min_evidence_length: 10,
                     enable_dedup: true,
                     maintenance_config: config.maintenance_config.clone(),
+                    custom_instructions: config.custom_extraction_instructions.clone(),
+                    extraction_includes: config.extraction_includes.clone(),
+                    extraction_excludes: config.extraction_excludes.clone(),
+                    few_shot_examples: config.extraction_few_shot_examples.clone(),
                 };
 
                 let queue = Arc::new(crate::claims::ClaimExtractionQueue::new(
@@ -585,6 +595,10 @@ impl GraphEngine {
             unified_llm_client,
             metadata_normalizer,
             metadata_llm_normalizer,
+            memory_audit_log: Arc::new(RwLock::new(crate::memory_audit::MemoryAuditLog::new())),
+            conversation_summaries: Arc::new(RwLock::new(HashMap::new())),
+            community_summaries: Arc::new(RwLock::new(HashMap::new())),
+            goal_store: Arc::new(RwLock::new(crate::goal_store::GoalStore::new())),
             active_executions: Arc::new(dashmap::DashMap::new()),
             next_execution_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };

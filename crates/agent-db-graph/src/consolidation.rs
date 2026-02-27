@@ -624,6 +624,7 @@ impl ConsolidationEngine {
                 m.insert("tier".to_string(), "semantic".to_string());
                 m
             },
+            expires_at: None,
         }
     }
 
@@ -773,6 +774,7 @@ impl ConsolidationEngine {
                 m.insert("tier".to_string(), "schema".to_string());
                 m
             },
+            expires_at: None,
         }
     }
 
@@ -899,6 +901,7 @@ mod tests {
             outcome,
             memory_type: MemoryType::Episodic { significance: 0.8 },
             metadata: HashMap::new(),
+            expires_at: None,
         }
     }
 
@@ -1153,6 +1156,7 @@ mod tests {
                 outcome: EpisodeOutcome::Success,
                 memory_type: MemoryType::Episodic { significance: 0.8 },
                 metadata: HashMap::new(),
+                expires_at: None,
             };
             store.store_consolidated_memory(mem);
         }
@@ -1293,6 +1297,7 @@ mod tests {
             outcome: EpisodeOutcome::Success,
             memory_type: MemoryType::Semantic,
             metadata: HashMap::new(),
+            expires_at: None,
         }
     }
 
@@ -1442,6 +1447,7 @@ mod tests {
                 outcome: EpisodeOutcome::Success,
                 memory_type: MemoryType::Episodic { significance: 0.8 },
                 metadata: HashMap::new(),
+                expires_at: None,
             };
             store.store_consolidated_memory(mem);
         }

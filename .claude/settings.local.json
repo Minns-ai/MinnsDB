@@ -34,7 +34,15 @@
       "Bash(Select-String \"FAILED\")",
       "Bash(python3:*)",
       "Bash(tasklist)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.microsoft.com)",
+      "WebFetch(domain:microsoft.github.io)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:external_graph.com)",
+      "WebFetch(domain:learnopencv.com)",
+      "WebFetch(domain:emanuelerossi.co.uk)"
     ]
   }
 }

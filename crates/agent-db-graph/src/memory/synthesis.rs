@@ -129,6 +129,31 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
                     reasoning_trace,
                 ));
             },
+            EventType::Conversation {
+                speaker,
+                content,
+                category,
+            } => {
+                // Include conversation messages in memory synthesis
+                let truncated = truncate_str(content, 120);
+                match category.as_str() {
+                    "transaction" => {
+                        actions.push(format!("{}: {}", speaker, truncated));
+                    },
+                    "state_change" => {
+                        context_texts.push(format!("{}: {}", speaker, truncated));
+                    },
+                    "relationship" => {
+                        context_texts.push(format!("{}: {}", speaker, truncated));
+                    },
+                    "preference" => {
+                        context_texts.push(format!("{}: {}", speaker, truncated));
+                    },
+                    _ => {
+                        communications.push(format!("{}: {}", speaker, truncated));
+                    },
+                }
+            },
             _ => {},
         }
     }
@@ -232,6 +257,17 @@ pub fn synthesize_causal_note(episode: &Episode, events: &[Event]) -> String {
                     reasoning_trace,
                 ));
             },
+            EventType::Conversation {
+                speaker,
+                content,
+                category,
+            } => {
+                // Conversation events count as successful actions for causal analysis
+                if category == "transaction" {
+                    successes += 1;
+                    last_success_action = format!("{}:{}", speaker, truncate_str(content, 60));
+                }
+            },
             _ => {},
         }
     }
@@ -333,6 +369,65 @@ pub fn synthesize_takeaway(episode: &Episode, events: &[Event]) -> String {
                     break;
                 },
                 _ => {},
+            }
+        }
+    }
+
+    // For conversation-only episodes, extract a conversation-based takeaway
+    if pivotal_action.is_none() {
+        let conv_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let EventType::Conversation {
+                    speaker,
+                    content,
+                    category,
+                } = &e.event_type
+                {
+                    Some((speaker.as_str(), content.as_str(), category.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !conv_events.is_empty() {
+            // Summarize conversation: count categories, pick most relevant
+            let tx_count = conv_events
+                .iter()
+                .filter(|(_, _, c)| *c == "transaction")
+                .count();
+            let rel_count = conv_events
+                .iter()
+                .filter(|(_, _, c)| *c == "relationship")
+                .count();
+            let pref_count = conv_events
+                .iter()
+                .filter(|(_, _, c)| *c == "preference")
+                .count();
+
+            let mut summary_parts = Vec::new();
+            if tx_count > 0 {
+                summary_parts.push(format!("{} transactions", tx_count));
+            }
+            if rel_count > 0 {
+                summary_parts.push(format!("{} relationships", rel_count));
+            }
+            if pref_count > 0 {
+                summary_parts.push(format!("{} preferences", pref_count));
+            }
+
+            if !summary_parts.is_empty() {
+                return format!(
+                    "Conversation session captured: {}. {} messages processed.",
+                    summary_parts.join(", "),
+                    conv_events.len()
+                );
+            } else {
+                return format!(
+                    "Conversation session with {} messages processed.",
+                    conv_events.len()
+                );
             }
         }
     }

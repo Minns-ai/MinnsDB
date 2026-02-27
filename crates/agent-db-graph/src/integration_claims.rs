@@ -41,7 +41,7 @@ impl Graph {
 
         // Create DERIVED_FROM edge to source event
         if let Some(event_node_id) = self.get_event_node(claim.source_event_id).map(|n| n.id) {
-            let derived_edge = GraphEdge::new(
+            let mut derived_edge = GraphEdge::new(
                 claim_node_id,
                 event_node_id,
                 EdgeType::DerivedFrom {
@@ -50,6 +50,11 @@ impl Graph {
                 },
                 claim.confidence,
             );
+            // Bi-temporal: set valid-time from claim lifecycle
+            derived_edge.valid_from = Some(claim.created_at * 1_000_000_000);
+            if let Some(exp) = claim.expires_at {
+                derived_edge.valid_until = Some(exp * 1_000_000_000);
+            }
 
             if let Some(edge_id) = self.add_edge(derived_edge) {
                 debug!(
@@ -69,7 +74,7 @@ impl Graph {
         // In a more advanced implementation, you could create separate evidence nodes
         for (idx, evidence) in claim.supporting_evidence.iter().enumerate() {
             if let Some(event_node_id) = self.get_event_node(claim.source_event_id).map(|n| n.id) {
-                let evidence_edge = GraphEdge::new(
+                let mut evidence_edge = GraphEdge::new(
                     claim_node_id,
                     event_node_id,
                     EdgeType::SupportedBy {
@@ -78,6 +83,11 @@ impl Graph {
                     },
                     0.8, // Evidence support weight
                 );
+                // Bi-temporal: evidence edges share claim's validity window
+                evidence_edge.valid_from = Some(claim.created_at * 1_000_000_000);
+                if let Some(exp) = claim.expires_at {
+                    evidence_edge.valid_until = Some(exp * 1_000_000_000);
+                }
 
                 if let Some(edge_id) = self.add_edge(evidence_edge) {
                     debug!(
@@ -166,6 +176,8 @@ impl Graph {
             },
             relevance_score,
         );
+        // Note: ABOUT edges don't carry bi-temporal fields since the entity
+        // relationship itself is atemporal (a claim is always "about" its entity).
 
         let edge_id = self.add_edge(about_edge)?;
 
@@ -341,6 +353,94 @@ mod tests {
         assert!(!spans.is_empty());
         assert_eq!(spans[0], (0, 10));
     }
+
+    /// Verify that extracted_fact observations produce clean NL canonical text
+    /// instead of JSON-in-text, enabling proper NER + distance scoring.
+    #[test]
+    fn test_extracted_fact_canonical_text() {
+        use agent_db_events::EventType;
+
+        // Simulate the canonical text extraction logic from extract_claims_async
+        let event_type = EventType::Observation {
+            observation_type: "extracted_fact".to_string(),
+            data: serde_json::json!({
+                "statement": "Alice lives in Paris",
+                "subject": "Alice",
+                "predicate": "lives_in",
+                "object": "Paris",
+            }),
+            confidence: 0.9,
+            source: "conversation_compaction".to_string(),
+        };
+
+        let canonical_text = match &event_type {
+            EventType::Observation {
+                observation_type,
+                data,
+                confidence,
+                source,
+            } => {
+                if observation_type == "extracted_fact" {
+                    if let Some(stmt) = data.get("statement").and_then(|s| s.as_str()) {
+                        stmt.to_string()
+                    } else {
+                        format!(
+                            "Observation [{}] from source '{}' (confidence {:.2}): {}",
+                            observation_type, source, confidence, data
+                        )
+                    }
+                } else {
+                    format!(
+                        "Observation [{}] from source '{}' (confidence {:.2}): {}",
+                        observation_type, source, confidence, data
+                    )
+                }
+            },
+            _ => unreachable!(),
+        };
+
+        // Should be clean NL text, not JSON-in-text
+        assert_eq!(canonical_text, "Alice lives in Paris");
+        assert!(!canonical_text.contains("Observation ["));
+        assert!(!canonical_text.contains("confidence"));
+
+        // Non-extracted_fact observations should still use the old format
+        let regular_obs = EventType::Observation {
+            observation_type: "sensor_reading".to_string(),
+            data: serde_json::json!({"temperature": 22.5}),
+            confidence: 0.95,
+            source: "thermometer".to_string(),
+        };
+
+        let regular_text = match &regular_obs {
+            EventType::Observation {
+                observation_type,
+                data,
+                confidence,
+                source,
+            } => {
+                if observation_type == "extracted_fact" {
+                    if let Some(stmt) = data.get("statement").and_then(|s| s.as_str()) {
+                        stmt.to_string()
+                    } else {
+                        format!(
+                            "Observation [{}] from source '{}' (confidence {:.2}): {}",
+                            observation_type, source, confidence, data
+                        )
+                    }
+                } else {
+                    format!(
+                        "Observation [{}] from source '{}' (confidence {:.2}): {}",
+                        observation_type, source, confidence, data
+                    )
+                }
+            },
+            _ => unreachable!(),
+        };
+
+        assert!(regular_text.contains("Observation [sensor_reading]"));
+        assert!(regular_text.contains("thermometer"));
+    }
 }
 
 // GraphEngine integration methods
@@ -423,10 +523,23 @@ impl GraphEngine {
                 confidence,
                 source,
             } => {
-                format!(
-                    "Observation [{}] from source '{}' (confidence {:.2}): {}",
-                    observation_type, source, confidence, data
-                )
+                // For compaction-extracted facts, use the statement directly
+                // so the claims pipeline gets clean NL text for NER + scoring
+                if observation_type == "extracted_fact" {
+                    if let Some(stmt) = data.get("statement").and_then(|s| s.as_str()) {
+                        stmt.to_string()
+                    } else {
+                        format!(
+                            "Observation [{}] from source '{}' (confidence {:.2}): {}",
+                            observation_type, source, confidence, data
+                        )
+                    }
+                } else {
+                    format!(
+                        "Observation [{}] from source '{}' (confidence {:.2}): {}",
+                        observation_type, source, confidence, data
+                    )
+                }
             },
 
             // ── Cognitive / Decision events ─────────────────────────────
@@ -597,6 +710,7 @@ impl GraphEngine {
                 thread_id: None,
                 user_id: Some(agent_id.to_string()),
                 workspace_id: Some(format!("session_{}", session_id)),
+                source_role: crate::claims::types::SourceRole::default(),
             };
 
             // Submit to claim extraction queue

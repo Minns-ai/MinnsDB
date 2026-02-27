@@ -621,6 +621,7 @@ impl MemoryStore for RedbMemoryStore {
                 .unwrap_or(EpisodeOutcome::Interrupted),
             memory_type,
             metadata: std::collections::HashMap::new(),
+            expires_at: None,
         };
 
         // Persist to redb (record + indexes + updated ID allocator in one batch)
@@ -2182,6 +2183,7 @@ mod tests {
             outcome: EpisodeOutcome::Success,
             memory_type: MemoryType::Episodic { significance: 0.5 },
             metadata: std::collections::HashMap::new(),
+            expires_at: None,
         }
     }
 

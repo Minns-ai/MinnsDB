@@ -466,7 +466,7 @@ impl ConceptType {
 }
 
 /// Goal status
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GoalStatus {
     Active,
     Completed,
@@ -540,7 +540,17 @@ impl NodeType {
     }
 }
 
-/// Graph edge representing relationships between nodes
+/// Graph edge representing relationships between nodes.
+///
+/// Supports a **bi-temporal** model (inspired by temporal graph reference/reference):
+///
+/// | Dimension       | Fields                    | Meaning |
+/// |-----------------|---------------------------|---------|
+/// | Transaction time| `created_at`, `updated_at`| When the edge entered/was modified in the database |
+/// | Valid time      | `valid_from`, `valid_until`| When the fact was true in the real world |
+///
+/// Example: "Alice worked at Google from 2020-2023" → `valid_from=2020`, `valid_until=2023`,
+/// but `created_at` is whenever it was ingested into the graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdge {
     /// Unique edge identifier
@@ -558,11 +568,23 @@ pub struct GraphEdge {
     /// Edge weight/strength
     pub weight: EdgeWeight,
 
-    /// Creation timestamp
+    // ── Transaction time (when the edge was recorded) ────────────────
+    /// Creation timestamp (transaction time — when this edge entered the database)
     pub created_at: Timestamp,
 
-    /// Last update timestamp
+    /// Last update timestamp (transaction time — last modification in the database)
     pub updated_at: Timestamp,
+
+    // ── Valid time (when the fact was true in the real world) ─────────
+    /// Start of real-world validity period (nanos since epoch).
+    /// `None` means "valid since the beginning of time" (open start).
+    #[serde(default)]
+    pub valid_from: Option<Timestamp>,
+
+    /// End of real-world validity period (nanos since epoch).
+    /// `None` means "still valid now" (open end / currently true).
+    #[serde(default)]
+    pub valid_until: Option<Timestamp>,
 
     /// Number of times this relationship has been observed
     pub observation_count: u32,
@@ -871,6 +893,8 @@ impl GraphEdge {
             weight,
             created_at: timestamp,
             updated_at: timestamp,
+            valid_from: None,
+            valid_until: None,
             observation_count: 1,
             confidence: 0.5, // Start with medium confidence
             properties: HashMap::new(),
@@ -992,6 +1016,89 @@ impl GraphEdge {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as Timestamp;
+    }
+
+    /// Check if this edge is currently valid (not soft-deleted).
+    ///
+    /// Edges without an `is_valid` property are treated as valid (backward compatible).
+    pub fn is_valid(&self) -> bool {
+        self.properties
+            .get("is_valid")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// Soft-delete this edge by marking it invalid.
+    pub fn invalidate(&mut self, reason: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        self.properties
+            .insert("is_valid".to_string(), serde_json::json!(false));
+        self.properties
+            .insert("invalidated_at".to_string(), serde_json::json!(now));
+        self.properties
+            .insert("invalidated_reason".to_string(), serde_json::json!(reason));
+    }
+
+    /// Get the invalidation timestamp, if this edge has been soft-deleted.
+    pub fn invalidated_at(&self) -> Option<u64> {
+        self.properties
+            .get("invalidated_at")
+            .and_then(|v| v.as_u64())
+    }
+
+    // ── Bi-temporal helpers ──────────────────────────────────────────────
+
+    /// Check if this edge's fact was valid at a given real-world timestamp.
+    ///
+    /// Uses half-open interval `[valid_from, valid_until)`:
+    /// - `valid_from == None` → valid since beginning of time
+    /// - `valid_until == None` → still valid now (open-ended)
+    pub fn valid_at(&self, point_in_time: Timestamp) -> bool {
+        if let Some(from) = self.valid_from {
+            if point_in_time < from {
+                return false;
+            }
+        }
+        if let Some(until) = self.valid_until {
+            if point_in_time >= until {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check if this edge's valid-time range overlaps with a query range.
+    ///
+    /// Useful for "what was true during 2022?" queries.
+    pub fn valid_during(&self, range_start: Timestamp, range_end: Timestamp) -> bool {
+        // Edge start must be before range end
+        if let Some(from) = self.valid_from {
+            if from >= range_end {
+                return false;
+            }
+        }
+        // Edge end must be after range start
+        if let Some(until) = self.valid_until {
+            if until <= range_start {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Set the valid-time window for this edge.
+    pub fn set_valid_time(&mut self, from: Option<Timestamp>, until: Option<Timestamp>) {
+        self.valid_from = from;
+        self.valid_until = until;
+    }
+
+    /// Check if this edge represents a currently-valid fact
+    /// (valid_until is None or in the future).
+    pub fn is_currently_valid_fact(&self, now: Timestamp) -> bool {
+        self.is_valid() && self.valid_at(now)
     }
 }
 
@@ -1151,6 +1258,7 @@ impl Graph {
 
         // Extract searchable text from common property keys
         let mut found_code_key = false;
+        let mut owned_parts: Vec<String> = Vec::new();
         for (key, value) in &node.properties {
             let key_lower = key.to_lowercase();
             if key_lower.contains("text")
@@ -1166,6 +1274,16 @@ impl Graph {
                 || key_lower == "body"
                 || key_lower == "function_name"
                 || key_lower == "class_name"
+                || key_lower == "message"
+                || key_lower == "query"
+                || key_lower == "result"
+                || key_lower == "error"
+                || key_lower == "prompt"
+                || key_lower == "answer"
+                || key_lower == "response"
+                || key_lower == "output"
+                || key_lower == "category"
+                || key_lower == "metadata_text"
             {
                 // Track whether a code-specific key was found
                 if matches!(
@@ -1176,13 +1294,25 @@ impl Graph {
                 }
                 if let Some(text) = value.as_str() {
                     text_parts.push(text);
+                } else {
+                    // Flatten nested JSON objects/arrays into searchable text
+                    let flat = Self::flatten_json_to_text(value);
+                    if !flat.is_empty() {
+                        owned_parts.push(flat);
+                    }
                 }
             }
         }
 
         // Index combined text if available, routing to code or natural tokenizer
-        if !text_parts.is_empty() {
-            let combined_text = text_parts.join(" ");
+        if !text_parts.is_empty() || !owned_parts.is_empty() {
+            let mut combined_text = text_parts.join(" ");
+            if !owned_parts.is_empty() {
+                if !combined_text.is_empty() {
+                    combined_text.push(' ');
+                }
+                combined_text.push_str(&owned_parts.join(" "));
+            }
             let is_code_content = node
                 .properties
                 .get("content_type")
@@ -1327,6 +1457,39 @@ impl Graph {
         }
 
         None // No path found
+    }
+
+    /// Flatten a JSON value into searchable text by recursively extracting string values.
+    pub(crate) fn flatten_json_to_text(value: &serde_json::Value) -> String {
+        let mut parts = Vec::new();
+        Self::collect_json_strings(value, &mut parts, 3);
+        parts.join(" ")
+    }
+
+    fn collect_json_strings(value: &serde_json::Value, parts: &mut Vec<String>, depth: u8) {
+        if depth == 0 {
+            return;
+        }
+        match value {
+            serde_json::Value::String(s) if !s.is_empty() => {
+                parts.push(s.clone());
+            },
+            serde_json::Value::Number(n) => {
+                parts.push(n.to_string());
+            },
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    parts.push(k.clone());
+                    Self::collect_json_strings(v, parts, depth - 1);
+                }
+            },
+            serde_json::Value::Array(arr) => {
+                for v in arr.iter().take(20) {
+                    Self::collect_json_strings(v, parts, depth - 1);
+                }
+            },
+            _ => {},
+        }
     }
 
     /// Update graph statistics (O(1) — uses incremental total_degree).
@@ -1596,6 +1759,115 @@ impl Graph {
                 result
             },
         }
+    }
+
+    // ========================================================================
+    // Soft-delete filtered queries
+    // ========================================================================
+
+    /// Get valid (non-soft-deleted) edges from a source node.
+    pub fn get_valid_edges_from(&self, source: NodeId) -> Vec<&GraphEdge> {
+        self.get_edges_from(source)
+            .into_iter()
+            .filter(|e| e.is_valid())
+            .collect()
+    }
+
+    /// Get valid (non-soft-deleted) edges to a target node.
+    pub fn get_valid_edges_to(&self, target: NodeId) -> Vec<&GraphEdge> {
+        self.get_edges_to(target)
+            .into_iter()
+            .filter(|e| e.is_valid())
+            .collect()
+    }
+
+    /// Get valid neighbors (outgoing, filtering soft-deleted edges).
+    pub fn get_valid_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
+        self.adjacency_out
+            .get(&node_id)
+            .map(|edge_ids| {
+                edge_ids
+                    .iter()
+                    .filter_map(|&edge_id| {
+                        self.edges
+                            .get(&edge_id)
+                            .filter(|e| e.is_valid())
+                            .map(|e| e.target)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get valid incoming neighbors (filtering soft-deleted edges).
+    pub fn get_valid_incoming_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
+        self.adjacency_in
+            .get(&node_id)
+            .map(|edge_ids| {
+                edge_ids
+                    .iter()
+                    .filter_map(|&edge_id| {
+                        self.edges
+                            .get(&edge_id)
+                            .filter(|e| e.is_valid())
+                            .map(|e| e.source)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Soft-delete an edge by ID, marking it invalid with a reason.
+    pub fn invalidate_edge(&mut self, edge_id: EdgeId, reason: &str) -> bool {
+        if let Some(edge) = self.edges.get_mut(&edge_id) {
+            edge.invalidate(reason);
+            self.dirty_edges.insert(edge_id);
+            self.generation += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get invalidated edges from a node (for temporal queries like "what changed?").
+    pub fn get_invalidated_edges_from(&self, source: NodeId) -> Vec<&GraphEdge> {
+        self.get_edges_from(source)
+            .into_iter()
+            .filter(|e| !e.is_valid())
+            .collect()
+    }
+
+    // ── Bi-temporal queries ─────────────────────────────────────────────
+
+    /// Get valid edges from a source that were true at a specific real-world time.
+    ///
+    /// Combines soft-delete check (`is_valid`) with valid-time check.
+    pub fn get_edges_valid_at(&self, source: NodeId, point_in_time: Timestamp) -> Vec<&GraphEdge> {
+        self.get_edges_from(source)
+            .into_iter()
+            .filter(|e| e.is_valid() && e.valid_at(point_in_time))
+            .collect()
+    }
+
+    /// Get valid edges from a source whose fact was true during a time range.
+    pub fn get_edges_valid_during(
+        &self,
+        source: NodeId,
+        range_start: Timestamp,
+        range_end: Timestamp,
+    ) -> Vec<&GraphEdge> {
+        self.get_edges_from(source)
+            .into_iter()
+            .filter(|e| e.is_valid() && e.valid_during(range_start, range_end))
+            .collect()
+    }
+
+    /// Get all edges (any source) that represent currently-valid facts.
+    pub fn get_all_currently_valid_edges(&self, now: Timestamp) -> Vec<&GraphEdge> {
+        self.edges
+            .values()
+            .filter(|e| e.is_currently_valid_fact(now))
+            .collect()
     }
 
     /// The latest timestamp in the temporal index (max created_at across all nodes).
@@ -1965,6 +2237,7 @@ impl Graph {
             _ => {},
         }
         let mut found_code_key = false;
+        let mut owned_parts: Vec<String> = Vec::new();
         for (key, value) in &node.properties {
             let key_lower = key.to_lowercase();
             if key_lower.contains("text")
@@ -1980,6 +2253,16 @@ impl Graph {
                 || key_lower == "body"
                 || key_lower == "function_name"
                 || key_lower == "class_name"
+                || key_lower == "message"
+                || key_lower == "query"
+                || key_lower == "result"
+                || key_lower == "error"
+                || key_lower == "prompt"
+                || key_lower == "answer"
+                || key_lower == "response"
+                || key_lower == "output"
+                || key_lower == "category"
+                || key_lower == "metadata_text"
             {
                 if matches!(
                     key_lower.as_str(),
@@ -1989,11 +2272,23 @@ impl Graph {
                 }
                 if let Some(text) = value.as_str() {
                     text_parts.push(text);
+                } else {
+                    // Flatten nested JSON objects/arrays into searchable text
+                    let flat = Self::flatten_json_to_text(value);
+                    if !flat.is_empty() {
+                        owned_parts.push(flat);
+                    }
                 }
             }
         }
-        if !text_parts.is_empty() {
-            let combined = text_parts.join(" ");
+        if !text_parts.is_empty() || !owned_parts.is_empty() {
+            let mut combined = text_parts.join(" ");
+            if !owned_parts.is_empty() {
+                if !combined.is_empty() {
+                    combined.push(' ');
+                }
+                combined.push_str(&owned_parts.join(" "));
+            }
             let is_code_content = node
                 .properties
                 .get("content_type")
@@ -2236,5 +2531,443 @@ mod tests {
             results.iter().any(|(id, _)| *id == node_id),
             "Node without code signals should be findable via natural search"
         );
+    }
+
+    // ── Soft-Delete Graph Edges Tests ──
+
+    #[test]
+    fn test_edge_is_valid_default() {
+        let edge = GraphEdge::new(
+            1,
+            2,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.5,
+        );
+        assert!(edge.is_valid(), "New edge should be valid by default");
+        assert!(edge.invalidated_at().is_none());
+    }
+
+    #[test]
+    fn test_edge_invalidate() {
+        let mut edge = GraphEdge::new(
+            1,
+            2,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.5,
+        );
+        edge.invalidate("superseded by newer info");
+        assert!(!edge.is_valid(), "Invalidated edge should not be valid");
+        assert_eq!(
+            edge.properties
+                .get("invalidated_reason")
+                .and_then(|v| v.as_str()),
+            Some("superseded by newer info")
+        );
+    }
+
+    #[test]
+    fn test_edge_invalidated_at_timestamp() {
+        let mut edge = GraphEdge::new(
+            1,
+            2,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.5,
+        );
+        assert!(edge.invalidated_at().is_none());
+        edge.invalidate("test");
+        let ts = edge.invalidated_at();
+        assert!(ts.is_some(), "Invalidated edge should have a timestamp");
+        assert!(ts.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_graph_invalidate_edge() {
+        let mut graph = Graph::new();
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 1,
+                agent_type: "test".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 2,
+                agent_type: "test".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+        let eid = graph
+            .add_edge(GraphEdge::new(
+                n1,
+                n2,
+                EdgeType::Temporal {
+                    average_interval_ms: 100,
+                    sequence_confidence: 0.9,
+                },
+                0.5,
+            ))
+            .unwrap();
+
+        let gen_before = graph.generation();
+        assert!(graph.invalidate_edge(eid, "outdated"));
+        assert!(
+            graph.generation() > gen_before,
+            "Generation should bump after invalidation"
+        );
+        assert!(!graph.get_edge(eid).unwrap().is_valid());
+        assert!(graph.dirty_edges.contains(&eid));
+    }
+
+    #[test]
+    fn test_graph_invalidate_edge_nonexistent() {
+        let mut graph = Graph::new();
+        assert!(
+            !graph.invalidate_edge(9999, "missing"),
+            "Should return false for nonexistent edge"
+        );
+    }
+
+    #[test]
+    fn test_get_valid_edges_from_filters() {
+        let mut graph = Graph::new();
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 1,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 2,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 3,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+
+        let e1 = graph
+            .add_edge(GraphEdge::new(
+                n1,
+                n2,
+                EdgeType::Temporal {
+                    average_interval_ms: 0,
+                    sequence_confidence: 0.9,
+                },
+                0.5,
+            ))
+            .unwrap();
+        let _e2 = graph
+            .add_edge(GraphEdge::new(
+                n1,
+                n3,
+                EdgeType::Temporal {
+                    average_interval_ms: 0,
+                    sequence_confidence: 0.9,
+                },
+                0.5,
+            ))
+            .unwrap();
+
+        // All edges valid initially
+        assert_eq!(graph.get_valid_edges_from(n1).len(), 2);
+
+        // Invalidate one
+        graph.invalidate_edge(e1, "test");
+        assert_eq!(graph.get_valid_edges_from(n1).len(), 1);
+        assert_eq!(graph.get_valid_edges_from(n1)[0].target, n3);
+    }
+
+    #[test]
+    fn test_get_valid_neighbors_filters() {
+        let mut graph = Graph::new();
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 1,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 2,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 3,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+
+        let e1 = graph
+            .add_edge(GraphEdge::new(
+                n1,
+                n2,
+                EdgeType::Temporal {
+                    average_interval_ms: 0,
+                    sequence_confidence: 0.9,
+                },
+                0.5,
+            ))
+            .unwrap();
+        let _e2 = graph
+            .add_edge(GraphEdge::new(
+                n1,
+                n3,
+                EdgeType::Temporal {
+                    average_interval_ms: 0,
+                    sequence_confidence: 0.9,
+                },
+                0.5,
+            ))
+            .unwrap();
+
+        assert_eq!(graph.get_valid_neighbors(n1).len(), 2);
+        graph.invalidate_edge(e1, "test");
+        let valid = graph.get_valid_neighbors(n1);
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0], n3);
+    }
+
+    #[test]
+    fn test_get_invalidated_edges_from() {
+        let mut graph = Graph::new();
+        let n1 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 1,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+        let n2 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 2,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+        let n3 = graph
+            .add_node(GraphNode::new(NodeType::Agent {
+                agent_id: 3,
+                agent_type: "t".into(),
+                capabilities: vec![],
+            }))
+            .unwrap();
+
+        let e1 = graph
+            .add_edge(GraphEdge::new(
+                n1,
+                n2,
+                EdgeType::Temporal {
+                    average_interval_ms: 0,
+                    sequence_confidence: 0.9,
+                },
+                0.5,
+            ))
+            .unwrap();
+        let _e2 = graph
+            .add_edge(GraphEdge::new(
+                n1,
+                n3,
+                EdgeType::Temporal {
+                    average_interval_ms: 0,
+                    sequence_confidence: 0.9,
+                },
+                0.5,
+            ))
+            .unwrap();
+
+        // No invalidated edges initially
+        assert!(graph.get_invalidated_edges_from(n1).is_empty());
+
+        graph.invalidate_edge(e1, "outdated");
+        let invalidated = graph.get_invalidated_edges_from(n1);
+        assert_eq!(invalidated.len(), 1);
+        assert_eq!(invalidated[0].target, n2);
+    }
+
+    #[test]
+    fn test_backward_compat_no_properties() {
+        // Edges deserialized from old format without is_valid property should be treated as valid
+        let edge = GraphEdge {
+            id: 1,
+            source: 10,
+            target: 20,
+            edge_type: EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            weight: 0.5,
+            created_at: 0,
+            updated_at: 0,
+            valid_from: None,
+            valid_until: None,
+            observation_count: 1,
+            confidence: 0.5,
+            properties: HashMap::new(), // No is_valid property
+        };
+        assert!(
+            edge.is_valid(),
+            "Edge without is_valid property should be treated as valid"
+        );
+    }
+
+    // ── Bi-temporal edge tests ───────────────────────────────────────────
+
+    fn make_bitemporal_edge(valid_from: Option<u64>, valid_until: Option<u64>) -> GraphEdge {
+        GraphEdge {
+            id: 1,
+            source: 10,
+            target: 20,
+            edge_type: EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            weight: 0.5,
+            created_at: 1000,
+            updated_at: 1000,
+            valid_from,
+            valid_until,
+            observation_count: 1,
+            confidence: 0.9,
+            properties: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_valid_at_open_interval() {
+        // No valid_from/valid_until → valid at all times
+        let edge = make_bitemporal_edge(None, None);
+        assert!(edge.valid_at(0));
+        assert!(edge.valid_at(999_999));
+    }
+
+    #[test]
+    fn test_valid_at_with_from() {
+        let edge = make_bitemporal_edge(Some(100), None);
+        assert!(!edge.valid_at(50), "Before valid_from");
+        assert!(edge.valid_at(100), "At valid_from");
+        assert!(edge.valid_at(200), "After valid_from");
+    }
+
+    #[test]
+    fn test_valid_at_with_until() {
+        let edge = make_bitemporal_edge(None, Some(200));
+        assert!(edge.valid_at(100), "Before valid_until");
+        assert!(!edge.valid_at(200), "At valid_until (half-open)");
+        assert!(!edge.valid_at(300), "After valid_until");
+    }
+
+    #[test]
+    fn test_valid_at_closed_range() {
+        let edge = make_bitemporal_edge(Some(100), Some(200));
+        assert!(!edge.valid_at(50));
+        assert!(edge.valid_at(100));
+        assert!(edge.valid_at(150));
+        assert!(!edge.valid_at(200));
+        assert!(!edge.valid_at(300));
+    }
+
+    #[test]
+    fn test_valid_during_overlap() {
+        let edge = make_bitemporal_edge(Some(100), Some(300));
+        // Query range fully inside
+        assert!(edge.valid_during(150, 250));
+        // Query range overlaps start
+        assert!(edge.valid_during(50, 150));
+        // Query range overlaps end
+        assert!(edge.valid_during(250, 350));
+        // Query range fully outside before
+        assert!(!edge.valid_during(10, 50));
+        // Query range fully outside after
+        assert!(!edge.valid_during(400, 500));
+        // Query range exactly at boundary (no overlap)
+        assert!(!edge.valid_during(300, 400));
+    }
+
+    #[test]
+    fn test_valid_during_open_edge() {
+        let edge = make_bitemporal_edge(None, None);
+        assert!(edge.valid_during(0, 999_999));
+    }
+
+    #[test]
+    fn test_set_valid_time() {
+        let mut edge = make_bitemporal_edge(None, None);
+        assert!(edge.valid_from.is_none());
+        assert!(edge.valid_until.is_none());
+
+        edge.set_valid_time(Some(100), Some(200));
+        assert_eq!(edge.valid_from, Some(100));
+        assert_eq!(edge.valid_until, Some(200));
+    }
+
+    #[test]
+    fn test_is_currently_valid_fact() {
+        let edge = make_bitemporal_edge(Some(100), Some(300));
+        assert!(edge.is_currently_valid_fact(150));
+        assert!(!edge.is_currently_valid_fact(50));
+        assert!(!edge.is_currently_valid_fact(350));
+    }
+
+    #[test]
+    fn test_is_currently_valid_fact_soft_deleted() {
+        let mut edge = make_bitemporal_edge(Some(100), Some(300));
+        edge.invalidate("superseded");
+        // Even though point_in_time is within valid range, edge is soft-deleted
+        assert!(!edge.is_currently_valid_fact(150));
+    }
+
+    #[test]
+    fn test_default_valid_from_until_is_none() {
+        let edge = GraphEdge::new(
+            10,
+            20,
+            EdgeType::Temporal {
+                average_interval_ms: 100,
+                sequence_confidence: 0.9,
+            },
+            0.5,
+        );
+        assert!(edge.valid_from.is_none());
+        assert!(edge.valid_until.is_none());
+    }
+
+    #[test]
+    fn test_bitemporal_serde_round_trip() {
+        let edge = make_bitemporal_edge(Some(100_000), Some(200_000));
+        let json = serde_json::to_string(&edge).unwrap();
+        let deserialized: GraphEdge = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.valid_from, Some(100_000));
+        assert_eq!(deserialized.valid_until, Some(200_000));
+    }
+
+    #[test]
+    fn test_bitemporal_serde_backward_compat() {
+        // Old JSON without valid_from/valid_until should deserialize with None
+        let json = r#"{"id":1,"source":10,"target":20,"edge_type":{"Temporal":{"average_interval_ms":100,"sequence_confidence":0.9}},"weight":0.5,"created_at":1000,"updated_at":1000,"observation_count":1,"confidence":0.9,"properties":{}}"#;
+        let edge: GraphEdge = serde_json::from_str(json).unwrap();
+        assert!(edge.valid_from.is_none());
+        assert!(edge.valid_until.is_none());
     }
 }

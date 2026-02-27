@@ -39,6 +39,10 @@ pub struct MaintenanceConfig {
 
     /// Whether to purge inactive (Dormant/Rejected/Superseded) claims from disk.
     pub purge_inactive_claims: bool,
+
+    /// Maximum days to retain soft-deleted edges before permanent removal.
+    /// 0 = never purge. Default: 0.
+    pub invalidated_edge_retention_days: u64,
 }
 
 impl Default for MaintenanceConfig {
@@ -52,6 +56,7 @@ impl Default for MaintenanceConfig {
             claim_contradiction_threshold: 0.85,
             max_vector_index_size: 50_000,
             purge_inactive_claims: true,
+            invalidated_edge_retention_days: 0,
         }
     }
 }
@@ -73,6 +78,10 @@ pub struct MaintenanceResult {
     pub transition_episodes_cleaned: usize,
     /// Number of weak transitions pruned.
     pub transition_entries_pruned_pass: bool,
+    /// Number of memories removed due to TTL expiration.
+    pub memories_expired: usize,
+    /// Number of claims moved to Dormant due to TTL expiration.
+    pub claims_expired: usize,
 }
 
 // ── Negation detection for claim contradiction ─────────────────────────────
@@ -192,6 +201,72 @@ pub fn check_claim_dedup(
 
     // Similar but not duplicate and not contradiction — treat as new
     ClaimDedupDecision::NewClaim
+}
+
+// ── Soft-delete edge purging ────────────────────────────────────────────────
+
+/// Permanently remove soft-deleted edges older than `retention_days`.
+///
+/// Returns the number of edges permanently removed.
+pub fn purge_old_invalidated_edges(
+    graph: &mut crate::structures::Graph,
+    retention_days: u64,
+) -> usize {
+    if retention_days == 0 {
+        return 0;
+    }
+
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+
+    let cutoff_nanos = now_nanos.saturating_sub(retention_days * 86_400 * 1_000_000_000);
+
+    // Collect edge IDs to purge
+    let to_purge: Vec<crate::structures::EdgeId> = graph
+        .edges
+        .values()
+        .filter(|e| {
+            !e.is_valid()
+                && e.invalidated_at()
+                    .map(|ts| ts < cutoff_nanos)
+                    .unwrap_or(false)
+        })
+        .map(|e| e.id)
+        .collect();
+
+    let count = to_purge.len();
+
+    for edge_id in to_purge {
+        if let Some(edge) = graph.edges.remove(&edge_id) {
+            // Remove from adjacency lists
+            if let Some(out_list) = graph.adjacency_out.get_mut(&edge.source) {
+                out_list.retain(|eid| *eid != edge_id);
+            }
+            if let Some(in_list) = graph.adjacency_in.get_mut(&edge.target) {
+                in_list.retain(|eid| *eid != edge_id);
+            }
+            // Update degree
+            if let Some(source) = graph.nodes.get_mut(&edge.source) {
+                source.degree = source.degree.saturating_sub(1);
+                graph.total_degree = graph.total_degree.saturating_sub(1);
+            }
+            if let Some(target) = graph.nodes.get_mut(&edge.target) {
+                target.degree = target.degree.saturating_sub(1);
+                graph.total_degree = graph.total_degree.saturating_sub(1);
+            }
+            graph.deleted_edges.insert(edge_id);
+            graph.dirty_edges.remove(&edge_id);
+        }
+    }
+
+    if count > 0 {
+        graph.generation += 1;
+        graph.adjacency_dirty = true;
+    }
+
+    count
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

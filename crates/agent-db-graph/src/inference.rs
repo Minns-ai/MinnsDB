@@ -399,6 +399,89 @@ impl GraphInference {
             node.properties.insert("language".to_string(), json!(lang));
         }
 
+        // Extract searchable content from event payload into node properties.
+        // This allows BM25 to index the actual event data (parameters, data,
+        // content, message text, metadata values).
+        match &event.event_type {
+            EventType::Action {
+                action_name,
+                parameters,
+                ..
+            } => {
+                node.properties
+                    .insert("action_name".to_string(), json!(action_name));
+                if !parameters.is_null() {
+                    node.properties
+                        .insert("content".to_string(), parameters.clone());
+                }
+            },
+            EventType::Observation { data, source, .. } => {
+                node.properties.insert("source".to_string(), json!(source));
+                if !data.is_null() {
+                    node.properties.insert("content".to_string(), data.clone());
+                }
+            },
+            EventType::Communication { content, .. } => {
+                if !content.is_null() {
+                    node.properties
+                        .insert("content".to_string(), content.clone());
+                }
+            },
+            EventType::Cognitive {
+                input,
+                output,
+                reasoning_trace,
+                ..
+            } => {
+                if !input.is_null() {
+                    node.properties.insert("content".to_string(), input.clone());
+                }
+                if !output.is_null() {
+                    node.properties.insert("output".to_string(), output.clone());
+                }
+                if !reasoning_trace.is_empty() {
+                    node.properties
+                        .insert("description".to_string(), json!(reasoning_trace.join(" ")));
+                }
+            },
+            EventType::Context { text, .. } => {
+                node.properties.insert("content".to_string(), json!(text));
+            },
+            EventType::Conversation {
+                speaker,
+                content,
+                category,
+            } => {
+                node.properties
+                    .insert("speaker_name".to_string(), json!(speaker));
+                node.properties
+                    .insert("content".to_string(), json!(content));
+                node.properties
+                    .insert("category".to_string(), json!(category));
+            },
+            EventType::Learning { .. } => {},
+        }
+
+        // Extract searchable text from event metadata
+        let mut meta_texts: Vec<String> = Vec::new();
+        for (key, value) in &event.metadata {
+            match value {
+                MetadataValue::String(s) if !s.is_empty() => {
+                    meta_texts.push(format!("{}: {}", key, s));
+                },
+                MetadataValue::Json(v) => {
+                    if let Some(s) = v.as_str() {
+                        meta_texts.push(format!("{}: {}", key, s));
+                    }
+                },
+                _ => {},
+            }
+        }
+        if !meta_texts.is_empty() {
+            node.properties
+                .insert("metadata_text".to_string(), json!(meta_texts.join("; ")));
+        }
+
         let node_id = self.graph.add_node(node)?;
         self.stats.nodes_created += 1;
         Ok(node_id)

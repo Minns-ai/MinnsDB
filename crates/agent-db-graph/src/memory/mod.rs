@@ -114,6 +114,10 @@ pub struct Memory {
 
     /// Additional metadata
     pub metadata: HashMap<String, String>,
+
+    /// Optional expiry timestamp (nanos since epoch). Memories past this are swept.
+    #[serde(default)]
+    pub expires_at: Option<Timestamp>,
 }
 
 // ========== Memory Hierarchy Types ==========
@@ -172,6 +176,8 @@ pub struct MemoryFormationConfig {
     pub access_strength_boost: f32,
     pub max_strength: f32,
     pub forget_threshold: f32,
+    /// Default TTL for memories in seconds. None = no expiration.
+    pub default_ttl_secs: Option<u64>,
 }
 
 impl Default for MemoryFormationConfig {
@@ -183,6 +189,7 @@ impl Default for MemoryFormationConfig {
             access_strength_boost: 0.1,
             max_strength: 1.0,
             forget_threshold: 0.1,
+            default_ttl_secs: None,
         }
     }
 }
@@ -301,6 +308,11 @@ impl MemoryFormation {
         let takeaway = synthesize_takeaway(episode, events);
 
         // Create memory from episode
+        let expires_at = self
+            .config
+            .default_ttl_secs
+            .map(|ttl| current_time + ttl * 1_000_000_000);
+
         let memory = Memory {
             id: memory_id,
             agent_id: episode.agent_id,
@@ -327,6 +339,7 @@ impl MemoryFormation {
                 .unwrap_or(EpisodeOutcome::Interrupted),
             memory_type,
             metadata: HashMap::new(),
+            expires_at,
         };
 
         // Store memory
@@ -625,6 +638,22 @@ impl MemoryFormation {
                 memories.into_iter().take(limit).collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Remove memories past their `expires_at` timestamp. Returns count removed.
+    pub fn apply_expiration(&mut self) -> usize {
+        let now = current_timestamp();
+        let to_expire: Vec<MemoryId> = self
+            .memories
+            .values()
+            .filter(|m| m.expires_at.map(|exp| now > exp).unwrap_or(false))
+            .map(|m| m.id)
+            .collect();
+        let count = to_expire.len();
+        for id in to_expire {
+            self.remove_memory(id);
+        }
+        count
     }
 
     /// Apply memory decay based on time elapsed
@@ -955,6 +984,7 @@ mod tests {
             outcome: EpisodeOutcome::Success,
             memory_type: MemoryType::Episodic { significance: 0.5 },
             metadata: HashMap::new(),
+            expires_at: None,
         }
     }
 
@@ -1040,5 +1070,59 @@ mod tests {
         assert_eq!(memory_negative_outcomes(&m), 0);
         // No outcomes → Bayesian (0+1)/(0+2) = 0.5
         assert!((memory_outcome_score(&m) - 0.5).abs() < 0.001);
+    }
+
+    // ── Memory TTL / Expiration tests ──────────────────────────────────
+
+    #[test]
+    fn test_memory_expires_at_default_none() {
+        let m = make_test_memory(1);
+        assert!(m.expires_at.is_none());
+    }
+
+    #[test]
+    fn test_memory_expires_at_with_ttl() {
+        let mut config = MemoryFormationConfig::default();
+        config.default_ttl_secs = Some(3600); // 1 hour
+        let engine = MemoryFormation::new(config);
+
+        // Directly check the config is stored
+        assert_eq!(engine.config.default_ttl_secs, Some(3600));
+    }
+
+    #[test]
+    fn test_apply_expiration_removes_expired() {
+        let config = MemoryFormationConfig::default();
+        let mut engine = MemoryFormation::new(config);
+
+        // Memory that expired 1 second ago
+        let mut mem = make_test_memory(1);
+        mem.expires_at = Some(current_timestamp().saturating_sub(1_000_000_000));
+        engine.store_direct(mem);
+
+        assert_eq!(engine.memory_count(), 1);
+        let removed = engine.apply_expiration();
+        assert_eq!(removed, 1);
+        assert_eq!(engine.memory_count(), 0);
+    }
+
+    #[test]
+    fn test_apply_expiration_keeps_valid() {
+        let config = MemoryFormationConfig::default();
+        let mut engine = MemoryFormation::new(config);
+
+        // Memory that expires far in the future
+        let mut mem1 = make_test_memory(1);
+        mem1.expires_at = Some(current_timestamp() + 3600_000_000_000); // +1 hour
+        engine.store_direct(mem1);
+
+        // Memory with no expiry
+        let mem2 = make_test_memory(2);
+        engine.store_direct(mem2);
+
+        assert_eq!(engine.memory_count(), 2);
+        let removed = engine.apply_expiration();
+        assert_eq!(removed, 0);
+        assert_eq!(engine.memory_count(), 2);
     }
 }

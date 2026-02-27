@@ -790,6 +790,7 @@ fn test_redb_goal_bucket_index() {
             outcome: EpisodeOutcome::Success,
             memory_type: MemoryType::Episodic { significance: 0.8 },
             metadata: HashMap::new(),
+            expires_at: None,
         };
         store.store_consolidated_memory(mem);
     }
@@ -832,6 +833,7 @@ fn test_redb_goal_bucket_index() {
         outcome: EpisodeOutcome::Success,
         memory_type: MemoryType::Episodic { significance: 0.8 },
         metadata: HashMap::new(),
+        expires_at: None,
     };
     store.store_consolidated_memory(other_mem);
 

@@ -525,8 +525,8 @@ impl GraphEngine {
                 },
             }
 
-            // Rebuild BM25 index
-            let mut text_parts = Vec::new();
+            // Rebuild BM25 index (must stay in sync with Graph::add_node whitelist)
+            let mut text_parts: Vec<&str> = Vec::new();
             match &node.node_type {
                 NodeType::Claim { claim_text, .. } => text_parts.push(claim_text.as_str()),
                 NodeType::Goal { description, .. } => text_parts.push(description.as_str()),
@@ -537,6 +537,8 @@ impl GraphEngine {
                 NodeType::Episode { outcome, .. } => text_parts.push(outcome.as_str()),
                 _ => {},
             }
+            let mut found_code_key = false;
+            let mut owned_parts: Vec<String> = Vec::new();
             for (key, value) in &node.properties {
                 let key_lower = key.to_lowercase();
                 if key_lower.contains("text")
@@ -545,15 +547,66 @@ impl GraphEngine {
                     || key_lower.contains("name")
                     || key_lower.contains("summary")
                     || key_lower == "data"
+                    || key_lower == "code"
+                    || key_lower == "source"
+                    || key_lower == "source_code"
+                    || key_lower == "snippet"
+                    || key_lower == "body"
+                    || key_lower == "function_name"
+                    || key_lower == "class_name"
+                    || key_lower == "message"
+                    || key_lower == "query"
+                    || key_lower == "result"
+                    || key_lower == "error"
+                    || key_lower == "prompt"
+                    || key_lower == "answer"
+                    || key_lower == "response"
+                    || key_lower == "output"
+                    || key_lower == "category"
+                    || key_lower == "metadata_text"
                 {
+                    if matches!(
+                        key_lower.as_str(),
+                        "code"
+                            | "source"
+                            | "source_code"
+                            | "snippet"
+                            | "function_name"
+                            | "class_name"
+                    ) {
+                        found_code_key = true;
+                    }
                     if let Some(text) = value.as_str() {
                         text_parts.push(text);
+                    } else {
+                        let flat = Graph::flatten_json_to_text(value);
+                        if !flat.is_empty() {
+                            owned_parts.push(flat);
+                        }
                     }
                 }
             }
-            if !text_parts.is_empty() {
-                let combined_text = text_parts.join(" ");
-                graph.bm25_index.index_document(node_id, &combined_text);
+            if !text_parts.is_empty() || !owned_parts.is_empty() {
+                let mut combined_text = text_parts.join(" ");
+                if !owned_parts.is_empty() {
+                    if !combined_text.is_empty() {
+                        combined_text.push(' ');
+                    }
+                    combined_text.push_str(&owned_parts.join(" "));
+                }
+                let is_code_content = node
+                    .properties
+                    .get("content_type")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "code")
+                    .unwrap_or(false);
+                if is_code_content || found_code_key {
+                    graph
+                        .bm25_index
+                        .index_document_code(node_id, &combined_text);
+                } else {
+                    graph.bm25_index.index_document(node_id, &combined_text);
+                }
             }
 
             graph.nodes.insert(node_id, node);

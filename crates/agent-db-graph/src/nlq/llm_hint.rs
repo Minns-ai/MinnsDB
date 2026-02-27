@@ -33,6 +33,7 @@ pub enum IntentHint {
     Aggregate,
     Temporal,
     Subgraph,
+    Knowledge,
     Unknown,
 }
 
@@ -55,7 +56,7 @@ const SYSTEM_PROMPT: &str = concat!(
     "You classify graph database queries. Output strict JSON with exactly two fields:\n",
     "- \"structure_hint\": one of \"ledger\", \"tree\", \"state_machine\", \"preference_list\", \"generic_graph\"\n",
     "- \"intent_hint\": one of \"balance\", \"current_state\", \"children\", \"ranking\", ",
-    "\"path\", \"neighbors\", \"similarity\", \"aggregate\", \"temporal\", \"subgraph\", \"unknown\"\n",
+    "\"path\", \"neighbors\", \"similarity\", \"aggregate\", \"temporal\", \"subgraph\", \"knowledge\", \"unknown\"\n",
     "No markdown fences, no explanation, no other fields.",
 );
 
@@ -188,6 +189,7 @@ pub fn intent_from_hint(hint: &LlmHintResponse) -> QueryIntent {
             direction: crate::nlq::intent::TemporalDirection::After,
         },
         IntentHint::Subgraph => QueryIntent::Subgraph { radius: 2 },
+        IntentHint::Knowledge => QueryIntent::KnowledgeQuery,
         IntentHint::Unknown => QueryIntent::Unknown,
     }
 }
@@ -248,6 +250,7 @@ pub fn intents_agree(rule_based: &QueryIntent, hint: &IntentHint) -> bool {
                 },
                 IntentHint::Ranking
             )
+            | (QueryIntent::KnowledgeQuery, IntentHint::Knowledge)
             | (QueryIntent::Unknown, IntentHint::Unknown)
     )
 }
@@ -453,6 +456,51 @@ mod tests {
         assert!(structured_intent_from_hint(&StructureHint::Tree).is_some());
         assert!(structured_intent_from_hint(&StructureHint::StateMachine).is_some());
         assert!(structured_intent_from_hint(&StructureHint::PreferenceList).is_some());
+    }
+
+    #[test]
+    fn test_parse_knowledge_hint() {
+        let json = r#"{"structure_hint": "generic_graph", "intent_hint": "knowledge"}"#;
+        let result = parse_hint_response(json);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().intent_hint, IntentHint::Knowledge);
+    }
+
+    #[test]
+    fn test_intent_from_hint_knowledge() {
+        let hint = LlmHintResponse {
+            structure_hint: StructureHint::GenericGraph,
+            intent_hint: IntentHint::Knowledge,
+        };
+        let intent = intent_from_hint(&hint);
+        assert!(matches!(intent, QueryIntent::KnowledgeQuery));
+    }
+
+    #[test]
+    fn test_merge_unknown_uses_knowledge() {
+        let rule = ClassifiedIntent {
+            intent: QueryIntent::Unknown,
+            negated: false,
+        };
+        let hint = LlmHintResponse {
+            structure_hint: StructureHint::GenericGraph,
+            intent_hint: IntentHint::Knowledge,
+        };
+        let merged = merge_classification(rule, Some(hint));
+        assert!(merged.llm_overrode);
+        assert!(matches!(merged.intent.intent, QueryIntent::KnowledgeQuery));
+    }
+
+    #[test]
+    fn test_intents_agree_knowledge() {
+        assert!(intents_agree(
+            &QueryIntent::KnowledgeQuery,
+            &IntentHint::Knowledge,
+        ));
+        assert!(!intents_agree(
+            &QueryIntent::KnowledgeQuery,
+            &IntentHint::Neighbors,
+        ));
     }
 
     #[test]

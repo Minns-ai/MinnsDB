@@ -4,7 +4,10 @@
 //! Signals are independently optional; the pipeline fuses whatever is available.
 
 use super::fusion::multi_list_rrf;
-use super::temporal::temporal_decay_score;
+use super::temporal::{
+    importance_modulated_decay_score, temporal_decay_score, ImportanceDecayConfig,
+    ImportanceDecayParams,
+};
 use crate::indexing::Bm25Index;
 use crate::memory::{calculate_context_similarity, Memory, MemoryId, MemoryTier};
 use agent_db_core::types::{AgentId, SessionId, Timestamp};
@@ -27,6 +30,12 @@ pub struct MemoryRetrievalConfig {
     pub tier_boost_schema: f32,
     /// Tier boost for Semantic memories.
     pub tier_boost_semantic: f32,
+    /// Enable importance-modulated decay (baseline system-inspired).
+    /// When true, Signal 4 uses importance to slow decay for frequently-accessed,
+    /// highly-relevant memories.
+    pub enable_importance_decay: bool,
+    /// Configuration for importance-modulated decay weights.
+    pub importance_decay_config: ImportanceDecayConfig,
 }
 
 impl Default for MemoryRetrievalConfig {
@@ -38,6 +47,8 @@ impl Default for MemoryRetrievalConfig {
             per_signal_limit: 50,
             tier_boost_schema: 0.3,
             tier_boost_semantic: 0.15,
+            enable_importance_decay: true,
+            importance_decay_config: ImportanceDecayConfig::default(),
         }
     }
 }
@@ -171,13 +182,43 @@ impl MemoryRetrievalPipeline {
             }
         }
 
-        // Signal 4: Temporal recency
+        // Signal 4: Temporal recency (with optional importance modulation)
         {
+            // Pre-compute max access count for normalization
+            let max_access = filtered
+                .iter()
+                .map(|m| m.access_count)
+                .max()
+                .unwrap_or(1)
+                .max(1) as f32;
+
             let mut temporal: Vec<(MemoryId, f32)> = filtered
                 .iter()
                 .map(|m| {
-                    let score =
-                        temporal_decay_score(m.formed_at, now, config.temporal_half_life_hours);
+                    let score = if config.enable_importance_decay {
+                        // Compute per-memory semantic relevance for importance
+                        let relevance = if !query.query_embedding.is_empty()
+                            && !m.summary_embedding.is_empty()
+                        {
+                            cosine_similarity(&query.query_embedding, &m.summary_embedding).max(0.0)
+                        } else {
+                            0.0
+                        };
+                        let params = ImportanceDecayParams {
+                            access_frequency: m.access_count as f32 / max_access,
+                            relevance,
+                            strength: m.strength,
+                        };
+                        importance_modulated_decay_score(
+                            m.formed_at,
+                            now,
+                            config.temporal_half_life_hours,
+                            &params,
+                            &config.importance_decay_config,
+                        )
+                    } else {
+                        temporal_decay_score(m.formed_at, now, config.temporal_half_life_hours)
+                    };
                     (m.id, score)
                 })
                 .filter(|&(_, s)| s > 1e-6)
@@ -283,6 +324,7 @@ mod tests {
             outcome: EpisodeOutcome::Success,
             memory_type: MemoryType::Episodic { significance: 0.5 },
             metadata: std::collections::HashMap::new(),
+            expires_at: None,
         }
     }
 

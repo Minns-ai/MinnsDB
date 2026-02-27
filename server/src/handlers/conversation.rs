@@ -238,6 +238,82 @@ pub async fn ingest_conversation(
         }
     }
 
+    // 5. Fire-and-forget: rolling summary update (if enabled)
+    if state.engine.config.enable_rolling_summary {
+        let engine = state.engine.clone();
+        let case_id_clone = case_id.clone();
+        // Collect all messages from the ingest
+        let new_messages: Vec<agent_db_graph::ConversationMessage> = ingest_data
+            .sessions
+            .iter()
+            .flat_map(|s| s.messages.clone())
+            .collect();
+        tokio::spawn(async move {
+            // Read existing summary
+            let existing = engine.conversation_summary(&case_id_clone).await;
+            let existing_text = existing.as_ref().map(|s| s.summary.as_str());
+            let prev_turn_count = existing.as_ref().map(|s| s.turn_count).unwrap_or(0);
+
+            if let Some(llm) = engine.unified_llm_client() {
+                if let Some(updated_text) = agent_db_graph::conversation::update_rolling_summary(
+                    llm.as_ref(),
+                    existing_text,
+                    &new_messages,
+                )
+                .await
+                {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64;
+                    // Rough token estimate: ~4 chars per token
+                    let token_est = (updated_text.len() / 4) as u32;
+                    let summary = agent_db_graph::ConversationRollingSummary {
+                        case_id: case_id_clone.clone(),
+                        summary: updated_text,
+                        last_updated: now,
+                        turn_count: prev_turn_count + new_messages.len() as u32,
+                        token_estimate: token_est,
+                    };
+                    engine.set_conversation_summary(summary).await;
+                    tracing::info!("Rolling summary updated for case_id={}", case_id_clone,);
+                }
+            }
+        });
+    }
+
+    // 6. Fire-and-forget: LLM compaction (if enabled)
+    let compaction_started = if state.engine.config.enable_conversation_compaction {
+        let engine = state.engine.clone();
+        let ingest_clone = ingest_data.clone();
+        let case_id_clone = case_id.clone();
+        tokio::spawn(async move {
+            let result = agent_db_graph::conversation::run_compaction(
+                &engine,
+                &ingest_clone,
+                &case_id_clone,
+            )
+            .await;
+            tracing::info!(
+                "Compaction case_id={}: facts={} goals={} goals_deduped={} steps={} memory={} updated={} deleted={} playbooks={}",
+                case_id_clone,
+                result.facts_extracted,
+                result.goals_extracted,
+                result.goals_deduplicated,
+                result.procedural_steps_extracted,
+                result.procedural_memory_created,
+                result.memories_updated,
+                result.memories_deleted,
+                result.playbooks_extracted,
+            );
+        });
+        true
+    } else {
+        false
+    };
+
+    let rolling_summary_started = state.engine.config.enable_rolling_summary;
+
     Ok(Json(json!({
         "case_id": result.case_id,
         "messages_processed": result.messages_processed,
@@ -247,6 +323,8 @@ pub async fn ingest_conversation(
         "preferences_found": result.preferences_found,
         "chitchat_skipped": result.chitchat_skipped,
         "events_submitted": events_processed,
+        "compaction_started": compaction_started,
+        "rolling_summary_started": rolling_summary_started,
     })))
 }
 

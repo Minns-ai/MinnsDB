@@ -29,6 +29,8 @@ pub enum QueryIntent {
     Aggregate { metric: AggregateMetric },
     /// "What is the balance between Alice and Bob?" -> structured memory lookup
     StructuredMemoryQuery { query_type: StructuredQueryType },
+    /// Open-ended knowledge question -> triggers full multi-source retrieval
+    KnowledgeQuery,
     /// Generic fallback
     Unknown,
 }
@@ -400,6 +402,23 @@ pub fn classify_intent(question: &str) -> QueryIntent {
         };
     }
 
+    // Knowledge queries (open-ended, triggers multi-source retrieval)
+    if contains_any(
+        &q,
+        &[
+            "what does.*know",
+            "what do.*know",
+            "tell me about",
+            "summarize",
+            "describe",
+            "explain",
+            "what information",
+            "what have you learned",
+        ],
+    ) {
+        return QueryIntent::KnowledgeQuery;
+    }
+
     QueryIntent::Unknown
 }
 
@@ -481,6 +500,7 @@ pub fn intent_display_name(intent: &QueryIntent) -> &'static str {
         QueryIntent::SimilaritySearch => "SimilaritySearch",
         QueryIntent::Aggregate { .. } => "Aggregate",
         QueryIntent::StructuredMemoryQuery { .. } => "StructuredMemoryQuery",
+        QueryIntent::KnowledgeQuery => "KnowledgeQuery",
         QueryIntent::Unknown => "Unknown",
     }
 }
@@ -1020,6 +1040,59 @@ mod tests {
     #[test]
     fn test_extract_property_none() {
         assert_eq!(extract_property_hint("hello world"), None);
+    }
+
+    // ===== KnowledgeQuery tests =====
+
+    #[test]
+    fn test_classify_intent_knowledge_tell_me() {
+        let intent = classify_intent("Tell me about the project status");
+        assert!(
+            matches!(intent, QueryIntent::KnowledgeQuery),
+            "Expected KnowledgeQuery, got {:?}",
+            intent
+        );
+    }
+
+    #[test]
+    fn test_classify_intent_knowledge_summarize() {
+        let intent = classify_intent("Summarize everything we discussed");
+        assert!(matches!(intent, QueryIntent::KnowledgeQuery));
+    }
+
+    #[test]
+    fn test_classify_intent_knowledge_explain() {
+        let intent = classify_intent("Explain the architecture decisions");
+        assert!(matches!(intent, QueryIntent::KnowledgeQuery));
+    }
+
+    #[test]
+    fn test_classify_intent_knowledge_what_information() {
+        let intent = classify_intent("Describe the main architecture patterns");
+        assert!(
+            matches!(intent, QueryIntent::KnowledgeQuery),
+            "Expected KnowledgeQuery, got {:?}",
+            intent
+        );
+    }
+
+    #[test]
+    fn test_classify_intent_knowledge_no_regression_neighbors() {
+        // "Who does Alice connect to?" should still → FindNeighbors, not KnowledgeQuery
+        let intent = classify_intent("Who does Alice connect to?");
+        assert!(
+            matches!(intent, QueryIntent::FindNeighbors { .. }),
+            "Expected FindNeighbors, got {:?}",
+            intent
+        );
+    }
+
+    #[test]
+    fn test_classify_intent_knowledge_display_name() {
+        assert_eq!(
+            intent_display_name(&QueryIntent::KnowledgeQuery),
+            "KnowledgeQuery"
+        );
     }
 
     // ===== Dispatch priority test =====

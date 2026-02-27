@@ -649,7 +649,7 @@ impl Bm25Index {
     fn tokenize(text: &str) -> Vec<String> {
         text.to_lowercase()
             .split_whitespace()
-            .filter(|s| s.len() > 2) // Filter out very short words
+            .filter(|s| s.len() > 1) // Filter single-character tokens only
             .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
             .filter(|s| !s.is_empty())
             .map(String::from)

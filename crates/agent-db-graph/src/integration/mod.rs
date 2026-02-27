@@ -271,11 +271,53 @@ pub struct GraphEngineConfig {
     /// Enable LLM-based metadata normalization fallback
     pub enable_metadata_normalization: bool,
 
+    /// Enable LLM-driven conversation compaction (extracts facts, goals, procedural summary).
+    /// Requires `unified_llm_client` to be configured. Default: false.
+    pub enable_conversation_compaction: bool,
+
+    /// Enable rolling conversation summaries (async-refreshed per turn).
+    /// Requires `unified_llm_client`. Default: false.
+    pub enable_rolling_summary: bool,
+
+    /// Maximum recent messages to include alongside the summary for extraction.
+    /// Default: 10.
+    pub rolling_summary_recent_messages: usize,
+
     /// Timeout in milliseconds for LLM metadata normalization
     pub metadata_normalization_timeout_ms: u64,
 
     /// Model name for metadata normalization (falls back to nlq_hint_model)
     pub metadata_normalization_model: Option<String>,
+
+    // ========== Custom Extraction Configuration ==========
+    /// Custom extraction instructions appended to claim extraction prompt.
+    pub custom_extraction_instructions: Option<String>,
+    /// Types of facts to specifically extract (e.g., ["dietary preferences"]).
+    pub extraction_includes: Vec<String>,
+    /// Types of facts to specifically ignore (e.g., ["greetings"]).
+    pub extraction_excludes: Vec<String>,
+    /// Few-shot examples for claim extraction prompts.
+    pub extraction_few_shot_examples: Vec<crate::claims::llm_client::FewShotExample>,
+
+    // ========== Memory TTL ==========
+    /// Default TTL for memories in seconds. None = no expiration. Default: None.
+    pub default_memory_ttl_secs: Option<u64>,
+
+    // ========== Community Summaries ==========
+    /// Enable LLM-generated community summaries after community detection. Default: false.
+    pub enable_community_summaries: bool,
+    /// Configuration for community summary generation.
+    pub community_summary_config: crate::community_summary::CommunitySummaryConfig,
+
+    // ========== Unified NLQ ==========
+    /// Enable unified NLQ pipeline (multi-source retrieval for KnowledgeQuery). Default: false.
+    pub enable_unified_nlq: bool,
+
+    // ========== DRIFT Search ==========
+    /// Enable DRIFT-style adaptive search (requires community summaries + LLM). Default: false.
+    pub enable_drift_search: bool,
+    /// Configuration for DRIFT search pipeline.
+    pub drift_config: crate::nlq::drift::DriftConfig,
 }
 
 impl GraphEngineConfig {
@@ -485,6 +527,24 @@ pub struct GraphEngine {
     pub(crate) metadata_llm_normalizer:
         Option<Arc<dyn crate::metadata_normalize::MetadataLlmNormalizer>>,
 
+    // ========== Memory Audit & Classification ==========
+    /// Audit log tracking every memory ADD/UPDATE/DELETE operation
+    pub(crate) memory_audit_log: Arc<RwLock<crate::memory_audit::MemoryAuditLog>>,
+
+    // ========== Rolling Conversation Summaries ==========
+    /// Per-case_id rolling conversation summaries (async-refreshed per turn)
+    pub(crate) conversation_summaries:
+        Arc<RwLock<HashMap<String, crate::conversation::compaction::ConversationRollingSummary>>>,
+
+    // ========== Community Summaries ==========
+    /// LLM-generated summaries for detected graph communities
+    pub(crate) community_summaries:
+        Arc<RwLock<HashMap<u64, crate::community_summary::CommunitySummary>>>,
+
+    // ========== Goal Dedup Store ==========
+    /// In-memory goal store with BM25-backed fast deduplication
+    pub(crate) goal_store: Arc<RwLock<crate::goal_store::GoalStore>>,
+
     // ========== Execution State ==========
     /// Active plan executions keyed by execution ID
     pub(crate) active_executions:
@@ -586,6 +646,26 @@ impl Default for GraphEngineConfig {
             enable_metadata_normalization: false,
             metadata_normalization_timeout_ms: 3000,
             metadata_normalization_model: None,
+            // Conversation compaction (disabled by default)
+            enable_conversation_compaction: false,
+            // Rolling conversation summary (disabled by default)
+            enable_rolling_summary: false,
+            rolling_summary_recent_messages: 10,
+            // Custom extraction configuration (empty by default)
+            custom_extraction_instructions: None,
+            extraction_includes: vec![],
+            extraction_excludes: vec![],
+            extraction_few_shot_examples: vec![],
+            // Memory TTL (disabled by default)
+            default_memory_ttl_secs: None,
+            // Community summaries (disabled by default)
+            enable_community_summaries: false,
+            community_summary_config: crate::community_summary::CommunitySummaryConfig::default(),
+            // Unified NLQ (disabled by default)
+            enable_unified_nlq: false,
+            // DRIFT search (disabled by default)
+            enable_drift_search: false,
+            drift_config: crate::nlq::drift::DriftConfig::default(),
         }
     }
 }
