@@ -1082,8 +1082,10 @@ mod tests {
 
     #[test]
     fn test_memory_expires_at_with_ttl() {
-        let mut config = MemoryFormationConfig::default();
-        config.default_ttl_secs = Some(3600); // 1 hour
+        let config = MemoryFormationConfig {
+            default_ttl_secs: Some(3600), // 1 hour
+            ..Default::default()
+        };
         let engine = MemoryFormation::new(config);
 
         // Directly check the config is stored
@@ -1113,7 +1115,7 @@ mod tests {
 
         // Memory that expires far in the future
         let mut mem1 = make_test_memory(1);
-        mem1.expires_at = Some(current_timestamp() + 3600_000_000_000); // +1 hour
+        mem1.expires_at = Some(current_timestamp() + 3_600_000_000_000); // +1 hour
         engine.store_direct(mem1);
 
         // Memory with no expiry

@@ -94,7 +94,7 @@ async fn verify_bm25_content(
                 continue;
             }
             // Check properties
-            for (_key, value) in &node.properties {
+            for value in node.properties.values() {
                 let prop_str = value.to_string().to_lowercase();
                 if prop_str.contains(&lower) {
                     matches += 1;
@@ -393,7 +393,7 @@ async fn test_relationship_graph_ingest_and_search() {
     let labeled_nodes = graph_structure
         .nodes
         .iter()
-        .filter(|n| n.label.as_ref().map_or(false, |l| !l.is_empty()))
+        .filter(|n| n.label.as_ref().is_some_and(|l| !l.is_empty()))
         .count();
     println!(
         "Graph structure: {} nodes ({} labeled), {} edges",
@@ -633,7 +633,7 @@ async fn test_graph_structure_nodes_have_content() {
             "Concept" => {
                 concept_nodes += 1;
                 // Concept nodes should have a label
-                if gn.label.as_ref().map_or(false, |l| !l.is_empty()) {
+                if gn.label.as_ref().is_some_and(|l| !l.is_empty()) {
                     nodes_with_content += 1;
                 }
             },
@@ -641,16 +641,16 @@ async fn test_graph_structure_nodes_have_content() {
                 event_nodes += 1;
                 // Event nodes should have properties
                 if !gn.properties.is_null()
-                    && gn.properties.as_object().map_or(false, |m| !m.is_empty())
+                    && gn.properties.as_object().is_some_and(|m| !m.is_empty())
                 {
                     nodes_with_content += 1;
                 }
             },
             _ => {
                 // Other node types count if they have a label or properties
-                if gn.label.as_ref().map_or(false, |l| !l.is_empty())
+                if gn.label.as_ref().is_some_and(|l| !l.is_empty())
                     || (!gn.properties.is_null()
-                        && gn.properties.as_object().map_or(false, |m| !m.is_empty()))
+                        && gn.properties.as_object().is_some_and(|m| !m.is_empty()))
                 {
                     nodes_with_content += 1;
                 }
