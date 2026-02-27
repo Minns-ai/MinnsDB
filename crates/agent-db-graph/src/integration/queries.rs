@@ -901,15 +901,23 @@ impl GraphEngine {
         };
 
         // 7. Optionally run DRIFT for synthesized answer
+        // Clone summaries snapshot to avoid holding read lock during LLM calls.
         let (final_answer, drift_explanation) = if self.config.enable_drift_search {
             if let Some(ref llm_client) = self.unified_llm_client {
-                let community_summaries = self.community_summaries.read().await;
-                if !community_summaries.is_empty() {
+                let summaries_snapshot = {
+                    let guard = self.community_summaries.read().await;
+                    if guard.is_empty() {
+                        None
+                    } else {
+                        Some(guard.clone())
+                    }
+                }; // read lock released here
+                if let Some(summaries) = summaries_snapshot {
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(self.config.drift_config.timeout_secs),
                         self.run_drift_search(
                             question,
-                            &community_summaries,
+                            &summaries,
                             &fused,
                             llm_client.as_ref(),
                         ),
@@ -1019,21 +1027,18 @@ impl GraphEngine {
         {
             let inference = self.inference.read().await;
             let graph = inference.graph();
-            // Add snippets from initial fused results
-            for &(node_id, _score) in initial_fused.iter().take(10) {
+            let mut seen = std::collections::HashSet::new();
+            // Add snippets from initial fused + DRIFT follow-up results
+            let combined_iter = initial_fused
+                .iter()
+                .take(10)
+                .chain(merged.iter().take(10));
+            for &(node_id, _score) in combined_iter {
                 let label = graph
                     .get_node(node_id)
                     .map(|n| n.label())
                     .unwrap_or_else(|| format!("Node {}", node_id));
-                retrieved_snippets.push(label);
-            }
-            // Add snippets from DRIFT follow-up results
-            for &(node_id, _score) in merged.iter().take(10) {
-                let label = graph
-                    .get_node(node_id)
-                    .map(|n| n.label())
-                    .unwrap_or_else(|| format!("Node {}", node_id));
-                if !retrieved_snippets.contains(&label) {
+                if seen.insert(label.clone()) {
                     retrieved_snippets.push(label);
                 }
             }

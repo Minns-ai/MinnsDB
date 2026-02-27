@@ -7,6 +7,7 @@ use crate::llm_client::{parse_json_from_llm, LlmClient, LlmRequest};
 use crate::structures::Graph;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 /// LLM-generated summary for a detected graph community.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,18 +71,15 @@ pub fn build_community_prompt(
     let mut prompt = String::with_capacity(1024);
     prompt.push_str("Community nodes:\n");
     for (i, label) in node_labels.iter().take(max_entities).enumerate() {
-        prompt.push_str(&format!("{}. {}\n", i + 1, label));
+        let _ = writeln!(prompt, "{}. {}", i + 1, label);
     }
     if node_labels.len() > max_entities {
-        prompt.push_str(&format!(
-            "... and {} more\n",
-            node_labels.len() - max_entities
-        ));
+        let _ = writeln!(prompt, "... and {} more", node_labels.len() - max_entities);
     }
     if !edge_descriptions.is_empty() {
         prompt.push_str("\nRelationships:\n");
         for desc in edge_descriptions.iter().take(max_entities) {
-            prompt.push_str(&format!("- {}\n", desc));
+            let _ = writeln!(prompt, "- {}", desc);
         }
     }
     prompt
@@ -151,20 +149,13 @@ pub fn extract_community_data(graph: &Graph) -> HashMap<u64, Vec<(u64, String)>>
 
 /// Extract edge descriptions for nodes within a community.
 pub fn extract_edge_descriptions(graph: &Graph, node_ids: &[(u64, String)]) -> Vec<String> {
-    let id_set: std::collections::HashSet<u64> = node_ids.iter().map(|(id, _)| *id).collect();
+    // Build HashMap for O(1) label lookups instead of O(n) linear search
+    let label_map: HashMap<u64, &str> = node_ids.iter().map(|(id, l)| (*id, l.as_str())).collect();
     let mut descriptions = Vec::new();
     for edge in graph.edges.values() {
-        if id_set.contains(&edge.source) && id_set.contains(&edge.target) {
-            let src_label = node_ids
-                .iter()
-                .find(|(id, _)| *id == edge.source)
-                .map(|(_, l)| l.as_str())
-                .unwrap_or("?");
-            let tgt_label = node_ids
-                .iter()
-                .find(|(id, _)| *id == edge.target)
-                .map(|(_, l)| l.as_str())
-                .unwrap_or("?");
+        if let (Some(src_label), Some(tgt_label)) =
+            (label_map.get(&edge.source), label_map.get(&edge.target))
+        {
             let edge_type = format!("{:?}", edge.edge_type);
             descriptions.push(format!("{} --[{}]--> {}", src_label, edge_type, tgt_label));
             if descriptions.len() >= 30 {

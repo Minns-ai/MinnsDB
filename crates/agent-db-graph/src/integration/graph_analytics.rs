@@ -108,7 +108,7 @@ impl GraphEngine {
                     sorted.truncate(config.max_communities_to_summarize);
 
                     for (cid, labels, edges) in &sorted {
-                        if let Some(summary) = crate::community_summary::generate_community_summary(
+                        match crate::community_summary::generate_community_summary(
                             client.as_ref(),
                             *cid,
                             labels,
@@ -117,7 +117,15 @@ impl GraphEngine {
                         )
                         .await
                         {
-                            results.insert(*cid, summary);
+                            Some(summary) => {
+                                results.insert(*cid, summary);
+                            },
+                            None => {
+                                tracing::debug!(
+                                    "Community summary generation failed for community {}",
+                                    cid
+                                );
+                            },
                         }
                     }
                     if !results.is_empty() {
