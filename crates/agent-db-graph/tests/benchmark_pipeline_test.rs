@@ -17,7 +17,10 @@ fn load_benchmark(relative_path: &str) -> Option<ConversationIngest> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => panic!("Failed to read {}: {}", path, e),
     };
-    Some(serde_json::from_str(&content).unwrap_or_else(|e| panic!("Failed to parse {}: {}", path, e)))
+    Some(
+        serde_json::from_str(&content)
+            .unwrap_or_else(|e| panic!("Failed to parse {}: {}", path, e)),
+    )
 }
 
 /// Macro to skip a test when benchmark data is missing.
@@ -26,9 +29,12 @@ macro_rules! skip_if_missing {
         match load_benchmark($path) {
             Some(data) => data,
             None => {
-                eprintln!("Skipping: benchmark data not found at {}/{}", BENCH_BASE, $path);
+                eprintln!(
+                    "Skipping: benchmark data not found at {}/{}",
+                    BENCH_BASE, $path
+                );
                 return;
-            }
+            },
         }
     };
 }
