@@ -9,11 +9,28 @@ use agent_db_graph::{ConversationIngest, GraphEngine, GraphEngineConfig, IngestO
 const BENCH_BASE: &str = "../../ref/bench/bench/dataset/benchmark";
 
 /// Helper: load a benchmark JSON file and deserialize as ConversationIngest.
-fn load_benchmark(relative_path: &str) -> ConversationIngest {
+/// Returns `None` when the file does not exist (e.g. in CI), so tests can skip.
+fn load_benchmark(relative_path: &str) -> Option<ConversationIngest> {
     let path = format!("{}/{}", BENCH_BASE, relative_path);
-    let content =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
-    serde_json::from_str(&content).unwrap_or_else(|e| panic!("Failed to parse {}: {}", path, e))
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => panic!("Failed to read {}: {}", path, e),
+    };
+    Some(serde_json::from_str(&content).unwrap_or_else(|e| panic!("Failed to parse {}: {}", path, e)))
+}
+
+/// Macro to skip a test when benchmark data is missing.
+macro_rules! skip_if_missing {
+    ($path:expr) => {
+        match load_benchmark($path) {
+            Some(data) => data,
+            None => {
+                eprintln!("Skipping: benchmark data not found at {}/{}", BENCH_BASE, $path);
+                return;
+            }
+        }
+    };
 }
 
 /// Trim a ConversationIngest to at most `max_msgs` messages per session.
@@ -117,7 +134,7 @@ async fn test_accounting_ingest_graph_and_search() {
         .await
         .unwrap();
 
-    let raw = load_benchmark("accounting/data/debt_tracker_10percent.json");
+    let raw = skip_if_missing!("accounting/data/debt_tracker_10percent.json");
     // Trim to 20 messages to keep test fast (full file has 1000+ messages)
     let data = trim_data(&raw, 20);
 
@@ -307,7 +324,7 @@ async fn test_relationship_graph_ingest_and_search() {
         .await
         .unwrap();
 
-    let data = load_benchmark("tree_based/graph_configs/graph_0_trimmed_10_with_path_1.json");
+    let data = skip_if_missing!("tree_based/graph_configs/graph_0_trimmed_10_with_path_1.json");
 
     let (processed, result) = ingest_into_engine(&engine, &data).await;
 
@@ -414,7 +431,7 @@ async fn test_recommendations_ingest_and_search() {
         .await
         .unwrap();
 
-    let raw = load_benchmark("recommendations/data/books_data.json");
+    let raw = skip_if_missing!("recommendations/data/books_data.json");
     // Trim to 8 messages per session to keep test fast
     let data = trim_data(&raw, 8);
 
@@ -540,7 +557,7 @@ async fn test_nlq_search_returns_meaningful_results() {
         .unwrap();
 
     // Ingest accounting data (trimmed for speed)
-    let raw = load_benchmark("accounting/data/debt_tracker_10percent.json");
+    let raw = skip_if_missing!("accounting/data/debt_tracker_10percent.json");
     let data = trim_data(&raw, 20);
     ingest_into_engine(&engine, &data).await;
 
@@ -612,7 +629,7 @@ async fn test_graph_structure_nodes_have_content() {
         .await
         .unwrap();
 
-    let raw = load_benchmark("accounting/data/debt_tracker_10percent.json");
+    let raw = skip_if_missing!("accounting/data/debt_tracker_10percent.json");
     let data = trim_data(&raw, 20);
     ingest_into_engine(&engine, &data).await;
 
@@ -712,12 +729,12 @@ async fn test_unified_search_cross_dataset_content() {
         .unwrap();
 
     // Ingest accounting (trimmed for speed)
-    let raw = load_benchmark("accounting/data/debt_tracker_10percent.json");
+    let raw = skip_if_missing!("accounting/data/debt_tracker_10percent.json");
     let acct = trim_data(&raw, 20);
     ingest_into_engine(&engine, &acct).await;
 
     // Ingest relationships
-    let rels = load_benchmark("tree_based/graph_configs/graph_0_trimmed_10_with_path_1.json");
+    let rels = skip_if_missing!("tree_based/graph_configs/graph_0_trimmed_10_with_path_1.json");
     ingest_into_engine(&engine, &rels).await;
 
     // --- Alice search should return accounting content (museum, dinner, etc.) ---
@@ -784,7 +801,7 @@ async fn test_event_content_fidelity() {
         .await
         .unwrap();
 
-    let raw = load_benchmark("accounting/data/debt_tracker_10percent.json");
+    let raw = skip_if_missing!("accounting/data/debt_tracker_10percent.json");
     let data = trim_data(&raw, 10);
 
     let options = IngestOptions::default();
@@ -879,7 +896,7 @@ async fn test_event_content_fidelity() {
 #[tokio::test]
 async fn test_structured_memory_ledger_content() {
     // Use the direct ingest path (not event pipeline) which populates StructuredMemoryStore
-    let data = load_benchmark("accounting/data/debt_tracker_10percent.json");
+    let data = skip_if_missing!("accounting/data/debt_tracker_10percent.json");
     let data = trim_data(&data, 20);
 
     let mut store = agent_db_graph::StructuredMemoryStore::new();
