@@ -36,7 +36,9 @@ impl GraphEngine {
                 let _ = backend.put_raw(table_names::EPISODE_CATALOG, b"__detector__", &wrapped);
             }
 
-            let counter = *self.episodes_since_consolidation.read().await;
+            let counter = self
+                .episodes_since_consolidation
+                .load(AtomicOrdering::Relaxed);
             let counter_bytes = counter.to_be_bytes();
             let wrapped = agent_db_storage::wrap_versioned(
                 agent_db_storage::CURRENT_DATA_VERSION,
@@ -126,7 +128,8 @@ impl GraphEngine {
                 let (_version, bytes) = agent_db_storage::unwrap_versioned(&raw);
                 if bytes.len() == 8 {
                     let counter = u64::from_be_bytes(bytes.try_into().unwrap());
-                    *self.episodes_since_consolidation.write().await = counter;
+                    self.episodes_since_consolidation
+                        .store(counter, AtomicOrdering::Relaxed);
                 }
             }
         }

@@ -8,7 +8,7 @@ use crate::GraphResult;
 pub fn execute(
     query: &GraphQuery,
     graph: &Graph,
-    traversal: &mut GraphTraversal,
+    traversal: &GraphTraversal,
 ) -> GraphResult<QueryResult> {
     traversal.execute_query(graph, query.clone())
 }

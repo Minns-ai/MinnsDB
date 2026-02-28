@@ -20,6 +20,12 @@ pub async fn get_agent_strategies(
     Path(agent_id): Path<AgentId>,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<StrategyResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Getting strategies for agent: {}", agent_id);
 
     let strategies = state
@@ -38,6 +44,12 @@ pub async fn get_similar_strategies(
     State(state): State<AppState>,
     Json(payload): Json<StrategySimilarityRequest>,
 ) -> Result<Json<Vec<SimilarStrategyResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let min_score = payload.min_score.unwrap_or(0.2);
     let query = agent_db_graph::strategies::StrategySimilarityQuery {
         goal_ids: payload.goal_ids,
@@ -152,6 +164,12 @@ pub async fn get_action_suggestions(
     State(state): State<AppState>,
     Query(query): Query<ActionSuggestionsQuery>,
 ) -> Result<Json<Vec<ActionSuggestionResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!(
         "Getting action suggestions for context: {}",
         query.context_hash

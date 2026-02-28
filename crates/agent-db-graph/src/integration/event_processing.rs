@@ -332,7 +332,9 @@ impl GraphEngine {
                         .to_vec();
                     if let Some(episode) = episodes.iter().find(|e| e.id == episode_id) {
                         if !is_correction {
-                            self.stats.write().await.total_episodes_detected += 1;
+                            self.stats
+                                .total_episodes_detected
+                                .fetch_add(1, AtomicOrdering::Relaxed);
                         }
 
                         if self.config.auto_memory_formation {
@@ -376,23 +378,28 @@ impl GraphEngine {
 
         // Update statistics
         {
-            let mut stats = self.stats.write().await;
-            stats.total_events_processed += 1;
-            stats.total_nodes_created += result.nodes_created.len() as u64;
-            stats.last_operation_time = std::time::Instant::now();
+            let new_count = self
+                .stats
+                .total_events_processed
+                .fetch_add(1, AtomicOrdering::Relaxed)
+                + 1;
+            self.stats
+                .total_nodes_created
+                .fetch_add(result.nodes_created.len() as u64, AtomicOrdering::Relaxed);
 
-            // Update average processing time
             let processing_time = start_time.elapsed().as_millis() as f64;
-            stats.average_processing_time_ms = (stats.average_processing_time_ms
-                * (stats.total_events_processed as f64 - 1.0)
-                + processing_time)
-                / stats.total_events_processed as f64;
+            {
+                let mut derived = self.stats.derived.lock();
+                derived.last_operation_time = std::time::Instant::now();
+                derived.average_processing_time_ms = (derived.average_processing_time_ms
+                    * (new_count as f64 - 1.0)
+                    + processing_time)
+                    / new_count as f64;
+            }
 
             // Run Louvain community detection periodically
-            if self.config.enable_louvain
-                && stats.total_events_processed % self.config.louvain_interval == 0
+            if self.config.enable_louvain && new_count.is_multiple_of(self.config.louvain_interval)
             {
-                drop(stats); // Release stats lock before async operation
                 if let Err(e) = self.run_community_detection().await {
                     result.errors.push(e);
                 } else {
@@ -400,8 +407,6 @@ impl GraphEngine {
                         .patterns_detected
                         .push("louvain_communities_updated".to_string());
                 }
-            } else {
-                drop(stats); // Always release the lock
             }
         }
 
@@ -417,11 +422,13 @@ impl GraphEngine {
 
         // Persist graph to redb when the backend is available
         if self.redb_backend.is_some() {
-            let stats = self.stats.read().await;
-            let last_persistence = *self.last_persistence.read().await;
+            let total = self
+                .stats
+                .total_events_processed
+                .load(AtomicOrdering::Relaxed);
+            let last_persistence = self.last_persistence.load(AtomicOrdering::Relaxed);
 
-            if stats.total_events_processed - last_persistence >= self.config.persistence_interval {
-                drop(stats);
+            if total - last_persistence >= self.config.persistence_interval {
                 if let Err(e) = self.persist_graph_state().await {
                     tracing::warn!("Graph persistence failed (will retry next interval): {}", e);
                 }
@@ -815,11 +822,19 @@ impl GraphEngine {
 
         // Update statistics
         {
-            let mut stats = self.stats.write().await;
-            stats.total_events_processed += combined_result.nodes_created.len() as u64;
-            stats.total_nodes_created += combined_result.nodes_created.len() as u64;
-            stats.total_patterns_detected += combined_result.patterns_detected.len() as u64;
-            stats.last_operation_time = std::time::Instant::now();
+            self.stats.total_events_processed.fetch_add(
+                combined_result.nodes_created.len() as u64,
+                AtomicOrdering::Relaxed,
+            );
+            self.stats.total_nodes_created.fetch_add(
+                combined_result.nodes_created.len() as u64,
+                AtomicOrdering::Relaxed,
+            );
+            self.stats.total_patterns_detected.fetch_add(
+                combined_result.patterns_detected.len() as u64,
+                AtomicOrdering::Relaxed,
+            );
+            self.stats.derived.lock().last_operation_time = std::time::Instant::now();
         }
 
         combined_result.processing_time_ms = start_time.elapsed().as_millis() as u64;

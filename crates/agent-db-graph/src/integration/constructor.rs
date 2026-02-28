@@ -34,7 +34,7 @@ impl GraphEngine {
         inf_config.max_graph_size = config.max_graph_size;
         let inference = Arc::new(RwLock::new(GraphInference::with_config(inf_config)));
 
-        let traversal = Arc::new(RwLock::new(GraphTraversal::new()));
+        let traversal = Arc::new(GraphTraversal::new());
 
         let event_ordering = Arc::new(EventOrderingEngine::new(config.ordering_config.clone()));
 
@@ -560,9 +560,9 @@ impl GraphEngine {
             redb_backend,
             graph_store,
             config,
-            stats: Arc::new(RwLock::new(GraphEngineStats::default())),
+            stats: Arc::new(GraphEngineStats::default()),
             event_buffer: Arc::new(RwLock::new(Vec::new())),
-            last_persistence: Arc::new(RwLock::new(0)),
+            last_persistence: Arc::new(AtomicU64::new(0)),
             index_manager,
             louvain,
             centrality,
@@ -581,7 +581,7 @@ impl GraphEngine {
             // 10x/100x: Consolidation + Refinement — built BEFORE config is moved
             consolidation_engine: consolidation_engine_arc,
             refinement_engine: refinement_engine_arc,
-            episodes_since_consolidation: Arc::new(RwLock::new(0)),
+            episodes_since_consolidation: Arc::new(AtomicU64::new(0)),
             world_model,
             planning_orchestrator,
             strategy_generator: strategy_generator_arc,
@@ -679,7 +679,9 @@ impl GraphEngine {
                     let (_version, bytes) = agent_db_storage::unwrap_versioned(&raw);
                     if bytes.len() == 8 {
                         let counter = u64::from_be_bytes(bytes.try_into().unwrap());
-                        *engine.episodes_since_consolidation.write().await = counter;
+                        engine
+                            .episodes_since_consolidation
+                            .store(counter, AtomicOrdering::Relaxed);
                         tracing::info!("Restored consolidation counter from disk: {}", counter);
                     }
                 },

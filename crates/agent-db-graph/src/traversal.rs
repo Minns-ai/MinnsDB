@@ -520,7 +520,7 @@ impl QueryCache {
 
 /// Advanced graph traversal engine with working LRU query cache.
 pub struct GraphTraversal {
-    cache: QueryCache,
+    cache: parking_lot::Mutex<QueryCache>,
 }
 
 impl Default for GraphTraversal {
@@ -533,38 +533,42 @@ impl GraphTraversal {
     /// Create new traversal engine with default cache (1000 entries, 5 min TTL).
     pub fn new() -> Self {
         Self {
-            cache: QueryCache::new(1000, 300),
+            cache: parking_lot::Mutex::new(QueryCache::new(1000, 300)),
         }
     }
 
     /// Create traversal engine with custom cache settings.
     pub fn with_cache(capacity: usize, ttl_secs: u64) -> Self {
         Self {
-            cache: QueryCache::new(capacity, ttl_secs),
+            cache: parking_lot::Mutex::new(QueryCache::new(capacity, ttl_secs)),
         }
     }
 
     /// Invalidate the query cache (call after graph mutations).
-    pub fn invalidate_cache(&mut self) {
-        self.cache.invalidate_all();
+    pub fn invalidate_cache(&self) {
+        self.cache.lock().invalidate_all();
     }
 
     /// Clean up expired cache entries.
-    pub fn cleanup_cache(&mut self) {
-        self.cache.evict_expired();
+    pub fn cleanup_cache(&self) {
+        self.cache.lock().evict_expired();
     }
 
     /// Execute a graph query, returning cached results when available.
-    pub fn execute_query(&mut self, graph: &Graph, query: GraphQuery) -> GraphResult<QueryResult> {
-        // Auto-invalidate cache if the graph has mutated since last query
-        self.cache.check_generation(graph.generation());
-
+    pub fn execute_query(&self, graph: &Graph, query: GraphQuery) -> GraphResult<QueryResult> {
+        // Lock cache briefly for generation check + lookup
         let cache_key = query_cache_key(&query);
+        {
+            let mut cache = self.cache.lock();
+            // Auto-invalidate cache if the graph has mutated since last query
+            cache.check_generation(graph.generation());
 
-        // Try cache first
-        if let Some(cached) = self.cache.get(cache_key) {
-            return Ok(cached.clone());
+            // Try cache first
+            if let Some(cached) = cache.get(cache_key) {
+                return Ok(cached.clone());
+            }
         }
+        // Cache lock released — execute the (potentially expensive) query
 
         // Execute query
         let result = match query {
@@ -636,8 +640,8 @@ impl GraphTraversal {
             },
         }?;
 
-        // Cache the result
-        self.cache.insert(cache_key, result.clone());
+        // Re-acquire cache lock to insert result
+        self.cache.lock().insert(cache_key, result.clone());
 
         Ok(result)
     }
@@ -3204,7 +3208,7 @@ mod tests {
     #[test]
     fn query_directed_traversal() {
         let g = build_directed_graph();
-        let mut engine = GraphTraversal::new();
+        let engine = GraphTraversal::new();
         let result = engine
             .execute_query(
                 &g,
@@ -3228,7 +3232,7 @@ mod tests {
     #[test]
     fn query_recursive_traversal() {
         let g = build_directed_graph();
-        let mut engine = GraphTraversal::new();
+        let engine = GraphTraversal::new();
         let result = engine
             .execute_query(
                 &g,

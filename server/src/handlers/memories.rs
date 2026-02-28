@@ -25,6 +25,12 @@ pub async fn get_agent_memories(
     Path(agent_id): Path<AgentId>,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<MemoryResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Getting memories for agent: {}", agent_id);
 
     let memories = state
@@ -42,6 +48,12 @@ pub async fn get_memories_by_context(
     State(state): State<AppState>,
     Json(payload): Json<ContextMemoriesRequest>,
 ) -> Result<Json<Vec<MemoryResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!(
         "Getting memories for context hash: {}",
         payload.context.fingerprint

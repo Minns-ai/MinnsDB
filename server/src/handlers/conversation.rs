@@ -77,10 +77,12 @@
 
 use crate::errors::ApiError;
 use crate::state::AppState;
+use crate::write_lanes::WriteJob;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 use tracing::info;
 
 // ---------------------------------------------------------------------------
@@ -156,7 +158,7 @@ pub async fn ingest_conversation(
 
     info!("Ingesting conversation case_id={}", case_id);
 
-    // Convert request into domain types
+    // Convert request into domain types (pure data transform, no engine access)
     let ingest_data = agent_db_graph::ConversationIngest {
         case_id: Some(case_id.clone()),
         sessions: request
@@ -187,7 +189,7 @@ pub async fn ingest_conversation(
         ..Default::default()
     };
 
-    // 1. Convert conversation to Event structs via bridge
+    // 1. Convert conversation to Event structs via bridge (pure CPU, no engine)
     let (events, conv_state, result) =
         agent_db_graph::conversation::ingest_to_events(&ingest_data, &options);
 
@@ -197,135 +199,168 @@ pub async fn ingest_conversation(
         case_id
     );
 
-    // 2. Pre-create Concept nodes for all participants
-    let participants: Vec<String> = conv_state.known_participants.iter().cloned().collect();
-    if let Err(e) = state
-        .engine
-        .ensure_conversation_participants(&participants)
-        .await
-    {
-        info!("Failed to pre-create participants: {}", e);
-    }
-
-    // 3. Submit each event through the full pipeline
-    let mut events_processed = 0usize;
-    for event in events {
-        match state
-            .engine
-            .process_event_with_options(event, Some(false))
-            .await
-        {
-            Ok(_) => events_processed += 1,
-            Err(e) => {
-                tracing::debug!("Event pipeline error: {}", e);
-            },
-        }
-    }
-
-    // 4. Store conversation state + LRU eviction
-    {
-        let mut states = state.engine.conversation_states().lock().await;
-        states.insert(case_id.clone(), conv_state);
-
-        if states.len() > MAX_CONVERSATION_STATES {
-            if let Some(evict_key) = states
-                .iter()
-                .min_by_key(|(_, s)| s.processed_messages.len())
-                .map(|(k, _)| k.clone())
-            {
-                states.remove(&evict_key);
-            }
-        }
-    }
-
-    // 5. Fire-and-forget: rolling summary update (if enabled)
-    if state.engine.config.enable_rolling_summary {
-        let engine = state.engine.clone();
-        let case_id_clone = case_id.clone();
-        // Collect all messages from the ingest
-        let new_messages: Vec<agent_db_graph::ConversationMessage> = ingest_data
-            .sessions
-            .iter()
-            .flat_map(|s| s.messages.clone())
-            .collect();
-        tokio::spawn(async move {
-            // Read existing summary
-            let existing = engine.conversation_summary(&case_id_clone).await;
-            let existing_text = existing.as_ref().map(|s| s.summary.as_str());
-            let prev_turn_count = existing.as_ref().map(|s| s.turn_count).unwrap_or(0);
-
-            if let Some(llm) = engine.unified_llm_client() {
-                if let Some(updated_text) = agent_db_graph::conversation::update_rolling_summary(
-                    llm.as_ref(),
-                    existing_text,
-                    &new_messages,
-                )
-                .await
-                {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos() as u64;
-                    // Rough token estimate: ~4 chars per token
-                    let token_est = (updated_text.len() / 4) as u32;
-                    let summary = agent_db_graph::ConversationRollingSummary {
-                        case_id: case_id_clone.clone(),
-                        summary: updated_text,
-                        last_updated: now,
-                        turn_count: prev_turn_count + new_messages.len() as u32,
-                        token_estimate: token_est,
-                    };
-                    engine.set_conversation_summary(summary).await;
-                    tracing::info!("Rolling summary updated for case_id={}", case_id_clone,);
-                }
-            }
-        });
-    }
-
-    // 6. Fire-and-forget: LLM compaction (if enabled)
-    let compaction_started = if state.engine.config.enable_conversation_compaction {
-        let engine = state.engine.clone();
-        let ingest_clone = ingest_data.clone();
-        let case_id_clone = case_id.clone();
-        tokio::spawn(async move {
-            let result = agent_db_graph::conversation::run_compaction(
-                &engine,
-                &ingest_clone,
-                &case_id_clone,
-            )
-            .await;
-            tracing::info!(
-                "Compaction case_id={}: facts={} goals={} goals_deduped={} steps={} memory={} updated={} deleted={} playbooks={}",
-                case_id_clone,
-                result.facts_extracted,
-                result.goals_extracted,
-                result.goals_deduplicated,
-                result.procedural_steps_extracted,
-                result.procedural_memory_created,
-                result.memories_updated,
-                result.memories_deleted,
-                result.playbooks_extracted,
-            );
-        });
-        true
-    } else {
-        false
+    // Use a hash of the case_id as routing key for write lane
+    let routing_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        case_id.hash(&mut hasher);
+        hasher.finish()
     };
 
-    let rolling_summary_started = state.engine.config.enable_rolling_summary;
+    // Submit the entire write-side logic to a write lane
+    let case_id_for_closure = case_id.clone();
+    let ingest_data_clone = ingest_data.clone();
+    let result = state
+        .write_lanes
+        .submit_and_await(routing_key, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let case_id = case_id_for_closure;
 
-    Ok(Json(json!({
-        "case_id": result.case_id,
-        "messages_processed": result.messages_processed,
-        "transactions_found": result.transactions_found,
-        "state_changes_found": result.state_changes_found,
-        "relationships_found": result.relationships_found,
-        "preferences_found": result.preferences_found,
-        "chitchat_skipped": result.chitchat_skipped,
-        "events_submitted": events_processed,
-        "compaction_started": compaction_started,
-        "rolling_summary_started": rolling_summary_started,
-    })))
+                        // 2. Pre-create Concept nodes for all participants
+                        let participants: Vec<String> =
+                            conv_state.known_participants.iter().cloned().collect();
+                        if let Err(e) =
+                            engine.ensure_conversation_participants(&participants).await
+                        {
+                            tracing::info!("Failed to pre-create participants: {}", e);
+                        }
+
+                        // 3. Submit each event through the full pipeline
+                        let mut events_processed = 0usize;
+                        for event in events {
+                            match engine
+                                .process_event_with_options(event, Some(false))
+                                .await
+                            {
+                                Ok(_) => events_processed += 1,
+                                Err(e) => {
+                                    tracing::debug!("Event pipeline error: {}", e);
+                                }
+                            }
+                        }
+
+                        // 4. Store conversation state + LRU eviction
+                        {
+                            let mut states = engine.conversation_states().lock().await;
+                            states.insert(case_id.clone(), conv_state);
+
+                            if states.len() > MAX_CONVERSATION_STATES {
+                                if let Some(evict_key) = states
+                                    .iter()
+                                    .min_by_key(|(_, s)| s.processed_messages.len())
+                                    .map(|(k, _)| k.clone())
+                                {
+                                    states.remove(&evict_key);
+                                }
+                            }
+                        }
+
+                        // 5. Fire-and-forget: rolling summary update (if enabled)
+                        if engine.config.enable_rolling_summary {
+                            let engine_rs = engine.clone();
+                            let case_id_clone = case_id.clone();
+                            let new_messages: Vec<agent_db_graph::ConversationMessage> =
+                                ingest_data_clone
+                                    .sessions
+                                    .iter()
+                                    .flat_map(|s| s.messages.clone())
+                                    .collect();
+                            tokio::spawn(async move {
+                                let existing =
+                                    engine_rs.conversation_summary(&case_id_clone).await;
+                                let existing_text =
+                                    existing.as_ref().map(|s| s.summary.as_str());
+                                let prev_turn_count =
+                                    existing.as_ref().map(|s| s.turn_count).unwrap_or(0);
+
+                                if let Some(llm) = engine_rs.unified_llm_client() {
+                                    if let Some(updated_text) =
+                                        agent_db_graph::conversation::update_rolling_summary(
+                                            llm.as_ref(),
+                                            existing_text,
+                                            &new_messages,
+                                        )
+                                        .await
+                                    {
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_nanos()
+                                            as u64;
+                                        let token_est = (updated_text.len() / 4) as u32;
+                                        let summary =
+                                            agent_db_graph::ConversationRollingSummary {
+                                                case_id: case_id_clone.clone(),
+                                                summary: updated_text,
+                                                last_updated: now,
+                                                turn_count: prev_turn_count
+                                                    + new_messages.len() as u32,
+                                                token_estimate: token_est,
+                                            };
+                                        engine_rs.set_conversation_summary(summary).await;
+                                        tracing::info!(
+                                            "Rolling summary updated for case_id={}",
+                                            case_id_clone,
+                                        );
+                                    }
+                                }
+                            });
+                        }
+
+                        // 6. Fire-and-forget: LLM compaction (if enabled)
+                        let compaction_started =
+                            if engine.config.enable_conversation_compaction {
+                                let engine_cmp = engine.clone();
+                                let ingest_cmp = ingest_data_clone.clone();
+                                let case_id_cmp = case_id.clone();
+                                tokio::spawn(async move {
+                                    let result =
+                                        agent_db_graph::conversation::run_compaction(
+                                            &engine_cmp,
+                                            &ingest_cmp,
+                                            &case_id_cmp,
+                                        )
+                                        .await;
+                                    tracing::info!(
+                                        "Compaction case_id={}: facts={} goals={} goals_deduped={} steps={} memory={} updated={} deleted={} playbooks={}",
+                                        case_id_cmp,
+                                        result.facts_extracted,
+                                        result.goals_extracted,
+                                        result.goals_deduplicated,
+                                        result.procedural_steps_extracted,
+                                        result.procedural_memory_created,
+                                        result.memories_updated,
+                                        result.memories_deleted,
+                                        result.playbooks_extracted,
+                                    );
+                                });
+                                true
+                            } else {
+                                false
+                            };
+
+                        let rolling_summary_started = engine.config.enable_rolling_summary;
+
+                        Ok(json!({
+                            "case_id": result.case_id,
+                            "messages_processed": result.messages_processed,
+                            "transactions_found": result.transactions_found,
+                            "state_changes_found": result.state_changes_found,
+                            "relationships_found": result.relationships_found,
+                            "preferences_found": result.preferences_found,
+                            "chitchat_skipped": result.chitchat_skipped,
+                            "events_submitted": events_processed,
+                            "compaction_started": compaction_started,
+                            "rolling_summary_started": rolling_summary_started,
+                        }))
+                    })
+                }),
+                result_tx: tx,
+            })
+        .await?;
+
+    Ok(Json(result))
 }
 
 /// POST /api/conversations/query — query with conversation context.
@@ -333,6 +368,12 @@ pub async fn query_conversation(
     State(state): State<AppState>,
     Json(request): Json<ConversationQueryRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Conversation query: {}", request.question);
 
     // Retrieve related memories and strategies for context enrichment (BM25-only)

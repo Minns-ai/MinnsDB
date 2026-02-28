@@ -19,6 +19,8 @@ pub enum ApiError {
     BadRequest(String),
     NotFound(String),
     NotImplemented(String),
+    /// 503 Service Unavailable — returned when write lanes or read gate are exhausted.
+    ServiceUnavailable(String),
 }
 
 impl IntoResponse for ApiError {
@@ -40,6 +42,11 @@ impl IntoResponse for ApiError {
                 "Not Implemented".to_string(),
                 Some(msg),
             ),
+            ApiError::ServiceUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service Unavailable".to_string(),
+                Some(msg),
+            ),
         };
 
         let body = Json(ErrorResponse {
@@ -54,5 +61,19 @@ impl IntoResponse for ApiError {
 impl From<Box<dyn std::error::Error>> for ApiError {
     fn from(err: Box<dyn std::error::Error>) -> Self {
         ApiError::Internal(err.to_string())
+    }
+}
+
+impl From<crate::write_lanes::WriteError> for ApiError {
+    fn from(err: crate::write_lanes::WriteError) -> Self {
+        match err {
+            crate::write_lanes::WriteError::LaneUnavailable(msg) => {
+                ApiError::ServiceUnavailable(msg)
+            },
+            crate::write_lanes::WriteError::WorkerDropped => {
+                ApiError::Internal("Write worker dropped".to_string())
+            },
+            crate::write_lanes::WriteError::OperationFailed(msg) => ApiError::Internal(msg),
+        }
     }
 }

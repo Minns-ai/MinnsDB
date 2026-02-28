@@ -154,8 +154,11 @@ impl GraphEngine {
         }
 
         // Update persistence checkpoint
-        let engine_stats = self.stats.read().await;
-        *self.last_persistence.write().await = engine_stats.total_events_processed;
+        let total = self
+            .stats
+            .total_events_processed
+            .load(AtomicOrdering::Relaxed);
+        self.last_persistence.store(total, AtomicOrdering::Relaxed);
 
         tracing::info!(
             "Graph persisted: {} nodes, {} edges written to redb",

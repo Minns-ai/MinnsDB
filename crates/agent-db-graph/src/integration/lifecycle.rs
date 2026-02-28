@@ -7,10 +7,7 @@ impl GraphEngine {
         // This would involve removing old temporal patterns and low-confidence relationships
 
         // Clean up query cache
-        {
-            let mut traversal = self.traversal.write().await;
-            traversal.cleanup_cache();
-        }
+        self.traversal.cleanup_cache();
 
         Ok(())
     }
@@ -91,7 +88,9 @@ impl GraphEngine {
 
         // 6. BUG 12 fix: Persist consolidation counter (with version envelope)
         if let Some(ref backend) = self.redb_backend {
-            let counter = *self.episodes_since_consolidation.read().await;
+            let counter = self
+                .episodes_since_consolidation
+                .load(AtomicOrdering::Relaxed);
             let counter_bytes = counter.to_be_bytes();
             let wrapped = agent_db_storage::wrap_versioned(
                 agent_db_storage::CURRENT_DATA_VERSION,

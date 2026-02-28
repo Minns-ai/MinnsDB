@@ -6,8 +6,11 @@ mod config;
 mod errors;
 mod handlers;
 mod models;
+mod read_gate;
 mod routes;
+mod sequence;
 mod state;
+mod write_lanes;
 
 use agent_db_graph::GraphEngine;
 use std::sync::Arc;
@@ -22,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
-    info!("🚀 Starting EventGraphDB REST API Server");
+    info!("Starting EventGraphDB REST API Server");
 
     // Load configuration
     info!("Initializing GraphEngine with persistent storage...");
@@ -30,19 +33,50 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize GraphEngine
     let engine = GraphEngine::with_config(config).await?;
-    info!("✓ GraphEngine initialized with persistent storage at ./data/eventgraph.redb");
-    info!("  Memory cache: 10,000 items (~20MB)");
-    info!("  Strategy cache: 5,000 items (~15MB)");
-    info!("  Redb cache: 128MB");
+    info!("GraphEngine initialized with persistent storage at ./data/eventgraph.redb");
 
     let engine = Arc::new(engine);
 
     // Start background maintenance loop (memory decay + strategy pruning)
     let _maintenance_handle = engine.start_maintenance_loop();
 
+    // ── Write Lanes ──────────────────────────────────────────────────────
+    let num_lanes = std::env::var("WRITE_LANE_COUNT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| (num_cpus::get() / 2).clamp(2, 8));
+    let lane_capacity = std::env::var("WRITE_LANE_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let write_lanes = Arc::new(write_lanes::WriteLanes::new(
+        engine.clone(),
+        num_lanes,
+        lane_capacity,
+    ));
+    info!(
+        "Write lanes: {} lanes x {} capacity",
+        write_lanes.num_lanes(),
+        lane_capacity
+    );
+
+    // ── Read Gate ────────────────────────────────────────────────────────
+    let read_permits = std::env::var("READ_GATE_PERMITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| num_cpus::get() * 2);
+    let read_gate = Arc::new(read_gate::ReadGate::new(read_permits));
+    info!("Read gate: {} permits", read_permits);
+
+    // ── Sequence Tracker ─────────────────────────────────────────────────
+    let seq_tracker = Arc::new(sequence::SequenceTracker::new());
+
     // Create application state
     let state = state::AppState {
         engine: engine.clone(),
+        write_lanes: write_lanes.clone(),
+        read_gate,
+        seq_tracker,
         started_at: Instant::now(),
     };
 
@@ -54,9 +88,9 @@ async fn main() -> anyhow::Result<()> {
     let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let addr = format!("{}:{}", host, port);
 
-    info!("🌐 Server listening on http://{}", addr);
-    info!("📚 API documentation: http://{}/docs", addr);
-    info!("❤️  Health check: http://{}/api/health", addr);
+    info!("Server listening on http://{}", addr);
+    info!("API documentation: http://{}/docs", addr);
+    info!("Health check: http://{}/api/health", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
@@ -65,10 +99,12 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    // ── Post-shutdown: flush all in-flight work to redb ──
-    info!("🛑 Server stopped accepting connections — flushing engine buffers");
+    // ── Post-shutdown: drain write lanes, then flush engine to redb ──
+    info!("Server stopped accepting connections — draining write lanes");
+    write_lanes.drain().await;
+    info!("Write lanes drained — flushing engine buffers");
     engine.shutdown().await;
-    info!("✅ Graceful shutdown complete");
+    info!("Graceful shutdown complete");
 
     Ok(())
 }

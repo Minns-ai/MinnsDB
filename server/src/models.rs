@@ -368,6 +368,46 @@ pub struct HealthResponse {
     pub node_count: usize,
     pub edge_count: usize,
     pub processing_rate: f64,
+    pub write_lanes: WriteLanesHealth,
+    pub read_gate: ReadGateHealth,
+    pub sequence_tracker: SequenceTrackerHealth,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WriteLanesHealth {
+    pub num_lanes: usize,
+    pub lanes: Vec<LaneHealth>,
+    pub total_submitted: u64,
+    pub total_completed: u64,
+    pub total_rejected: u64,
+    pub write_p50_ms: f64,
+    pub write_p95_ms: f64,
+    pub write_p99_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LaneHealth {
+    pub lane_id: usize,
+    pub depth: u64,
+    pub in_flight: u64,
+    pub completed: u64,
+    pub rejected: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadGateHealth {
+    pub permits_total: usize,
+    pub in_flight: u64,
+    pub completed: u64,
+    pub rejected: u64,
+    pub read_p50_ms: f64,
+    pub read_p95_ms: f64,
+    pub read_p99_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SequenceTrackerHealth {
+    pub tracked_domains: usize,
 }
 
 #[derive(Debug, Serialize)]

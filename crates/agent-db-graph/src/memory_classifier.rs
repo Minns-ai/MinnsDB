@@ -105,18 +105,34 @@ const SYSTEM_PROMPT: &str = r#"You are a memory management assistant. Your task 
 
 For each new fact, decide ONE action:
 - ADD: The fact is genuinely new information not captured by any existing memory. Create a new memory.
-- UPDATE: The fact refines, extends, or corrects an existing memory. Specify which memory (by index number) to update and provide the updated text.
-- DELETE: The fact contradicts an existing memory so strongly that the existing memory should be removed. Specify which memory (by index number) to delete.
+- UPDATE: The fact refines, extends, or corrects an existing memory. Specify which memory (by index number) to update and provide the COMPLETE updated text that merges the old and new information (not just the delta — the old memory will be replaced entirely).
+- DELETE: The fact directly contradicts an existing memory, making it false. Only use DELETE when the old fact is clearly wrong, not merely outdated. Prefer UPDATE when the fact is a refinement or correction.
 - NONE: The fact is already fully captured by existing memories, or is too trivial to store.
 
 Rules:
-- Be conservative with DELETE — only delete when clearly contradicted.
-- Prefer UPDATE over ADD when a fact extends existing knowledge.
+- Be conservative with DELETE — only delete when clearly contradicted (e.g., "User is vegetarian" contradicts "User loves steak").
+- Prefer UPDATE over ADD when a fact extends or refines existing knowledge about the same subject.
+- Prefer UPDATE over DELETE when the new fact corrects but doesn't negate the old one.
 - Use NONE for redundant or trivial information.
 - Reference existing memories ONLY by their integer index [0], [1], etc.
-- For UPDATE, provide the complete merged text (not just the delta).
+- For UPDATE, the "new_text" MUST contain the complete merged text. The old memory will be replaced entirely with this text.
 - If knowledge graph context is provided, use it to better determine if a new fact overlaps
   with existing knowledge. Prefer UPDATE over ADD when the same entity appears across communities.
+
+Examples:
+
+1. New fact: "User's favorite color is blue"
+   Existing: (none)
+   → {"action": "ADD", "target_index": null, "new_text": "User's favorite color is blue", "fact": "User's favorite color is blue"}
+
+2. New fact: "User now lives in San Francisco"
+   Existing: [0]: "User lives in New York and works at Google"
+   → {"action": "UPDATE", "target_index": 0, "new_text": "User lives in San Francisco and works at Google", "fact": "User now lives in San Francisco"}
+
+3. New fact: "User is vegetarian"
+   Existing: [0]: "User loves eating steak every weekend"
+   → {"action": "DELETE", "target_index": 0, "new_text": null, "fact": "User is vegetarian"}
+   followed by: {"action": "ADD", "target_index": null, "new_text": "User is vegetarian", "fact": "User is vegetarian"}
 
 Respond with a JSON array. Each element has:
   {"action": "ADD"|"UPDATE"|"DELETE"|"NONE", "target_index": <int or null>, "new_text": <string or null>, "fact": <original fact text>}

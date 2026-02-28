@@ -5,9 +5,16 @@
 
 use crate::structures::NodeId;
 use crate::{GraphError, GraphResult};
+use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Stem a single English token using the Snowball/Porter algorithm.
+fn stem_english(token: &str) -> String {
+    let en_stemmer = Stemmer::create(Algorithm::English);
+    en_stemmer.stem(token).into_owned()
+}
 
 /// Type of index to create
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,10 +129,10 @@ impl PropertyIndex {
                 self.hash_index.entry(key).or_default().push(node_id);
             },
             IndexType::FullText => {
-                // For full-text, index each word
+                // For full-text, index each word (stemmed)
                 if let serde_json::Value::String(s) = value {
                     for word in s.split_whitespace() {
-                        let word_key = IndexKey::String(word.to_lowercase());
+                        let word_key = IndexKey::String(stem_english(&word.to_lowercase()));
                         self.hash_index.entry(word_key).or_default().push(node_id);
                     }
                 }
@@ -159,7 +166,7 @@ impl PropertyIndex {
             IndexType::FullText => {
                 if let serde_json::Value::String(s) = value {
                     for word in s.split_whitespace() {
-                        let word_key = IndexKey::String(word.to_lowercase());
+                        let word_key = IndexKey::String(stem_english(&word.to_lowercase()));
                         if let Some(nodes) = self.hash_index.get_mut(&word_key) {
                             nodes.retain(|&id| id != node_id);
                             if nodes.is_empty() {
@@ -283,8 +290,11 @@ impl PropertyIndex {
 
         self.stats.query_count += 1;
 
-        // Split query into words and find nodes containing all words (AND query)
-        let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+        // Split query into words, stem, and find nodes containing all words (AND query)
+        let words: Vec<String> = query
+            .split_whitespace()
+            .map(|w| stem_english(&w.to_lowercase()))
+            .collect();
 
         if words.is_empty() {
             return Ok(Vec::new());
@@ -645,14 +655,14 @@ impl Bm25Index {
 
     /// Tokenize text into terms (natural language).
     ///
-    /// Simple tokenization: lowercase, split on whitespace, filter short words
+    /// Lowercase, split on whitespace, filter short words, then stem.
     fn tokenize(text: &str) -> Vec<String> {
         text.to_lowercase()
             .split_whitespace()
             .filter(|s| s.len() > 1) // Filter single-character tokens only
             .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
             .filter(|s| !s.is_empty())
-            .map(String::from)
+            .map(stem_english)
             .collect()
     }
 
@@ -1447,5 +1457,72 @@ mod tests {
     fn test_split_camel_case_single() {
         let parts = split_camel_case("name");
         assert_eq!(parts, vec!["name"]);
+    }
+
+    // ========================================================================
+    // BM25 stemming tests
+    // ========================================================================
+
+    #[test]
+    fn test_bm25_stemming_plurals() {
+        let mut index = Bm25Index::new();
+        index.index_document(1, "I would like to place new order for blue jeans");
+        index.index_document(2, "red shoes on sale");
+
+        // "blue jean" (singular) should match "blue jeans" (plural) via stemming
+        let results = index.search("blue jean", 10);
+        assert!(
+            !results.is_empty(),
+            "Stemmed search 'blue jean' should match 'blue jeans'"
+        );
+        assert_eq!(results[0].0, 1);
+    }
+
+    #[test]
+    fn test_bm25_stemming_verb_forms() {
+        let mut index = Bm25Index::new();
+        index.index_document(1, "the user is running tests");
+        index.index_document(2, "deployment completed successfully");
+
+        // "run" should match "running"
+        let results = index.search("run test", 10);
+        assert!(
+            !results.is_empty(),
+            "Stemmed search 'run test' should match 'running tests'"
+        );
+        assert_eq!(results[0].0, 1);
+    }
+
+    #[test]
+    fn test_fulltext_index_stemming() {
+        let mut index = PropertyIndex::new(
+            "test_idx".to_string(),
+            "description".to_string(),
+            IndexType::FullText,
+        );
+
+        index.insert(1, &json!("blue jeans on sale"));
+        index.insert(2, &json!("red shoes available"));
+
+        // "jean" (singular) should match "jeans" (plural) via stemming
+        let results = index.search_text("jean").unwrap();
+        assert!(
+            results.contains(&1),
+            "FullText stemmed search 'jean' should match 'jeans'"
+        );
+    }
+
+    #[test]
+    fn test_bm25_stemming_does_not_affect_code_tokenizer() {
+        let mut index = Bm25Index::new();
+        // Code tokenizer should NOT stem
+        index.index_document_code(1, "fn getUsers() { return users; }");
+
+        // Code search uses tokenize_code, not stemmed tokenize
+        let results = index.search_code("getUsers", 10);
+        assert!(
+            !results.is_empty(),
+            "Code search should still find exact identifiers"
+        );
     }
 }

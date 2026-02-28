@@ -156,9 +156,11 @@ impl ClaimExtractionQueue {
                 // 3.1 Run NER on the claim text
                 // Since we don't have a direct NER extractor here, we'll use literal matches
                 // from the already extracted context entities as a high-confidence proxy.
+                // Case-insensitive to match entity attachment logic (line ~386).
+                let claim_text_lower = llm_claim.claim_text.to_lowercase();
                 let mut e_claim = HashSet::new();
                 for entity in &all_context_entities {
-                    if llm_claim.claim_text.contains(entity) {
+                    if claim_text_lower.contains(&entity.to_lowercase()) {
                         e_claim.insert(entity.clone());
                     }
                 }
@@ -244,16 +246,21 @@ impl ClaimExtractionQueue {
                     let _distance = 1.0 - similarity;
 
                     // overlap = |E_claim ∩ E_evidence| / max(1, |E_claim|)
-                    let mut e_evidence = HashSet::new();
-                    for ent in &sent.entities {
-                        e_evidence.insert(ent.text.clone());
-                    }
-                    let overlap = jaccard_similarity(&e_claim, &e_evidence);
+                    // Normalize both sides for case-insensitive comparison
+                    let e_claim_norm: HashSet<String> =
+                        e_claim.iter().map(|e| normalize_entity(e)).collect();
+                    let e_evidence_norm: HashSet<String> = sent
+                        .entities
+                        .iter()
+                        .map(|ent| normalize_entity(&ent.text))
+                        .collect();
+                    let overlap = jaccard_similarity(&e_claim_norm, &e_evidence_norm);
 
                     // exact_entity_presence: Check if entities in claim are literally in sentence
+                    let sent_text_lower = sent.text.to_lowercase();
                     let mut missing_entities = Vec::new();
                     for ent in &e_claim {
-                        if !sent.text.contains(ent) {
+                        if !sent_text_lower.contains(&ent.to_lowercase()) {
                             missing_entities.push(ent.clone());
                         }
                     }
@@ -583,7 +590,7 @@ impl Default for ClaimExtractionConfig {
             custom_instructions: None,
             extraction_includes: vec![],
             extraction_excludes: vec![],
-            few_shot_examples: vec![],
+            few_shot_examples: crate::claims::llm_client::default_few_shot_examples(),
         }
     }
 }

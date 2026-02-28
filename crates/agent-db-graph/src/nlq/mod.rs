@@ -153,7 +153,7 @@ impl NlqPipeline {
         &self,
         question: &str,
         graph: &Graph,
-        traversal: &mut GraphTraversal,
+        traversal: &GraphTraversal,
     ) -> GraphResult<NlqResponse> {
         self.execute_with_pagination(question, graph, traversal, &NlqPagination::default())
     }
@@ -166,7 +166,7 @@ impl NlqPipeline {
         &self,
         question: &str,
         graph: &Graph,
-        traversal: &mut GraphTraversal,
+        traversal: &GraphTraversal,
         pagination: &NlqPagination,
     ) -> GraphResult<NlqResponse> {
         self.execute_with_pagination_ext(question, graph, traversal, pagination, None)
@@ -177,7 +177,7 @@ impl NlqPipeline {
         &self,
         question: &str,
         graph: &Graph,
-        traversal: &mut GraphTraversal,
+        traversal: &GraphTraversal,
         pagination: &NlqPagination,
         structured_store: Option<&crate::structured_memory::StructuredMemoryStore>,
     ) -> GraphResult<NlqResponse> {
@@ -200,7 +200,7 @@ impl NlqPipeline {
         &self,
         question: &str,
         graph: &Graph,
-        traversal: &mut GraphTraversal,
+        traversal: &GraphTraversal,
         pagination: &NlqPagination,
         structured_store: Option<&crate::structured_memory::StructuredMemoryStore>,
         intent_override: Option<intent::ClassifiedIntent>,
@@ -410,7 +410,7 @@ impl NlqPipeline {
         question: &str,
         compound: &CompoundQuery,
         graph: &Graph,
-        traversal: &mut GraphTraversal,
+        traversal: &GraphTraversal,
         pagination: &NlqPagination,
         structured_store: Option<&crate::structured_memory::StructuredMemoryStore>,
     ) -> GraphResult<NlqResponse> {
@@ -1188,11 +1188,11 @@ mod tests {
     #[test]
     fn test_end_to_end_pipeline() {
         let graph = build_test_graph();
-        let mut traversal = GraphTraversal::new();
+        let traversal = GraphTraversal::new();
         let pipeline = NlqPipeline::new();
 
         // Test ranking query (no entities needed)
-        let result = pipeline.execute("Most important nodes", &graph, &mut traversal);
+        let result = pipeline.execute("Most important nodes", &graph, &traversal);
         assert!(result.is_ok());
         let resp = result.unwrap();
         assert!(!resp.answer.is_empty());
@@ -1203,11 +1203,11 @@ mod tests {
     #[test]
     fn test_end_to_end_neighbors() {
         let graph = build_test_graph();
-        let mut traversal = GraphTraversal::new();
+        let traversal = GraphTraversal::new();
         let pipeline = NlqPipeline::new();
 
         // "Who does Alice connect to?" — should find Alice, get neighbors
-        let result = pipeline.execute("Who does Alice connect to?", &graph, &mut traversal);
+        let result = pipeline.execute("Who does Alice connect to?", &graph, &traversal);
         // May succeed or fail depending on entity resolution
         // Just verify it doesn't panic
         match result {
@@ -1226,9 +1226,9 @@ mod tests {
     #[test]
     fn test_aggregation_node_count() {
         let graph = build_test_graph();
-        let mut traversal = GraphTraversal::new();
+        let traversal = GraphTraversal::new();
         let pipeline = NlqPipeline::new();
-        let result = pipeline.execute("How many nodes are there?", &graph, &mut traversal);
+        let result = pipeline.execute("How many nodes are there?", &graph, &traversal);
         assert!(result.is_ok());
         let resp = result.unwrap();
         assert!(resp.answer.contains("2") || resp.answer.contains("nodes"));
@@ -1238,7 +1238,7 @@ mod tests {
     #[test]
     fn test_pagination() {
         let graph = build_test_graph();
-        let mut traversal = GraphTraversal::new();
+        let traversal = GraphTraversal::new();
         let pipeline = NlqPipeline::new();
         let pagination = NlqPagination {
             limit: Some(1),
@@ -1247,7 +1247,7 @@ mod tests {
         let result = pipeline.execute_with_pagination(
             "Most important nodes",
             &graph,
-            &mut traversal,
+            &traversal,
             &pagination,
         );
         assert!(result.is_ok());
@@ -1318,9 +1318,9 @@ mod tests {
     #[test]
     fn test_explanation_populated() {
         let graph = build_test_graph();
-        let mut traversal = GraphTraversal::new();
+        let traversal = GraphTraversal::new();
         let pipeline = NlqPipeline::new();
-        let result = pipeline.execute("Most important nodes", &graph, &mut traversal);
+        let result = pipeline.execute("Most important nodes", &graph, &traversal);
         assert!(result.is_ok());
         let resp = result.unwrap();
         assert!(resp

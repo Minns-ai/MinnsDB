@@ -1,22 +1,50 @@
 use super::*;
 
 impl GraphEngine {
-    /// Get engine statistics
-    pub async fn get_engine_stats(&self) -> GraphEngineStats {
-        let stats = self.stats.read().await;
-        GraphEngineStats {
-            total_events_processed: stats.total_events_processed,
-            total_nodes_created: stats.total_nodes_created,
-            total_relationships_created: stats.total_relationships_created,
-            total_patterns_detected: stats.total_patterns_detected,
-            total_queries_executed: stats.total_queries_executed,
-            average_processing_time_ms: stats.average_processing_time_ms,
-            cache_hit_rate: stats.cache_hit_rate,
-            last_operation_time: stats.last_operation_time,
-            total_episodes_detected: stats.total_episodes_detected,
-            total_memories_formed: stats.total_memories_formed,
-            total_strategies_extracted: stats.total_strategies_extracted,
-            total_reinforcements_applied: stats.total_reinforcements_applied,
+    /// Get a point-in-time snapshot of engine statistics.
+    ///
+    /// Atomic counters are loaded with `Relaxed` ordering (sufficient for
+    /// monotonic counters). The derived stats are copied under a brief
+    /// `parking_lot::Mutex` lock.
+    pub async fn get_engine_stats(&self) -> GraphEngineStatsSnapshot {
+        let derived = self.stats.derived.lock();
+        GraphEngineStatsSnapshot {
+            total_events_processed: self
+                .stats
+                .total_events_processed
+                .load(AtomicOrdering::Relaxed),
+            total_nodes_created: self.stats.total_nodes_created.load(AtomicOrdering::Relaxed),
+            total_relationships_created: self
+                .stats
+                .total_relationships_created
+                .load(AtomicOrdering::Relaxed),
+            total_patterns_detected: self
+                .stats
+                .total_patterns_detected
+                .load(AtomicOrdering::Relaxed),
+            total_queries_executed: self
+                .stats
+                .total_queries_executed
+                .load(AtomicOrdering::Relaxed),
+            average_processing_time_ms: derived.average_processing_time_ms,
+            cache_hit_rate: derived.cache_hit_rate,
+            last_operation_time: derived.last_operation_time,
+            total_episodes_detected: self
+                .stats
+                .total_episodes_detected
+                .load(AtomicOrdering::Relaxed),
+            total_memories_formed: self
+                .stats
+                .total_memories_formed
+                .load(AtomicOrdering::Relaxed),
+            total_strategies_extracted: self
+                .stats
+                .total_strategies_extracted
+                .load(AtomicOrdering::Relaxed),
+            total_reinforcements_applied: self
+                .stats
+                .total_reinforcements_applied
+                .load(AtomicOrdering::Relaxed),
         }
     }
 
@@ -98,11 +126,10 @@ impl GraphEngine {
         // Get patterns
         let patterns = self.get_patterns().await;
 
-        // Update statistics
-        {
-            let mut stats = self.stats.write().await;
-            stats.total_patterns_detected += patterns.len() as u64;
-        }
+        // Update statistics (lock-free atomic increment)
+        self.stats
+            .total_patterns_detected
+            .fetch_add(patterns.len() as u64, AtomicOrdering::Relaxed);
 
         Ok(patterns)
     }
@@ -143,21 +170,39 @@ pub struct GraphHealthMetrics {
     pub is_healthy: bool,
 }
 
+/// Point-in-time snapshot of engine statistics (value types, cloneable).
+///
+/// Returned by [`GraphEngine::get_engine_stats`] and used in serialisation /
+/// health-check paths where plain value types are more convenient than atomics.
+#[derive(Debug, Clone)]
+pub struct GraphEngineStatsSnapshot {
+    pub total_events_processed: u64,
+    pub total_nodes_created: u64,
+    pub total_relationships_created: u64,
+    pub total_patterns_detected: u64,
+    pub total_queries_executed: u64,
+    pub average_processing_time_ms: f64,
+    pub cache_hit_rate: f32,
+    pub last_operation_time: std::time::Instant,
+    pub total_episodes_detected: u64,
+    pub total_memories_formed: u64,
+    pub total_strategies_extracted: u64,
+    pub total_reinforcements_applied: u64,
+}
+
 impl GraphEngineStats {
     fn new() -> Self {
         Self {
-            total_events_processed: 0,
-            total_nodes_created: 0,
-            total_relationships_created: 0,
-            total_patterns_detected: 0,
-            total_queries_executed: 0,
-            average_processing_time_ms: 0.0,
-            cache_hit_rate: 0.0,
-            last_operation_time: std::time::Instant::now(),
-            total_episodes_detected: 0,
-            total_memories_formed: 0,
-            total_strategies_extracted: 0,
-            total_reinforcements_applied: 0,
+            total_events_processed: AtomicU64::new(0),
+            total_nodes_created: AtomicU64::new(0),
+            total_relationships_created: AtomicU64::new(0),
+            total_patterns_detected: AtomicU64::new(0),
+            total_queries_executed: AtomicU64::new(0),
+            total_episodes_detected: AtomicU64::new(0),
+            total_memories_formed: AtomicU64::new(0),
+            total_strategies_extracted: AtomicU64::new(0),
+            total_reinforcements_applied: AtomicU64::new(0),
+            derived: parking_lot::Mutex::new(DerivedStats::default()),
         }
     }
 }

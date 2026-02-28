@@ -6,9 +6,11 @@ use crate::models::{
     StructuredMemoryRequest, TreeAddChildRequest,
 };
 use crate::state::AppState;
+use crate::write_lanes::{WriteError, WriteJob};
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde_json::json;
+use std::sync::Arc;
 use tracing::info;
 
 /// POST /api/structured-memory — upsert a structured memory
@@ -17,9 +19,24 @@ pub async fn upsert_structured_memory(
     Json(request): Json<StructuredMemoryRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     info!("Upsert structured memory: key={}", request.key);
-    let mut store = state.engine.structured_memory().write().await;
-    store.upsert(&request.key, request.template);
-    Ok(Json(json!({ "success": true, "key": request.key })))
+
+    let key = request.key.clone();
+    let routing_key = hash_string_key(&key);
+    let result = state
+        .write_lanes
+        .submit_and_await(routing_key, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let mut store = engine.structured_memory().write().await;
+                    store.upsert(&request.key, request.template);
+                    Ok(json!({ "success": true, "key": request.key }))
+                })
+            }),
+            result_tx: tx,
+        })
+        .await?;
+
+    Ok(Json(result))
 }
 
 /// GET /api/structured-memory/:key — get by key
@@ -27,6 +44,12 @@ pub async fn get_structured_memory(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let store = state.engine.structured_memory().read().await;
     match store.get(&key) {
         Some(template) => Ok(Json(json!({
@@ -45,6 +68,12 @@ pub async fn list_structured_memory_keys(
     State(state): State<AppState>,
     Query(query): Query<StructuredMemoryKeyQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let store = state.engine.structured_memory().read().await;
     let prefix = query.prefix.as_deref().unwrap_or("");
     let keys: Vec<&str> = store.list_keys(prefix);
@@ -56,13 +85,28 @@ pub async fn delete_structured_memory(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut store = state.engine.structured_memory().write().await;
-    match store.remove(&key) {
-        Some(_) => Ok(Json(json!({ "success": true, "key": key }))),
-        None => Err(ApiError::NotFound(format!(
-            "Structured memory not found: {}",
-            key
-        ))),
+    let routing_key = hash_string_key(&key);
+    let key_clone = key.clone();
+    let result = state
+        .write_lanes
+        .submit_and_await(routing_key, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let mut store = engine.structured_memory().write().await;
+                    match store.remove(&key_clone) {
+                        Some(_) => Ok(json!({ "success": true, "key": key_clone })),
+                        None => Err(format!("Structured memory not found: {}", key_clone)),
+                    }
+                })
+            }),
+            result_tx: tx,
+        })
+        .await;
+
+    match result {
+        Ok(v) => Ok(Json(v)),
+        Err(WriteError::OperationFailed(e)) => Err(ApiError::NotFound(e)),
+        Err(e) => Err(ApiError::from(e)),
     }
 }
 
@@ -78,19 +122,37 @@ pub async fn ledger_append(
             request.amount
         )));
     }
-    let mut store = state.engine.structured_memory().write().await;
-    let entry = agent_db_graph::LedgerEntry {
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64,
-        amount: request.amount,
-        description: request.description,
-        direction: request.direction,
-    };
-    match store.ledger_append(&key, entry) {
-        Ok(balance) => Ok(Json(json!({ "success": true, "balance": balance }))),
-        Err(e) => Err(ApiError::BadRequest(e)),
+    let routing_key = hash_string_key(&key);
+    let key_clone = key.clone();
+    let result = state
+        .write_lanes
+        .submit_and_await(routing_key, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let mut store = engine.structured_memory().write().await;
+                    let entry = agent_db_graph::LedgerEntry {
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as u64,
+                        amount: request.amount,
+                        description: request.description,
+                        direction: request.direction,
+                    };
+                    match store.ledger_append(&key_clone, entry) {
+                        Ok(balance) => Ok(json!({ "success": true, "balance": balance })),
+                        Err(e) => Err(e),
+                    }
+                })
+            }),
+            result_tx: tx,
+        })
+        .await;
+
+    match result {
+        Ok(v) => Ok(Json(v)),
+        Err(WriteError::OperationFailed(e)) => Err(ApiError::BadRequest(e)),
+        Err(e) => Err(ApiError::from(e)),
     }
 }
 
@@ -99,6 +161,12 @@ pub async fn ledger_balance(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let store = state.engine.structured_memory().read().await;
     match store.ledger_balance(&key) {
         Some(balance) => Ok(Json(json!({ "key": key, "balance": balance }))),
@@ -115,16 +183,37 @@ pub async fn state_transition(
     Path(key): Path<String>,
     Json(request): Json<StateTransitionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    let mut store = state.engine.structured_memory().write().await;
-    match store.state_transition(&key, &request.new_state, &request.trigger, timestamp) {
-        Ok(()) => Ok(Json(
-            json!({ "success": true, "new_state": request.new_state }),
-        )),
-        Err(e) => Err(ApiError::BadRequest(e)),
+    let routing_key = hash_string_key(&key);
+    let key_clone = key.clone();
+    let result = state
+        .write_lanes
+        .submit_and_await(routing_key, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64;
+                    let mut store = engine.structured_memory().write().await;
+                    match store.state_transition(
+                        &key_clone,
+                        &request.new_state,
+                        &request.trigger,
+                        timestamp,
+                    ) {
+                        Ok(()) => Ok(json!({ "success": true, "new_state": request.new_state })),
+                        Err(e) => Err(e),
+                    }
+                })
+            }),
+            result_tx: tx,
+        })
+        .await;
+
+    match result {
+        Ok(v) => Ok(Json(v)),
+        Err(WriteError::OperationFailed(e)) => Err(ApiError::BadRequest(e)),
+        Err(e) => Err(ApiError::from(e)),
     }
 }
 
@@ -133,6 +222,12 @@ pub async fn state_current(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let store = state.engine.structured_memory().read().await;
     match store.state_current(&key) {
         Some(current) => Ok(Json(json!({ "key": key, "current_state": current }))),
@@ -149,10 +244,33 @@ pub async fn preference_update(
     Path(key): Path<String>,
     Json(request): Json<PreferenceUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut store = state.engine.structured_memory().write().await;
-    match store.preference_update(&key, &request.item, request.rank, request.score) {
-        Ok(()) => Ok(Json(json!({ "success": true }))),
-        Err(e) => Err(ApiError::BadRequest(e)),
+    let routing_key = hash_string_key(&key);
+    let key_clone = key.clone();
+    let result = state
+        .write_lanes
+        .submit_and_await(routing_key, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let mut store = engine.structured_memory().write().await;
+                    match store.preference_update(
+                        &key_clone,
+                        &request.item,
+                        request.rank,
+                        request.score,
+                    ) {
+                        Ok(()) => Ok(json!({ "success": true })),
+                        Err(e) => Err(e),
+                    }
+                })
+            }),
+            result_tx: tx,
+        })
+        .await;
+
+    match result {
+        Ok(v) => Ok(Json(v)),
+        Err(WriteError::OperationFailed(e)) => Err(ApiError::BadRequest(e)),
+        Err(e) => Err(ApiError::from(e)),
     }
 }
 
@@ -162,9 +280,35 @@ pub async fn tree_add_child(
     Path(key): Path<String>,
     Json(request): Json<TreeAddChildRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut store = state.engine.structured_memory().write().await;
-    match store.tree_add_child(&key, &request.parent, &request.child) {
-        Ok(()) => Ok(Json(json!({ "success": true }))),
-        Err(e) => Err(ApiError::BadRequest(e)),
+    let routing_key = hash_string_key(&key);
+    let key_clone = key.clone();
+    let result = state
+        .write_lanes
+        .submit_and_await(routing_key, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let mut store = engine.structured_memory().write().await;
+                    match store.tree_add_child(&key_clone, &request.parent, &request.child) {
+                        Ok(()) => Ok(json!({ "success": true })),
+                        Err(e) => Err(e),
+                    }
+                })
+            }),
+            result_tx: tx,
+        })
+        .await;
+
+    match result {
+        Ok(v) => Ok(Json(v)),
+        Err(WriteError::OperationFailed(e)) => Err(ApiError::BadRequest(e)),
+        Err(e) => Err(ApiError::from(e)),
     }
+}
+
+/// Hash a string key to a u64 for write lane routing.
+fn hash_string_key(key: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
 }

@@ -61,7 +61,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "crossbeam",
- "dashmap",
+ "dashmap 5.5.3",
  "indexmap 1.9.3",
  "instant-distance",
  "lru",
@@ -71,6 +71,7 @@ dependencies = [
  "redb",
  "reqwest",
  "rmp-serde",
+ "rust-stemmers",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -521,6 +522,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -601,7 +616,10 @@ dependencies = [
  "axum-macros",
  "bytes",
  "chrono",
+ "dashmap 6.1.0",
  "futures",
+ "num_cpus",
+ "parking_lot",
  "serde",
  "serde_json",
  "serde_with",
@@ -1642,6 +1660,16 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "rust-stemmers"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46a2036019fdb888131db7a4c847a1063a7493f971ed94ea82c67eada63ca54"
+dependencies = [
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]

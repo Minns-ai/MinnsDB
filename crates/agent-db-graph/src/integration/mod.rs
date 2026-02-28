@@ -26,8 +26,8 @@ mod stats;
 mod world_model;
 
 pub use stats::{
-    ClaimMetrics, GraphHealthMetrics, GraphMetricsSummary, MemoryMetrics, StoreMetrics,
-    StrategyMetrics,
+    ClaimMetrics, GraphEngineStatsSnapshot, GraphHealthMetrics, GraphMetricsSummary, MemoryMetrics,
+    StoreMetrics, StrategyMetrics,
 };
 
 use crate::algorithms::{
@@ -64,6 +64,7 @@ use agent_db_world_model::{EbmWorldModel, WorldModelConfig, WorldModelCritic};
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
@@ -379,7 +380,7 @@ pub struct GraphEngine {
     pub(crate) inference: Arc<RwLock<GraphInference>>,
 
     /// Graph traversal engine
-    pub(crate) traversal: Arc<RwLock<GraphTraversal>>,
+    pub(crate) traversal: Arc<GraphTraversal>,
 
     /// Event ordering engine for handling concurrent events
     pub(crate) event_ordering: Arc<EventOrderingEngine>,
@@ -427,14 +428,14 @@ pub struct GraphEngine {
     /// Configuration
     pub config: GraphEngineConfig,
 
-    /// Operation statistics
-    pub(crate) stats: Arc<RwLock<GraphEngineStats>>,
+    /// Operation statistics (lock-free atomic counters + sync Mutex for derived)
+    pub(crate) stats: Arc<GraphEngineStats>,
 
     /// Event processing buffer
     pub(crate) event_buffer: Arc<RwLock<Vec<Event>>>,
 
-    /// Last persistence checkpoint
-    pub(crate) last_persistence: Arc<RwLock<u64>>,
+    /// Last persistence checkpoint (atomic counter)
+    pub(crate) last_persistence: Arc<AtomicU64>,
 
     // ========== NEW: Advanced Graph Features ==========
     /// Index manager for fast property queries
@@ -492,8 +493,8 @@ pub struct GraphEngine {
     /// Refinement engine for LLM-enhanced summaries
     pub(crate) refinement_engine: Option<Arc<crate::refinement::RefinementEngine>>,
 
-    /// Counter for triggering periodic consolidation
-    pub(crate) episodes_since_consolidation: Arc<RwLock<u64>>,
+    /// Counter for triggering periodic consolidation (atomic counter)
+    pub(crate) episodes_since_consolidation: Arc<AtomicU64>,
 
     // ========== World Model (Shadow Mode) ==========
     /// Energy-based world model for predictive coding (optional, shadow mode)
@@ -559,23 +560,93 @@ pub struct GraphEngine {
     pub(crate) next_execution_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// Statistics for the graph engine
-#[derive(Debug)]
+/// Statistics for the graph engine (lock-free atomic counters).
+///
+/// Atomic counters allow concurrent bump operations from multiple async tasks
+/// without acquiring an async `RwLock`. Non-atomic derived stats (f64/f32/Instant)
+/// live behind a brief `parking_lot::Mutex` in [`DerivedStats`].
 pub struct GraphEngineStats {
-    pub total_events_processed: u64,
-    pub total_nodes_created: u64,
-    pub total_relationships_created: u64,
-    pub total_patterns_detected: u64,
-    pub total_queries_executed: u64,
+    pub total_events_processed: AtomicU64,
+    pub total_nodes_created: AtomicU64,
+    pub total_relationships_created: AtomicU64,
+    pub total_patterns_detected: AtomicU64,
+    pub total_queries_executed: AtomicU64,
+
+    // Self-evolution stats
+    pub total_episodes_detected: AtomicU64,
+    pub total_memories_formed: AtomicU64,
+    pub total_strategies_extracted: AtomicU64,
+    pub total_reinforcements_applied: AtomicU64,
+
+    /// Derived stats that need f64/f32/Instant -- brief sync lock
+    pub derived: parking_lot::Mutex<DerivedStats>,
+}
+
+/// Non-atomic derived statistics (held behind a brief sync Mutex).
+#[derive(Debug, Clone)]
+pub struct DerivedStats {
     pub average_processing_time_ms: f64,
     pub cache_hit_rate: f32,
     pub last_operation_time: std::time::Instant,
+}
 
-    // Self-evolution stats
-    pub total_episodes_detected: u64,
-    pub total_memories_formed: u64,
-    pub total_strategies_extracted: u64,
-    pub total_reinforcements_applied: u64,
+impl Default for DerivedStats {
+    fn default() -> Self {
+        Self {
+            average_processing_time_ms: 0.0,
+            cache_hit_rate: 0.0,
+            last_operation_time: std::time::Instant::now(),
+        }
+    }
+}
+
+impl std::fmt::Debug for GraphEngineStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphEngineStats")
+            .field(
+                "total_events_processed",
+                &self.total_events_processed.load(AtomicOrdering::Relaxed),
+            )
+            .field(
+                "total_nodes_created",
+                &self.total_nodes_created.load(AtomicOrdering::Relaxed),
+            )
+            .field(
+                "total_relationships_created",
+                &self
+                    .total_relationships_created
+                    .load(AtomicOrdering::Relaxed),
+            )
+            .field(
+                "total_patterns_detected",
+                &self.total_patterns_detected.load(AtomicOrdering::Relaxed),
+            )
+            .field(
+                "total_queries_executed",
+                &self.total_queries_executed.load(AtomicOrdering::Relaxed),
+            )
+            .field(
+                "total_episodes_detected",
+                &self.total_episodes_detected.load(AtomicOrdering::Relaxed),
+            )
+            .field(
+                "total_memories_formed",
+                &self.total_memories_formed.load(AtomicOrdering::Relaxed),
+            )
+            .field(
+                "total_strategies_extracted",
+                &self
+                    .total_strategies_extracted
+                    .load(AtomicOrdering::Relaxed),
+            )
+            .field(
+                "total_reinforcements_applied",
+                &self
+                    .total_reinforcements_applied
+                    .load(AtomicOrdering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 impl Default for GraphEngineConfig {
@@ -661,7 +732,7 @@ impl Default for GraphEngineConfig {
             custom_extraction_instructions: None,
             extraction_includes: vec![],
             extraction_excludes: vec![],
-            extraction_few_shot_examples: vec![],
+            extraction_few_shot_examples: crate::claims::llm_client::default_few_shot_examples(),
             // Memory TTL (disabled by default)
             default_memory_ttl_secs: None,
             // Community summaries (disabled by default)

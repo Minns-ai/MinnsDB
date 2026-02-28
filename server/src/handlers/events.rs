@@ -6,6 +6,7 @@ use crate::models::{
     StateChangeEventRequest, TransactionEventRequest,
 };
 use crate::state::AppState;
+use crate::write_lanes::WriteJob;
 use agent_db_events::{
     core::{ActionOutcome, EventType, MetadataValue},
     Event,
@@ -50,30 +51,38 @@ pub async fn process_event(
         event.context.fingerprint = event.context.compute_fingerprint();
     }
 
+    let session_id = event.session_id;
     let result = state
-        .engine
-        .process_event_with_options(event, Some(payload.enable_semantic))
-        .await
-        .map_err(|e| {
-            info!("Error processing event: {:?}", e);
-            ApiError::Internal(e.to_string())
-        })?;
+        .write_lanes
+        .submit_and_await(session_id, |tx| WriteJob::ProcessEvent {
+            event: Box::new(event),
+            enable_semantic: Some(payload.enable_semantic),
+            result_tx: tx,
+        })
+        .await?;
+
+    let nodes_created = result["nodes_created"].as_u64().unwrap_or(0) as usize;
+    let patterns_detected = result["patterns_detected"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or_else(|| result["patterns_detected"].as_u64().unwrap_or(0) as usize);
+    let processing_time_ms = result["processing_time_ms"].as_u64().unwrap_or(0);
 
     info!(
         "Processed event {}: nodes_created={} patterns_detected={} processing_time_ms={} total_handler_ms={}",
         event_id,
-        result.nodes_created.len(),
-        result.patterns_detected.len(),
-        result.processing_time_ms,
+        nodes_created,
+        patterns_detected,
+        processing_time_ms,
         start.elapsed().as_millis()
     );
 
     Ok(Json(ProcessEventResponse {
         success: true,
         event_id,
-        nodes_created: result.nodes_created.len(),
-        patterns_detected: result.patterns_detected.len(),
-        processing_time_ms: result.processing_time_ms,
+        nodes_created,
+        patterns_detected,
+        processing_time_ms,
     }))
 }
 
@@ -117,34 +126,42 @@ pub async fn process_simple_event(
         is_code: false,
     };
 
-    // Process the event through the standard pipeline
+    // Process the event through the write lane pipeline
     let start = std::time::Instant::now();
     let event_id = event.id;
+    let session_id = event.session_id;
 
     let result = state
-        .engine
-        .process_event_with_options(event, Some(payload.enable_semantic))
-        .await
-        .map_err(|e| {
-            info!("Error processing simple event: {:?}", e);
-            ApiError::Internal(e.to_string())
-        })?;
+        .write_lanes
+        .submit_and_await(session_id, |tx| WriteJob::ProcessEvent {
+            event: Box::new(event),
+            enable_semantic: Some(payload.enable_semantic),
+            result_tx: tx,
+        })
+        .await?;
+
+    let nodes_created = result["nodes_created"].as_u64().unwrap_or(0) as usize;
+    let patterns_detected = result["patterns_detected"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or_else(|| result["patterns_detected"].as_u64().unwrap_or(0) as usize);
+    let processing_time_ms = result["processing_time_ms"].as_u64().unwrap_or(0);
 
     info!(
         "Processed simple event {}: nodes_created={} patterns_detected={} processing_time_ms={} total_handler_ms={}",
         event_id,
-        result.nodes_created.len(),
-        result.patterns_detected.len(),
-        result.processing_time_ms,
+        nodes_created,
+        patterns_detected,
+        processing_time_ms,
         start.elapsed().as_millis()
     );
 
     Ok(Json(ProcessEventResponse {
         success: true,
         event_id,
-        nodes_created: result.nodes_created.len(),
-        patterns_detected: result.patterns_detected.len(),
-        processing_time_ms: result.processing_time_ms,
+        nodes_created,
+        patterns_detected,
+        processing_time_ms,
     }))
 }
 
@@ -153,6 +170,12 @@ pub async fn get_events(
     State(state): State<AppState>,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<Event>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Getting recent events");
     let events = state.engine.get_recent_events(pagination.limit).await;
     Ok(Json(events))
@@ -163,6 +186,12 @@ pub async fn get_episodes(
     State(state): State<AppState>,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<Vec<crate::models::EpisodeResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Getting episodes");
 
     let episodes = state.engine.get_completed_episodes().await;
@@ -249,26 +278,37 @@ pub async fn process_state_change_event(
 
     let start = std::time::Instant::now();
     let event_id = event.id;
+    let session_id = event.session_id;
 
     let result = state
-        .engine
-        .process_event_with_options(event, Some(payload.enable_semantic))
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .write_lanes
+        .submit_and_await(session_id, |tx| WriteJob::ProcessEvent {
+            event: Box::new(event),
+            enable_semantic: Some(payload.enable_semantic),
+            result_tx: tx,
+        })
+        .await?;
+
+    let nodes_created = result["nodes_created"].as_u64().unwrap_or(0) as usize;
+    let patterns_detected = result["patterns_detected"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or_else(|| result["patterns_detected"].as_u64().unwrap_or(0) as usize);
+    let processing_time_ms = result["processing_time_ms"].as_u64().unwrap_or(0);
 
     info!(
         "Processed state-change event {}: nodes_created={} total_handler_ms={}",
         event_id,
-        result.nodes_created.len(),
+        nodes_created,
         start.elapsed().as_millis()
     );
 
     Ok(Json(ProcessEventResponse {
         success: true,
         event_id,
-        nodes_created: result.nodes_created.len(),
-        patterns_detected: result.patterns_detected.len(),
-        processing_time_ms: result.processing_time_ms,
+        nodes_created,
+        patterns_detected,
+        processing_time_ms,
     }))
 }
 
@@ -341,25 +381,36 @@ pub async fn process_transaction_event(
 
     let start = std::time::Instant::now();
     let event_id = event.id;
+    let session_id = event.session_id;
 
     let result = state
-        .engine
-        .process_event_with_options(event, Some(payload.enable_semantic))
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .write_lanes
+        .submit_and_await(session_id, |tx| WriteJob::ProcessEvent {
+            event: Box::new(event),
+            enable_semantic: Some(payload.enable_semantic),
+            result_tx: tx,
+        })
+        .await?;
+
+    let nodes_created = result["nodes_created"].as_u64().unwrap_or(0) as usize;
+    let patterns_detected = result["patterns_detected"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or_else(|| result["patterns_detected"].as_u64().unwrap_or(0) as usize);
+    let processing_time_ms = result["processing_time_ms"].as_u64().unwrap_or(0);
 
     info!(
         "Processed transaction event {}: nodes_created={} total_handler_ms={}",
         event_id,
-        result.nodes_created.len(),
+        nodes_created,
         start.elapsed().as_millis()
     );
 
     Ok(Json(ProcessEventResponse {
         success: true,
         event_id,
-        nodes_created: result.nodes_created.len(),
-        patterns_detected: result.patterns_detected.len(),
-        processing_time_ms: result.processing_time_ms,
+        nodes_created,
+        patterns_detected,
+        processing_time_ms,
     }))
 }

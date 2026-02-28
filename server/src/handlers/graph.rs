@@ -6,6 +6,7 @@ use crate::models::{
     GraphResponse, StatsResponse,
 };
 use crate::state::AppState;
+use crate::write_lanes::WriteJob;
 use axum::{
     extract::{Query, State},
     Json,
@@ -17,6 +18,12 @@ pub async fn get_graph(
     State(state): State<AppState>,
     Query(query): Query<GraphQuery>,
 ) -> Result<Json<GraphResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Getting graph structure");
 
     let graph_data = state
@@ -57,6 +64,12 @@ pub async fn get_graph_for_context(
     State(state): State<AppState>,
     Query(query): Query<GraphContextQuery>,
 ) -> Result<Json<GraphResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!(
         "Getting graph structure for context: {}",
         query.context_hash
@@ -106,11 +119,13 @@ pub async fn persist_graph(
 ) -> Result<Json<GraphPersistResponse>, ApiError> {
     info!("Force-persisting graph state to disk");
 
-    let (nodes_persisted, edges_persisted) = state
-        .engine
-        .persist_graph_state()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Graph persistence failed: {}", e)))?;
+    let result = state
+        .write_lanes
+        .submit_and_await(0, |tx| WriteJob::PersistGraph { result_tx: tx })
+        .await?;
+
+    let nodes_persisted = result["nodes_persisted"].as_u64().unwrap_or(0) as usize;
+    let edges_persisted = result["edges_persisted"].as_u64().unwrap_or(0) as usize;
 
     Ok(Json(GraphPersistResponse {
         success: true,
@@ -121,6 +136,12 @@ pub async fn persist_graph(
 
 // GET /api/stats - Get system statistics
 pub async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Getting system statistics");
 
     let stats = state.engine.get_engine_stats().await;

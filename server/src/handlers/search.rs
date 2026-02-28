@@ -12,6 +12,12 @@ pub async fn search(
     State(state): State<AppState>,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!(
         "Search request: query='{}' mode={:?} limit={}",
         request.query, request.mode, request.limit

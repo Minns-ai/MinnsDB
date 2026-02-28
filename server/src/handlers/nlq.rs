@@ -11,6 +11,12 @@ pub async fn nlq_query(
     State(state): State<AppState>,
     Json(request): Json<NlqRequest>,
 ) -> Result<Json<NlqResponseBody>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("NLQ query: '{}'", request.question);
 
     let pagination = agent_db_graph::nlq::NlqPagination {

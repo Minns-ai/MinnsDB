@@ -38,3 +38,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Time
 chrono = "0.4"
 axum-macros = "0.5.0"
+
+# Concurrency
+parking_lot = "0.12"
+dashmap = "6"
+num_cpus = "1"

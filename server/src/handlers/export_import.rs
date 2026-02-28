@@ -2,6 +2,7 @@
 
 use crate::errors::ApiError;
 use crate::state::AppState;
+use crate::write_lanes::WriteJob;
 use agent_db_graph::ImportMode;
 use axum::{
     body::Body,
@@ -14,6 +15,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
@@ -100,6 +102,12 @@ impl Drop for ChannelWriter {
 /// Export all persisted state as a streaming binary v2 response.
 /// Content-Type: application/octet-stream
 pub async fn export_handler(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Starting streaming database export");
 
     // Step 1: Flush caches (async)
@@ -186,68 +194,71 @@ pub async fn import_handler(
     info!("Starting streaming database import: mode={}", query.mode);
     let start = std::time::Instant::now();
 
-    // Create a duplex pipe: async writer -> sync reader
-    let (duplex_writer, duplex_reader) = tokio::io::duplex(256 * 1024);
-
-    // Spawn async task to pump body chunks into the pipe
-    let pump_handle = tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        let mut writer = duplex_writer;
-        let mut stream = body.into_data_stream();
-
-        while let Some(chunk_result) = stream.next().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    if let Err(e) = writer.write_all(&chunk).await {
-                        warn!("Import pump write error: {}", e);
-                        return Err(e);
-                    }
-                },
-                Err(e) => {
-                    warn!("Import pump body read error: {}", e);
-                    return Err(std::io::Error::other(e.to_string()));
-                },
-            }
+    // Collect the request body into memory before submitting to write lane.
+    // This avoids lifetime issues with the streaming body inside the closure.
+    let mut body_bytes = Vec::new();
+    let mut stream = body.into_data_stream();
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => body_bytes.extend_from_slice(&chunk),
+            Err(e) => {
+                return Err(ApiError::Internal(format!(
+                    "Failed to read import body: {}",
+                    e
+                )));
+            },
         }
-        // Flush and close the writer to signal EOF to the reader
-        writer.shutdown().await?;
-        Ok(())
-    });
+    }
 
-    // Spawn blocking task for sync import
-    let engine = state.engine.clone();
-    let import_result = tokio::task::spawn_blocking(move || {
-        let sync_reader = tokio_util::io::SyncIoBridge::new(duplex_reader);
-        engine.import_sync(sync_reader, mode)
-    })
-    .await
-    .map_err(|e| ApiError::Internal(format!("Import task panicked: {}", e)))?
-    .map_err(|e| ApiError::Internal(format!("Import failed: {}", e)))?;
+    let mode_str = query.mode.clone();
+    let result = state
+        .write_lanes
+        .submit_and_await(0, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    // Run sync import on a blocking thread
+                    let engine_clone = engine.clone();
+                    let import_result = tokio::task::spawn_blocking(move || {
+                        let cursor = std::io::Cursor::new(body_bytes);
+                        engine_clone.import_sync(cursor, mode)
+                    })
+                    .await
+                    .map_err(|e| format!("Import task panicked: {}", e))?
+                    .map_err(|e| format!("Import failed: {}", e))?;
 
-    // Wait for pump to finish (it should already be done or will finish quickly)
-    let _ = pump_handle.await;
+                    // Finalize: reinitialize in-memory stores
+                    engine
+                        .import_finalize()
+                        .await
+                        .map_err(|e| format!("Import finalize failed: {}", e))?;
 
-    // Finalize: reinitialize in-memory stores (async)
-    state
-        .engine
-        .import_finalize()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Import finalize failed: {}", e)))?;
+                    Ok(serde_json::json!({
+                        "memories_imported": import_result.memories_imported,
+                        "strategies_imported": import_result.strategies_imported,
+                        "graph_nodes_imported": import_result.graph_nodes_imported,
+                        "graph_edges_imported": import_result.graph_edges_imported,
+                        "total_records": import_result.total_records,
+                    }))
+                })
+            }),
+            result_tx: tx,
+        })
+        .await?;
 
     info!(
         "Import completed: {} records in {}ms (mode={})",
-        import_result.total_records,
+        result["total_records"].as_u64().unwrap_or(0),
         start.elapsed().as_millis(),
-        query.mode
+        mode_str
     );
 
     Ok(Json(ImportResponse {
         success: true,
-        memories_imported: import_result.memories_imported,
-        strategies_imported: import_result.strategies_imported,
-        graph_nodes_imported: import_result.graph_nodes_imported,
-        graph_edges_imported: import_result.graph_edges_imported,
-        total_records: import_result.total_records,
-        mode: query.mode,
+        memories_imported: result["memories_imported"].as_u64().unwrap_or(0),
+        strategies_imported: result["strategies_imported"].as_u64().unwrap_or(0),
+        graph_nodes_imported: result["graph_nodes_imported"].as_u64().unwrap_or(0),
+        graph_edges_imported: result["graph_edges_imported"].as_u64().unwrap_or(0),
+        total_records: result["total_records"].as_u64().unwrap_or(0),
+        mode: mode_str,
     }))
 }

@@ -232,10 +232,32 @@ const COMPACTION_SYSTEM_PROMPT: &str = r#"You are an information extraction syst
      "overall_summary", "takeaway" }
 
 Rules:
-- Extract facts that are NOT obvious from individual messages (cross-message inferences)
+- Look for cross-message inferences: facts that only become apparent when combining information from multiple messages (e.g., user says "I live in NYC" in one message and asks about "nearby restaurants" later → user wants restaurants in NYC)
+- Detect implicit goals from questions: if the user asks "How do I deploy to AWS?", the implicit goal is "Deploy application to AWS"
+- Detect commercial/purchase intent: phrases like "I want to order", "I need to buy", "place an order for" indicate purchase goals
 - Focus on relationships, preferences, states, and implicit knowledge
-- For goals, look for intent/desire/objective expressions
-- Output ONLY valid JSON"#;
+- For goals, look for intent/desire/objective expressions including "I would like to", "I need to", "Can you help me"
+- Output ONLY valid JSON
+
+Example output:
+{
+  "facts": [
+    {"statement": "User lives in New York", "subject": "User", "predicate": "lives_in", "object": "New York", "confidence": 0.9}
+  ],
+  "goals": [
+    {"description": "Order blue jeans online", "status": "active", "owner": "user"}
+  ],
+  "procedural_summary": {
+    "objective": "Set up development environment",
+    "progress_status": "completed",
+    "steps": [
+      {"step_number": 1, "action": "Install Node.js", "result": "Installed v18.0", "outcome": "success"},
+      {"step_number": 2, "action": "Configure ESLint", "result": "Config file created", "outcome": "success"}
+    ],
+    "overall_summary": "Successfully set up dev environment with Node.js and ESLint",
+    "takeaway": "Use nvm for Node.js version management"
+  }
+}"#;
 
 // ────────── Transcript Formatting ──────────
 

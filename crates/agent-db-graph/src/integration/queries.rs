@@ -27,8 +27,6 @@ impl GraphEngine {
 
     /// Execute a graph query
     pub async fn execute_query(&self, query: GraphQuery) -> GraphResult<QueryResult> {
-        let start_time = std::time::Instant::now();
-
         // Get read access to the graph through inference engine
         {
             let _inference = self.inference.read().await;
@@ -38,18 +36,13 @@ impl GraphEngine {
 
         let result = {
             let inference = self.inference.read().await;
-            let mut traversal = self.traversal.write().await;
-            traversal.execute_query(inference.graph(), query)?
+            self.traversal.execute_query(inference.graph(), query)?
         };
 
         // Update query statistics
-        {
-            let mut stats = self.stats.write().await;
-            stats.total_queries_executed += 1;
-
-            let _query_time = start_time.elapsed().as_millis() as f64;
-            // Would update query timing statistics here
-        }
+        self.stats
+            .total_queries_executed
+            .fetch_add(1, AtomicOrdering::Relaxed);
 
         Ok(result)
     }
@@ -202,9 +195,8 @@ impl GraphEngine {
     ) -> GraphResult<Vec<ActionSuggestion>> {
         let inference = self.inference.read().await;
         let graph = inference.graph();
-        let traversal = self.traversal.read().await;
 
-        let mut suggestions = traversal.get_next_step_suggestions(
+        let mut suggestions = self.traversal.get_next_step_suggestions(
             graph,
             context_hash,
             last_action_node,
@@ -737,12 +729,11 @@ impl GraphEngine {
 
         let response = {
             let inference = self.inference.read().await;
-            let mut traversal = self.traversal.write().await;
             let sm_guard = self.structured_memory.read().await;
             self.nlq_pipeline.execute_with_hint(
                 &effective_question,
                 inference.graph(),
-                &mut traversal,
+                &self.traversal,
                 pagination,
                 Some(&sm_guard),
                 intent_override,
@@ -818,12 +809,28 @@ impl GraphEngine {
             ranked_lists.push(bm25);
         }
 
-        // 2. Memory retrieval (BM25-based, no embedding needed)
+        // Generate query embedding if embedding client is available (reused for memory + claims)
+        let query_embedding = if let Some(ref ec) = self.embedding_client {
+            match ec
+                .embed(crate::claims::EmbeddingRequest {
+                    text: question.to_string(),
+                    context: None,
+                })
+                .await
+            {
+                Ok(resp) => resp.embedding,
+                Err(_) => vec![], // fail-open: fall back to BM25-only
+            }
+        } else {
+            vec![]
+        };
+
+        // 2. Memory retrieval (with semantic signal when embedding is available)
         let memories = self
             .retrieve_memories_multi_signal(
                 crate::retrieval::MemoryRetrievalQuery {
                     query_text: question.to_string(),
-                    query_embedding: vec![],
+                    query_embedding: query_embedding.clone(),
                     context: None,
                     anchor_node: None,
                     agent_id: None,
@@ -852,11 +859,36 @@ impl GraphEngine {
             ranked_lists.push(memory_ranked);
         }
 
-        // 3. Claim search (if semantic memory enabled)
-        if let Ok(claims) = self.search_claims_semantic(question, 20, 0.3).await {
-            if !claims.is_empty() {
-                explanation.push(format!("Claims: {} results", claims.len()));
-                ranked_lists.push(claims);
+        // 3. Claim search (hybrid BM25 + semantic via RRF)
+        if let Some(ref store) = self.claim_store {
+            if !query_embedding.is_empty() {
+                let hybrid_config = crate::claims::hybrid_search::HybridSearchConfig::default();
+                if let Ok(claims) = crate::claims::hybrid_search::HybridClaimSearch::search(
+                    question,
+                    &query_embedding,
+                    store,
+                    20,
+                    &hybrid_config,
+                ) {
+                    if !claims.is_empty() {
+                        // Convert claim IDs to node IDs
+                        let claim_node_ids: Vec<(u64, f32)> = {
+                            let inference = self.inference.read().await;
+                            let graph = inference.graph();
+                            claims
+                                .iter()
+                                .filter_map(|&(claim_id, score)| {
+                                    graph.claim_index.get(&claim_id).map(|&nid| (nid, score))
+                                })
+                                .collect()
+                        };
+                        if !claim_node_ids.is_empty() {
+                            explanation
+                                .push(format!("Claims (hybrid): {} results", claim_node_ids.len()));
+                            ranked_lists.push(claim_node_ids);
+                        }
+                    }
+                }
             }
         }
 

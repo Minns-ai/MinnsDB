@@ -26,7 +26,9 @@ impl GraphEngine {
         );
         if let Some(upsert) = memory_store.store_episode(episode, &events) {
             if upsert.is_new {
-                self.stats.write().await.total_memories_formed += 1;
+                self.stats
+                    .total_memories_formed
+                    .fetch_add(1, AtomicOrdering::Relaxed);
             }
             if let Some(memory) = memory_store.get_memory(upsert.id) {
                 drop(memory_store);
@@ -171,13 +173,14 @@ impl GraphEngine {
             }
 
             // Check if we should run consolidation
-            let should_consolidate = {
-                let mut counter = self.episodes_since_consolidation.write().await;
-                *counter += 1;
-                *counter >= self.config.consolidation_interval
-            };
+            let new_counter = self
+                .episodes_since_consolidation
+                .fetch_add(1, AtomicOrdering::Relaxed)
+                + 1;
+            let should_consolidate = new_counter >= self.config.consolidation_interval;
             if should_consolidate {
-                *self.episodes_since_consolidation.write().await = 0;
+                self.episodes_since_consolidation
+                    .store(0, AtomicOrdering::Relaxed);
                 let store_ref = self.memory_store.clone();
                 let engine_ref = self.consolidation_engine.clone();
                 let bm25_ref = self.memory_bm25_index.clone();
@@ -259,7 +262,9 @@ impl GraphEngine {
             );
             if let Some(upsert) = strategy_store.store_episode(episode, &events)? {
                 if upsert.is_new {
-                    self.stats.write().await.total_strategies_extracted += 1;
+                    self.stats
+                        .total_strategies_extracted
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                 }
                 if let Some(strategy) = strategy_store.get_strategy(upsert.id) {
                     drop(strategy_store);
@@ -454,7 +459,9 @@ impl GraphEngine {
 
         self.update_transition_model(episode).await?;
 
-        self.stats.write().await.total_reinforcements_applied += 1;
+        self.stats
+            .total_reinforcements_applied
+            .fetch_add(1, AtomicOrdering::Relaxed);
 
         Ok(())
     }

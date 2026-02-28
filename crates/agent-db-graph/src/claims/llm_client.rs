@@ -138,8 +138,9 @@ impl OpenAiClient {
 Focus on:
 - Personal preferences and opinions ("I like X", "I prefer Y")
 - Personal facts about the user ("I work at X", "My name is Y")
-- Intentions and plans ("I want to X", "I plan to Y")
+- Intentions and plans ("I want to X", "I plan to Y", "I would like to X", "I need to X", "I'm looking to X", "Let me X", "Can you help me X")
 - Beliefs and opinions ("I think X", "I believe Y")
+- Avoidances and dislikes ("Don't do X", "Never use Y", "I hate X", "Avoid X")
 Do NOT extract:
 - System instructions or agent capabilities
 - Generic knowledge that isn't personally attributed
@@ -180,20 +181,22 @@ Use these entities to anchor your claims.
 Rules:
 1. Extract at most {max_claims} claims.
 2. Each claim must be **atomic** (single fact/statement).
-3. Each claim MUST have supporting evidence spans (UTF-8 byte offsets into the original text).
+3. Each claim SHOULD have supporting evidence spans (UTF-8 byte offsets into the original text). An empty array is acceptable if offsets are uncertain.
 4. Only extract claims that are **explicitly** stated in the text — do not infer.
 5. Classify each claim as one of:
    - "preference"  — personal taste or like/dislike ("I like X", "I prefer Y")
    - "fact"        — objective, verifiable statement ("X costs $10", "The API uses REST")
    - "belief"      — uncertain opinion ("I think X will work", "Maybe we should Y")
-   - "intention"   — desired future action ("I want to do X", "I plan to Y")
+   - "intention"   — desired future action ("I want to do X", "I plan to Y", "I would like to X", "I need to X", "I'm looking to X")
    - "capability"  — system/agent ability ("The system supports X", "It can handle 1k RPS")
+   - "avoidance"   — negative lesson or dislike ("Don't do X", "Never use Y", "Avoid X", "I hate Y")
    Use the NER labels as a signal:
      • Claims about PERSON/ORG entities are often "fact".
      • Claims with sentiment words (like/dislike/prefer/hate) are "preference".
      • Claims about PRODUCT capabilities are "capability".
-     • Claims with future-tense verbs (want/plan/will) are "intention".
+     • Claims with future-tense/volitional verbs (want/plan/will/would like/need to/looking to) are "intention".
      • Claims with hedging words (think/maybe/probably) are "belief".
+     • Claims with negation words (don't/never/avoid/hate/stop) are "avoidance".
 6. Set "subject_entity" to the **primary NER entity** the claim is about.
    Prefer the exact entity text from the NER list (case-sensitive match).
    If no NER entity matches, use the most relevant noun phrase.
@@ -443,6 +446,40 @@ impl LlmClient for AnthropicClient {
     fn model_name(&self) -> &str {
         &self.model
     }
+}
+
+/// Default few-shot examples for claim extraction.
+///
+/// Provides 4 representative examples covering intention, fact+preference,
+/// avoidance, and static fact claim types.
+pub fn default_few_shot_examples() -> Vec<FewShotExample> {
+    vec![
+        FewShotExample {
+            text: "I would like to place a new order for blue jeans".to_string(),
+            claims: vec![
+                r#"{"claim_text":"User wants to place a new order for blue jeans","evidence_spans":[],"confidence":0.95,"claim_type":"intention","subject_entity":null,"category":"lifestyle","temporal_type":"dynamic"}"#.to_string(),
+            ],
+        },
+        FewShotExample {
+            text: "I work at Google and I prefer dark mode".to_string(),
+            claims: vec![
+                r#"{"claim_text":"User works at Google","evidence_spans":[],"confidence":0.95,"claim_type":"fact","subject_entity":"Google","category":"work","temporal_type":"dynamic"}"#.to_string(),
+                r#"{"claim_text":"User prefers dark mode","evidence_spans":[],"confidence":0.90,"claim_type":"preference","subject_entity":null,"category":"preferences","temporal_type":"dynamic"}"#.to_string(),
+            ],
+        },
+        FewShotExample {
+            text: "Never use the old deployment script, it breaks production".to_string(),
+            claims: vec![
+                r#"{"claim_text":"The old deployment script should not be used because it breaks production","evidence_spans":[],"confidence":0.90,"claim_type":"avoidance","subject_entity":null,"category":"technology","temporal_type":"dynamic"}"#.to_string(),
+            ],
+        },
+        FewShotExample {
+            text: "Python was created by Guido van Rossum in 1991".to_string(),
+            claims: vec![
+                r#"{"claim_text":"Python was created by Guido van Rossum in 1991","evidence_spans":[],"confidence":0.99,"claim_type":"fact","subject_entity":"Python","category":"technology","temporal_type":"static"}"#.to_string(),
+            ],
+        },
+    ]
 }
 
 /// Mock client for testing (returns no claims)
@@ -718,5 +755,62 @@ mod tests {
         let prompt = OpenAiClient::user_prompt("Actual text", &[], &examples);
         assert!(prompt.contains("Text: \"Sample text\""));
         assert!(prompt.contains("- claim A\n- claim B\n- claim C"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_avoidance() {
+        let prompt =
+            OpenAiClient::system_prompt(5, crate::claims::types::SourceRole::User, None, &[], &[]);
+        assert!(
+            prompt.contains("avoidance"),
+            "System prompt should include avoidance claim type"
+        );
+        assert!(
+            prompt.contains("Don't do X"),
+            "System prompt should have avoidance examples"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_includes_expanded_intention_patterns() {
+        let prompt =
+            OpenAiClient::system_prompt(5, crate::claims::types::SourceRole::User, None, &[], &[]);
+        assert!(
+            prompt.contains("I would like to"),
+            "Should include 'I would like to' pattern"
+        );
+        assert!(
+            prompt.contains("I need to"),
+            "Should include 'I need to' pattern"
+        );
+    }
+
+    #[test]
+    fn test_default_few_shot_examples_parse_as_valid_claims() {
+        let examples = default_few_shot_examples();
+        assert_eq!(examples.len(), 4);
+
+        for example in &examples {
+            for claim_json in &example.claims {
+                let parsed: Result<LlmClaim, _> = serde_json::from_str(claim_json);
+                assert!(
+                    parsed.is_ok(),
+                    "Few-shot claim should parse as valid LlmClaim: {}",
+                    claim_json
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_default_few_shot_examples_cover_avoidance() {
+        let examples = default_few_shot_examples();
+        let has_avoidance = examples
+            .iter()
+            .any(|ex| ex.claims.iter().any(|c| c.contains("\"avoidance\"")));
+        assert!(
+            has_avoidance,
+            "Default few-shot examples should include an avoidance claim"
+        );
     }
 }

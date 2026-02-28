@@ -6,10 +6,12 @@ use crate::models::{
     EmbeddingProcessResponse, EvidenceSpanResponse, PaginationQuery,
 };
 use crate::state::AppState;
+use crate::write_lanes::WriteJob;
 use axum::{
     extract::{Path, Query, State},
     Json,
 };
+use std::sync::Arc;
 use tracing::info;
 
 /// Convert a DerivedClaim into a ClaimResponse.
@@ -58,6 +60,12 @@ pub async fn search_claims(
     State(state): State<AppState>,
     Json(payload): Json<ClaimSearchRequest>,
 ) -> Result<Json<Vec<ClaimResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!(
         "Searching for claims: query={} top_k={} min_similarity={}",
         payload.query_text, payload.top_k, payload.min_similarity
@@ -89,16 +97,32 @@ pub async fn process_embeddings(
         params.limit
     );
 
-    let count = state
-        .engine
-        .process_pending_embeddings(params.limit)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to process embeddings: {}", e)))?;
+    let limit = params.limit;
+    let result = state
+        .write_lanes
+        .submit_and_await(0, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let count = engine
+                        .process_pending_embeddings(limit)
+                        .await
+                        .map_err(|e| format!("Failed to process embeddings: {}", e))?;
+                    Ok(serde_json::json!({ "claims_processed": count }))
+                })
+            }),
+            result_tx: tx,
+        })
+        .await?;
 
-    info!("Processed {} claims for embedding generation", count);
+    let claims_processed = result["claims_processed"].as_u64().unwrap_or(0) as usize;
+
+    info!(
+        "Processed {} claims for embedding generation",
+        claims_processed
+    );
 
     Ok(Json(EmbeddingProcessResponse {
-        claims_processed: count,
+        claims_processed,
         success: true,
     }))
 }
@@ -108,6 +132,12 @@ pub async fn get_claim(
     State(state): State<AppState>,
     Path(claim_id): Path<u64>,
 ) -> Result<Json<ClaimResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Fetching claim {}", claim_id);
 
     let claim_store = state
@@ -128,6 +158,12 @@ pub async fn list_claims(
     State(state): State<AppState>,
     Query(params): Query<ClaimListQuery>,
 ) -> Result<Json<Vec<ClaimResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     info!("Listing claims (limit={})", params.limit);
 
     let claim_store = state

@@ -15,6 +15,12 @@ use axum::Json;
 pub async fn get_analytics(
     State(state): State<AppState>,
 ) -> Result<Json<AnalyticsResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let metrics = state
         .engine
         .get_analytics()
@@ -47,6 +53,12 @@ pub async fn get_analytics(
 pub async fn get_indexes(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<IndexStatsResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let index_stats = state.engine.get_index_stats().await;
 
     let response: Vec<IndexStatsResponse> = index_stats
@@ -69,6 +81,12 @@ pub async fn get_communities(
     State(state): State<AppState>,
     Query(params): Query<CommunitiesQuery>,
 ) -> Result<Json<CommunitiesResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let result = state
         .engine
         .detect_communities_with_algorithm(params.algorithm.as_deref())
@@ -107,6 +125,12 @@ pub async fn get_communities(
 pub async fn get_centrality(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<CentralityScoresResponse>>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let all_centralities = state
         .engine
         .get_all_centrality_scores()
@@ -168,6 +192,12 @@ pub async fn get_ppr(
     State(state): State<AppState>,
     Query(params): Query<PprQuery>,
 ) -> Result<Json<PprResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let start = std::time::Instant::now();
 
     let ppr_scores = state
@@ -211,6 +241,12 @@ pub async fn get_reachability(
     State(state): State<AppState>,
     Query(params): Query<ReachabilityQuery>,
 ) -> Result<Json<ReachabilityResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let start = std::time::Instant::now();
     let max_hops = params.max_hops.unwrap_or(0);
     let max_results = params.max_results.unwrap_or(500);
@@ -262,6 +298,12 @@ pub async fn get_causal_path(
     State(state): State<AppState>,
     Query(params): Query<CausalPathQuery>,
 ) -> Result<Json<CausalPathResponse>, ApiError> {
+    let _permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     // Handle source == target trivially
     if params.source == params.target {
         return Ok(Json(CausalPathResponse {
