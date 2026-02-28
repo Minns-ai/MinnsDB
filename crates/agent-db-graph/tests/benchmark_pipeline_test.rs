@@ -56,6 +56,16 @@ fn trim_data(data: &ConversationIngest, max_msgs: usize) -> ConversationIngest {
     }
 }
 
+/// Helper: create a GraphEngineConfig with isolated temp-dir paths so parallel
+/// tests don't fight over the same ReDB lock.
+fn isolated_config(tmp: &std::path::Path) -> GraphEngineConfig {
+    let mut cfg = GraphEngineConfig::default();
+    cfg.redb_path = tmp.join("graph.redb");
+    cfg.ner_storage_path = Some(tmp.join("ner_features.redb"));
+    cfg.claim_storage_path = Some(tmp.join("claims.redb"));
+    cfg
+}
+
 /// Helper: ingest a ConversationIngest into the engine, returning event count.
 async fn ingest_into_engine(
     engine: &GraphEngine,
@@ -136,7 +146,8 @@ async fn verify_bm25_content(
 
 #[tokio::test]
 async fn test_accounting_ingest_graph_and_search() {
-    let engine = GraphEngine::with_config(GraphEngineConfig::default())
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
         .await
         .unwrap();
 
@@ -326,7 +337,8 @@ async fn test_accounting_ingest_graph_and_search() {
 
 #[tokio::test]
 async fn test_relationship_graph_ingest_and_search() {
-    let engine = GraphEngine::with_config(GraphEngineConfig::default())
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
         .await
         .unwrap();
 
@@ -433,7 +445,8 @@ async fn test_relationship_graph_ingest_and_search() {
 
 #[tokio::test]
 async fn test_recommendations_ingest_and_search() {
-    let engine = GraphEngine::with_config(GraphEngineConfig::default())
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
         .await
         .unwrap();
 
@@ -558,7 +571,8 @@ async fn test_recommendations_ingest_and_search() {
 
 #[tokio::test]
 async fn test_nlq_search_returns_meaningful_results() {
-    let engine = GraphEngine::with_config(GraphEngineConfig::default())
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
         .await
         .unwrap();
 
@@ -631,7 +645,8 @@ async fn test_nlq_search_returns_meaningful_results() {
 
 #[tokio::test]
 async fn test_graph_structure_nodes_have_content() {
-    let engine = GraphEngine::with_config(GraphEngineConfig::default())
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
         .await
         .unwrap();
 
@@ -730,7 +745,8 @@ async fn test_graph_structure_nodes_have_content() {
 
 #[tokio::test]
 async fn test_unified_search_cross_dataset_content() {
-    let engine = GraphEngine::with_config(GraphEngineConfig::default())
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
         .await
         .unwrap();
 
@@ -803,7 +819,8 @@ async fn test_unified_search_cross_dataset_content() {
 
 #[tokio::test]
 async fn test_event_content_fidelity() {
-    let engine = GraphEngine::with_config(GraphEngineConfig::default())
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
         .await
         .unwrap();
 
