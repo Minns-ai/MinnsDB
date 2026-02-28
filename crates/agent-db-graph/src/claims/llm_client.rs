@@ -12,6 +12,8 @@ pub struct LabeledEntity {
     pub text: String,
     /// NER label (e.g. "PERSON", "ORG", "LOC", "DATE", "PRODUCT", "EVENT")
     pub label: String,
+    /// NER confidence score [0.0, 1.0]
+    pub confidence: f32,
 }
 
 /// A few-shot example for claim extraction.
@@ -43,6 +45,8 @@ pub struct LlmExtractionRequest {
     pub extraction_excludes: Vec<String>,
     /// Few-shot examples to include in the prompt.
     pub few_shot_examples: Vec<FewShotExample>,
+    /// Rolling conversation summary for cross-message context (optional).
+    pub rolling_summary: Option<String>,
 }
 
 /// LLM extraction response
@@ -69,6 +73,12 @@ pub struct LlmClaim {
     /// Primary entity this claim is about (optional, LLM best-effort)
     #[serde(default)]
     pub subject_entity: Option<String>,
+    /// Verb/relationship linking subject to object (e.g. "works at", "prefers")
+    #[serde(default)]
+    pub predicate: Option<String>,
+    /// Target entity of the predicate (e.g. "Google", "dark mode")
+    #[serde(default)]
+    pub object_entity: Option<String>,
     /// Category tag for this claim (e.g., "personal", "preferences", "work")
     #[serde(default)]
     pub category: Option<String>,
@@ -197,9 +207,13 @@ Rules:
      • Claims with future-tense/volitional verbs (want/plan/will/would like/need to/looking to) are "intention".
      • Claims with hedging words (think/maybe/probably) are "belief".
      • Claims with negation words (don't/never/avoid/hate/stop) are "avoidance".
-6. Set "subject_entity" to the **primary NER entity** the claim is about.
-   Prefer the exact entity text from the NER list (case-sensitive match).
-   If no NER entity matches, use the most relevant noun phrase.
+6. Extract a Subject-Predicate-Object (SPO) triple for each claim:
+   - "subject_entity": The primary entity performing the action or being described.
+     Prefer the exact entity text from the NER list (case-sensitive match).
+   - "predicate": The relationship or verb phrase linking subject to object.
+     Use short, lowercase verb phrases (e.g., "works at", "prefers", "was created by").
+   - "object_entity": The target entity of the predicate.
+     If no clear object exists (e.g., "User is happy"), set to null.
 7. Assign a "category" from: personal, preferences, work, health, education, finance,
    travel, food, hobbies, technology, relationships, goals, habits, lifestyle, opinions, other.
    Use the closest match. If none fits, use "other".
@@ -220,6 +234,8 @@ Output format — strict JSON:
       "confidence": 0.95,
       "claim_type": "fact",
       "subject_entity": "John",
+      "predicate": "works at",
+      "object_entity": "Google",
       "category": "work",
       "temporal_type": "dynamic"
     }}
@@ -248,7 +264,12 @@ Output format — strict JSON:
     }
 
     /// Build the user prompt, formatting NER entities with their labels.
-    fn user_prompt(text: &str, entities: &[LabeledEntity], examples: &[FewShotExample]) -> String {
+    fn user_prompt(
+        text: &str,
+        entities: &[LabeledEntity],
+        examples: &[FewShotExample],
+        rolling_summary: Option<&str>,
+    ) -> String {
         let entity_hint = if entities.is_empty() {
             String::new()
         } else {
@@ -276,9 +297,19 @@ Output format — strict JSON:
             section
         };
 
+        let context_section = match rolling_summary {
+            Some(summary) if !summary.is_empty() => {
+                format!(
+                    "=== CONVERSATION CONTEXT ===\n{}\n=== END CONTEXT ===\n\n",
+                    summary
+                )
+            },
+            _ => String::new(),
+        };
+
         format!(
-            "{}Text:\n\n{}{}\n\nExtract claims with evidence:",
-            examples_section, text, entity_hint
+            "{}{}Text:\n\n{}{}\n\nExtract claims with evidence:",
+            context_section, examples_section, text, entity_hint
         )
     }
 }
@@ -298,8 +329,12 @@ impl LlmClient for OpenAiClient {
             &request.extraction_includes,
             &request.extraction_excludes,
         );
-        let user_prompt =
-            Self::user_prompt(&request.text, &request.entities, &request.few_shot_examples);
+        let user_prompt = Self::user_prompt(
+            &request.text,
+            &request.entities,
+            &request.few_shot_examples,
+            request.rolling_summary.as_deref(),
+        );
 
         let response = self
             .client
@@ -388,8 +423,12 @@ impl LlmClient for AnthropicClient {
             &request.extraction_includes,
             &request.extraction_excludes,
         );
-        let user_prompt =
-            OpenAiClient::user_prompt(&request.text, &request.entities, &request.few_shot_examples);
+        let user_prompt = OpenAiClient::user_prompt(
+            &request.text,
+            &request.entities,
+            &request.few_shot_examples,
+            request.rolling_summary.as_deref(),
+        );
 
         let response = self
             .client
@@ -457,26 +496,26 @@ pub fn default_few_shot_examples() -> Vec<FewShotExample> {
         FewShotExample {
             text: "I would like to place a new order for blue jeans".to_string(),
             claims: vec![
-                r#"{"claim_text":"User wants to place a new order for blue jeans","evidence_spans":[],"confidence":0.95,"claim_type":"intention","subject_entity":null,"category":"lifestyle","temporal_type":"dynamic"}"#.to_string(),
+                r#"{"claim_text":"User wants to place a new order for blue jeans","evidence_spans":[],"confidence":0.95,"claim_type":"intention","subject_entity":"User","predicate":"wants to order","object_entity":"blue jeans","category":"lifestyle","temporal_type":"dynamic"}"#.to_string(),
             ],
         },
         FewShotExample {
             text: "I work at Google and I prefer dark mode".to_string(),
             claims: vec![
-                r#"{"claim_text":"User works at Google","evidence_spans":[],"confidence":0.95,"claim_type":"fact","subject_entity":"Google","category":"work","temporal_type":"dynamic"}"#.to_string(),
-                r#"{"claim_text":"User prefers dark mode","evidence_spans":[],"confidence":0.90,"claim_type":"preference","subject_entity":null,"category":"preferences","temporal_type":"dynamic"}"#.to_string(),
+                r#"{"claim_text":"User works at Google","evidence_spans":[],"confidence":0.95,"claim_type":"fact","subject_entity":"User","predicate":"works at","object_entity":"Google","category":"work","temporal_type":"dynamic"}"#.to_string(),
+                r#"{"claim_text":"User prefers dark mode","evidence_spans":[],"confidence":0.90,"claim_type":"preference","subject_entity":"User","predicate":"prefers","object_entity":"dark mode","category":"preferences","temporal_type":"dynamic"}"#.to_string(),
             ],
         },
         FewShotExample {
             text: "Never use the old deployment script, it breaks production".to_string(),
             claims: vec![
-                r#"{"claim_text":"The old deployment script should not be used because it breaks production","evidence_spans":[],"confidence":0.90,"claim_type":"avoidance","subject_entity":null,"category":"technology","temporal_type":"dynamic"}"#.to_string(),
+                r#"{"claim_text":"The old deployment script should not be used because it breaks production","evidence_spans":[],"confidence":0.90,"claim_type":"avoidance","subject_entity":"old deployment script","predicate":"breaks","object_entity":"production","category":"technology","temporal_type":"dynamic"}"#.to_string(),
             ],
         },
         FewShotExample {
             text: "Python was created by Guido van Rossum in 1991".to_string(),
             claims: vec![
-                r#"{"claim_text":"Python was created by Guido van Rossum in 1991","evidence_spans":[],"confidence":0.99,"claim_type":"fact","subject_entity":"Python","category":"technology","temporal_type":"static"}"#.to_string(),
+                r#"{"claim_text":"Python was created by Guido van Rossum in 1991","evidence_spans":[],"confidence":0.99,"claim_type":"fact","subject_entity":"Python","predicate":"was created by","object_entity":"Guido van Rossum","category":"technology","temporal_type":"static"}"#.to_string(),
             ],
         },
     ]
@@ -535,6 +574,7 @@ mod tests {
             extraction_includes: vec![],
             extraction_excludes: vec![],
             few_shot_examples: vec![],
+            rolling_summary: None,
         };
 
         let result = client.extract_claims(request).await.unwrap();
@@ -665,13 +705,15 @@ mod tests {
             LabeledEntity {
                 text: "John".to_string(),
                 label: "PERSON".to_string(),
+                confidence: 0.95,
             },
             LabeledEntity {
                 text: "Google".to_string(),
                 label: "ORG".to_string(),
+                confidence: 0.90,
             },
         ];
-        let prompt = OpenAiClient::user_prompt("John works at Google", &entities, &[]);
+        let prompt = OpenAiClient::user_prompt("John works at Google", &entities, &[], None);
         assert!(prompt.contains("John works at Google"));
         assert!(prompt.contains("John [PERSON]"));
         assert!(prompt.contains("Google [ORG]"));
@@ -680,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_user_prompt_empty_entities() {
-        let prompt = OpenAiClient::user_prompt("No entities here", &[], &[]);
+        let prompt = OpenAiClient::user_prompt("No entities here", &[], &[], None);
         assert!(prompt.contains("No entities here"));
         assert!(!prompt.contains("NER entities"));
     }
@@ -700,7 +742,7 @@ mod tests {
                 ],
             },
         ];
-        let prompt = OpenAiClient::user_prompt("Test text", &[], &examples);
+        let prompt = OpenAiClient::user_prompt("Test text", &[], &examples, None);
         assert!(prompt.contains("=== EXAMPLES ==="));
         assert!(prompt.contains("Example 1:"));
         assert!(prompt.contains("Example 2:"));
@@ -713,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_user_prompt_no_examples() {
-        let prompt = OpenAiClient::user_prompt("Test text", &[], &[]);
+        let prompt = OpenAiClient::user_prompt("Test text", &[], &[], None);
         assert!(!prompt.contains("=== EXAMPLES ==="));
         assert!(prompt.contains("Test text"));
     }
@@ -752,7 +794,7 @@ mod tests {
                 "claim C".to_string(),
             ],
         }];
-        let prompt = OpenAiClient::user_prompt("Actual text", &[], &examples);
+        let prompt = OpenAiClient::user_prompt("Actual text", &[], &examples, None);
         assert!(prompt.contains("Text: \"Sample text\""));
         assert!(prompt.contains("- claim A\n- claim B\n- claim C"));
     }
@@ -812,5 +854,101 @@ mod tests {
             has_avoidance,
             "Default few-shot examples should include an avoidance claim"
         );
+    }
+
+    #[test]
+    fn test_user_prompt_with_rolling_summary() {
+        let summary = "User is discussing their work at Google and preference for dark mode.";
+        let prompt =
+            OpenAiClient::user_prompt("I also like vim keybindings", &[], &[], Some(summary));
+        assert!(prompt.contains("=== CONVERSATION CONTEXT ==="));
+        assert!(prompt.contains(summary));
+        assert!(prompt.contains("=== END CONTEXT ==="));
+        assert!(prompt.contains("I also like vim keybindings"));
+        // Context should appear before the text
+        let ctx_pos = prompt.find("=== CONVERSATION CONTEXT ===").unwrap();
+        let text_pos = prompt.find("I also like vim keybindings").unwrap();
+        assert!(
+            ctx_pos < text_pos,
+            "Context section should appear before the text"
+        );
+    }
+
+    #[test]
+    fn test_user_prompt_without_rolling_summary() {
+        let prompt = OpenAiClient::user_prompt("Test text", &[], &[], None);
+        assert!(!prompt.contains("=== CONVERSATION CONTEXT ==="));
+        assert!(!prompt.contains("=== END CONTEXT ==="));
+        assert!(prompt.contains("Test text"));
+    }
+
+    #[test]
+    fn test_user_prompt_with_empty_rolling_summary() {
+        let prompt = OpenAiClient::user_prompt("Test text", &[], &[], Some(""));
+        assert!(!prompt.contains("=== CONVERSATION CONTEXT ==="));
+        assert!(prompt.contains("Test text"));
+    }
+
+    // ── SPO triple tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_llm_claim_spo_deserialization_with_fields() {
+        let json = r#"{"claim_text":"User works at Google","evidence_spans":[],"confidence":0.95,"claim_type":"fact","subject_entity":"User","predicate":"works at","object_entity":"Google","category":"work","temporal_type":"dynamic"}"#;
+        let claim: LlmClaim = serde_json::from_str(json).unwrap();
+        assert_eq!(claim.subject_entity.as_deref(), Some("User"));
+        assert_eq!(claim.predicate.as_deref(), Some("works at"));
+        assert_eq!(claim.object_entity.as_deref(), Some("Google"));
+    }
+
+    #[test]
+    fn test_llm_claim_spo_deserialization_without_fields() {
+        // Old format without predicate/object_entity should deserialize cleanly
+        let json =
+            r#"{"claim_text":"test","evidence_spans":[],"confidence":0.9,"subject_entity":"X"}"#;
+        let claim: LlmClaim = serde_json::from_str(json).unwrap();
+        assert_eq!(claim.subject_entity.as_deref(), Some("X"));
+        assert!(claim.predicate.is_none());
+        assert!(claim.object_entity.is_none());
+    }
+
+    #[test]
+    fn test_system_prompt_includes_spo_instructions() {
+        let prompt =
+            OpenAiClient::system_prompt(5, crate::claims::types::SourceRole::User, None, &[], &[]);
+        assert!(
+            prompt.contains("predicate"),
+            "Prompt should mention predicate"
+        );
+        assert!(
+            prompt.contains("object_entity"),
+            "Prompt should mention object_entity"
+        );
+        assert!(
+            prompt.contains("Subject-Predicate-Object"),
+            "Prompt should describe SPO triple extraction"
+        );
+        assert!(
+            prompt.contains("\"predicate\": \"works at\""),
+            "JSON example should include predicate"
+        );
+        assert!(
+            prompt.contains("\"object_entity\": \"Google\""),
+            "JSON example should include object_entity"
+        );
+    }
+
+    #[test]
+    fn test_few_shot_examples_include_spo() {
+        let examples = default_few_shot_examples();
+        for example in &examples {
+            for claim_json in &example.claims {
+                let parsed: LlmClaim = serde_json::from_str(claim_json).unwrap();
+                assert!(
+                    parsed.predicate.is_some(),
+                    "Few-shot claim should have predicate: {}",
+                    claim_json
+                );
+            }
+        }
     }
 }

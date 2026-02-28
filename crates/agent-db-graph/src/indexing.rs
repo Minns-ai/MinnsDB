@@ -655,15 +655,48 @@ impl Bm25Index {
 
     /// Tokenize text into terms (natural language).
     ///
-    /// Lowercase, split on whitespace, filter short words, then stem.
+    /// Lowercase, split on whitespace, strip possessives, split hyphens, then stem.
     fn tokenize(text: &str) -> Vec<String> {
-        text.to_lowercase()
-            .split_whitespace()
-            .filter(|s| s.len() > 1) // Filter single-character tokens only
-            .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
-            .filter(|s| !s.is_empty())
-            .map(stem_english)
-            .collect()
+        let lower = text.to_lowercase();
+        let mut tokens = Vec::new();
+        for word in lower.split_whitespace() {
+            let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
+            if trimmed.len() <= 1 {
+                continue;
+            }
+            // Strip possessive 's / \u{2019}s (curly apostrophe)
+            let base = trimmed
+                .strip_suffix("'s")
+                .or_else(|| trimmed.strip_suffix("\u{2019}s"))
+                .unwrap_or(trimmed);
+            if base.is_empty() {
+                continue;
+            }
+            // Split hyphenated tokens: emit each part + the joined whole
+            if base.contains('-') {
+                let parts: Vec<&str> = base.split('-').filter(|p| !p.is_empty()).collect();
+                if parts.len() > 1 {
+                    for part in &parts {
+                        if part.len() > 1 {
+                            tokens.push(stem_english(part));
+                        }
+                    }
+                    // Also emit the whole without hyphens for exact-compound matching
+                    let joined: String = parts.concat();
+                    if joined.len() > 1 {
+                        tokens.push(stem_english(&joined));
+                    }
+                } else if let Some(p) = parts.first() {
+                    // Single part after splitting (leading/trailing hyphen)
+                    if p.len() > 1 {
+                        tokens.push(stem_english(p));
+                    }
+                }
+            } else {
+                tokens.push(stem_english(base));
+            }
+        }
+        tokens
     }
 
     /// Get index statistics

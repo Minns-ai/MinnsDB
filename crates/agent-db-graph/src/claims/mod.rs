@@ -9,9 +9,11 @@ pub mod store;
 pub mod types;
 
 pub use embedding_queue::EmbeddingQueue;
+#[cfg(test)]
+pub use embeddings::MockEmbeddingClient;
 pub use embeddings::{
     AnthropicEmbeddingClient, DistanceMetric, Embedding, EmbeddingClient, EmbeddingRequest,
-    EmbeddingResponse, MockEmbeddingClient, OpenAiEmbeddingClient, VectorSimilarity,
+    EmbeddingResponse, OpenAiEmbeddingClient, VectorSimilarity,
 };
 pub use extractor::{ClaimExtractionConfig, ClaimExtractionQueue};
 pub use hybrid_search::{HybridClaimSearch, HybridSearchConfig};

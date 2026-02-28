@@ -859,10 +859,18 @@ impl GraphEngine {
             ranked_lists.push(memory_ranked);
         }
 
-        // 3. Claim search (hybrid BM25 + semantic via RRF)
+        // 3. Claim search (hybrid BM25 + semantic via RRF, falls back to BM25-only if no embedding)
         if let Some(ref store) = self.claim_store {
-            if !query_embedding.is_empty() {
-                let hybrid_config = crate::claims::hybrid_search::HybridSearchConfig::default();
+            {
+                let hybrid_config = if query_embedding.is_empty() {
+                    // No embedding available — use keyword-only mode
+                    crate::claims::hybrid_search::HybridSearchConfig {
+                        mode: crate::indexing::SearchMode::Keyword,
+                        ..Default::default()
+                    }
+                } else {
+                    crate::claims::hybrid_search::HybridSearchConfig::default()
+                };
                 if let Ok(claims) = crate::claims::hybrid_search::HybridClaimSearch::search(
                     question,
                     &query_embedding,
@@ -906,8 +914,12 @@ impl GraphEngine {
                 let mut entity_hits: Vec<(u64, f32)> = Vec::new();
                 for entity in &resolved {
                     entity_hits.push((entity.node_id, 1.0));
-                    // 1-hop neighbors
-                    for &neighbor_id in graph.get_neighbors(entity.node_id).iter() {
+                    // 1-hop neighbors (both directions: outgoing + incoming)
+                    // Incoming edges capture claims linked via ABOUT edges (Claim→Concept)
+                    for &neighbor_id in graph
+                        .neighbors_directed(entity.node_id, crate::structures::Direction::Both)
+                        .iter()
+                    {
                         entity_hits.push((neighbor_id, 0.5));
                     }
                 }

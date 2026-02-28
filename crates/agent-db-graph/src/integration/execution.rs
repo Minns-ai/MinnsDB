@@ -381,8 +381,10 @@ impl GraphEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial]
     async fn test_start_execution_requires_full_mode() {
         let engine = GraphEngine::new().await.unwrap();
         let strategy = agent_db_planning::GeneratedStrategyPlan {
@@ -403,6 +405,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_start_execution_success() {
         let mut config = GraphEngineConfig::default();
         config.planning_config.generation_mode = agent_db_planning::GenerationMode::Full;
@@ -445,6 +448,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_advance_execution_step() {
         let mut config = GraphEngineConfig::default();
         config.planning_config.generation_mode = agent_db_planning::GenerationMode::Full;
@@ -508,6 +512,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_validate_execution_not_found() {
         let config = GraphEngineConfig {
             world_model_mode: agent_db_planning::WorldModelMode::Shadow,

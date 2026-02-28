@@ -577,6 +577,29 @@ impl GraphEngine {
                 "memory_type".to_string(),
                 json!(format!("{:?}", memory.memory_type)),
             );
+            // Store actual memory content for graph-based retrieval
+            if !memory.summary.is_empty() {
+                node.properties
+                    .insert("summary".to_string(), json!(memory.summary));
+            }
+            if !memory.takeaway.is_empty() {
+                node.properties
+                    .insert("takeaway".to_string(), json!(memory.takeaway));
+            }
+            if !memory.causal_note.is_empty() {
+                node.properties
+                    .insert("causal_note".to_string(), json!(memory.causal_note));
+            }
+            node.properties
+                .insert("tier".to_string(), json!(format!("{:?}", memory.tier)));
+            node.properties.insert(
+                "consolidation_status".to_string(),
+                json!(format!("{:?}", memory.consolidation_status)),
+            );
+            node.properties.insert(
+                "outcome".to_string(),
+                json!(format!("{:?}", memory.outcome)),
+            );
             graph.add_node(node)
         }
     }

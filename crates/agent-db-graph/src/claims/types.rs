@@ -28,6 +28,28 @@ pub const Q_ALPHA: f32 = 0.3;
 pub type ClaimId = u64;
 pub type ThreadId = String;
 
+/// Role of an entity within a claim's Subject-Predicate-Object triple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EntityRole {
+    /// The primary entity performing the action or being described.
+    Subject,
+    /// The target entity of the predicate.
+    Object,
+    /// Mentioned but not the subject or object of the claim's core relationship.
+    #[default]
+    Mentioned,
+}
+
+impl std::fmt::Display for EntityRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EntityRole::Subject => write!(f, "subject"),
+            EntityRole::Object => write!(f, "object"),
+            EntityRole::Mentioned => write!(f, "mentioned"),
+        }
+    }
+}
+
 /// An entity attached to a claim, carrying the NER label.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimEntity {
@@ -37,6 +59,16 @@ pub struct ClaimEntity {
     pub label: String,
     /// Normalized form for dedup (lowercased, trimmed, determiners stripped)
     pub normalized: String,
+    /// NER confidence score [0.0, 1.0], default 1.0 for backward compat
+    #[serde(default = "default_entity_confidence")]
+    pub confidence: f32,
+    /// Role of this entity in the claim's SPO triple
+    #[serde(default)]
+    pub role: EntityRole,
+}
+
+fn default_entity_confidence() -> f32 {
+    1.0
 }
 
 /// Status of a claim in its lifecycle
@@ -233,6 +265,14 @@ pub struct DerivedClaim {
     #[serde(default)]
     pub subject_entity: Option<String>,
 
+    /// Verb/relationship linking subject to object (e.g. "works at", "prefers").
+    #[serde(default)]
+    pub predicate: Option<String>,
+
+    /// Target entity of the predicate (e.g. "google", "dark mode").
+    #[serde(default)]
+    pub object_entity: Option<String>,
+
     /// Optional explicit expiry timestamp (epoch seconds).
     /// Claims past this time get status Dormant during maintenance.
     #[serde(default)]
@@ -344,6 +384,8 @@ pub struct ClaimExtractionRequest {
     /// Role of the content source for role-aware extraction prompts.
     #[allow(dead_code)]
     pub source_role: SourceRole,
+    /// Rolling conversation summary for cross-message context (optional).
+    pub rolling_summary: Option<String>,
 }
 
 /// Result of claim extraction
@@ -416,6 +458,8 @@ impl DerivedClaim {
             metadata: HashMap::new(),
             claim_type: ClaimType::Fact,
             subject_entity: None,
+            predicate: None,
+            object_entity: None,
             expires_at: None,
             superseded_by: None,
             entities: Vec::new(),
@@ -1203,5 +1247,82 @@ mod tests {
             None,
         );
         assert_eq!(claim.temporal_type, TemporalType::Dynamic);
+    }
+
+    // ── EntityRole tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_entity_role_default_is_mentioned() {
+        assert_eq!(EntityRole::default(), EntityRole::Mentioned);
+    }
+
+    #[test]
+    fn test_entity_role_display() {
+        assert_eq!(EntityRole::Subject.to_string(), "subject");
+        assert_eq!(EntityRole::Object.to_string(), "object");
+        assert_eq!(EntityRole::Mentioned.to_string(), "mentioned");
+    }
+
+    #[test]
+    fn test_claim_entity_backward_compat_deserialization() {
+        // Old format without confidence/role should deserialize cleanly
+        let json = r#"{"text":"John","label":"PERSON","normalized":"john"}"#;
+        let entity: ClaimEntity = serde_json::from_str(json).unwrap();
+        assert_eq!(entity.text, "John");
+        assert_eq!(entity.label, "PERSON");
+        assert_eq!(entity.normalized, "john");
+        assert_eq!(entity.confidence, 1.0); // default
+        assert_eq!(entity.role, EntityRole::Mentioned); // default
+    }
+
+    #[test]
+    fn test_claim_entity_full_deserialization() {
+        let json = r#"{"text":"Google","label":"ORG","normalized":"google","confidence":0.92,"role":"Object"}"#;
+        let entity: ClaimEntity = serde_json::from_str(json).unwrap();
+        assert_eq!(entity.text, "Google");
+        assert_eq!(entity.confidence, 0.92);
+        assert_eq!(entity.role, EntityRole::Object);
+    }
+
+    #[test]
+    fn test_derived_claim_spo_defaults() {
+        let claim = DerivedClaim::new(
+            1,
+            "Test".to_string(),
+            vec![EvidenceSpan::new(0, 4, "Test")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(claim.predicate.is_none());
+        assert!(claim.object_entity.is_none());
+    }
+
+    #[test]
+    fn test_derived_claim_spo_backward_compat_deserialization() {
+        // Simulate old serialized DerivedClaim without predicate/object_entity
+        let mut claim = DerivedClaim::new(
+            1,
+            "User works at Google".to_string(),
+            vec![EvidenceSpan::new(0, 4, "User")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.subject_entity = Some("user".to_string());
+        // Serialize and deserialize
+        let serialized = serde_json::to_string(&claim).unwrap();
+        let deserialized: DerivedClaim = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.subject_entity.as_deref(), Some("user"));
+        assert!(deserialized.predicate.is_none());
+        assert!(deserialized.object_entity.is_none());
     }
 }

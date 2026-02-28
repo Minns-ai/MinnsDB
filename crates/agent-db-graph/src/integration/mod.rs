@@ -320,6 +320,10 @@ pub struct GraphEngineConfig {
     /// Configuration for DRIFT search pipeline.
     pub drift_config: crate::nlq::drift::DriftConfig,
 
+    // ========== Strategy Quality Gates ==========
+    /// Minimum playbook steps required before triggering LLM refinement. Default: 2.
+    pub min_playbook_steps_for_refinement: usize,
+
     // ========== Context Enrichment ==========
     /// Enable community-enriched context injection into formation pipelines. Default: false.
     pub enable_context_enrichment: bool,
@@ -676,8 +680,8 @@ impl Default for GraphEngineConfig {
             redb_cache_size_mb: 128,    // 128MB cache by default
             memory_cache_size: 10_000,  // Keep 10K memories in RAM
             strategy_cache_size: 5_000, // Keep 5K strategies in RAM
-            // Semantic memory defaults (disabled by default)
-            enable_semantic_memory: false,
+            // Semantic memory defaults (enabled by default — requires openai_api_key for real embeddings)
+            enable_semantic_memory: true,
             ner_workers: 2,
             ner_service_url: "http://localhost:8081/ner".to_string(),
             ner_request_timeout_ms: 5_000,
@@ -713,8 +717,8 @@ impl Default for GraphEngineConfig {
             planning_config: PlanningConfig::default(),
             planning_llm_api_key: None,
             planning_llm_provider: "openai".to_string(),
-            // NLQ hint classifier (disabled by default)
-            enable_nlq_hint: false,
+            // NLQ hint classifier (enabled by default, requires unified_llm_client)
+            enable_nlq_hint: true,
             nlq_hint_api_key: None,
             nlq_hint_provider: "openai".to_string(),
             nlq_hint_model: "gpt-4o-mini".to_string(),
@@ -723,10 +727,10 @@ impl Default for GraphEngineConfig {
             enable_metadata_normalization: false,
             metadata_normalization_timeout_ms: 3000,
             metadata_normalization_model: None,
-            // Conversation compaction (disabled by default)
-            enable_conversation_compaction: false,
-            // Rolling conversation summary (disabled by default)
-            enable_rolling_summary: false,
+            // Conversation compaction (enabled by default, requires unified_llm_client)
+            enable_conversation_compaction: true,
+            // Rolling conversation summary (enabled by default)
+            enable_rolling_summary: true,
             rolling_summary_recent_messages: 10,
             // Custom extraction configuration (empty by default)
             custom_extraction_instructions: None,
@@ -735,16 +739,18 @@ impl Default for GraphEngineConfig {
             extraction_few_shot_examples: crate::claims::llm_client::default_few_shot_examples(),
             // Memory TTL (disabled by default)
             default_memory_ttl_secs: None,
-            // Community summaries (disabled by default)
-            enable_community_summaries: false,
+            // Community summaries (enabled by default, requires unified_llm_client)
+            enable_community_summaries: true,
             community_summary_config: crate::community_summary::CommunitySummaryConfig::default(),
-            // Unified NLQ (disabled by default)
-            enable_unified_nlq: false,
-            // DRIFT search (disabled by default)
-            enable_drift_search: false,
+            // Unified NLQ (enabled by default, LLM-free retrieval path)
+            enable_unified_nlq: true,
+            // DRIFT search (enabled by default, requires unified_llm_client)
+            enable_drift_search: true,
             drift_config: crate::nlq::drift::DriftConfig::default(),
-            // Context enrichment (disabled by default)
-            enable_context_enrichment: false,
+            // Strategy quality gates
+            min_playbook_steps_for_refinement: 2,
+            // Context enrichment (enabled by default, fail-open when no community data)
+            enable_context_enrichment: true,
             enrichment_config: crate::context_enrichment::EnrichmentConfig::default(),
         }
     }

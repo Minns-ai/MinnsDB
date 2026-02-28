@@ -122,6 +122,7 @@ impl ClaimExtractionQueue {
                         .map(|span| super::llm_client::LabeledEntity {
                             text: span.text.clone(),
                             label: span.label.clone(),
+                            confidence: span.confidence,
                         })
                         .collect()
                 } else {
@@ -144,6 +145,7 @@ impl ClaimExtractionQueue {
                 extraction_includes: config.extraction_includes.clone(),
                 extraction_excludes: config.extraction_excludes.clone(),
                 few_shot_examples: config.few_shot_examples.clone(),
+                rolling_summary: request.rolling_summary.clone(),
             };
 
             let llm_response = llm_client.extract_claims(llm_request).await?;
@@ -377,6 +379,14 @@ impl ClaimExtractionQueue {
                     .subject_entity
                     .as_deref()
                     .map(normalize_entity);
+                claim.predicate = llm_claim
+                    .predicate
+                    .as_deref()
+                    .map(|p| p.to_lowercase().trim().to_string());
+                claim.object_entity = llm_claim
+                    .object_entity
+                    .as_deref()
+                    .map(normalize_entity);
                 claim.category = llm_claim.category.clone();
                 if let Some(ref cat) = claim.category {
                     claim.metadata.insert("_category".to_string(), cat.clone());
@@ -384,19 +394,43 @@ impl ClaimExtractionQueue {
                 claim.temporal_type =
                     crate::claims::types::TemporalType::from_str_loose(&llm_claim.temporal_type);
 
-                // ── Attach NER-labeled entities found in the claim text ────
+                // ── Attach NER-labeled entities found in the claim text (with roles) ────
                 {
+                    use crate::claims::types::EntityRole;
+
                     let claim_lower = claim.claim_text.to_lowercase();
                     let mut seen = HashSet::new();
+
+                    // Pre-compute normalized subject/object for role matching
+                    let norm_subject = claim.subject_entity.as_deref().unwrap_or("");
+                    let norm_object = claim.object_entity.as_deref().unwrap_or("");
+
                     for labeled in &labeled_entities {
                         // Match entity text case-insensitively in the claim
                         if claim_lower.contains(&labeled.text.to_lowercase()) {
                             let norm = normalize_entity(&labeled.text);
                             if seen.insert(norm.clone()) {
+                                // Determine role: exact match then fuzzy match
+                                let role = if !norm_subject.is_empty()
+                                    && (norm == norm_subject
+                                        || entities_match_fuzzy(&norm, norm_subject))
+                                {
+                                    EntityRole::Subject
+                                } else if !norm_object.is_empty()
+                                    && (norm == norm_object
+                                        || entities_match_fuzzy(&norm, norm_object))
+                                {
+                                    EntityRole::Object
+                                } else {
+                                    EntityRole::Mentioned
+                                };
+
                                 claim.entities.push(ClaimEntity {
                                     text: labeled.text.clone(),
                                     label: labeled.label.clone(),
                                     normalized: norm,
+                                    confidence: labeled.confidence,
+                                    role,
                                 });
                             }
                         }
@@ -432,6 +466,16 @@ impl ClaimExtractionQueue {
                     claim
                         .metadata
                         .insert("subject_entity".to_string(), ent.clone());
+                }
+                if let Some(ref pred) = claim.predicate {
+                    claim
+                        .metadata
+                        .insert("predicate".to_string(), pred.clone());
+                }
+                if let Some(ref obj) = claim.object_entity {
+                    claim
+                        .metadata
+                        .insert("object_entity".to_string(), obj.clone());
                 }
 
                 // Store claim

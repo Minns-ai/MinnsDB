@@ -641,9 +641,42 @@ impl GraphEngine {
             return Ok(());
         };
 
-        if !trace.memory_used.is_empty() {
+        // Auto-promote: served strategies/claims/memories that weren't explicitly
+        // marked as "used" still contributed to the response. Include them
+        // in outcome feedback so the feedback loop closes automatically.
+        let memory_used: Vec<u64> = {
+            let mut ids = trace.memory_used.clone();
+            for mid in &trace.memory_ids {
+                if !ids.contains(mid) {
+                    ids.push(*mid);
+                }
+            }
+            ids
+        };
+
+        let strategy_used: Vec<u64> = {
+            let mut ids = trace.strategy_used.clone();
+            for sid in &trace.strategy_ids {
+                if !ids.contains(sid) {
+                    ids.push(*sid);
+                }
+            }
+            ids
+        };
+
+        let claims_used: Vec<u64> = {
+            let mut ids = trace.claims_used.clone();
+            for cid in &trace.claim_ids {
+                if !ids.contains(cid) {
+                    ids.push(*cid);
+                }
+            }
+            ids
+        };
+
+        if !memory_used.is_empty() {
             let mut store = self.memory_store.write().await;
-            for memory_id in &trace.memory_used {
+            for memory_id in &memory_used {
                 let applied = store.apply_outcome(*memory_id, success);
                 tracing::info!(
                     "Learning outcome applied to memory_id={} success={} applied={}",
@@ -654,9 +687,9 @@ impl GraphEngine {
             }
         }
 
-        if !trace.strategy_used.is_empty() {
+        if !strategy_used.is_empty() {
             let mut store = self.strategy_store.write().await;
-            for strategy_id in &trace.strategy_used {
+            for strategy_id in &strategy_used {
                 let updated = store.update_strategy_outcome(*strategy_id, success).is_ok();
                 tracing::info!(
                     "Learning outcome applied to strategy_id={} success={} updated={}",
@@ -680,7 +713,7 @@ impl GraphEngine {
                 let memory = agent_db_world_model::MemoryFeatures {
                     tier: 0,
                     strength: 0.5,
-                    access_count: trace.memory_used.len() as u32,
+                    access_count: memory_used.len() as u32,
                     context_fingerprint: 0,
                     goal_bucket_id: 0,
                 };
@@ -719,9 +752,9 @@ impl GraphEngine {
             }
         }
 
-        if !trace.claims_used.is_empty() {
+        if !claims_used.is_empty() {
             if let Some(ref claim_store) = self.claim_store {
-                for claim_id in &trace.claims_used {
+                for claim_id in &claims_used {
                     match claim_store.record_outcome(*claim_id, success) {
                         Ok(Some(updated)) => {
                             tracing::info!(

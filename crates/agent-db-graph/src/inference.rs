@@ -315,7 +315,22 @@ impl GraphInference {
     /// Ensure agent node exists in graph
     fn ensure_agent_node(&mut self, agent_id: AgentId, event: &Event) -> GraphResult<NodeId> {
         if let Some(node) = self.graph.get_agent_node(agent_id) {
-            Ok(node.id)
+            let node_id = node.id;
+            // Accumulate capabilities from each new event type
+            let capability = Self::capability_from_event(event);
+            if let Some(mut_node) = self.graph.get_node_mut(node_id) {
+                if let NodeType::Agent {
+                    ref mut capabilities,
+                    ..
+                } = &mut mut_node.node_type
+                {
+                    if !capabilities.contains(&capability) {
+                        capabilities.push(capability);
+                    }
+                }
+                mut_node.touch();
+            }
+            Ok(node_id)
         } else {
             // Create new agent node
             let agent_type = match &event.event_type {
@@ -328,15 +343,38 @@ impl GraphInference {
                 EventType::Conversation { .. } => "conversation_agent",
             };
 
+            let capability = Self::capability_from_event(event);
             let node = GraphNode::new(NodeType::Agent {
                 agent_id,
                 agent_type: agent_type.to_string(),
-                capabilities: vec!["event_generation".to_string()],
+                capabilities: vec![capability],
             });
 
             let node_id = self.graph.add_node(node)?;
             self.stats.nodes_created += 1;
             Ok(node_id)
+        }
+    }
+
+    fn capability_from_event(event: &Event) -> String {
+        match &event.event_type {
+            EventType::Action { action_name, .. } => format!("action:{}", action_name),
+            EventType::Observation {
+                observation_type, ..
+            } => {
+                format!("observation:{}", observation_type)
+            },
+            EventType::Communication { message_type, .. } => {
+                format!("communication:{}", message_type)
+            },
+            EventType::Cognitive { process_type, .. } => {
+                format!("cognitive:{:?}", process_type)
+            },
+            EventType::Learning { .. } => "learning".to_string(),
+            EventType::Context { context_type, .. } => {
+                format!("context:{}", context_type)
+            },
+            EventType::Conversation { .. } => "conversation".to_string(),
         }
     }
 
@@ -505,11 +543,45 @@ impl GraphInference {
         } else {
             let context_type = self.classify_context(context);
 
-            let node = GraphNode::new(NodeType::Context {
+            let mut node = GraphNode::new(NodeType::Context {
                 context_hash: context.fingerprint,
                 context_type,
                 frequency: 1,
             });
+
+            // Store actual context data in properties
+            node.properties
+                .insert("goal_count".to_string(), json!(context.active_goals.len()));
+            if !context.active_goals.is_empty() {
+                let goal_summaries: Vec<serde_json::Value> = context
+                    .active_goals
+                    .iter()
+                    .map(|g| {
+                        json!({
+                            "id": g.id,
+                            "description": g.description,
+                            "priority": g.priority,
+                        })
+                    })
+                    .collect();
+                node.properties
+                    .insert("active_goals".to_string(), json!(goal_summaries));
+            }
+            node.properties.insert(
+                "cpu_percent".to_string(),
+                json!(context.resources.computational.cpu_percent),
+            );
+            node.properties.insert(
+                "memory_bytes".to_string(),
+                json!(context.resources.computational.memory_bytes),
+            );
+            node.properties
+                .insert("goal_bucket_id".to_string(), json!(context.goal_bucket_id));
+            if !context.environment.variables.is_empty() {
+                let env_keys: Vec<&String> = context.environment.variables.keys().collect();
+                node.properties
+                    .insert("environment_keys".to_string(), json!(env_keys));
+            }
 
             let node_id = self.graph.add_node(node)?;
             self.stats.nodes_created += 1;
@@ -609,7 +681,7 @@ impl GraphInference {
         }
 
         for tool_name in self.extract_tool_names(event) {
-            let tool_node_id = self.ensure_tool_node(&tool_name)?;
+            let tool_node_id = self.ensure_tool_node(&tool_name, event)?;
             self.add_or_strengthen_association(
                 event_node_id,
                 tool_node_id,
@@ -702,7 +774,7 @@ impl GraphInference {
         }
     }
 
-    fn ensure_tool_node(&mut self, tool_name: &str) -> GraphResult<NodeId> {
+    fn ensure_tool_node(&mut self, tool_name: &str, event: &Event) -> GraphResult<NodeId> {
         if let Some(node_id) = self.graph.get_tool_node(tool_name).map(|node| node.id) {
             if let Some(existing) = self.graph.get_node_mut(node_id) {
                 let count = existing
@@ -718,14 +790,40 @@ impl GraphInference {
             }
             Ok(node_id)
         } else {
+            let tool_type = Self::derive_tool_type(tool_name, event);
             let mut node = GraphNode::new(NodeType::Tool {
                 tool_name: tool_name.to_string(),
-                tool_type: "external".to_string(),
+                tool_type,
             });
             node.properties.insert("usage_count".to_string(), json!(1));
+            node.properties.insert(
+                "first_seen_event_type".to_string(),
+                json!(self.event_type_label(event)),
+            );
             let node_id = self.graph.add_node(node)?;
             self.stats.nodes_created += 1;
             Ok(node_id)
+        }
+    }
+
+    fn derive_tool_type(tool_name: &str, event: &Event) -> String {
+        let lower = tool_name.to_lowercase();
+        if lower.contains("search") || lower.contains("browse") || lower.contains("fetch") {
+            "search".to_string()
+        } else if lower.contains("api") || lower.contains("http") || lower.contains("request") {
+            "api".to_string()
+        } else if lower.contains("db") || lower.contains("sql") || lower.contains("query") {
+            "database".to_string()
+        } else if lower.contains("file") || lower.contains("read") || lower.contains("write") {
+            "filesystem".to_string()
+        } else {
+            // Derive from event type as fallback
+            match &event.event_type {
+                EventType::Action { .. } => "action".to_string(),
+                EventType::Observation { .. } => "observation".to_string(),
+                EventType::Communication { .. } => "communication".to_string(),
+                _ => "external".to_string(),
+            }
         }
     }
 

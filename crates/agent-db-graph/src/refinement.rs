@@ -13,7 +13,7 @@
 use crate::claims::EmbeddingClient;
 use crate::memory::{Memory, MemoryId};
 use crate::stores::MemoryStore;
-use crate::strategies::Strategy;
+use crate::strategies::{PlaybookStep, Strategy};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -36,18 +36,25 @@ overall knowledge graph. Reference relevant communities or patterns when they ad
 Be specific, not generic. Name the actual actions, tools, and outcomes.
 Output ONLY valid JSON, no markdown fences."#;
 
-const STRATEGY_REFINEMENT_SYSTEM_PROMPT: &str = r#"You are an expert at codifying AI agent strategies into reusable playbooks.
+const STRATEGY_REFINEMENT_SYSTEM_PROMPT: &str = r#"You are an expert at codifying AI agent strategies into reusable, generalized playbooks.
 Given raw strategy data, produce a JSON response with:
-1. "summary": A clear 2-3 sentence description of this strategy
+1. "summary": A clear 2-3 sentence description of this strategy, generalized for reuse
 2. "when_to_use": Specific conditions where this strategy applies (1-2 sentences)
 3. "when_not_to_use": Conditions where this strategy should NOT be used (1-2 sentences)
 4. "failure_modes": Array of known failure modes, each as a short sentence (max 3)
 5. "counterfactual": What would have happened differently with an alternative approach (1 sentence)
+6. "playbook": Array of generalized step objects: [{"step": 1, "action": "...", "condition": "...", "recovery": "..."}]
+
+CRITICAL: Generalize ALL instance-specific values into reusable descriptions:
+- Replace specific IDs with their role: "ORD-1001" → "the target order ID", "user_42" → "the requesting user"
+- Replace specific names: "John Smith" → "the customer", "alice@corp.com" → "the user's email"
+- Replace specific URLs/paths with descriptions: "https://api.example.com/v2/orders" → "the orders API endpoint"
+- Keep action/tool names (e.g., "lookup_order", "send_email") — those are reusable patterns
+- The playbook should work for ANY similar situation, not just the specific instance
 
 If broader knowledge context or similar strategies are provided, reference them to identify
 patterns, differentiate from existing strategies, and note complements or conflicts.
 
-Be specific. Reference actual action names, context patterns, and outcomes.
 Output ONLY valid JSON, no markdown fences."#;
 
 /// Refined memory fields from LLM
@@ -68,6 +75,19 @@ pub struct RefinedStrategyFields {
     pub failure_modes: Vec<String>,
     #[serde(default)]
     pub counterfactual: String,
+    #[serde(default)]
+    pub playbook: Vec<RefinedPlaybookStep>,
+}
+
+/// A single generalized playbook step from LLM refinement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefinedPlaybookStep {
+    pub step: u32,
+    pub action: String,
+    #[serde(default)]
+    pub condition: String,
+    #[serde(default)]
+    pub recovery: String,
 }
 
 // ============================================================================
@@ -204,8 +224,19 @@ impl RefinementEngine {
             _ => String::new(),
         };
 
+        let playbook_text = if strategy.playbook.is_empty() {
+            "No playbook steps".to_string()
+        } else {
+            strategy
+                .playbook
+                .iter()
+                .map(|s| format!("  {}. {}", s.step, s.action))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         let user_prompt = format!(
-            "Raw strategy data:\n\nSummary: {}\nWhen to use: {}\nWhen not to use: {}\nAction hint: {}\nPrecondition: {}\nSuccess rate: {:.0}%\nQuality: {:.2}\nFailure patterns: {:?}\nPlaybook steps: {}{}{}{}",
+            "Raw strategy data:\n\nSummary: {}\nWhen to use: {}\nWhen not to use: {}\nAction hint: {}\nPrecondition: {}\nSuccess rate: {:.0}%\nQuality: {:.2}\nFailure patterns: {:?}\nPlaybook steps:\n{}{}{}{}",
             strategy.summary,
             strategy.when_to_use,
             strategy.when_not_to_use,
@@ -214,7 +245,7 @@ impl RefinementEngine {
             strategy.expected_success * 100.0,
             strategy.quality_score,
             strategy.failure_patterns,
-            strategy.playbook.len(),
+            playbook_text,
             event_section,
             context_section,
             strategy_section,
@@ -365,6 +396,19 @@ impl RefinementEngine {
                     }
                     if !refined.counterfactual.is_empty() {
                         updated.counterfactual = refined.counterfactual;
+                    }
+                    if !refined.playbook.is_empty() {
+                        updated.playbook = refined
+                            .playbook
+                            .iter()
+                            .map(|rs| PlaybookStep {
+                                step: rs.step,
+                                action: rs.action.clone(),
+                                condition: rs.condition.clone(),
+                                recovery: rs.recovery.clone(),
+                                ..Default::default()
+                            })
+                            .collect();
                     }
                 },
                 Err(e) => {

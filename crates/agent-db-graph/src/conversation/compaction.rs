@@ -21,6 +21,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+// ────────── Quality Gate Constants ──────────
+
+/// Minimum transcript length (chars) to attempt playbook extraction.
+/// ~3-4 conversational turns minimum.
+const MIN_PLAYBOOK_TRANSCRIPT_LEN: usize = 200;
+
+/// Minimum confidence for an extracted playbook to be attached.
+const MIN_PLAYBOOK_CONFIDENCE: f32 = 0.4;
+
 // ────────── Rolling Summary ──────────
 
 /// A rolling, incrementally updated summary of an ongoing conversation.
@@ -351,6 +360,16 @@ pub async fn extract_playbooks(
     goals: &[ExtractedGoal],
 ) -> Option<PlaybookExtractionResponse> {
     if goals.is_empty() || transcript.is_empty() {
+        return None;
+    }
+
+    // Reject trivially short transcripts
+    if transcript.len() < MIN_PLAYBOOK_TRANSCRIPT_LEN {
+        tracing::info!(
+            "Playbook extraction skipped: transcript too short ({} < {} chars)",
+            transcript.len(),
+            MIN_PLAYBOOK_TRANSCRIPT_LEN
+        );
         return None;
     }
 
@@ -1264,8 +1283,14 @@ pub async fn run_compaction(
         )
         .await
         {
-            result.playbooks_extracted = pb_response.playbooks.len();
-            attach_playbooks(engine, &pb_response.playbooks, case_id).await;
+            // Filter out low-confidence and empty playbooks
+            let quality_playbooks: Vec<_> = pb_response
+                .playbooks
+                .into_iter()
+                .filter(|pb| pb.confidence >= MIN_PLAYBOOK_CONFIDENCE && !pb.steps_taken.is_empty())
+                .collect();
+            result.playbooks_extracted = quality_playbooks.len();
+            attach_playbooks(engine, &quality_playbooks, case_id).await;
         }
     }
 

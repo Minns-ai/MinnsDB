@@ -202,6 +202,9 @@ impl GraphEngine {
 
             // Create NER storage
             let store = if let Some(path) = &config.ner_storage_path {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
                 let store = agent_db_ner::NerFeatureStore::new(path).map_err(|e| {
                     GraphError::OperationError(format!("Failed to initialize NER storage: {}", e))
                 })?;
@@ -228,6 +231,9 @@ impl GraphEngine {
 
             // Create claim store
             let store = if let Some(path) = &config.claim_storage_path {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
                 let store = crate::claims::ClaimStore::new(path).map_err(|e| {
                     GraphError::OperationError(format!("Failed to initialize claim storage: {}", e))
                 })?;
@@ -251,19 +257,25 @@ impl GraphEngine {
                 Arc::new(crate::claims::MockClient::new())
             };
 
-            // Create embedding client
-            let embedding_client: Arc<dyn crate::claims::EmbeddingClient> =
-                if let Some(key) = &config.openai_api_key {
-                    Arc::new(crate::claims::OpenAiEmbeddingClient::new(
-                        key.clone(),
-                        "text-embedding-3-small".to_string(),
-                    ))
-                } else {
-                    Arc::new(crate::claims::MockEmbeddingClient::new(384))
-                };
+            // Create embedding client (requires API key — no mock fallback)
+            let embedding_client: Option<Arc<dyn crate::claims::EmbeddingClient>> = if let Some(
+                key,
+            ) =
+                &config.openai_api_key
+            {
+                Some(Arc::new(crate::claims::OpenAiEmbeddingClient::new(
+                    key.clone(),
+                    "text-embedding-3-small".to_string(),
+                )))
+            } else {
+                tracing::warn!(
+                        "No openai_api_key — embedding generation disabled (semantic search will be keyword-only)"
+                    );
+                None
+            };
 
-            // Create claim extraction queue
-            let queue = if let Some(ref store) = store {
+            // Create claim extraction queue (requires embedding client)
+            let queue = if let (Some(ref store), Some(ref emb)) = (&store, &embedding_client) {
                 let extraction_config = crate::claims::ClaimExtractionConfig {
                     max_claims_per_input: config.claim_max_per_input,
                     min_confidence: config.claim_min_confidence,
@@ -278,7 +290,7 @@ impl GraphEngine {
 
                 let queue = Arc::new(crate::claims::ClaimExtractionQueue::new(
                     client.clone(),
-                    embedding_client.clone(),
+                    emb.clone(),
                     store.clone(),
                     config.claim_workers,
                     extraction_config,
@@ -292,49 +304,51 @@ impl GraphEngine {
                 "Claim extraction initialized with {} workers",
                 config.claim_workers
             );
-            (queue, store, Some(client), Some(embedding_client))
+            (queue, store, Some(client), embedding_client)
         } else {
             (None, None, None, None)
         };
 
         // Initialize embedding generation components if semantic memory is enabled
-        let (embedding_queue, embedding_client) =
-            if config.enable_semantic_memory && config.enable_embedding_generation {
-                tracing::info!("Initializing embedding generation pipeline");
+        let (embedding_queue, embedding_client) = if config.enable_semantic_memory
+            && config.enable_embedding_generation
+        {
+            tracing::info!("Initializing embedding generation pipeline");
 
-                // Use the client created above if available, otherwise create a new one
-                let client: Arc<dyn crate::claims::EmbeddingClient> =
-                    if let Some(ref client) = embedding_client {
-                        client.clone()
-                    } else if let Some(key) = &config.openai_api_key {
-                        Arc::new(crate::claims::OpenAiEmbeddingClient::new(
-                            key.clone(),
-                            "text-embedding-3-small".to_string(),
-                        ))
-                    } else {
-                        Arc::new(crate::claims::MockEmbeddingClient::new(384))
-                    };
-
-                // Create embedding queue if claim store is available
-                let queue = if let Some(ref store) = claim_store {
-                    let queue = Arc::new(crate::claims::EmbeddingQueue::new(
-                        client.clone(),
-                        store.clone(),
-                        config.embedding_workers,
-                    ));
-                    Some(queue)
+            // Use the client created above if available, otherwise create a new one
+            let client: Option<Arc<dyn crate::claims::EmbeddingClient>> =
+                if let Some(ref client) = embedding_client {
+                    Some(client.clone())
+                } else if let Some(key) = &config.openai_api_key {
+                    Some(Arc::new(crate::claims::OpenAiEmbeddingClient::new(
+                        key.clone(),
+                        "text-embedding-3-small".to_string(),
+                    )))
                 } else {
+                    tracing::warn!("No openai_api_key — embedding generation pipeline disabled");
                     None
                 };
 
-                tracing::info!(
-                    "Embedding generation initialized with {} workers",
-                    config.embedding_workers
-                );
-                (queue, Some(client))
+            // Create embedding queue if both client and store are available
+            let queue = if let (Some(ref emb), Some(ref store)) = (&client, &claim_store) {
+                let queue = Arc::new(crate::claims::EmbeddingQueue::new(
+                    emb.clone(),
+                    store.clone(),
+                    config.embedding_workers,
+                ));
+                Some(queue)
             } else {
-                (None, embedding_client)
+                None
             };
+
+            tracing::info!(
+                "Embedding generation initialized with {} workers",
+                config.embedding_workers
+            );
+            (queue, client)
+        } else {
+            (None, embedding_client)
+        };
 
         // 10x/100x: Build consolidation + refinement before config is moved
         let consolidation_engine_arc =

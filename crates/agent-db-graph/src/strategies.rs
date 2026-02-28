@@ -218,7 +218,7 @@ pub struct Strategy {
 }
 
 /// A single step in an executable playbook
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PlaybookStep {
     /// Step number (1-indexed)
     pub step: u32,
@@ -316,6 +316,12 @@ pub struct StrategyExtractionConfig {
     /// Eligibility threshold (0.0 to 1.0)
     pub eligibility_threshold: f32,
 
+    /// Minimum events in an episode to consider for strategy extraction
+    pub min_episode_events: usize,
+
+    /// Minimum quality score to accept a new strategy
+    pub min_quality_score: f32,
+
     /// Eligibility weights
     pub w_novelty: f32,
     pub w_outcome_utility: f32,
@@ -347,6 +353,8 @@ impl Default for StrategyExtractionConfig {
             min_occurrences: 3,
             max_strategies_per_agent: 100,
             eligibility_threshold: 0.5,
+            min_episode_events: 3,
+            min_quality_score: 0.55,
             w_novelty: 0.25,
             w_outcome_utility: 0.25,
             w_difficulty: 0.2,
@@ -466,6 +474,17 @@ impl StrategyExtractor {
             }));
         }
 
+        // Early exit: trivial episodes with too few events
+        if events.len() < self.config.min_episode_events {
+            tracing::info!(
+                "Strategy extraction rejected episode_id={} events={} min={}",
+                episode.id,
+                events.len(),
+                self.config.min_episode_events
+            );
+            return Ok(None);
+        }
+
         let outcome = episode
             .outcome
             .clone()
@@ -510,12 +529,23 @@ impl StrategyExtractor {
         // Phase 1 Feature K: Extract failure patterns from failed events
         let failure_patterns = self.extract_failure_patterns(events, &episode.outcome)?;
 
+        // Phase 1: Initialize quality with prediction-error weighting
+        let quality_with_prediction = episode.significance * (1.0 + episode.prediction_error * 0.3);
+
+        // Quality floor: reject low-quality strategies
+        if quality_with_prediction < self.config.min_quality_score {
+            tracing::info!(
+                "Strategy extraction rejected episode_id={} quality={:.3} min={:.3}",
+                episode.id,
+                quality_with_prediction,
+                self.config.min_quality_score
+            );
+            return Ok(None);
+        }
+
         // Create strategy
         let strategy_id = self.next_strategy_id;
         self.next_strategy_id += 1;
-
-        // Phase 1: Initialize quality with prediction-error weighting
-        let quality_with_prediction = episode.significance * (1.0 + episode.prediction_error * 0.3);
 
         let (precondition, action_hint, expected_cost) =
             self.extract_behavior_skeleton(events, &strategy_type, goal_bucket_id);

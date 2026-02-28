@@ -104,8 +104,10 @@ impl Graph {
             claim.supporting_evidence.len()
         );
 
-        // Auto-link to NER entities attached to the claim (with proper labels)
+        // Auto-link to NER entities attached to the claim (with proper labels and roles)
         for entity in &claim.entities {
+            use crate::claims::types::EntityRole;
+
             // Find or create concept node for entity, using the NER label
             let concept_type = crate::structures::ConceptType::from_ner_label(&entity.label);
 
@@ -115,14 +117,27 @@ impl Graph {
                 let new_node = GraphNode::new(NodeType::Concept {
                     concept_name: entity.text.clone(),
                     concept_type,
-                    confidence: claim.confidence,
+                    confidence: entity.confidence,
                 });
                 self.add_node(new_node).ok()
             };
 
-            // Link claim to entity
+            // Assign relevance by role: Subject=0.95, Object=0.90, Mentioned=0.70
+            let relevance = match entity.role {
+                EntityRole::Subject => 0.95,
+                EntityRole::Object => 0.90,
+                EntityRole::Mentioned => 0.70,
+            };
+
+            // Only pass predicate for Subject/Object roles
+            let pred = match entity.role {
+                EntityRole::Subject | EntityRole::Object => claim.predicate.clone(),
+                EntityRole::Mentioned => None,
+            };
+
+            // Link claim to entity with role
             if let Some(eid) = entity_node_id {
-                self.link_claim_to_entity(claim.id, eid, 0.9);
+                self.link_claim_to_entity(claim.id, eid, relevance, entity.role, pred);
             }
         }
 
@@ -147,7 +162,13 @@ impl Graph {
                     };
 
                     if let Some(eid) = entity_node_id {
-                        self.link_claim_to_entity(claim.id, eid, 0.9);
+                        self.link_claim_to_entity(
+                            claim.id,
+                            eid,
+                            0.70,
+                            crate::claims::types::EntityRole::Mentioned,
+                            None,
+                        );
                     }
                 }
             }
@@ -158,12 +179,15 @@ impl Graph {
 
     /// Link a claim to an entity/concept node via ABOUT edge
     ///
-    /// This creates semantic relationships between claims and the entities they mention
+    /// This creates semantic relationships between claims and the entities they mention,
+    /// with role information (Subject/Object/Mentioned) and optional predicate.
     pub fn link_claim_to_entity(
         &mut self,
         claim_id: u64,
         entity_node_id: crate::structures::NodeId,
         relevance_score: f32,
+        entity_role: crate::claims::types::EntityRole,
+        predicate: Option<String>,
     ) -> Option<crate::structures::EdgeId> {
         let claim_node_id = self.get_claim_node(claim_id).map(|n| n.id)?;
 
@@ -173,6 +197,8 @@ impl Graph {
             EdgeType::About {
                 relevance_score,
                 mention_count: 1,
+                entity_role,
+                predicate,
             },
             relevance_score,
         );
@@ -182,8 +208,8 @@ impl Graph {
         let edge_id = self.add_edge(about_edge)?;
 
         debug!(
-            "Created ABOUT edge {} linking claim {} to entity node {}",
-            edge_id, claim_id, entity_node_id
+            "Created ABOUT edge {} linking claim {} to entity node {} (role: {})",
+            edge_id, claim_id, entity_node_id, entity_role
         );
 
         Some(edge_id)
@@ -227,6 +253,26 @@ impl Graph {
                 } else {
                     None
                 }
+            })
+            .filter(|node| matches!(node.node_type, NodeType::Claim { .. }))
+            .collect()
+    }
+
+    /// Get all claims about a specific entity/concept filtered by entity role
+    pub fn get_claims_about_entity_with_role(
+        &self,
+        entity_node_id: crate::structures::NodeId,
+        role: crate::claims::types::EntityRole,
+    ) -> Vec<&GraphNode> {
+        self.get_edges_to(entity_node_id)
+            .into_iter()
+            .filter_map(|edge| {
+                if let EdgeType::About { entity_role, .. } = &edge.edge_type {
+                    if *entity_role == role {
+                        return self.get_node(edge.source);
+                    }
+                }
+                None
             })
             .filter(|node| matches!(node.node_type, NodeType::Claim { .. }))
             .collect()
@@ -324,8 +370,14 @@ mod tests {
         });
         let concept_node_id = graph.add_node(concept_node).unwrap();
 
-        // Link claim to entity
-        let edge_id = graph.link_claim_to_entity(1, concept_node_id, 0.95);
+        // Link claim to entity with role
+        let edge_id = graph.link_claim_to_entity(
+            1,
+            concept_node_id,
+            0.95,
+            crate::claims::types::EntityRole::Object,
+            Some("works at".to_string()),
+        );
         assert!(edge_id.is_some());
 
         // Verify ABOUT edge was created
@@ -441,6 +493,159 @@ mod tests {
         assert!(regular_text.contains("Observation [sensor_reading]"));
         assert!(regular_text.contains("thermometer"));
     }
+
+    #[test]
+    fn test_link_claim_to_entity_with_role_and_predicate() {
+        let mut graph = Graph::new();
+
+        let event_node = GraphNode::new(NodeType::Event {
+            event_id: 200,
+            event_type: "Context".to_string(),
+            significance: 0.8,
+        });
+        graph.add_node(event_node).unwrap();
+
+        let claim = create_test_claim(10, 200, "User works at Google");
+        graph.add_claim_node(&claim);
+
+        let concept_node = GraphNode::new(NodeType::Concept {
+            concept_name: "Google".to_string(),
+            concept_type: crate::structures::ConceptType::ContextualAssociation,
+            confidence: 0.9,
+        });
+        let concept_id = graph.add_node(concept_node).unwrap();
+
+        // Link with Subject role
+        let edge_id = graph.link_claim_to_entity(
+            10,
+            concept_id,
+            0.95,
+            crate::claims::types::EntityRole::Subject,
+            Some("works at".to_string()),
+        );
+        assert!(edge_id.is_some());
+
+        // Verify the edge has the correct role and predicate
+        let edge = graph.get_edge(edge_id.unwrap()).unwrap();
+        if let EdgeType::About {
+            entity_role,
+            predicate,
+            ..
+        } = &edge.edge_type
+        {
+            assert_eq!(*entity_role, crate::claims::types::EntityRole::Subject);
+            assert_eq!(predicate.as_deref(), Some("works at"));
+        } else {
+            panic!("Expected About edge type");
+        }
+    }
+
+    #[test]
+    fn test_get_claims_about_entity_with_role_filters() {
+        use crate::claims::types::EntityRole;
+
+        let mut graph = Graph::new();
+
+        let event_node = GraphNode::new(NodeType::Event {
+            event_id: 300,
+            event_type: "Context".to_string(),
+            significance: 0.8,
+        });
+        graph.add_node(event_node).unwrap();
+
+        // Create two claims
+        let claim1 = create_test_claim(20, 300, "John works at Google");
+        graph.add_claim_node(&claim1);
+        let claim2 = create_test_claim(21, 300, "Alice visited Google");
+        graph.add_claim_node(&claim2);
+
+        let concept_node = GraphNode::new(NodeType::Concept {
+            concept_name: "Google".to_string(),
+            concept_type: crate::structures::ConceptType::ContextualAssociation,
+            confidence: 0.9,
+        });
+        let concept_id = graph.add_node(concept_node).unwrap();
+
+        // Link claim1 as Object, claim2 as Subject
+        graph.link_claim_to_entity(
+            20,
+            concept_id,
+            0.90,
+            EntityRole::Object,
+            Some("works at".to_string()),
+        );
+        graph.link_claim_to_entity(21, concept_id, 0.95, EntityRole::Subject, None);
+
+        // All claims about entity
+        let all = graph.get_claims_about_entity(concept_id);
+        assert_eq!(all.len(), 2);
+
+        // Only Subject role
+        let subjects = graph.get_claims_about_entity_with_role(concept_id, EntityRole::Subject);
+        assert_eq!(subjects.len(), 1);
+
+        // Only Object role
+        let objects = graph.get_claims_about_entity_with_role(concept_id, EntityRole::Object);
+        assert_eq!(objects.len(), 1);
+
+        // Mentioned role (none linked)
+        let mentioned = graph.get_claims_about_entity_with_role(concept_id, EntityRole::Mentioned);
+        assert_eq!(mentioned.len(), 0);
+    }
+
+    #[test]
+    fn test_add_claim_node_with_entity_roles() {
+        use crate::claims::types::{ClaimEntity, EntityRole};
+
+        let mut graph = Graph::new();
+
+        let event_node = GraphNode::new(NodeType::Event {
+            event_id: 400,
+            event_type: "Context".to_string(),
+            significance: 0.8,
+        });
+        graph.add_node(event_node).unwrap();
+
+        let mut claim = create_test_claim(30, 400, "John works at Google");
+        claim.subject_entity = Some("john".to_string());
+        claim.predicate = Some("works at".to_string());
+        claim.object_entity = Some("google".to_string());
+        claim.entities = vec![
+            ClaimEntity {
+                text: "John".to_string(),
+                label: "PERSON".to_string(),
+                normalized: "john".to_string(),
+                confidence: 0.95,
+                role: EntityRole::Subject,
+            },
+            ClaimEntity {
+                text: "Google".to_string(),
+                label: "ORG".to_string(),
+                normalized: "google".to_string(),
+                confidence: 0.90,
+                role: EntityRole::Object,
+            },
+        ];
+
+        let claim_node_id = graph.add_claim_node(&claim);
+        assert!(claim_node_id.is_some());
+
+        // Find the Google concept node
+        let google_node = graph.get_concept_node("Google");
+        assert!(google_node.is_some());
+        let google_id = google_node.unwrap().id;
+
+        // Verify role filtering works
+        let object_claims = graph.get_claims_about_entity_with_role(google_id, EntityRole::Object);
+        assert_eq!(object_claims.len(), 1);
+
+        // John should be linked as Subject
+        let john_node = graph.get_concept_node("John");
+        assert!(john_node.is_some());
+        let john_id = john_node.unwrap().id;
+        let subject_claims = graph.get_claims_about_entity_with_role(john_id, EntityRole::Subject);
+        assert_eq!(subject_claims.len(), 1);
+    }
 }
 
 // GraphEngine integration methods
@@ -474,6 +679,17 @@ impl GraphEngine {
         let ner_store: Option<Arc<agent_db_ner::NerFeatureStore>> = self.ner_store.clone();
         let inference: Arc<RwLock<crate::inference::GraphInference>> = self.inference.clone();
         let ner_promotion_threshold = self.config.ner_promotion_threshold;
+
+        // Snapshot rolling summary for context enrichment (best-effort)
+        let rolling_summary: Option<String> = if self.config.enable_rolling_summary {
+            let summaries = self.conversation_summaries.read().await;
+            summaries
+                .values()
+                .max_by_key(|s| s.last_updated)
+                .map(|s| s.summary.clone())
+        } else {
+            None
+        };
 
         // Extract canonical text from event.
         // Context events carry inline text; other event types synthesise a
@@ -711,6 +927,7 @@ impl GraphEngine {
                 user_id: Some(agent_id.to_string()),
                 workspace_id: Some(format!("session_{}", session_id)),
                 source_role: crate::claims::types::SourceRole::default(),
+                rolling_summary,
             };
 
             // Submit to claim extraction queue

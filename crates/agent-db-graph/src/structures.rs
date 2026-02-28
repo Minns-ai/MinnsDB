@@ -660,6 +660,12 @@ pub enum EdgeType {
     About {
         relevance_score: f32,
         mention_count: u32,
+        /// Role of the entity in the claim's SPO triple (Subject/Object/Mentioned)
+        #[serde(default)]
+        entity_role: crate::claims::types::EntityRole,
+        /// Predicate linking subject to object (only set for Subject/Object roles)
+        #[serde(default)]
+        predicate: Option<String>,
     },
 }
 

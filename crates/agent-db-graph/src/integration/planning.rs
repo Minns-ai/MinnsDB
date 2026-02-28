@@ -536,8 +536,10 @@ impl GraphEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial]
     async fn test_generate_strategies_without_orchestrator() {
         let engine = GraphEngine::new().await.unwrap();
         let result = engine
@@ -548,6 +550,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_generate_strategies_with_mock() {
         let mut config = GraphEngineConfig::default();
         config.planning_config.enable_strategy_generation = true;
@@ -563,6 +566,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_generate_actions_without_orchestrator() {
         let engine = GraphEngine::new().await.unwrap();
         let strategy = agent_db_planning::GeneratedStrategyPlan {
@@ -582,6 +586,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_generate_actions_with_mock() {
         let mut config = GraphEngineConfig::default();
         config.planning_config.enable_action_generation = true;
@@ -621,6 +626,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_generate_strategies_with_world_model() {
         let mut config = GraphEngineConfig::default();
         config.planning_config.enable_strategy_generation = true;
@@ -637,6 +643,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_plan_for_goal_disabled() {
         let engine = GraphEngine::new().await.unwrap();
         let result = engine.plan_for_goal("test goal", 1, 42, 1).await;
@@ -645,6 +652,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_plan_for_goal_generate_and_score() {
         let mut config = GraphEngineConfig::default();
         config.planning_config.enable_strategy_generation = true;
@@ -669,6 +677,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_plan_for_goal_strategies_only() {
         let mut config = GraphEngineConfig::default();
         config.planning_config.enable_strategy_generation = true;
