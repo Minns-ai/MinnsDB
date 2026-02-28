@@ -59,11 +59,12 @@ fn trim_data(data: &ConversationIngest, max_msgs: usize) -> ConversationIngest {
 /// Helper: create a GraphEngineConfig with isolated temp-dir paths so parallel
 /// tests don't fight over the same ReDB lock.
 fn isolated_config(tmp: &std::path::Path) -> GraphEngineConfig {
-    let mut cfg = GraphEngineConfig::default();
-    cfg.redb_path = tmp.join("graph.redb");
-    cfg.ner_storage_path = Some(tmp.join("ner_features.redb"));
-    cfg.claim_storage_path = Some(tmp.join("claims.redb"));
-    cfg
+    GraphEngineConfig {
+        redb_path: tmp.join("graph.redb"),
+        ner_storage_path: Some(tmp.join("ner_features.redb")),
+        claim_storage_path: Some(tmp.join("claims.redb")),
+        ..Default::default()
+    }
 }
 
 /// Helper: ingest a ConversationIngest into the engine, returning event count.
