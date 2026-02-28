@@ -4,6 +4,7 @@
 //! and facts captured from conversation sessions.
 
 use agent_db_graph::{ConversationIngest, GraphEngine, GraphEngineConfig, IngestOptions};
+use serial_test::serial;
 
 /// Base path for benchmark data (relative to crate root).
 const BENCH_BASE: &str = "../../ref/bench/bench/dataset/benchmark";
@@ -53,17 +54,6 @@ fn trim_data(data: &ConversationIngest, max_msgs: usize) -> ConversationIngest {
             })
             .collect(),
         queries: data.queries.clone(),
-    }
-}
-
-/// Helper: create a GraphEngineConfig with isolated temp-dir paths so parallel
-/// tests don't fight over the same ReDB lock.
-fn isolated_config(tmp: &std::path::Path) -> GraphEngineConfig {
-    GraphEngineConfig {
-        redb_path: tmp.join("graph.redb"),
-        ner_storage_path: Some(tmp.join("ner_features.redb")),
-        claim_storage_path: Some(tmp.join("claims.redb")),
-        ..Default::default()
     }
 }
 
@@ -146,9 +136,9 @@ async fn verify_bm25_content(
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_accounting_ingest_graph_and_search() {
-    let tmp = tempfile::tempdir().unwrap();
-    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
+    let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
         .unwrap();
 
@@ -337,9 +327,9 @@ async fn test_accounting_ingest_graph_and_search() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_relationship_graph_ingest_and_search() {
-    let tmp = tempfile::tempdir().unwrap();
-    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
+    let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
         .unwrap();
 
@@ -445,9 +435,9 @@ async fn test_relationship_graph_ingest_and_search() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_recommendations_ingest_and_search() {
-    let tmp = tempfile::tempdir().unwrap();
-    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
+    let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
         .unwrap();
 
@@ -571,9 +561,9 @@ async fn test_recommendations_ingest_and_search() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_nlq_search_returns_meaningful_results() {
-    let tmp = tempfile::tempdir().unwrap();
-    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
+    let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
         .unwrap();
 
@@ -645,9 +635,9 @@ async fn test_nlq_search_returns_meaningful_results() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_graph_structure_nodes_have_content() {
-    let tmp = tempfile::tempdir().unwrap();
-    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
+    let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
         .unwrap();
 
@@ -745,9 +735,9 @@ async fn test_graph_structure_nodes_have_content() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_unified_search_cross_dataset_content() {
-    let tmp = tempfile::tempdir().unwrap();
-    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
+    let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
         .unwrap();
 
@@ -819,9 +809,9 @@ async fn test_unified_search_cross_dataset_content() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_event_content_fidelity() {
-    let tmp = tempfile::tempdir().unwrap();
-    let engine = GraphEngine::with_config(isolated_config(tmp.path()))
+    let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
         .unwrap();
 
@@ -918,6 +908,7 @@ async fn test_event_content_fidelity() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_structured_memory_ledger_content() {
     // Use the direct ingest path (not event pipeline) which populates StructuredMemoryStore
     let data = skip_if_missing!("accounting/data/debt_tracker_10percent.json");

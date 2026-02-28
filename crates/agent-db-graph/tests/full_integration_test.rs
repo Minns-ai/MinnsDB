@@ -14,6 +14,7 @@ use agent_db_events::{
 };
 use agent_db_graph::{GraphEngine, GraphEngineConfig};
 use serde_json::json;
+use serial_test::serial;
 use std::collections::HashMap;
 
 fn create_test_context() -> EventContext {
@@ -101,6 +102,7 @@ fn create_action_event(agent_id: AgentId, timestamp: u64, success: bool) -> Even
 }
 
 #[tokio::test]
+#[serial]
 async fn test_fully_integrated_self_evolution_pipeline() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🚀 Testing FULLY INTEGRATED Self-Evolution Pipeline");
     println!("══════════════════════════════════════════════════════");
@@ -352,6 +354,7 @@ async fn test_fully_integrated_self_evolution_pipeline() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
+#[serial]
 async fn test_policy_guide_with_real_patterns() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🧭 Testing Policy Guide with Real Patterns");
 

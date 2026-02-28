@@ -8,6 +8,7 @@ use agent_db_graph::{
     ConversationIngest, ConversationMessage, ConversationSession, GraphEngine, GraphEngineConfig,
     IngestOptions,
 };
+use serial_test::serial;
 
 fn make_test_ingest(case_id: &str, messages: Vec<(&str, &str)>) -> ConversationIngest {
     ConversationIngest {
@@ -32,6 +33,7 @@ fn make_test_ingest(case_id: &str, messages: Vec<(&str, &str)>) -> ConversationI
 }
 
 #[tokio::test]
+#[serial]
 async fn test_conversation_pipeline_concept_nodes_in_graph() {
     let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
@@ -76,6 +78,7 @@ async fn test_conversation_pipeline_concept_nodes_in_graph() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_conversation_pipeline_processes_events() {
     let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
@@ -126,6 +129,7 @@ async fn test_conversation_pipeline_processes_events() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_conversation_pipeline_stores_events_with_metadata() {
     let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
@@ -167,6 +171,7 @@ async fn test_conversation_pipeline_stores_events_with_metadata() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_conversation_pipeline_multi_session() {
     let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
@@ -249,6 +254,7 @@ async fn test_conversation_pipeline_multi_session() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_ensure_conversation_participants_idempotent() {
     let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
@@ -283,6 +289,7 @@ async fn test_ensure_conversation_participants_idempotent() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_conversation_pipeline_structured_memory_accessible() {
     let engine = GraphEngine::with_config(GraphEngineConfig::default())
         .await
