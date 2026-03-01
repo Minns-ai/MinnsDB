@@ -39,9 +39,7 @@ fn build_context_event(text: &str) -> Event {
 #[tokio::test]
 #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
 async fn test_real_claims_pipeline_end_to_end() {
-    let api_key = match std::env::var("LLM_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-    {
+    let api_key = match std::env::var("LLM_API_KEY").or_else(|_| std::env::var("OPENAI_API_KEY")) {
         Ok(key) if !key.is_empty() => key,
         _ => {
             eprintln!("Skipping: LLM_API_KEY / OPENAI_API_KEY not set");
@@ -267,9 +265,7 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
 #[tokio::test]
 #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
 async fn test_real_embedding_generation() {
-    let api_key = match std::env::var("LLM_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-    {
+    let api_key = match std::env::var("LLM_API_KEY").or_else(|_| std::env::var("OPENAI_API_KEY")) {
         Ok(key) if !key.is_empty() => key,
         _ => {
             eprintln!("Skipping: LLM_API_KEY / OPENAI_API_KEY not set");
