@@ -510,7 +510,10 @@ impl StrategyExtractor {
             .unwrap_or(EpisodeOutcome::Interrupted);
 
         // Defense-in-depth: skip low-signal outcomes early
-        if matches!(outcome, EpisodeOutcome::Partial | EpisodeOutcome::Interrupted) {
+        if matches!(
+            outcome,
+            EpisodeOutcome::Partial | EpisodeOutcome::Interrupted
+        ) {
             tracing::info!(
                 "Strategy extraction skipped episode_id={} outcome={:?} (low signal)",
                 episode.id,
@@ -745,9 +748,7 @@ impl StrategyExtractor {
                 let weakest = bucket_ids
                     .iter()
                     .filter(|&&id| id != stored_id)
-                    .filter_map(|&id| {
-                        self.strategies.get(&id).map(|s| (id, s.quality_score))
-                    })
+                    .filter_map(|&id| self.strategies.get(&id).map(|s| (id, s.quality_score)))
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 if let Some((victim_id, _)) = weakest {
                     self.remove_strategy(victim_id);
@@ -1551,8 +1552,7 @@ impl StrategyExtractor {
             (bucket_count as f32 / 10.0).min(1.0)
         };
 
-        let redundancy =
-            self.estimate_redundancy(goal_bucket_id, behavior_signature, action_hint);
+        let redundancy = self.estimate_redundancy(goal_bucket_id, behavior_signature, action_hint);
 
         let score = self.config.w_novelty * novelty
             + self.config.w_outcome_utility * outcome_utility
@@ -1702,12 +1702,9 @@ impl StrategyExtractor {
                         StrategyType::Positive => expected_success,
                         StrategyType::Constraint => -expected_success,
                     };
-                    existing.confidence =
-                        1.0 - (-((existing.support_count as f32) / 3.0)).exp();
+                    existing.confidence = 1.0 - (-((existing.support_count as f32) / 3.0)).exp();
 
-                    if existing.reasoning_steps.is_empty()
-                        && !strategy.reasoning_steps.is_empty()
-                    {
+                    if existing.reasoning_steps.is_empty() && !strategy.reasoning_steps.is_empty() {
                         existing.reasoning_steps = strategy.reasoning_steps;
                     }
 

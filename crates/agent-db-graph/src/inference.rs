@@ -1173,10 +1173,8 @@ impl GraphInference {
 
         // Prune lowest-confidence patterns when over cap (remove bottom 20%)
         if self.temporal_patterns.len() > self.config.max_temporal_patterns {
-            self.temporal_patterns.sort_by(|a, b| {
-                b.confidence
-                    .total_cmp(&a.confidence)
-            });
+            self.temporal_patterns
+                .sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
             self.temporal_patterns
                 .truncate(self.config.max_temporal_patterns * 4 / 5);
         }

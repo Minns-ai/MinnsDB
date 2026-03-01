@@ -2,12 +2,12 @@
 
 use crate::handlers;
 use crate::state::AppState;
+use axum::http::Method;
 use axum::{
     routing::{get, post},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
-use axum::http::Method;
 
 /// Build CORS layer from environment configuration.
 ///
@@ -26,7 +26,13 @@ fn build_cors_layer() -> CorsLayer {
             .collect();
         CorsLayer::new()
             .allow_origin(allowed)
-            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
             .allow_headers(Any)
     }
 }

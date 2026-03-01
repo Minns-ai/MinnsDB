@@ -154,7 +154,10 @@ impl EmbeddingQueue {
                         tokio::task::yield_now().await;
                     },
                     Err(mpsc::error::TrySendError::Closed(_)) => {
-                        error!("Embedding queue closed, permanently dropping claim {}", claim_id);
+                        error!(
+                            "Embedding queue closed, permanently dropping claim {}",
+                            claim_id
+                        );
                         return;
                     },
                 }
@@ -341,7 +344,8 @@ mod tests {
 
         // Store 20 claims without embeddings
         for i in 1..=20 {
-            let claim = create_test_claim(i, &format!("Batch claim number {} about topic {}", i, i));
+            let claim =
+                create_test_claim(i, &format!("Batch claim number {} about topic {}", i, i));
             store.store(&claim).unwrap();
         }
 

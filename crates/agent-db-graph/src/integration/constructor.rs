@@ -696,9 +696,7 @@ impl GraphEngine {
                 Ok(Some(raw)) => {
                     let (_version, bytes) = agent_db_storage::unwrap_versioned(&raw);
                     if bytes.len() == 8 {
-                        let counter = u64::from_be_bytes(
-                            bytes.try_into().unwrap_or([0u8; 8])
-                        );
+                        let counter = u64::from_be_bytes(bytes.try_into().unwrap_or([0u8; 8]));
                         engine
                             .episodes_since_consolidation
                             .store(counter, AtomicOrdering::Relaxed);

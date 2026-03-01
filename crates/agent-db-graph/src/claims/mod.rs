@@ -10,8 +10,8 @@ pub mod types;
 
 pub use embedding_queue::EmbeddingQueue;
 pub use embeddings::{
-    AnthropicEmbeddingClient, DistanceMetric, Embedding, EmbeddingClient, EmbeddingRequest,
-    EmbeddingResponse, OpenAiEmbeddingClient, VectorSimilarity, openai_client_from_env,
+    openai_client_from_env, AnthropicEmbeddingClient, DistanceMetric, Embedding, EmbeddingClient,
+    EmbeddingRequest, EmbeddingResponse, OpenAiEmbeddingClient, VectorSimilarity,
 };
 pub use extractor::{ClaimExtractionConfig, ClaimExtractionQueue};
 pub use hybrid_search::{HybridClaimSearch, HybridSearchConfig};

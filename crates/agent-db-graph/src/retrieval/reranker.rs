@@ -162,9 +162,7 @@ pub async fn apply_reranking(
     // Collect (id, memory_ref) pairs for the top-K, preserving alignment
     let top_k_pairs: Vec<(u64, &Memory)> = fused_results[..k]
         .iter()
-        .filter_map(|&(id, _)| {
-            all_memories.iter().find(|m| m.id == id).map(|m| (id, m))
-        })
+        .filter_map(|&(id, _)| all_memories.iter().find(|m| m.id == id).map(|m| (id, m)))
         .collect();
 
     if top_k_pairs.is_empty() {

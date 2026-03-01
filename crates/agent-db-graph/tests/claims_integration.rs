@@ -165,8 +165,8 @@ async fn test_real_claims_pipeline_end_to_end() {
 async fn test_hybrid_claims_search_finds_alice_and_user() {
     use agent_db_graph::claims::types::{DerivedClaim, EvidenceSpan};
     use agent_db_graph::claims::{
-        ClaimStore, EmbeddingClient, EmbeddingRequest, HybridClaimSearch, HybridSearchConfig,
-        OpenAiEmbeddingClient, openai_client_from_env,
+        openai_client_from_env, ClaimStore, EmbeddingClient, EmbeddingRequest, HybridClaimSearch,
+        HybridSearchConfig, OpenAiEmbeddingClient,
     };
 
     let dir = tempdir().unwrap();
@@ -243,10 +243,16 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     let results =
         HybridClaimSearch::search("IDE theme preferences", &query_emb, &store, 10, &config)
             .unwrap();
-    assert!(!results.is_empty(), "'IDE theme preferences' should return results");
+    assert!(
+        !results.is_empty(),
+        "'IDE theme preferences' should return results"
+    );
     // With real embeddings, claim 1 about dark mode should rank highly
     let ids: Vec<u64> = results.iter().map(|r| r.0).collect();
-    assert!(ids.contains(&1), "claim 1 (dark mode) should appear for 'IDE theme preferences'");
+    assert!(
+        ids.contains(&1),
+        "claim 1 (dark mode) should appear for 'IDE theme preferences'"
+    );
 }
 
 /// Test that embedding generation works end-to-end with real OpenAI API.

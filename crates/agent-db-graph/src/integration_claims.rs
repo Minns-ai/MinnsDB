@@ -1157,10 +1157,7 @@ impl GraphEngine {
             fused
         };
 
-        debug!(
-            "Fused {} candidate claims for re-ranking",
-            fused_ids.len()
-        );
+        debug!("Fused {} candidate claims for re-ranking", fused_ids.len());
 
         // Retrieve full claims and compute temporally-weighted retrieval score
         let mut results: Vec<(crate::claims::DerivedClaim, f32)> = Vec::new();
@@ -1234,8 +1231,7 @@ impl GraphEngine {
                                 if let NodeType::Claim { claim_id, .. } = &source_node.node_type {
                                     // Accumulate score — claims linked via multiple entities
                                     // get a higher score
-                                    let entry =
-                                        claim_scores.entry(*claim_id).or_insert(0.0);
+                                    let entry = claim_scores.entry(*claim_id).or_insert(0.0);
                                     *entry += relevance_score;
                                 }
                             }
