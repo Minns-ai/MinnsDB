@@ -322,6 +322,9 @@ pub struct StrategyExtractionConfig {
     /// Minimum quality score to accept a new strategy
     pub min_quality_score: f32,
 
+    /// Maximum strategies allowed per goal bucket before quality-gating
+    pub max_strategies_per_bucket: usize,
+
     /// Eligibility weights
     pub w_novelty: f32,
     pub w_outcome_utility: f32,
@@ -352,14 +355,15 @@ impl Default for StrategyExtractionConfig {
             min_success_rate: 0.7,
             min_occurrences: 3,
             max_strategies_per_agent: 100,
-            eligibility_threshold: 0.5,
+            eligibility_threshold: 0.6,
             min_episode_events: 3,
-            min_quality_score: 0.55,
+            min_quality_score: 0.65,
+            max_strategies_per_bucket: 15,
             w_novelty: 0.25,
             w_outcome_utility: 0.25,
             w_difficulty: 0.2,
             w_reuse_potential: 0.2,
-            w_redundancy: 0.1,
+            w_redundancy: 0.25,
             distill_every: 5,
             motif_window_k: 2,
             min_support_success: 5,
@@ -374,6 +378,21 @@ impl Default for StrategyExtractionConfig {
             drift_max_drop: 0.25,
             conflict_margin: 0.1,
         }
+    }
+}
+
+/// Compute word-level Jaccard similarity between two strings.
+///
+/// Splits on whitespace, compares as sets. Returns 0.0 if both are empty.
+fn word_jaccard(a: &str, b: &str) -> f32 {
+    let a_words: HashSet<&str> = a.split_whitespace().collect();
+    let b_words: HashSet<&str> = b.split_whitespace().collect();
+    let intersection = a_words.intersection(&b_words).count() as f32;
+    let union = a_words.union(&b_words).count() as f32;
+    if union > 0.0 {
+        intersection / union
+    } else {
+        0.0
     }
 }
 
@@ -489,6 +508,17 @@ impl StrategyExtractor {
             .outcome
             .clone()
             .unwrap_or(EpisodeOutcome::Interrupted);
+
+        // Defense-in-depth: skip low-signal outcomes early
+        if matches!(outcome, EpisodeOutcome::Partial | EpisodeOutcome::Interrupted) {
+            tracing::info!(
+                "Strategy extraction skipped episode_id={} outcome={:?} (low signal)",
+                episode.id,
+                outcome
+            );
+            return Ok(None);
+        }
+
         let strategy_type = match outcome {
             EpisodeOutcome::Success => StrategyType::Positive,
             EpisodeOutcome::Failure => StrategyType::Constraint,
@@ -498,8 +528,18 @@ impl StrategyExtractor {
 
         let goal_bucket_id = self.derive_goal_bucket_id(episode);
         let behavior_signature = self.compute_behavior_signature(events);
-        let eligibility_score =
-            self.calculate_eligibility_score(episode, &behavior_signature, goal_bucket_id, events);
+
+        // Extract action_hint early so eligibility can use it for fuzzy redundancy
+        let (precondition, action_hint, expected_cost) =
+            self.extract_behavior_skeleton(events, &strategy_type, goal_bucket_id);
+
+        let eligibility_score = self.calculate_eligibility_score(
+            episode,
+            &behavior_signature,
+            &action_hint,
+            goal_bucket_id,
+            events,
+        );
         if eligibility_score < self.config.eligibility_threshold {
             tracing::info!(
                 "Strategy extraction rejected episode_id={} eligibility={:.3} min={:.3}",
@@ -508,6 +548,29 @@ impl StrategyExtractor {
                 self.config.eligibility_threshold
             );
             return Ok(None);
+        }
+
+        // Per-bucket cap: if bucket is full, only allow if quality exceeds weakest
+        let quality_with_prediction_early =
+            episode.significance * (1.0 + episode.prediction_error * 0.3);
+        if let Some(bucket_ids) = self.goal_bucket_index.get(&goal_bucket_id) {
+            if bucket_ids.len() >= self.config.max_strategies_per_bucket {
+                let weakest_quality = bucket_ids
+                    .iter()
+                    .filter_map(|id| self.strategies.get(id))
+                    .map(|s| s.quality_score)
+                    .fold(f32::INFINITY, f32::min);
+                if quality_with_prediction_early <= weakest_quality {
+                    tracing::info!(
+                        "Strategy extraction rejected episode_id={} bucket full ({}) quality={:.3} <= weakest={:.3}",
+                        episode.id,
+                        bucket_ids.len(),
+                        quality_with_prediction_early,
+                        weakest_quality
+                    );
+                    return Ok(None);
+                }
+            }
         }
 
         // Extract reasoning traces from cognitive events
@@ -547,8 +610,7 @@ impl StrategyExtractor {
         let strategy_id = self.next_strategy_id;
         self.next_strategy_id += 1;
 
-        let (precondition, action_hint, expected_cost) =
-            self.extract_behavior_skeleton(events, &strategy_type, goal_bucket_id);
+        // precondition, action_hint, expected_cost already extracted above
         let (expected_success, expected_value, confidence) =
             self.derive_calibrated_metrics(&strategy_type, &outcome, events.len() as u32);
         // Generate natural language summary
@@ -675,6 +737,28 @@ impl StrategyExtractor {
         let stored_id = self.store_strategy(strategy, &context_patterns, goal_bucket_id);
         self.episode_index.insert(episode.id, stored_id);
         self.episode_outcomes.insert(episode.id, outcome.clone());
+
+        // Per-bucket cap enforcement: evict weakest if over limit after insertion
+        if let Some(bucket_ids) = self.goal_bucket_index.get(&goal_bucket_id) {
+            if bucket_ids.len() > self.config.max_strategies_per_bucket {
+                // Find the weakest strategy in this bucket (excluding the one we just stored)
+                let weakest = bucket_ids
+                    .iter()
+                    .filter(|&&id| id != stored_id)
+                    .filter_map(|&id| {
+                        self.strategies.get(&id).map(|s| (id, s.quality_score))
+                    })
+                    .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                if let Some((victim_id, _)) = weakest {
+                    self.remove_strategy(victim_id);
+                    tracing::debug!(
+                        "Per-bucket cap: evicted strategy {} from bucket {}",
+                        victim_id,
+                        goal_bucket_id
+                    );
+                }
+            }
+        }
 
         *self
             .context_counts
@@ -1434,6 +1518,7 @@ impl StrategyExtractor {
         &self,
         episode: &Episode,
         behavior_signature: &str,
+        action_hint: &str,
         goal_bucket_id: u64,
         events: &[Event],
     ) -> f32 {
@@ -1466,7 +1551,8 @@ impl StrategyExtractor {
             (bucket_count as f32 / 10.0).min(1.0)
         };
 
-        let redundancy = self.estimate_redundancy(goal_bucket_id, behavior_signature);
+        let redundancy =
+            self.estimate_redundancy(goal_bucket_id, behavior_signature, action_hint);
 
         let score = self.config.w_novelty * novelty
             + self.config.w_outcome_utility * outcome_utility
@@ -1477,17 +1563,33 @@ impl StrategyExtractor {
         score.clamp(0.0, 1.0)
     }
 
-    fn estimate_redundancy(&self, goal_bucket_id: u64, behavior_signature: &str) -> f32 {
+    /// Estimate how redundant a candidate strategy is relative to existing bucket peers.
+    ///
+    /// Returns a continuous 0.0–1.0 score: 1.0 for exact behavior_signature match,
+    /// otherwise the highest word-level Jaccard similarity on action_hint found.
+    fn estimate_redundancy(
+        &self,
+        goal_bucket_id: u64,
+        behavior_signature: &str,
+        action_hint: &str,
+    ) -> f32 {
+        let mut max_similarity: f32 = 0.0;
         if let Some(ids) = self.goal_bucket_index.get(&goal_bucket_id) {
             for id in ids {
                 if let Some(strategy) = self.strategies.get(id) {
+                    // Exact signature match → maximum redundancy
                     if strategy.behavior_signature == behavior_signature {
                         return 1.0;
+                    }
+                    // Fuzzy match on action_hint
+                    let jaccard = word_jaccard(&strategy.action_hint, action_hint);
+                    if jaccard > max_similarity {
+                        max_similarity = jaccard;
                     }
                 }
             }
         }
-        0.0
+        max_similarity
     }
 
     fn derive_calibrated_metrics(
@@ -1561,6 +1663,64 @@ impl StrategyExtractor {
             }
         }
 
+        // Fuzzy dedup: check goal bucket peers for Jaccard similarity on action_hint
+        if let Some(bucket_ids) = self.goal_bucket_index.get(&goal_bucket_id) {
+            let mut best_peer: Option<StrategyId> = None;
+            let mut best_jaccard: f32 = 0.0;
+            for &peer_id in bucket_ids {
+                if let Some(peer) = self.strategies.get(&peer_id) {
+                    if peer.strategy_type != strategy.strategy_type {
+                        continue;
+                    }
+                    if peer.agent_id != strategy.agent_id {
+                        continue;
+                    }
+                    let jaccard = word_jaccard(&peer.action_hint, &strategy.action_hint);
+                    if jaccard >= 0.60 && jaccard > best_jaccard {
+                        best_jaccard = jaccard;
+                        best_peer = Some(peer_id);
+                    }
+                }
+            }
+            if let Some(peer_id) = best_peer {
+                if let Some(existing) = self.strategies.get_mut(&peer_id) {
+                    existing.support_count += strategy.support_count;
+                    existing.success_count += strategy.success_count;
+                    existing.failure_count += strategy.failure_count;
+                    existing.last_used = current_timestamp();
+                    existing
+                        .source_episodes
+                        .append(&mut strategy.source_episodes);
+                    existing
+                        .source_outcomes
+                        .append(&mut strategy.source_outcomes);
+
+                    let expected_success = (existing.success_count as f32 + self.config.alpha)
+                        / (existing.support_count as f32 + self.config.alpha + self.config.beta);
+                    existing.expected_success = expected_success;
+                    existing.expected_value = match existing.strategy_type {
+                        StrategyType::Positive => expected_success,
+                        StrategyType::Constraint => -expected_success,
+                    };
+                    existing.confidence =
+                        1.0 - (-((existing.support_count as f32) / 3.0)).exp();
+
+                    if existing.reasoning_steps.is_empty()
+                        && !strategy.reasoning_steps.is_empty()
+                    {
+                        existing.reasoning_steps = strategy.reasoning_steps;
+                    }
+
+                    tracing::debug!(
+                        "Fuzzy dedup merged into peer={} jaccard={:.3}",
+                        peer_id,
+                        best_jaccard
+                    );
+                    return peer_id;
+                }
+            }
+        }
+
         let strategy_id = strategy.id;
         self.strategy_signature_index.insert(signature, strategy_id);
         let agent_id = strategy.agent_id;
@@ -1598,6 +1758,23 @@ impl StrategyExtractor {
         }
 
         strategy_id
+    }
+
+    /// Remove a strategy and clean all indexes.
+    fn remove_strategy(&mut self, id: StrategyId) {
+        if let Some(strategy) = self.strategies.remove(&id) {
+            if let Some(ids) = self.agent_strategies.get_mut(&strategy.agent_id) {
+                ids.retain(|sid| *sid != id);
+            }
+            if let Some(ids) = self.goal_bucket_index.get_mut(&strategy.goal_bucket_id) {
+                ids.retain(|sid| *sid != id);
+            }
+            if let Some(ids) = self.behavior_index.get_mut(&strategy.behavior_signature) {
+                ids.retain(|sid| *sid != id);
+            }
+            self.strategy_signature_index.retain(|_, v| *v != id);
+            self.episode_index.retain(|_, v| *v != id);
+        }
     }
 
     fn should_distill(&self, bucket_count: u32) -> bool {
@@ -2317,15 +2494,7 @@ impl StrategyExtractor {
                     };
 
                     // Word-level Jaccard on action_hint
-                    let a_words: HashSet<&str> = a.action_hint.split_whitespace().collect();
-                    let b_words: HashSet<&str> = b.action_hint.split_whitespace().collect();
-                    let intersection = a_words.intersection(&b_words).count() as f32;
-                    let union = a_words.union(&b_words).count() as f32;
-                    let jaccard = if union > 0.0 {
-                        intersection / union
-                    } else {
-                        0.0
-                    };
+                    let jaccard = word_jaccard(&a.action_hint, &b.action_hint);
 
                     if jaccard >= 0.70 {
                         // Merge weaker into stronger

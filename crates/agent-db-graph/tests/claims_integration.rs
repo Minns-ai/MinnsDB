@@ -156,6 +156,93 @@ async fn test_real_claims_pipeline_end_to_end() {
     println!("=== Claims pipeline integration test PASSED ===");
 }
 
+/// Verify that hybrid claims search (BM25 + semantic) surfaces claims for
+/// simple queries like "alice" and "user".
+///
+/// Uses MockEmbeddingClient to generate deterministic embeddings — same as the
+/// real extractor does but without needing an API key.
+#[tokio::test]
+async fn test_hybrid_claims_search_finds_alice_and_user() {
+    use agent_db_graph::claims::types::{DerivedClaim, EvidenceSpan};
+    use agent_db_graph::claims::{
+        ClaimStore, EmbeddingClient, EmbeddingRequest, HybridClaimSearch, HybridSearchConfig,
+        MockEmbeddingClient,
+    };
+
+    let dir = tempdir().unwrap();
+    let mock = MockEmbeddingClient::new(384);
+
+    let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+
+    // Helper: generate embedding for text using the mock (same as extractor would)
+    async fn embed(mock: &MockEmbeddingClient, text: &str) -> Vec<f32> {
+        mock.embed(EmbeddingRequest {
+            text: text.to_string(),
+            context: None,
+        })
+        .await
+        .unwrap()
+        .embedding
+    }
+
+    // Store claims WITH embeddings (production path — extractor always embeds)
+    let texts = [
+        (1u64, "Alice prefers dark mode for her IDE"),
+        (2, "User requested a refund for order ORD-2001"),
+        (3, "Bob's favorite programming language is Rust"),
+    ];
+
+    for &(id, text) in &texts {
+        let emb = embed(&mock, text).await;
+        let claim = DerivedClaim::new(
+            id,
+            text.to_string(),
+            vec![EvidenceSpan::new(0, 10, &text[..10])],
+            0.9,
+            emb,
+            100 + id as u128,
+            None,
+            None,
+            None,
+            None,
+        );
+        store.store(&claim).unwrap();
+    }
+
+    let config = HybridSearchConfig::default(); // Hybrid mode
+
+    // "alice" → claim 1 via BM25 keyword leg
+    let query_emb = embed(&mock, "alice").await;
+    let results = HybridClaimSearch::search("alice", &query_emb, &store, 10, &config).unwrap();
+    assert!(!results.is_empty(), "'alice' should return results");
+    assert_eq!(results[0].0, 1, "claim 1 should be top result for 'alice'");
+
+    // "user" → claim 2
+    let query_emb = embed(&mock, "user").await;
+    let results = HybridClaimSearch::search("user", &query_emb, &store, 10, &config).unwrap();
+    assert!(!results.is_empty(), "'user' should return results");
+    assert_eq!(results[0].0, 2, "claim 2 should be top result for 'user'");
+
+    // "rust" → claim 3
+    let query_emb = embed(&mock, "rust").await;
+    let results = HybridClaimSearch::search("rust", &query_emb, &store, 10, &config).unwrap();
+    assert!(!results.is_empty(), "'rust' should return results");
+    assert_eq!(results[0].0, 3, "claim 3 should be top result for 'rust'");
+
+    // "refund order" → claim 2
+    let query_emb = embed(&mock, "refund order").await;
+    let results =
+        HybridClaimSearch::search("refund order", &query_emb, &store, 10, &config).unwrap();
+    assert!(!results.is_empty(), "'refund order' should return results");
+    assert_eq!(results[0].0, 2, "claim 2 should match 'refund order'");
+
+    // Unrelated query — may return results from semantic leg but scores should
+    // be low; at minimum it should not panic or error.
+    let query_emb = embed(&mock, "quantum physics").await;
+    let _results =
+        HybridClaimSearch::search("quantum physics", &query_emb, &store, 10, &config).unwrap();
+}
+
 /// Test that embedding generation works end-to-end with real OpenAI API.
 #[tokio::test]
 #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]

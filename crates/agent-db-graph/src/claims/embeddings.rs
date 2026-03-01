@@ -269,27 +269,26 @@ impl EmbeddingClient for AnthropicEmbeddingClient {
     }
 }
 
-/// Mock embedding client for testing only
-#[cfg(test)]
+/// Deterministic embedding client for tests.
+///
+/// Generates hash-based unit vectors so that identical texts always produce
+/// identical embeddings.  Available in integration tests and unit tests alike.
 pub struct MockEmbeddingClient {
     dimensions: usize,
 }
 
-#[cfg(test)]
 impl MockEmbeddingClient {
     pub fn new(dimensions: usize) -> Self {
         Self { dimensions }
     }
 }
 
-#[cfg(test)]
 impl Default for MockEmbeddingClient {
     fn default() -> Self {
         Self::new(384) // Common dimension for small models
     }
 }
 
-#[cfg(test)]
 #[async_trait]
 impl EmbeddingClient for MockEmbeddingClient {
     async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {

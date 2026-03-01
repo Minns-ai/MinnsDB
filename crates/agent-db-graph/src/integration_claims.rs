@@ -1039,9 +1039,10 @@ impl GraphEngine {
         Ok(count)
     }
 
-    /// Search for similar claims using semantic search
+    /// Search for claims using hybrid BM25 + semantic search.
     ///
-    /// Returns claims ranked by similarity to the query text
+    /// Always runs both legs (keyword + vector) and fuses via RRF.
+    /// Requires an embedding client to generate the query embedding.
     pub async fn search_similar_claims(
         &self,
         query_text: &str,
@@ -1049,15 +1050,6 @@ impl GraphEngine {
         min_similarity: f32,
     ) -> Result<Vec<(crate::claims::DerivedClaim, f32)>, crate::GraphError> {
         use tracing::debug;
-
-        let embedding_client = match &self.embedding_client {
-            Some(c) => c,
-            None => {
-                return Err(crate::GraphError::InvalidOperation(
-                    "Embedding client not initialized".to_string(),
-                ));
-            },
-        };
 
         let claim_store = match &self.claim_store {
             Some(s) => s,
@@ -1068,7 +1060,16 @@ impl GraphEngine {
             },
         };
 
-        // Generate embedding for query
+        let embedding_client = match &self.embedding_client {
+            Some(c) => c,
+            None => {
+                return Err(crate::GraphError::InvalidOperation(
+                    "Embedding client not initialized".to_string(),
+                ));
+            },
+        };
+
+        // Generate query embedding for the semantic leg
         let request = crate::claims::EmbeddingRequest {
             text: query_text.to_string(),
             context: None,
@@ -1083,14 +1084,24 @@ impl GraphEngine {
             response.embedding.len()
         );
 
-        // Search for similar claims — request extra candidates so temporal
-        // re-ranking can still fill top_k after reordering.
+        // Always hybrid: BM25 keyword + vector semantic, fused via RRF
+        let hybrid_config = crate::claims::hybrid_search::HybridSearchConfig {
+            min_similarity,
+            ..Default::default()
+        };
+
+        // Request extra candidates so temporal re-ranking can still fill top_k
         let fetch_k = (top_k * 3).max(20);
-        let similar_ids = claim_store
-            .find_similar(&response.embedding, fetch_k, min_similarity)
-            .map_err(|e| {
-                crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
-            })?;
+        let similar_ids = crate::claims::hybrid_search::HybridClaimSearch::search(
+            query_text,
+            &response.embedding,
+            claim_store,
+            fetch_k,
+            &hybrid_config,
+        )
+        .map_err(|e| {
+            crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
+        })?;
 
         debug!(
             "Found {} candidate claims for re-ranking",

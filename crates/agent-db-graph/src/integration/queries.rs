@@ -86,6 +86,19 @@ impl GraphEngine {
             }
         }
 
+        // Also search claim store BM25 index
+        if let Some(ref store) = self.claim_store {
+            store.apply_pending();
+            let claim_bm25 = store.bm25_index().read();
+            let claim_hits = claim_bm25.search(query, limit);
+            drop(claim_bm25);
+            for (claim_id, score) in claim_hits {
+                if let Some(&node_id) = inference.graph().claim_index.get(&claim_id) {
+                    results.push((node_id, score));
+                }
+            }
+        }
+
         // Deduplicate by node_id, keeping highest score
         results.sort_by(|a, b| {
             a.0.cmp(&b.0)
@@ -859,18 +872,10 @@ impl GraphEngine {
             ranked_lists.push(memory_ranked);
         }
 
-        // 3. Claim search (hybrid BM25 + semantic via RRF, falls back to BM25-only if no embedding)
+        // 3. Claim search (always hybrid BM25 + semantic via RRF)
         if let Some(ref store) = self.claim_store {
             {
-                let hybrid_config = if query_embedding.is_empty() {
-                    // No embedding available — use keyword-only mode
-                    crate::claims::hybrid_search::HybridSearchConfig {
-                        mode: crate::indexing::SearchMode::Keyword,
-                        ..Default::default()
-                    }
-                } else {
-                    crate::claims::hybrid_search::HybridSearchConfig::default()
-                };
+                let hybrid_config = crate::claims::hybrid_search::HybridSearchConfig::default();
                 if let Ok(claims) = crate::claims::hybrid_search::HybridClaimSearch::search(
                     question,
                     &query_embedding,
