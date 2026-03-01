@@ -97,7 +97,7 @@ impl StrategyRetrievalPipeline {
                 })
                 .filter(|&(_, sim)| sim >= config.min_semantic_similarity)
                 .collect();
-            semantic.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            semantic.sort_by(|a, b| b.1.total_cmp(&a.1));
             semantic.truncate(limit);
             if !semantic.is_empty() {
                 ranked_lists.push(semantic);
@@ -127,7 +127,7 @@ impl StrategyRetrievalPipeline {
                 .filter(|&&(_, score)| score > 0.0)
                 .copied()
                 .collect();
-            jac.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            jac.sort_by(|a, b| b.1.total_cmp(&a.1));
             jac.truncate(limit);
             if !jac.is_empty() {
                 ranked_lists.push(jac);
@@ -145,7 +145,7 @@ impl StrategyRetrievalPipeline {
                 })
                 .filter(|&(_, s)| s > 1e-6)
                 .collect();
-            temporal.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            temporal.sort_by(|a, b| b.1.total_cmp(&a.1));
             temporal.truncate(limit);
             if !temporal.is_empty() {
                 ranked_lists.push(temporal);
@@ -166,7 +166,7 @@ impl StrategyRetrievalPipeline {
                     }
                 })
                 .collect();
-            proximity.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            proximity.sort_by(|a, b| b.1.total_cmp(&a.1));
             proximity.truncate(limit);
             if !proximity.is_empty() {
                 ranked_lists.push(proximity);
@@ -183,7 +183,7 @@ impl StrategyRetrievalPipeline {
                 })
                 .filter(|&(_, s)| s > 1e-6)
                 .collect();
-            quality.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            quality.sort_by(|a, b| b.1.total_cmp(&a.1));
             quality.truncate(limit);
             if !quality.is_empty() {
                 ranked_lists.push(quality);
@@ -193,7 +193,7 @@ impl StrategyRetrievalPipeline {
         // Fuse all signals via RRF
         let mut fused = multi_list_rrf(&ranked_lists, config.rrf_k);
 
-        fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        fused.sort_by(|a, b| b.1.total_cmp(&a.1));
         fused.truncate(query.limit);
         fused
     }

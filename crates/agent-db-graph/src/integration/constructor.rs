@@ -8,6 +8,10 @@ impl GraphEngine {
 
     /// Create a graph engine with custom configuration
     pub async fn with_config(config: GraphEngineConfig) -> GraphResult<Self> {
+        // Validate and clamp config values
+        let mut config = config;
+        config.validate();
+
         // Apply Free Tier overrides if requested via environment
         let config = if std::env::var("SERVICE_PROFILE").unwrap_or_default() == "free" {
             tracing::info!("Applying Free Tier resource limits (0.25 CPU, 768MB RAM cap, No NER)");
@@ -692,7 +696,9 @@ impl GraphEngine {
                 Ok(Some(raw)) => {
                     let (_version, bytes) = agent_db_storage::unwrap_versioned(&raw);
                     if bytes.len() == 8 {
-                        let counter = u64::from_be_bytes(bytes.try_into().unwrap());
+                        let counter = u64::from_be_bytes(
+                            bytes.try_into().unwrap_or([0u8; 8])
+                        );
                         engine
                             .episodes_since_consolidation
                             .store(counter, AtomicOrdering::Relaxed);

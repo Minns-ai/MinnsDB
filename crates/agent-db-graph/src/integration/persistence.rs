@@ -24,25 +24,28 @@ impl GraphEngine {
             graph.nodes.len() + graph.edges.len() + 1, // +1 for metadata
         );
 
-        // BUG 1 fix: Delete stale nodes/edges from disk that no longer exist in memory.
+        // Delete stale nodes/edges from disk that no longer exist in memory.
         // Without this, deleted nodes resurrect as zombies on restart.
+        // Safety: skip mass-deletion if the stale count exceeds 50% of disk
+        // entries — that likely means the in-memory set was only partially
+        // loaded (e.g. max_graph_size cap), not that nodes were truly deleted.
         {
             let disk_node_keys = backend
                 .scan_prefix_raw(table_names::GRAPH_NODES, b"n")
                 .unwrap_or_default();
+            let disk_node_count = disk_node_keys.len();
             let memory_node_ids: std::collections::HashSet<NodeId> =
                 graph.nodes.keys().copied().collect();
-            let mut stale_nodes = 0usize;
+            let mut stale_node_ops: Vec<BatchOperation> = Vec::new();
             for (key, _) in disk_node_keys {
                 if key.len() >= 9 {
                     if let Ok(id_bytes) = key[1..9].try_into() {
                         let id = u64::from_be_bytes(id_bytes);
                         if !memory_node_ids.contains(&id) {
-                            ops.push(BatchOperation::Delete {
+                            stale_node_ops.push(BatchOperation::Delete {
                                 table_name: table_names::GRAPH_NODES.to_string(),
                                 key,
                             });
-                            stale_nodes += 1;
                         }
                     }
                 }
@@ -51,30 +54,54 @@ impl GraphEngine {
             let disk_edge_keys = backend
                 .scan_prefix_raw(table_names::GRAPH_EDGES, b"e")
                 .unwrap_or_default();
+            let disk_edge_count = disk_edge_keys.len();
             let memory_edge_ids: std::collections::HashSet<EdgeId> =
                 graph.edges.keys().copied().collect();
-            let mut stale_edges = 0usize;
+            let mut stale_edge_ops: Vec<BatchOperation> = Vec::new();
             for (key, _) in disk_edge_keys {
                 if key.len() >= 9 {
                     if let Ok(id_bytes) = key[1..9].try_into() {
                         let id = u64::from_be_bytes(id_bytes);
                         if !memory_edge_ids.contains(&id) {
-                            ops.push(BatchOperation::Delete {
+                            stale_edge_ops.push(BatchOperation::Delete {
                                 table_name: table_names::GRAPH_EDGES.to_string(),
                                 key,
                             });
-                            stale_edges += 1;
                         }
                     }
                 }
             }
 
-            if stale_nodes > 0 || stale_edges > 0 {
-                tracing::info!(
-                    "persist_graph_state: deleting {} stale nodes, {} stale edges from disk",
-                    stale_nodes,
-                    stale_edges
+            // Safety threshold: if more than 50% of disk entries would be
+            // deleted, the in-memory graph is likely a partial load — skip
+            // the deletion to prevent data loss from evicted nodes.
+            let node_ratio = if disk_node_count > 0 {
+                stale_node_ops.len() as f64 / disk_node_count as f64
+            } else {
+                0.0
+            };
+            let edge_ratio = if disk_edge_count > 0 {
+                stale_edge_ops.len() as f64 / disk_edge_count as f64
+            } else {
+                0.0
+            };
+
+            if node_ratio > 0.5 || edge_ratio > 0.5 {
+                tracing::warn!(
+                    "persist_graph_state: skipping stale cleanup — would delete {}/{} nodes, {}/{} edges (likely partial load)",
+                    stale_node_ops.len(), disk_node_count,
+                    stale_edge_ops.len(), disk_edge_count
                 );
+            } else {
+                if !stale_node_ops.is_empty() || !stale_edge_ops.is_empty() {
+                    tracing::info!(
+                        "persist_graph_state: deleting {} stale nodes, {} stale edges from disk",
+                        stale_node_ops.len(),
+                        stale_edge_ops.len()
+                    );
+                }
+                ops.extend(stale_node_ops);
+                ops.extend(stale_edge_ops);
             }
         }
 

@@ -128,14 +128,52 @@ impl EmbeddingQueue {
             .map_err(|e| anyhow::anyhow!("Failed to receive embedding result: {}", e))?
     }
 
-    /// Submit embedding generation without waiting for result (drops if queue full)
+    /// Submit embedding generation without waiting for result.
+    ///
+    /// Retries up to 3 times with a short yield between attempts if the
+    /// queue is full, to avoid silently losing embedding jobs under
+    /// transient backpressure.
     pub fn generate_embedding_async(&self, claim: DerivedClaim) {
-        if let Err(e) = self.sender.try_send(EmbeddingJob {
-            claim,
-            result_tx: None,
-        }) {
-            warn!("Embedding queue full or closed, dropping job: {}", e);
-        }
+        let sender = self.sender.clone();
+        let claim_id = claim.id;
+        tokio::spawn(async move {
+            let mut job = Some(EmbeddingJob {
+                claim,
+                result_tx: None,
+            });
+            for attempt in 0..3u32 {
+                match sender.try_send(job.take().unwrap()) {
+                    Ok(()) => return,
+                    Err(mpsc::error::TrySendError::Full(returned)) => {
+                        job = Some(returned);
+                        warn!(
+                            "Embedding queue full (attempt {}/3) for claim {}, retrying after yield",
+                            attempt + 1,
+                            claim_id
+                        );
+                        tokio::task::yield_now().await;
+                    },
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        error!("Embedding queue closed, permanently dropping claim {}", claim_id);
+                        return;
+                    },
+                }
+            }
+            // Final attempt: await with a timeout so we don't block forever
+            if let Some(final_job) = job {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    sender.send(final_job),
+                ).await {
+                    Ok(Ok(())) => {},
+                    Ok(Err(_)) => error!("Embedding queue closed, permanently dropping claim {}", claim_id),
+                    Err(_) => error!(
+                        "Embedding queue full for >5s, dropping claim {} (consider increasing queue capacity)",
+                        claim_id
+                    ),
+                }
+            }
+        });
     }
 
     /// Process all claims that need embeddings using batch API.

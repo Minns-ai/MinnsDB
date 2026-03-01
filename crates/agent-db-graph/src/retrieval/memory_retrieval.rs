@@ -26,9 +26,9 @@ pub struct MemoryRetrievalConfig {
     pub min_semantic_similarity: f32,
     /// Maximum candidates per signal list before RRF.
     pub per_signal_limit: usize,
-    /// Tier boost for Schema memories (added to fused score).
+    /// Tier boost multiplier for Schema memories (applied to fused score).
     pub tier_boost_schema: f32,
-    /// Tier boost for Semantic memories.
+    /// Tier boost multiplier for Semantic memories.
     pub tier_boost_semantic: f32,
     /// Enable importance-modulated decay (baseline system-inspired).
     /// When true, Signal 4 uses importance to slow decay for frequently-accessed,
@@ -45,8 +45,8 @@ impl Default for MemoryRetrievalConfig {
             temporal_half_life_hours: 24.0,
             min_semantic_similarity: 0.3,
             per_signal_limit: 50,
-            tier_boost_schema: 0.3,
-            tier_boost_semantic: 0.15,
+            tier_boost_schema: 3.0,
+            tier_boost_semantic: 1.5,
             enable_importance_decay: true,
             importance_decay_config: ImportanceDecayConfig::default(),
         }
@@ -141,7 +141,7 @@ impl MemoryRetrievalPipeline {
                 })
                 .filter(|&(_, sim)| sim >= config.min_semantic_similarity)
                 .collect();
-            semantic.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            semantic.sort_by(|a, b| b.1.total_cmp(&a.1));
             semantic.truncate(limit);
             if !semantic.is_empty() {
                 ranked_lists.push(semantic);
@@ -175,7 +175,7 @@ impl MemoryRetrievalPipeline {
                 })
                 .filter(|&(_, sim)| sim > 0.0)
                 .collect();
-            ctx_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            ctx_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
             ctx_scores.truncate(limit);
             if !ctx_scores.is_empty() {
                 ranked_lists.push(ctx_scores);
@@ -223,7 +223,7 @@ impl MemoryRetrievalPipeline {
                 })
                 .filter(|&(_, s)| s > 1e-6)
                 .collect();
-            temporal.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            temporal.sort_by(|a, b| b.1.total_cmp(&a.1));
             temporal.truncate(limit);
             if !temporal.is_empty() {
                 ranked_lists.push(temporal);
@@ -244,7 +244,7 @@ impl MemoryRetrievalPipeline {
                     }
                 })
                 .collect();
-            proximity.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            proximity.sort_by(|a, b| b.1.total_cmp(&a.1));
             proximity.truncate(limit);
             if !proximity.is_empty() {
                 ranked_lists.push(proximity);
@@ -263,7 +263,7 @@ impl MemoryRetrievalPipeline {
                 .iter()
                 .map(|m| (m.id, m.access_count as f32 / max_access))
                 .collect();
-            access.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            access.sort_by(|a, b| b.1.total_cmp(&a.1));
             access.truncate(limit);
             if !access.is_empty() {
                 ranked_lists.push(access);
@@ -273,19 +273,19 @@ impl MemoryRetrievalPipeline {
         // Fuse all signals via RRF
         let mut fused = multi_list_rrf(&ranked_lists, config.rrf_k);
 
-        // Post-fusion tier boost
+        // Post-fusion tier boost (multiplicative to preserve relative ordering)
         let tier_map: HashMap<MemoryId, MemoryTier> =
             filtered.iter().map(|m| (m.id, m.tier.clone())).collect();
         for item in &mut fused {
             match tier_map.get(&item.0) {
-                Some(MemoryTier::Schema) => item.1 += config.tier_boost_schema,
-                Some(MemoryTier::Semantic) => item.1 += config.tier_boost_semantic,
+                Some(MemoryTier::Schema) => item.1 *= config.tier_boost_schema,
+                Some(MemoryTier::Semantic) => item.1 *= config.tier_boost_semantic,
                 _ => {},
             }
         }
 
-        // Re-sort after tier boost
-        fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Re-sort after tier boost (NaN-safe)
+        fused.sort_by(|a, b| b.1.total_cmp(&a.1));
         fused.truncate(query.limit);
         fused
     }

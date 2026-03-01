@@ -158,34 +158,43 @@ pub async fn apply_reranking(
     }
 
     let k = config.top_k.min(fused_results.len());
-    let top_k_ids: Vec<u64> = fused_results[..k].iter().map(|&(id, _)| id).collect();
 
-    // Collect Memory references for the top-K
-    let top_k_memories: Vec<&Memory> = top_k_ids
+    // Collect (id, memory_ref) pairs for the top-K, preserving alignment
+    let top_k_pairs: Vec<(u64, &Memory)> = fused_results[..k]
         .iter()
-        .filter_map(|id| all_memories.iter().find(|m| m.id == *id))
+        .filter_map(|&(id, _)| {
+            all_memories.iter().find(|m| m.id == id).map(|m| (id, m))
+        })
         .collect();
 
-    if top_k_memories.is_empty() {
+    if top_k_pairs.is_empty() {
         return Ok(fused_results.to_vec());
     }
 
+    let top_k_memories: Vec<&Memory> = top_k_pairs.iter().map(|(_, m)| *m).collect();
     let scores = reranker.rerank(query, &top_k_memories).await?;
 
-    // Blend scores
+    // Build a map from memory ID → reranker score for correct alignment
+    let score_map: std::collections::HashMap<u64, f32> = top_k_pairs
+        .iter()
+        .zip(scores.iter())
+        .map(|(&(id, _), &score)| (id, score))
+        .collect();
+
+    // Blend scores using the ID-based map (not positional index)
     let mut result: Vec<(u64, f32)> = Vec::with_capacity(fused_results.len());
 
-    for (i, &(id, original_score)) in fused_results.iter().enumerate() {
-        if i < k && i < scores.len() {
-            let blended = config.alpha * scores[i] + (1.0 - config.alpha) * original_score;
+    for &(id, original_score) in fused_results.iter() {
+        if let Some(&rerank_score) = score_map.get(&id) {
+            let blended = config.alpha * rerank_score + (1.0 - config.alpha) * original_score;
             result.push((id, blended));
         } else {
             result.push((id, original_score));
         }
     }
 
-    // Re-sort by blended score
-    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Re-sort by blended score (NaN-safe)
+    result.sort_by(|a, b| b.1.total_cmp(&a.1));
     Ok(result)
 }
 

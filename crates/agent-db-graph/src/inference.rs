@@ -1147,7 +1147,8 @@ impl GraphInference {
                 for i in 1..window.len() {
                     total_interval += window[i].timestamp.saturating_sub(window[i - 1].timestamp);
                 }
-                let avg_interval = total_interval / (window.len() - 1) as u64;
+                let divisor = (window.len().saturating_sub(1)).max(1) as u64;
+                let avg_interval = total_interval / divisor;
 
                 // Check if this pattern already exists or create new one
                 let pattern_name = event_types.join("->");
@@ -1174,8 +1175,7 @@ impl GraphInference {
         if self.temporal_patterns.len() > self.config.max_temporal_patterns {
             self.temporal_patterns.sort_by(|a, b| {
                 b.confidence
-                    .partial_cmp(&a.confidence)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.confidence)
             });
             self.temporal_patterns
                 .truncate(self.config.max_temporal_patterns * 4 / 5);

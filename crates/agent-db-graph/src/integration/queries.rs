@@ -102,7 +102,7 @@ impl GraphEngine {
         // Deduplicate by node_id, keeping highest score
         results.sort_by(|a, b| {
             a.0.cmp(&b.0)
-                .then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+                .then(b.1.total_cmp(&a.1))
         });
         results.dedup_by(|a, b| {
             if a.0 == b.0 {
@@ -114,7 +114,7 @@ impl GraphEngine {
         });
 
         // Re-sort by score descending and truncate to limit
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
         results.truncate(limit);
         results
     }
@@ -276,7 +276,7 @@ impl GraphEngine {
                         })
                         .collect();
                     indexed_scores
-                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                        .sort_by(|a, b| a.1.total_cmp(&b.1));
 
                     let mut rank_scores = vec![0.0f64; n];
                     for (rank, &(idx, _)) in indexed_scores.iter().enumerate() {

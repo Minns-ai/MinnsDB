@@ -119,8 +119,8 @@ pub fn minimize_transfers(
         }
 
         // Sort by amount descending (largest first)
-        debtors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        creditors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        debtors.sort_by(|a, b| b.1.total_cmp(&a.1));
+        creditors.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         // Greedy matching
         let mut di = 0;

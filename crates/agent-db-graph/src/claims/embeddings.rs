@@ -384,7 +384,7 @@ impl VectorSimilarity {
             .collect();
 
         // Sort by similarity (descending)
-        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        similarities.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         // Take top k
         similarities.truncate(k);

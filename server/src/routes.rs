@@ -6,7 +6,30 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
+use axum::http::Method;
+
+/// Build CORS layer from environment configuration.
+///
+/// Set `CORS_ALLOWED_ORIGINS` to a comma-separated list of allowed origins
+/// (e.g. `https://my-app.com,https://staging.my-app.com`).
+/// If unset or empty, falls back to permissive CORS for local development.
+fn build_cors_layer() -> CorsLayer {
+    let origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
+    if origins.is_empty() {
+        // Development default: permissive
+        CorsLayer::permissive()
+    } else {
+        let allowed: Vec<_> = origins
+            .split(',')
+            .filter_map(|o| o.trim().parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(allowed)
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+            .allow_headers(Any)
+    }
+}
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
@@ -136,6 +159,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/admin/export", post(handlers::export_handler))
         .route("/api/admin/import", post(handlers::import_handler))
         // Apply middleware
-        .layer(CorsLayer::permissive())
+        .layer(build_cors_layer())
         .with_state(state)
 }

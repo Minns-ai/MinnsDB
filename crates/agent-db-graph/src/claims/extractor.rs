@@ -209,7 +209,7 @@ impl ClaimExtractionQueue {
                     }
 
                     scored_sentences
-                        .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                        .sort_by(|a, b| b.2.total_cmp(&a.2));
                     candidate_sentences = scored_sentences.into_iter().take(3).collect();
                 }
 
@@ -231,7 +231,7 @@ impl ClaimExtractionQueue {
                     .embedding;
 
                 let mut best_sentence = None;
-                let mut max_support_score = -1.0;
+                let mut max_support_score = f32::NEG_INFINITY;
                 let mut best_diagnostics = None;
 
                 for (sent_idx, sent, _initial_sim) in candidate_sentences {
