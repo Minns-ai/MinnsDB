@@ -328,7 +328,7 @@ impl CentralityMeasures {
     /// Get top N nodes by centrality
     pub fn top_nodes(centrality: &HashMap<NodeId, f32>, n: usize) -> Vec<(NodeId, f32)> {
         let mut sorted: Vec<_> = centrality.iter().map(|(&id, &score)| (id, score)).collect();
-        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
         sorted.truncate(n);
         sorted
     }

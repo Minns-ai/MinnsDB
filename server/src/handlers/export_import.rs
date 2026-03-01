@@ -194,13 +194,24 @@ pub async fn import_handler(
     info!("Starting streaming database import: mode={}", query.mode);
     let start = std::time::Instant::now();
 
+    // Maximum import body size: 512 MB (prevents OOM from oversized uploads)
+    const MAX_IMPORT_SIZE: usize = 512 * 1024 * 1024;
+
     // Collect the request body into memory before submitting to write lane.
     // This avoids lifetime issues with the streaming body inside the closure.
     let mut body_bytes = Vec::new();
     let mut stream = body.into_data_stream();
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
-            Ok(chunk) => body_bytes.extend_from_slice(&chunk),
+            Ok(chunk) => {
+                if body_bytes.len() + chunk.len() > MAX_IMPORT_SIZE {
+                    return Err(ApiError::BadRequest(format!(
+                        "Import body exceeds maximum allowed size of {} MB",
+                        MAX_IMPORT_SIZE / (1024 * 1024)
+                    )));
+                }
+                body_bytes.extend_from_slice(&chunk);
+            },
             Err(e) => {
                 return Err(ApiError::Internal(format!(
                     "Failed to read import body: {}",

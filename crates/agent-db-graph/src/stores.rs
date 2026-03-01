@@ -1167,18 +1167,18 @@ impl MemoryStore for RedbMemoryStore {
                 let sim = fp_sim.max(emb_sim).max(bucket_sim);
                 if sim >= min_similarity {
                     let tier_boost = match m.tier {
-                        crate::memory::MemoryTier::Schema => 0.3,
-                        crate::memory::MemoryTier::Semantic => 0.15,
-                        crate::memory::MemoryTier::Episodic => 0.0,
+                        crate::memory::MemoryTier::Schema => 3.0_f32,
+                        crate::memory::MemoryTier::Semantic => 1.5,
+                        crate::memory::MemoryTier::Episodic => 1.0,
                     };
-                    Some((sim + tier_boost, m))
+                    Some((sim * tier_boost, m))
                 } else {
                     None
                 }
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored.into_iter().take(limit).map(|(_, m)| m).collect()
     }
 

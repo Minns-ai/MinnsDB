@@ -543,7 +543,7 @@ impl MemoryFormation {
             })
             .collect();
 
-        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
 
         {
             let result = candidates
@@ -883,20 +883,20 @@ impl MemoryFormation {
                 let sim = fp_sim.max(emb_sim);
 
                 if sim >= min_similarity {
-                    // Tier boost: Schema > Semantic > Episodic
+                    // Tier boost: Schema > Semantic > Episodic (multiplicative)
                     let tier_boost = match m.tier {
-                        MemoryTier::Schema => 0.3,
-                        MemoryTier::Semantic => 0.15,
-                        MemoryTier::Episodic => 0.0,
+                        MemoryTier::Schema => 3.0_f32,
+                        MemoryTier::Semantic => 1.5,
+                        MemoryTier::Episodic => 1.0,
                     };
-                    Some((sim + tier_boost, m))
+                    Some((sim * tier_boost, m))
                 } else {
                     None
                 }
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored
             .into_iter()
             .take(limit)

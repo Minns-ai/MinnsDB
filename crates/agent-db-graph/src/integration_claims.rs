@@ -1039,17 +1039,26 @@ impl GraphEngine {
         Ok(count)
     }
 
-    /// Search for claims using hybrid BM25 + semantic search.
+    /// Search for claims using hybrid BM25 + semantic search with graph-enhanced
+    /// retrieval (Graph RAG).
     ///
-    /// Always runs both legs (keyword + vector) and fuses via RRF.
-    /// Requires an embedding client to generate the query embedding.
+    /// Runs up to three retrieval legs:
+    /// 1. **BM25 keyword** — full-text search on claim text
+    /// 2. **Vector semantic** — cosine similarity on embeddings (skipped when no
+    ///    embedding client is configured; degrades gracefully to keyword-only)
+    /// 3. **Graph entity traversal** — finds claims linked to the same entities
+    ///    via ABOUT edges in the knowledge graph
+    ///
+    /// Results are fused via Reciprocal Rank Fusion (RRF) and re-ranked with
+    /// temporal decay weighting.
     pub async fn search_similar_claims(
         &self,
         query_text: &str,
         top_k: usize,
         min_similarity: f32,
     ) -> Result<Vec<(crate::claims::DerivedClaim, f32)>, crate::GraphError> {
-        use tracing::debug;
+        use crate::claims::types::ClaimId;
+        use tracing::{debug, info};
 
         let claim_store = match &self.claim_store {
             Some(s) => s,
@@ -1060,41 +1069,54 @@ impl GraphEngine {
             },
         };
 
-        let embedding_client = match &self.embedding_client {
-            Some(c) => c,
-            None => {
-                return Err(crate::GraphError::InvalidOperation(
-                    "Embedding client not initialized".to_string(),
-                ));
-            },
+        // Determine search mode based on embedding client availability
+        let query_embedding = if let Some(ref embedding_client) = self.embedding_client {
+            let request = crate::claims::EmbeddingRequest {
+                text: query_text.to_string(),
+                context: None,
+            };
+
+            match embedding_client.embed(request).await {
+                Ok(response) => {
+                    debug!(
+                        "Generated query embedding ({} dimensions)",
+                        response.embedding.len()
+                    );
+                    Some(response.embedding)
+                },
+                Err(e) => {
+                    info!(
+                        "Embedding generation failed, falling back to keyword-only search: {}",
+                        e
+                    );
+                    None
+                },
+            }
+        } else {
+            debug!("No embedding client available, using keyword-only search");
+            None
         };
 
-        // Generate query embedding for the semantic leg
-        let request = crate::claims::EmbeddingRequest {
-            text: query_text.to_string(),
-            context: None,
+        let search_mode = if query_embedding.is_some() {
+            crate::indexing::SearchMode::Hybrid
+        } else {
+            crate::indexing::SearchMode::Keyword
         };
 
-        let response = embedding_client.embed(request).await.map_err(|e| {
-            crate::GraphError::OperationError(format!("Failed to generate query embedding: {}", e))
-        })?;
-
-        debug!(
-            "Generated query embedding ({} dimensions)",
-            response.embedding.len()
-        );
-
-        // Always hybrid: BM25 keyword + vector semantic, fused via RRF
         let hybrid_config = crate::claims::hybrid_search::HybridSearchConfig {
+            mode: search_mode,
             min_similarity,
             ..Default::default()
         };
 
         // Request extra candidates so temporal re-ranking can still fill top_k
         let fetch_k = (top_k * 3).max(20);
+        let empty_embedding: Vec<f32> = Vec::new();
+        let search_embedding = query_embedding.as_deref().unwrap_or(&empty_embedding);
+
         let similar_ids = crate::claims::hybrid_search::HybridClaimSearch::search(
             query_text,
-            &response.embedding,
+            search_embedding,
             claim_store,
             fetch_k,
             &hybrid_config,
@@ -1104,13 +1126,42 @@ impl GraphEngine {
         })?;
 
         debug!(
-            "Found {} candidate claims for re-ranking",
+            "Found {} candidate claims from hybrid search",
             similar_ids.len()
         );
 
+        // ── Graph RAG: entity-based claim discovery ──────────────────────
+        // Find claims linked to the same entities via ABOUT edges in the
+        // knowledge graph.  This surfaces claims that share entities with
+        // the query even when there is zero keyword or embedding overlap.
+        let graph_claim_ids: Vec<(ClaimId, f32)> = {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            self.graph_entity_claims(query_text, graph, fetch_k)
+        };
+
+        if !graph_claim_ids.is_empty() {
+            debug!(
+                "Graph RAG found {} additional claims via entity traversal",
+                graph_claim_ids.len()
+            );
+        }
+
+        // ── Fuse all retrieval legs via RRF ──────────────────────────────
+        let fused_ids = if graph_claim_ids.is_empty() {
+            similar_ids
+        } else {
+            let lists: Vec<Vec<(ClaimId, f32)>> = vec![similar_ids, graph_claim_ids];
+            let mut fused = crate::retrieval::multi_list_rrf(&lists, 60.0);
+            fused.truncate(fetch_k);
+            fused
+        };
+
+        debug!("Fused {} candidate claims for re-ranking", fused_ids.len());
+
         // Retrieve full claims and compute temporally-weighted retrieval score
         let mut results: Vec<(crate::claims::DerivedClaim, f32)> = Vec::new();
-        for (claim_id, similarity) in similar_ids {
+        for (claim_id, similarity) in fused_ids {
             if let Some(claim) = claim_store.get(claim_id).map_err(|e| {
                 crate::GraphError::OperationError(format!("Failed to retrieve claim: {}", e))
             })? {
@@ -1120,7 +1171,7 @@ impl GraphEngine {
         }
 
         // Re-sort by temporally-weighted score (descending) and truncate
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
         results.truncate(top_k);
 
         debug!(
@@ -1129,5 +1180,87 @@ impl GraphEngine {
         );
 
         Ok(results)
+    }
+
+    /// Graph RAG: discover claims related to the query via entity traversal.
+    ///
+    /// 1. Tokenizes the query into words
+    /// 2. Looks up each word as a concept node in the graph
+    /// 3. Traverses ABOUT edges from matching concept nodes to find claim nodes
+    /// 4. Returns (ClaimId, relevance_score) pairs
+    fn graph_entity_claims(
+        &self,
+        query_text: &str,
+        graph: &crate::structures::Graph,
+        limit: usize,
+    ) -> Vec<(crate::claims::types::ClaimId, f32)> {
+        use crate::structures::{EdgeType, NodeType};
+        use std::collections::HashMap;
+
+        let mut claim_scores: HashMap<u64, f32> = HashMap::new();
+
+        // Tokenize query into candidate entity names (single words + bigrams)
+        let words: Vec<&str> = query_text.split_whitespace().collect();
+        let mut candidates: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+
+        // Add bigrams for multi-word entity names (e.g. "Alice Chen")
+        for window in words.windows(2) {
+            candidates.push(format!("{} {}", window[0], window[1]));
+        }
+
+        // Also try the full query as a concept name
+        candidates.push(query_text.to_string());
+
+        for candidate in &candidates {
+            // Try exact match and case variations
+            let variations = [
+                candidate.clone(),
+                capitalize_first(candidate),
+                candidate.to_lowercase(),
+            ];
+
+            for name in &variations {
+                if let Some(concept_node) = graph.get_concept_node(name) {
+                    // Found a concept node — traverse ABOUT edges to find claims
+                    for edge in graph.get_edges_to(concept_node.id) {
+                        if let EdgeType::About {
+                            relevance_score, ..
+                        } = &edge.edge_type
+                        {
+                            if let Some(source_node) = graph.get_node(edge.source) {
+                                if let NodeType::Claim { claim_id, .. } = &source_node.node_type {
+                                    // Accumulate score — claims linked via multiple entities
+                                    // get a higher score
+                                    let entry = claim_scores.entry(*claim_id).or_insert(0.0);
+                                    *entry += relevance_score;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Normalize and sort by score
+        let mut results: Vec<(u64, f32)> = claim_scores
+            .into_iter()
+            .map(|(id, score)| {
+                // Clamp to [0, 1] — multiple entity matches can sum above 1.0
+                (id, score.min(1.0))
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
+        results.truncate(limit);
+        results
+    }
+}
+
+/// Capitalize the first letter of a string.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
     }
 }

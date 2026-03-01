@@ -128,14 +128,55 @@ impl EmbeddingQueue {
             .map_err(|e| anyhow::anyhow!("Failed to receive embedding result: {}", e))?
     }
 
-    /// Submit embedding generation without waiting for result (drops if queue full)
+    /// Submit embedding generation without waiting for result.
+    ///
+    /// Retries up to 3 times with a short yield between attempts if the
+    /// queue is full, to avoid silently losing embedding jobs under
+    /// transient backpressure.
     pub fn generate_embedding_async(&self, claim: DerivedClaim) {
-        if let Err(e) = self.sender.try_send(EmbeddingJob {
-            claim,
-            result_tx: None,
-        }) {
-            warn!("Embedding queue full or closed, dropping job: {}", e);
-        }
+        let sender = self.sender.clone();
+        let claim_id = claim.id;
+        tokio::spawn(async move {
+            let mut job = Some(EmbeddingJob {
+                claim,
+                result_tx: None,
+            });
+            for attempt in 0..3u32 {
+                match sender.try_send(job.take().unwrap()) {
+                    Ok(()) => return,
+                    Err(mpsc::error::TrySendError::Full(returned)) => {
+                        job = Some(returned);
+                        warn!(
+                            "Embedding queue full (attempt {}/3) for claim {}, retrying after yield",
+                            attempt + 1,
+                            claim_id
+                        );
+                        tokio::task::yield_now().await;
+                    },
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        error!(
+                            "Embedding queue closed, permanently dropping claim {}",
+                            claim_id
+                        );
+                        return;
+                    },
+                }
+            }
+            // Final attempt: await with a timeout so we don't block forever
+            if let Some(final_job) = job {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    sender.send(final_job),
+                ).await {
+                    Ok(Ok(())) => {},
+                    Ok(Err(_)) => error!("Embedding queue closed, permanently dropping claim {}", claim_id),
+                    Err(_) => error!(
+                        "Embedding queue full for >5s, dropping claim {} (consider increasing queue capacity)",
+                        claim_id
+                    ),
+                }
+            }
+        });
     }
 
     /// Process all claims that need embeddings using batch API.
@@ -210,7 +251,7 @@ impl EmbeddingQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claims::embeddings::MockEmbeddingClient;
+    use crate::claims::embeddings::openai_client_from_env;
     use crate::claims::types::EvidenceSpan;
     use crate::ClaimId;
     use tempfile::tempdir;
@@ -232,17 +273,19 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
     async fn test_embedding_queue() {
+        let client = Arc::new(openai_client_from_env().expect("LLM_API_KEY required"));
+        let dims = client.dimensions();
+
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("claims.redb");
-
-        let client = Arc::new(MockEmbeddingClient::new(384));
         let store = Arc::new(ClaimStore::new(&store_path).unwrap());
 
         let queue = EmbeddingQueue::new(client, store.clone(), 1);
 
         // Create and store a claim without embedding
-        let claim = create_test_claim(1, "Test claim");
+        let claim = create_test_claim(1, "Test claim about artificial intelligence");
         store.store(&claim).unwrap();
 
         // Verify it has no embedding
@@ -255,22 +298,23 @@ mod tests {
         // Verify embedding was added
         let retrieved = store.get(1).unwrap().unwrap();
         assert!(!retrieved.embedding.is_empty());
-        assert_eq!(retrieved.embedding.len(), 384);
+        assert_eq!(retrieved.embedding.len(), dims);
     }
 
     #[tokio::test]
+    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
     async fn test_process_pending_embeddings_batch() {
+        let client = Arc::new(openai_client_from_env().expect("LLM_API_KEY required"));
+
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("claims.redb");
-
-        let client = Arc::new(MockEmbeddingClient::new(384));
         let store = Arc::new(ClaimStore::new(&store_path).unwrap());
 
         let queue = EmbeddingQueue::new(client.clone(), store.clone(), 2);
 
         // Create multiple claims without embeddings
         for i in 1..=5 {
-            let claim = create_test_claim(i, &format!("Claim {}", i));
+            let claim = create_test_claim(i, &format!("Claim number {} about different topics", i));
             store.store(&claim).unwrap();
         }
 
@@ -281,24 +325,27 @@ mod tests {
             .unwrap();
         assert_eq!(count, 5);
 
-        // Verify all claims now have embeddings (batch is synchronous, no sleep needed)
+        // Verify all claims now have embeddings
         let claims_needing = store.get_claims_needing_embeddings(10).unwrap();
         assert_eq!(claims_needing.len(), 0);
     }
 
     #[tokio::test]
+    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
     async fn test_batch_embed_20_claims() {
+        let client = Arc::new(openai_client_from_env().expect("LLM_API_KEY required"));
+        let dims = client.dimensions();
+
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("claims.redb");
-
-        let client = Arc::new(MockEmbeddingClient::new(384));
         let store = Arc::new(ClaimStore::new(&store_path).unwrap());
 
         let queue = EmbeddingQueue::new(client.clone(), store.clone(), 1);
 
         // Store 20 claims without embeddings
         for i in 1..=20 {
-            let claim = create_test_claim(i, &format!("Batch claim number {}", i));
+            let claim =
+                create_test_claim(i, &format!("Batch claim number {} about topic {}", i, i));
             store.store(&claim).unwrap();
         }
 
@@ -315,7 +362,7 @@ mod tests {
         // Verify embeddings are correct dimension
         for i in 1..=20u64 {
             let claim = store.get(i).unwrap().unwrap();
-            assert_eq!(claim.embedding.len(), 384);
+            assert_eq!(claim.embedding.len(), dims);
         }
     }
 }

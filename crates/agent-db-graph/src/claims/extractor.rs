@@ -209,7 +209,7 @@ impl ClaimExtractionQueue {
                     }
 
                     scored_sentences
-                        .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                        .sort_by(|a, b| b.2.total_cmp(&a.2));
                     candidate_sentences = scored_sentences.into_iter().take(3).collect();
                 }
 
@@ -231,7 +231,7 @@ impl ClaimExtractionQueue {
                     .embedding;
 
                 let mut best_sentence = None;
-                let mut max_support_score = -1.0;
+                let mut max_support_score = f32::NEG_INFINITY;
                 let mut best_diagnostics = None;
 
                 for (sent_idx, sent, _initial_sim) in candidate_sentences {
@@ -646,12 +646,15 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
+    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
     async fn test_queue_creation() {
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("claims.redb");
 
+        let embedding_client = Arc::new(
+            crate::claims::embeddings::openai_client_from_env().expect("LLM_API_KEY required"),
+        );
         let client = Arc::new(MockClient::new());
-        let embedding_client = Arc::new(crate::claims::embeddings::MockEmbeddingClient::new(384));
         let store = Arc::new(ClaimStore::new(&store_path).unwrap());
         let config = ClaimExtractionConfig::default();
 

@@ -98,7 +98,7 @@ pub async fn drift_primer(
         })
         .collect();
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     scored.truncate(config.max_primer_communities);
 
     let top_community_ids: Vec<u64> = scored.iter().map(|(cid, _)| *cid).collect();
@@ -187,7 +187,7 @@ pub fn drift_followup_merge(results_per_query: &[Vec<(u64, f32)>]) -> Vec<(u64, 
         }
     }
     let mut merged: Vec<(u64, f32)> = best_scores.into_iter().collect();
-    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    merged.sort_by(|a, b| b.1.total_cmp(&a.1));
     merged
 }
 
@@ -355,7 +355,7 @@ mod tests {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
         scored.truncate(config.max_primer_communities);
 
         let ids: Vec<u64> = scored.iter().map(|(cid, _)| *cid).collect();

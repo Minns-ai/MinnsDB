@@ -531,7 +531,7 @@ impl Bm25Index {
 
         // Sort by score descending
         let mut results: Vec<(NodeId, f32)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
         results.truncate(limit);
 
         results
@@ -545,9 +545,14 @@ impl Bm25Index {
             return 0.0;
         }
 
+        // Guard: empty corpus or zero total docs
+        let n = self.corpus_stats.total_docs as f32;
+        if n == 0.0 {
+            return 0.0;
+        }
+
         // Calculate IDF (Inverse Document Frequency)
         let df = *self.corpus_stats.doc_frequencies.get(term).unwrap_or(&0) as f32;
-        let n = self.corpus_stats.total_docs as f32;
 
         // Standard BM25 IDF formula
         let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
@@ -556,7 +561,7 @@ impl Bm25Index {
         let doc_length = doc_stats.length as f32;
         let k1 = self.config.k1;
         let b = self.config.b;
-        let avg_length = self.corpus_stats.avg_doc_length;
+        let avg_length = self.corpus_stats.avg_doc_length.max(1.0);
 
         let normalized_tf =
             (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (doc_length / avg_length)));
@@ -622,7 +627,7 @@ impl Bm25Index {
         }
 
         let mut results: Vec<(NodeId, f32)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
         results.truncate(limit);
         results
     }
@@ -648,7 +653,7 @@ impl Bm25Index {
         }
 
         let mut results: Vec<(NodeId, f32)> = merged.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
         results.truncate(limit);
         results
     }
@@ -1020,7 +1025,7 @@ impl FusionStrategy {
         }
 
         let mut results: Vec<(NodeId, f32)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
         results
     }
 
@@ -1044,7 +1049,7 @@ impl FusionStrategy {
         }
 
         let mut results: Vec<(NodeId, f32)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1));
         results
     }
 }

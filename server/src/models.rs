@@ -45,7 +45,10 @@ pub struct SimpleEventRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct PaginationQuery {
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
 }
 
@@ -54,13 +57,19 @@ pub struct ActionSuggestionsQuery {
     pub context_hash: ContextHash,
     #[serde(default)]
     pub last_action_node: Option<u64>,
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct GraphQuery {
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
     #[serde(default)]
     pub session_id: Option<SessionId>,
@@ -71,7 +80,10 @@ pub struct GraphQuery {
 #[derive(Debug, Deserialize)]
 pub struct GraphContextQuery {
     pub context_hash: ContextHash,
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
     #[serde(default)]
     pub session_id: Option<SessionId>,
@@ -83,7 +95,10 @@ pub struct GraphContextQuery {
 #[derive(Debug, Deserialize)]
 pub struct ContextMemoriesRequest {
     pub context: EventContext,
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
     #[serde(default)]
     #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
@@ -112,7 +127,10 @@ pub struct StrategySimilarityRequest {
     #[serde(default)]
     #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
     pub agent_id: Option<AgentId>,
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
     #[serde(default)]
     #[serde_as(as = "Option<PickFirst<(_, DisplayFromStr)>>")]
@@ -122,7 +140,10 @@ pub struct StrategySimilarityRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClaimSearchRequest {
     pub query_text: String,
-    #[serde(default = "default_top_k")]
+    #[serde(
+        default = "default_top_k",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub top_k: usize,
     #[serde(default = "default_min_similarity")]
     pub min_similarity: f32,
@@ -131,7 +152,10 @@ pub struct ClaimSearchRequest {
 #[serde_as]
 #[derive(Debug, Deserialize)]
 pub struct ClaimListQuery {
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -146,7 +170,10 @@ pub struct SearchRequest {
     #[serde(default)]
     pub mode: agent_db_graph::indexing::SearchMode,
     /// Maximum number of results
-    #[serde(default = "default_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
     /// Fusion strategy for hybrid search
     #[serde(default)]
@@ -637,6 +664,19 @@ fn default_top_k() -> usize {
 
 fn default_min_similarity() -> f32 {
     0.7
+}
+
+/// Maximum allowed value for user-supplied `limit` / `top_k` parameters.
+/// Prevents DoS via absurdly large result sets.
+const MAX_LIMIT: usize = 1_000;
+
+/// Deserializer that caps a `usize` limit to `MAX_LIMIT`.
+fn deserialize_capped_limit<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    Ok(value.min(MAX_LIMIT))
 }
 
 // ============================================================================

@@ -362,7 +362,7 @@ impl GraphPruner {
         }
 
         // Sort by similarity descending (merge most similar first)
-        merge_pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        merge_pairs.sort_by(|a, b| b.2.total_cmp(&a.2));
         merge_pairs.truncate(self.config.max_merges_per_pass);
 
         // Step 4: Execute merges

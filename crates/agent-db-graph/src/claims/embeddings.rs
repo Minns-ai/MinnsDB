@@ -269,70 +269,19 @@ impl EmbeddingClient for AnthropicEmbeddingClient {
     }
 }
 
-/// Deterministic embedding client for tests.
+/// Create an OpenAI embedding client from the `LLM_API_KEY` environment variable.
 ///
-/// Generates hash-based unit vectors so that identical texts always produce
-/// identical embeddings.  Available in integration tests and unit tests alike.
-pub struct MockEmbeddingClient {
-    dimensions: usize,
-}
-
-impl MockEmbeddingClient {
-    pub fn new(dimensions: usize) -> Self {
-        Self { dimensions }
-    }
-}
-
-impl Default for MockEmbeddingClient {
-    fn default() -> Self {
-        Self::new(384) // Common dimension for small models
-    }
-}
-
-#[async_trait]
-impl EmbeddingClient for MockEmbeddingClient {
-    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        debug!("Mock embedding for text: {} chars", request.text.len());
-
-        // Generate deterministic embedding based on text hash
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        request.text.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        // Use hash to seed random-looking but deterministic vector
-        let mut embedding = Vec::with_capacity(self.dimensions);
-        let mut seed = hash;
-        for _ in 0..self.dimensions {
-            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-            let value = ((seed >> 16) & 0x7FFF) as f32 / 32768.0;
-            embedding.push(value);
-        }
-
-        // Normalize to unit length
-        let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if magnitude > 0.0 {
-            for v in embedding.iter_mut() {
-                *v /= magnitude;
-            }
-        }
-
-        Ok(EmbeddingResponse {
-            embedding,
-            model: "mock".to_string(),
-            tokens_used: 0,
-        })
-    }
-
-    fn dimensions(&self) -> usize {
-        self.dimensions
-    }
-
-    fn model_name(&self) -> &str {
-        "mock"
-    }
+/// Returns `None` if the variable is unset or empty.  Used by tests that
+/// require real embeddings — callers should `#[ignore]` the test when the
+/// key is absent.
+pub fn openai_client_from_env() -> Option<OpenAiEmbeddingClient> {
+    let key = std::env::var("LLM_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())?;
+    Some(OpenAiEmbeddingClient::new(
+        key,
+        "text-embedding-3-small".to_string(),
+    ))
 }
 
 /// Distance metric for vector search
@@ -437,7 +386,7 @@ impl VectorSimilarity {
             .collect();
 
         // Sort by similarity (descending)
-        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        similarities.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         // Take top k
         similarities.truncate(k);
@@ -450,20 +399,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_mock_embedding_client() {
-        let client = MockEmbeddingClient::new(384);
+    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
+    async fn test_real_embedding_client() {
+        let client = openai_client_from_env().expect("LLM_API_KEY required");
         let request = EmbeddingRequest {
             text: "Test claim text".to_string(),
             context: None,
         };
 
         let response = client.embed(request).await.unwrap();
-        assert_eq!(response.embedding.len(), 384);
-        assert_eq!(response.model, "mock");
+        assert_eq!(response.embedding.len(), 1536); // text-embedding-3-small
+        assert!(response.tokens_used > 0);
 
-        // Verify normalization (should be unit vector)
+        // Verify normalization (should be approximately unit vector)
         let magnitude: f32 = response.embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((magnitude - 1.0).abs() < 0.001);
+        assert!((magnitude - 1.0).abs() < 0.05);
     }
 
     #[test]
@@ -548,8 +498,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_embed_batch_fallback() {
-        let client = MockEmbeddingClient::new(384);
+    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
+    async fn test_real_embed_batch() {
+        let client = openai_client_from_env().expect("LLM_API_KEY required");
         let requests = vec![
             EmbeddingRequest {
                 text: "First".to_string(),
@@ -568,7 +519,7 @@ mod tests {
         let responses = client.embed_batch(requests).await.unwrap();
         assert_eq!(responses.len(), 3);
         for resp in &responses {
-            assert_eq!(resp.embedding.len(), 384);
+            assert_eq!(resp.embedding.len(), 1536);
         }
         // Different inputs should give different embeddings
         assert_ne!(responses[0].embedding, responses[1].embedding);
