@@ -125,42 +125,67 @@ impl GraphEngine {
         inference.graph().nodes.get(&node_id).cloned()
     }
 
-    /// Search claims by semantic similarity for hybrid search
+    /// Search claims using hybrid BM25 + semantic search.
     ///
-    /// Returns a list of (NodeId, score) tuples for claims ranked by semantic similarity
+    /// Gracefully degrades to BM25-only when no embedding client is configured.
+    /// Returns a list of (NodeId, score) tuples for claims ranked by relevance.
     pub async fn search_claims_semantic(
         &self,
         query: &str,
         limit: usize,
         min_similarity: f32,
     ) -> crate::GraphResult<Vec<(u64, f32)>> {
-        // Check if embedding client is available
-        let embedding_client = match &self.embedding_client {
-            Some(c) => c,
-            None => return Ok(vec![]), // No semantic search available
-        };
-
         let claim_store = match &self.claim_store {
             Some(s) => s,
             None => return Ok(vec![]), // No claim store available
         };
 
-        // Generate embedding for query
-        let request = crate::claims::EmbeddingRequest {
-            text: query.to_string(),
-            context: None,
+        // Generate embedding if client is available; degrade to keyword-only otherwise
+        let query_embedding = if let Some(ref embedding_client) = self.embedding_client {
+            let request = crate::claims::EmbeddingRequest {
+                text: query.to_string(),
+                context: None,
+            };
+
+            match embedding_client.embed(request).await {
+                Ok(response) => Some(response.embedding),
+                Err(e) => {
+                    tracing::info!(
+                        "Embedding generation failed, falling back to keyword-only: {}",
+                        e
+                    );
+                    None
+                },
+            }
+        } else {
+            None
         };
 
-        let response = embedding_client.embed(request).await.map_err(|e| {
-            crate::GraphError::OperationError(format!("Failed to generate query embedding: {}", e))
-        })?;
+        let search_mode = if query_embedding.is_some() {
+            crate::indexing::SearchMode::Hybrid
+        } else {
+            crate::indexing::SearchMode::Keyword
+        };
 
-        // Search for similar claims
-        let similar_claims = claim_store
-            .find_similar(&response.embedding, limit, min_similarity)
-            .map_err(|e| {
-                crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
-            })?;
+        let hybrid_config = crate::claims::hybrid_search::HybridSearchConfig {
+            mode: search_mode,
+            min_similarity,
+            ..Default::default()
+        };
+
+        let empty_embedding: Vec<f32> = Vec::new();
+        let search_embedding = query_embedding.as_deref().unwrap_or(&empty_embedding);
+
+        let similar_claims = crate::claims::hybrid_search::HybridClaimSearch::search(
+            query,
+            search_embedding,
+            claim_store,
+            limit,
+            &hybrid_config,
+        )
+        .map_err(|e| {
+            crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
+        })?;
 
         // Convert claim IDs to node IDs
         let inference = self.inference.read().await;
