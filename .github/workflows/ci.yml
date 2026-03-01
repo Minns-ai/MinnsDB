@@ -56,7 +56,7 @@ jobs:
 
     - name: Run claims integration tests
       env:
-        LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        LLM_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       run: cargo test -p agent-db-graph --test claims_integration -- --ignored --nocapture
 
   benchmark:

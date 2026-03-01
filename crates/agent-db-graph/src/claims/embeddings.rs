@@ -276,6 +276,7 @@ impl EmbeddingClient for AnthropicEmbeddingClient {
 /// key is absent.
 pub fn openai_client_from_env() -> Option<OpenAiEmbeddingClient> {
     let key = std::env::var("LLM_API_KEY")
+        .or_else(|_| std::env::var("OPENAI_API_KEY"))
         .ok()
         .filter(|k| !k.is_empty())?;
     Some(OpenAiEmbeddingClient::new(
