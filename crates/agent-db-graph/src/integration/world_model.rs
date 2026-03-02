@@ -66,6 +66,8 @@ pub(super) fn extract_event_features_raw(event: &Event) -> EventFeatures {
         EventType::Learning { .. } => (hash_str("Learning"), 0, 0.5, 0.0),
         EventType::Context { .. } => (hash_str("Context"), 0, 0.5, 0.0),
         EventType::Conversation { .. } => (hash_str("Conversation"), 0, 0.5, 0.0),
+        EventType::CodeReview { .. } => (hash_str("CodeReview"), 0, 0.5, 0.0),
+        EventType::CodeFile { .. } => (hash_str("CodeFile"), 0, 0.5, 0.0),
     };
 
     EventFeatures {

@@ -1254,6 +1254,12 @@ impl StrategyExtractor {
                 EventType::Conversation { .. } => {
                     types.insert("conversation".to_string());
                 },
+                EventType::CodeReview { .. } => {
+                    types.insert("code_review".to_string());
+                },
+                EventType::CodeFile { .. } => {
+                    types.insert("code_file".to_string());
+                },
             }
         }
 
@@ -1494,6 +1500,8 @@ impl StrategyExtractor {
                 EventType::Conversation { speaker, .. } => {
                     skeleton.push(format!("Conv:{}", speaker));
                 },
+                EventType::CodeReview { .. } => skeleton.push("CodeReview".to_string()),
+                EventType::CodeFile { .. } => skeleton.push("CodeFile".to_string()),
             }
         }
         skeleton

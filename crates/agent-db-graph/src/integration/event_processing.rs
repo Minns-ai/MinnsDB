@@ -89,8 +89,9 @@ impl GraphEngine {
                 let mut inference = self.inference.write().await;
                 inference.process_event(ready_event.clone())
             };
-            match nodes_result {
+            let _event_node_id = match nodes_result {
                 Ok(nodes) => {
+                    let first_node = nodes.first().copied();
                     result.nodes_created.extend(nodes.clone());
 
                     // Auto-index newly created nodes
@@ -101,10 +102,64 @@ impl GraphEngine {
                     );
                     self.auto_index_nodes(&nodes).await?;
                     tracing::info!("Auto-index done event_id={}", ready_event.id);
+                    first_node
                 },
                 Err(e) => {
                     result.errors.push(e);
+                    None
                 },
+            };
+
+            // Code Intelligence: AST parsing for CodeFile events
+            // Only proceed if base event processing succeeded (event_node_id is Some)
+            #[cfg(feature = "code-intelligence")]
+            if _event_node_id.is_some() {
+                if let EventType::CodeFile {
+                    ref content,
+                    ref file_path,
+                    ref language,
+                    ..
+                } = ready_event.event_type
+                {
+                    if let Some(ref parser) = self.ast_parser {
+                        let detected = agent_db_ast::AstParser::detect_language(file_path);
+                        let lang = language.as_deref().or(detected.as_deref());
+                        if let Some(lang) = lang {
+                            match parser.parse(content, lang, file_path) {
+                                Ok(parse_result) => {
+                                    let entity_count = parse_result.entities.len();
+                                    let rel_count = parse_result.relationships.len();
+                                    let mut inference = self.inference.write().await;
+                                    let graph = inference.graph_mut();
+                                    match crate::code_graph::ingest_parse_result(
+                                        graph,
+                                        &parse_result,
+                                        _event_node_id,
+                                    ) {
+                                        Ok(code_nodes) => {
+                                            let num_code_nodes = code_nodes.len();
+                                            tracing::info!(
+                                            "AST ingestion for {}: {} entities, {} relationships, {} concept nodes created",
+                                            file_path, entity_count, rel_count, num_code_nodes
+                                        );
+                                            result.nodes_created.extend(code_nodes);
+                                        },
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "AST graph ingestion failed for {}: {}",
+                                                file_path,
+                                                e
+                                            );
+                                        },
+                                    }
+                                },
+                                Err(e) => {
+                                    tracing::warn!("AST parsing failed for {}: {}", file_path, e);
+                                },
+                            }
+                        }
+                    }
+                }
             }
 
             // Process through scoped inference engine (session + agent_type isolation)
@@ -456,6 +511,8 @@ impl GraphEngine {
             EventType::Learning { .. } => "Learning",
             EventType::Context { .. } => "Context",
             EventType::Conversation { .. } => "Conversation",
+            EventType::CodeReview { .. } => "CodeReview",
+            EventType::CodeFile { .. } => "CodeFile",
         }
     }
 

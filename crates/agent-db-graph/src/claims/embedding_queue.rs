@@ -91,11 +91,9 @@ impl EmbeddingQueue {
     ) -> Result<()> {
         debug!("Generating embedding for claim {}", claim.id);
 
-        // Generate embedding for claim text
-        let request = EmbeddingRequest {
-            text: claim.claim_text.clone(),
-            context: None, // Could add evidence context here if needed
-        };
+        // Generate embedding using per-type text with structured context
+        let (text, context) = claim.embedding_text();
+        let request = EmbeddingRequest { text, context };
 
         let response = embedding_client.embed(request).await?;
 
@@ -204,9 +202,9 @@ impl EmbeddingQueue {
         // Build batch request
         let requests: Vec<super::embeddings::EmbeddingRequest> = claims
             .iter()
-            .map(|c| super::embeddings::EmbeddingRequest {
-                text: c.claim_text.clone(),
-                context: None,
+            .map(|c| {
+                let (text, context) = c.embedding_text();
+                super::embeddings::EmbeddingRequest { text, context }
             })
             .collect();
 

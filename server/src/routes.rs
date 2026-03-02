@@ -58,6 +58,13 @@ pub fn create_router(state: AppState) -> Router {
             "/api/events/transaction",
             post(handlers::process_transaction_event),
         )
+        // Code intelligence
+        .route(
+            "/api/events/code-review",
+            post(handlers::process_code_review),
+        )
+        .route("/api/events/code-file", post(handlers::process_code_file))
+        .route("/api/code/search", post(handlers::search_code))
         .route("/api/episodes", get(handlers::get_episodes))
         // Memories
         .route(

@@ -2,6 +2,7 @@
 
 pub mod analytics;
 pub mod claims;
+pub mod code;
 pub mod conversation;
 pub mod events;
 pub mod export_import;
@@ -17,6 +18,7 @@ pub mod world_model;
 // Re-export all handlers for convenience
 pub use analytics::*;
 pub use claims::*;
+pub use code::*;
 pub use conversation::*;
 pub use events::*;
 pub use export_import::*;

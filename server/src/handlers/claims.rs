@@ -2,8 +2,8 @@
 
 use crate::errors::ApiError;
 use crate::models::{
-    ClaimEntityResponse, ClaimListQuery, ClaimResponse, ClaimSearchRequest,
-    EmbeddingProcessResponse, EvidenceSpanResponse, PaginationQuery,
+    ClaimEntityResponse, ClaimGroup, ClaimListQuery, ClaimResponse, ClaimSearchRequest,
+    EmbeddingProcessResponse, EvidenceSpanResponse, GroupedClaimSearchResponse, PaginationQuery,
 };
 use crate::state::AppState;
 use crate::write_lanes::WriteJob;
@@ -55,11 +55,11 @@ fn claim_to_response(
     }
 }
 
-// POST /api/claims/search - Search for similar claims
+// POST /api/claims/search - Search for similar claims (grouped by subject entity)
 pub async fn search_claims(
     State(state): State<AppState>,
     Json(payload): Json<ClaimSearchRequest>,
-) -> Result<Json<Vec<ClaimResponse>>, ApiError> {
+) -> Result<Json<GroupedClaimSearchResponse>, ApiError> {
     let _permit = state
         .read_gate
         .acquire()
@@ -82,9 +82,32 @@ pub async fn search_claims(
         .map(|(claim, sim)| claim_to_response(claim, Some(sim)))
         .collect();
 
-    info!("Found {} similar claims", responses.len());
+    let total_results = responses.len();
+    info!("Found {} similar claims", total_results);
 
-    Ok(Json(responses))
+    // Group by subject_entity using BTreeMap for stable ordering
+    let mut grouped: std::collections::BTreeMap<String, Vec<ClaimResponse>> =
+        std::collections::BTreeMap::new();
+    let mut ungrouped: Vec<ClaimResponse> = Vec::new();
+
+    for resp in responses {
+        if let Some(ref subject) = resp.subject_entity {
+            grouped.entry(subject.clone()).or_default().push(resp);
+        } else {
+            ungrouped.push(resp);
+        }
+    }
+
+    let groups: Vec<ClaimGroup> = grouped
+        .into_iter()
+        .map(|(subject, claims)| ClaimGroup { subject, claims })
+        .collect();
+
+    Ok(Json(GroupedClaimSearchResponse {
+        groups,
+        ungrouped,
+        total_results,
+    }))
 }
 
 // POST /api/embeddings/process - Process pending embeddings

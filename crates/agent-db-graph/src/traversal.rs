@@ -61,6 +61,7 @@ pub fn edge_cost(edge: &GraphEdge) -> f32 {
         EdgeType::About {
             relevance_score, ..
         } => 1.0 - relevance_score,
+        EdgeType::CodeStructure { confidence, .. } => 1.0 - confidence,
     };
     // Clamp to prevent zero-cost cycles while preserving ordering
     raw.max(0.001)
@@ -2041,6 +2042,7 @@ pub(crate) fn edge_type_name(et: &EdgeType) -> String {
         EdgeType::DerivedFrom { .. } => "DerivedFrom".to_string(),
         EdgeType::SupportedBy { .. } => "SupportedBy".to_string(),
         EdgeType::About { .. } => "About".to_string(),
+        EdgeType::CodeStructure { .. } => "CodeStructure".to_string(),
     }
 }
 

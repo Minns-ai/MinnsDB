@@ -169,12 +169,9 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
         HybridSearchConfig, OpenAiEmbeddingClient,
     };
 
-    let client = match openai_client_from_env() {
-        Ok(c) => c,
-        _ => {
-            eprintln!("Skipping: LLM_API_KEY not set");
-            return;
-        },
+    let Some(client) = openai_client_from_env() else {
+        eprintln!("Skipping test: OpenAI client not configured");
+        return;
     };
     let dir = tempdir().unwrap();
 

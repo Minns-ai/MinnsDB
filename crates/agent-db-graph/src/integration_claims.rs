@@ -856,6 +856,109 @@ impl GraphEngine {
             } => {
                 format!("{}: {}", speaker, content)
             },
+
+            // ── Code review events ─────────────────────────────────────────
+            EventType::CodeReview {
+                body,
+                file_path,
+                repository,
+                title,
+                ..
+            } => {
+                let mut parts = Vec::new();
+                if let Some(t) = title {
+                    parts.push(format!("Code review: {}", t));
+                }
+                parts.push(format!("Repository: {}", repository));
+                if let Some(fp) = file_path {
+                    parts.push(format!("File: {}", fp));
+                }
+                parts.push(body.clone());
+                parts.join("\n")
+            },
+
+            // ── Code file events ───────────────────────────────────────────
+            // Use AST summary context when available, never raw source
+            EventType::CodeFile {
+                file_path,
+                content,
+                language,
+                ..
+            } => {
+                let lang = language.as_deref().unwrap_or("unknown");
+
+                // When code-intelligence feature is enabled, use AST summary
+                #[cfg(feature = "code-intelligence")]
+                {
+                    let parser = agent_db_ast::AstParser::new();
+                    let auto_detected = agent_db_ast::AstParser::detect_language(file_path);
+                    let detected_lang = language.as_deref().or(auto_detected.as_deref());
+                    if let Some(lang_str) = detected_lang {
+                        if let Ok(parse_result) = parser.parse(content, lang_str, file_path) {
+                            // Build summary-sized context (~500 tokens) from AST
+                            let mut parts = Vec::new();
+                            parts
+                                .push(format!("Code file: {} (language: {})", file_path, lang_str));
+
+                            // Entity names + kinds + signatures (capped to avoid token blowup)
+                            let mut entity_summaries = Vec::new();
+                            for entity in &parse_result.entities {
+                                if entity.kind == agent_db_ast::CodeEntityKind::Import {
+                                    continue;
+                                }
+                                let mut desc = format!("{:?} {}", entity.kind, entity.name);
+                                if let Some(ref sig) = entity.signature {
+                                    desc.push_str(&format!(": {}", sig));
+                                }
+                                entity_summaries.push(desc);
+                                if entity_summaries.len() >= 50 {
+                                    break;
+                                }
+                            }
+                            if !entity_summaries.is_empty() {
+                                parts.push(format!("Defines: {}", entity_summaries.join(", ")));
+                            }
+
+                            // Imports (capped)
+                            let imports: Vec<_> = parse_result
+                                .entities
+                                .iter()
+                                .filter(|e| e.kind == agent_db_ast::CodeEntityKind::Import)
+                                .take(30)
+                                .map(|e| e.name.clone())
+                                .collect();
+                            if !imports.is_empty() {
+                                parts.push(format!("Imports: {}", imports.join(", ")));
+                            }
+
+                            // High-confidence relationships
+                            let rel_summaries: Vec<_> = parse_result
+                                .relationships
+                                .iter()
+                                .filter(|r| r.confidence >= 0.9)
+                                .take(20) // cap to avoid token blowup
+                                .map(|r| format!("{} {:?} {}", r.source, r.kind, r.target))
+                                .collect();
+                            if !rel_summaries.is_empty() {
+                                parts.push(format!("Relationships: {}", rel_summaries.join("; ")));
+                            }
+
+                            parts.join("\n")
+                        } else {
+                            format!("Code file: {} (language: {})", file_path, lang)
+                        }
+                    } else {
+                        format!("Code file: {} (language: {})", file_path, lang)
+                    }
+                }
+
+                // Without code-intelligence feature, use minimal summary
+                #[cfg(not(feature = "code-intelligence"))]
+                {
+                    let _ = content; // suppress unused warning
+                    format!("Code file: {} (language: {})", file_path, lang)
+                }
+            },
         };
 
         // Skip empty synthesised text

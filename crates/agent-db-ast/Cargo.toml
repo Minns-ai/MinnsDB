@@ -1,0 +1,40 @@
+[package]
+name = "agent-db-ast"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tree-sitter = "0.24"
+
+[features]
+default = ["lang-rust"]
+lang-rust = ["dep:tree-sitter-rust"]
+lang-python = ["dep:tree-sitter-python"]
+lang-javascript = ["dep:tree-sitter-javascript"]
+lang-typescript = ["dep:tree-sitter-typescript"]
+lang-go = ["dep:tree-sitter-go"]
+all-languages = ["lang-rust", "lang-python", "lang-javascript", "lang-typescript", "lang-go"]
+
+[dependencies.tree-sitter-rust]
+version = "0.23"
+optional = true
+
+[dependencies.tree-sitter-python]
+version = "0.23"
+optional = true
+
+[dependencies.tree-sitter-javascript]
+version = "0.23"
+optional = true
+
+[dependencies.tree-sitter-typescript]
+version = "0.23"
+optional = true
+
+[dependencies.tree-sitter-go]
+version = "0.23"
+optional = true

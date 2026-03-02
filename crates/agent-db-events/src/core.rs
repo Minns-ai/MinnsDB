@@ -126,6 +126,35 @@ pub enum EventType {
         /// Classification: "transaction", "state_change", "relationship", "preference", "chitchat"
         category: String,
     },
+
+    /// Code review event (PR comment, review, approval)
+    CodeReview {
+        review_id: String,
+        action: CodeReviewAction,
+        body: String,
+        file_path: Option<String>,
+        line_range: Option<(usize, usize)>,
+        repository: String,
+        title: Option<String>,
+    },
+
+    /// Code file snapshot (full file content for AST analysis)
+    CodeFile {
+        file_path: String,
+        content: String,
+        language: Option<String>,
+        repository: Option<String>,
+        git_ref: Option<String>,
+    },
+}
+
+/// Action type for code review events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeReviewAction {
+    Comment,
+    Approve,
+    RequestChanges,
 }
 
 /// Explicit learning telemetry events (no inference)

@@ -1125,4 +1125,24 @@ impl GraphEngine {
             total_items_retrieved: total_items,
         }
     }
+
+    /// Search code entities in the graph by filtering Concept nodes with code metadata.
+    pub async fn search_code_entities(
+        &self,
+        name_pattern: Option<&str>,
+        kind: Option<&str>,
+        language: Option<&str>,
+        file_pattern: Option<&str>,
+        limit: usize,
+    ) -> Vec<crate::code_graph::CodeEntityMatch> {
+        let inference = self.inference.read().await;
+        crate::code_graph::search_code_entities_in_graph(
+            inference.graph(),
+            name_pattern,
+            kind,
+            language,
+            file_pattern,
+            limit,
+        )
+    }
 }

@@ -220,6 +220,7 @@ impl GraphEngine {
             EdgeType::DerivedFrom { .. } => "DerivedFrom",
             EdgeType::SupportedBy { .. } => "SupportedBy",
             EdgeType::About { .. } => "About",
+            EdgeType::CodeStructure { .. } => "CodeStructure",
         };
         GraphEdgeData {
             id: edge.id,

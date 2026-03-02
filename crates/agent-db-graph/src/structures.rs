@@ -443,6 +443,12 @@ pub enum ConceptType {
     Module,
     /// Variable or constant (code-derived)
     Variable,
+    /// Trait or interface (code-derived)
+    Interface,
+    /// Enum type (code-derived)
+    Enum,
+    /// Type alias (code-derived)
+    TypeAlias,
 }
 
 impl ConceptType {
@@ -457,7 +463,10 @@ impl ConceptType {
             "EVENT" => ConceptType::Event,
             "MISC" | "NORP" | "WORK_OF_ART" | "LAW" | "LANGUAGE" => ConceptType::NamedEntity,
             "FUNCTION" | "METHOD" | "FUNC" => ConceptType::Function,
-            "CLASS" | "STRUCT" | "TYPE" | "INTERFACE" => ConceptType::Class,
+            "CLASS" | "STRUCT" | "TYPE" => ConceptType::Class,
+            "INTERFACE" | "TRAIT" => ConceptType::Interface,
+            "ENUM" => ConceptType::Enum,
+            "TYPE_ALIAS" | "TYPEDEF" => ConceptType::TypeAlias,
             "MODULE" | "PACKAGE" | "CRATE" | "NAMESPACE" => ConceptType::Module,
             "VARIABLE" | "CONST" | "VAR" | "PARAM" => ConceptType::Variable,
             _ => ConceptType::ContextualAssociation,
@@ -654,6 +663,16 @@ pub enum EdgeType {
     SupportedBy {
         evidence_strength: f32,
         span_offset: (usize, usize), // start, end byte offsets
+    },
+
+    /// Code structural relationship (from AST analysis)
+    CodeStructure {
+        /// Relationship kind: "contains", "imports", "field_of", "returns", "calls", etc.
+        relation_kind: String,
+        /// Source file path
+        file_path: String,
+        /// Extraction confidence (1.0 for safe structural, <1.0 for heuristic)
+        confidence: f32,
     },
 
     /// Semantic relationship (claim is about an entity/concept)
@@ -1686,6 +1705,16 @@ impl Graph {
             .and_then(|&node_id| self.nodes.get(&node_id))
     }
 
+    /// Iterate over all nodes in the graph.
+    pub fn nodes(&self) -> impl Iterator<Item = &GraphNode> {
+        self.nodes.values()
+    }
+
+    /// Find a concept node by its qualified_name (used for code dedup).
+    pub fn find_concept_node(&self, qualified_name: &str) -> Option<NodeId> {
+        self.concept_index.get(qualified_name).copied()
+    }
+
     /// Get node count
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -2422,7 +2451,7 @@ mod tests {
         ));
         assert!(matches!(
             ConceptType::from_ner_label("INTERFACE"),
-            ConceptType::Class
+            ConceptType::Interface
         ));
         assert!(matches!(
             ConceptType::from_ner_label("MODULE"),

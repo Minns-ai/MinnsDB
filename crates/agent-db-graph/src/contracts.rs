@@ -173,6 +173,8 @@ fn build_behavior_skeleton(events: &[Event]) -> Vec<String> {
             EventType::Conversation { speaker, .. } => {
                 skeleton.push(format!("Conv:{}", speaker));
             },
+            EventType::CodeReview { .. } => skeleton.push("CodeReview".to_string()),
+            EventType::CodeFile { .. } => skeleton.push("CodeFile".to_string()),
         }
     }
     skeleton
@@ -211,6 +213,8 @@ fn state_from_event(event: &Event) -> String {
         EventType::Learning { .. } => "Learn".to_string(),
         EventType::Context { context_type, .. } => format!("Context:{}", context_type),
         EventType::Conversation { .. } => "Conversation".to_string(),
+        EventType::CodeReview { .. } => "CodeReview".to_string(),
+        EventType::CodeFile { .. } => "CodeFile".to_string(),
     }
 }
 
@@ -225,6 +229,8 @@ fn action_from_event(event: &Event) -> String {
         EventType::Learning { .. } => "Learn".to_string(),
         EventType::Context { context_type, .. } => format!("Context:{}", context_type),
         EventType::Conversation { speaker, .. } => format!("Conv:{}", speaker),
+        EventType::CodeReview { review_id, .. } => format!("CodeReview:{}", review_id),
+        EventType::CodeFile { file_path, .. } => format!("CodeFile:{}", file_path),
     }
 }
 

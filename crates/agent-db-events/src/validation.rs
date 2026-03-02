@@ -131,6 +131,40 @@ impl BasicEventValidator {
                     ));
                 }
             },
+            EventType::CodeReview {
+                review_id,
+                body,
+                repository,
+                ..
+            } => {
+                if review_id.is_empty() {
+                    return Err(DatabaseError::validation(
+                        "CodeReview review_id cannot be empty",
+                    ));
+                }
+                if body.is_empty() {
+                    return Err(DatabaseError::validation("CodeReview body cannot be empty"));
+                }
+                if repository.is_empty() {
+                    return Err(DatabaseError::validation(
+                        "CodeReview repository cannot be empty",
+                    ));
+                }
+            },
+            EventType::CodeFile {
+                file_path, content, ..
+            } => {
+                if file_path.is_empty() {
+                    return Err(DatabaseError::validation(
+                        "CodeFile file_path cannot be empty",
+                    ));
+                }
+                if content.is_empty() {
+                    return Err(DatabaseError::validation(
+                        "CodeFile content cannot be empty",
+                    ));
+                }
+            },
         }
 
         Ok(())

@@ -329,6 +329,10 @@ pub struct GraphEngineConfig {
     pub enable_context_enrichment: bool,
     /// Configuration for context enrichment.
     pub enrichment_config: crate::context_enrichment::EnrichmentConfig,
+
+    // ========== Code Intelligence ==========
+    /// Enable AST-based code intelligence (requires `code-intelligence` feature). Default: false.
+    pub enable_code_intelligence: bool,
 }
 
 impl GraphEngineConfig {
@@ -582,6 +586,11 @@ pub struct GraphEngine {
         Arc<dashmap::DashMap<u64, Arc<RwLock<execution::ExecutionState>>>>,
     /// Monotonic counter for generating unique execution IDs
     pub(crate) next_execution_id: Arc<std::sync::atomic::AtomicU64>,
+
+    // ========== Code Intelligence (optional) ==========
+    /// AST parser for code intelligence (feature-gated)
+    #[cfg(feature = "code-intelligence")]
+    pub(crate) ast_parser: Option<Arc<agent_db_ast::AstParser>>,
 }
 
 /// Statistics for the graph engine (lock-free atomic counters).
@@ -772,6 +781,8 @@ impl Default for GraphEngineConfig {
             // Context enrichment (enabled by default, fail-open when no community data)
             enable_context_enrichment: true,
             enrichment_config: crate::context_enrichment::EnrichmentConfig::default(),
+            // Code intelligence (disabled by default, requires code-intelligence feature)
+            enable_code_intelligence: false,
         }
     }
 }

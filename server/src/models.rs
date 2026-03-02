@@ -616,6 +616,19 @@ pub struct ClaimEntityResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ClaimGroup {
+    pub subject: String,
+    pub claims: Vec<ClaimResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupedClaimSearchResponse {
+    pub groups: Vec<ClaimGroup>,
+    pub ungrouped: Vec<ClaimResponse>,
+    pub total_results: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct EvidenceSpanResponse {
     pub start_offset: usize,
     pub end_offset: usize,
@@ -760,6 +773,98 @@ pub struct PreferenceUpdateRequest {
 pub struct TreeAddChildRequest {
     pub parent: String,
     pub child: String,
+}
+
+// ============================================================================
+// Code Intelligence Types
+// ============================================================================
+
+/// POST /api/events/code-review — code review event submission
+#[serde_as]
+#[derive(Debug, Deserialize)]
+pub struct CodeReviewRequest {
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    pub agent_id: AgentId,
+    pub agent_type: AgentType,
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    pub session_id: SessionId,
+    pub review_id: String,
+    /// "comment", "approve", "request_changes"
+    pub action: String,
+    pub body: String,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub line_range: Option<(usize, usize)>,
+    pub repository: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub enable_semantic: bool,
+}
+
+/// POST /api/events/code-file — code file snapshot submission
+#[serde_as]
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct CodeFileRequest {
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    pub agent_id: AgentId,
+    pub agent_type: AgentType,
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
+    pub session_id: SessionId,
+    pub file_path: String,
+    pub content: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub git_ref: Option<String>,
+    #[serde(default)]
+    pub enable_ast: bool,
+    #[serde(default)]
+    pub enable_semantic: bool,
+}
+
+/// POST /api/code/search — structural code search
+#[derive(Debug, Deserialize)]
+pub struct CodeSearchRequest {
+    /// Glob pattern for entity name matching
+    #[serde(default)]
+    pub name_pattern: Option<String>,
+    /// Filter by entity kind: "function", "struct", "enum", etc.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Filter by language
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Glob pattern for file path matching
+    #[serde(default)]
+    pub file_pattern: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+/// Code search response
+#[derive(Debug, Serialize)]
+pub struct CodeSearchResponse {
+    pub entities: Vec<CodeEntityResult>,
+    pub total_matches: usize,
+}
+
+/// Single code entity result
+#[derive(Debug, Serialize)]
+pub struct CodeEntityResult {
+    pub name: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub file_path: String,
+    pub language: String,
+    pub line_range: Option<(usize, usize)>,
+    pub signature: Option<String>,
+    pub doc_comment: Option<String>,
+    pub visibility: Option<String>,
 }
 
 // ============================================================================

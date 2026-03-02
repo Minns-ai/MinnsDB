@@ -23,10 +23,11 @@ Last Updated: 2026-02-26
 12. [Structured Memory](#structured-memory)
 13. [Conversation Ingestion](#conversation-ingestion)
 14. [Planning & World Model](#planning--world-model)
-15. [Admin](#admin)
-16. [Health](#health)
-17. [Error Handling](#error-handling)
-18. [Configuration](#configuration)
+15. [Code Intelligence](#code-intelligence)
+16. [Admin](#admin)
+17. [Health](#health)
+18. [Error Handling](#error-handling)
+19. [Configuration](#configuration)
 
 ---
 
@@ -1616,6 +1617,239 @@ When `repair_triggered: true`:
 ```
 
 When `enabled: false`, only `enabled`, `mode`, and `planning` fields are returned.
+
+---
+
+## Code Intelligence
+
+Code intelligence provides AST-based structural understanding of source code. Source files are parsed into typed entities (functions, structs, traits, enums) and relationships (contains, imports, field_of, implements), which are ingested into the graph as `Concept` nodes with `CodeStructure` edges.
+
+**Requires:** The `code-intelligence` Cargo feature and `enable_code_intelligence: true` in `GraphEngineConfig`. Without the feature, the endpoints still accept requests but skip AST parsing — events are processed through the standard pipeline only.
+
+**Supported languages:** Rust (default). Python, TypeScript, JavaScript, Go available via feature flags (`lang-python`, `lang-typescript`, etc.).
+
+### How It Works
+
+```
+CodeFile event → Standard Pipeline (graph node, claims, episodes)
+                     │
+                     └→ AST Parser (tree-sitter)
+                          │
+                          ├→ Concept nodes (Function, Struct, Enum, Trait, Module, Variable)
+                          ├→ CodeStructure edges (contains, imports, field_of, returns, implements)
+                          └→ About edges (event → defines → concept)
+```
+
+1. A `CodeFile` event is submitted with source code content
+2. The event is processed through the standard pipeline (graph construction, episodes, claims)
+3. If code intelligence is enabled, the source is parsed via tree-sitter
+4. Extracted entities become `Concept` graph nodes (deduped by `qualified_name`)
+5. Extracted relationships become `CodeStructure` edges with confidence scores
+6. Concept nodes are linked to the source event via `About` edges with `predicate: "defines"`
+
+**Claim extraction for code events** uses an AST-derived summary (entity names, signatures, imports, relationships) instead of raw source code. This keeps the LLM context small and focused on structural facts.
+
+### EventType: CodeFile
+
+Submit a source file for AST analysis and graph ingestion.
+
+#### POST /api/events/code-file
+
+**Request:**
+```json
+{
+  "agent_id": 1,
+  "agent_type": "code-indexer",
+  "session_id": 42,
+  "file_path": "src/auth/login.rs",
+  "content": "pub fn authenticate(user: &str, pass: &str) -> Result<Token, AuthError> { ... }",
+  "language": "rust",
+  "repository": "my-app",
+  "git_ref": "main",
+  "enable_ast": true,
+  "enable_semantic": true
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_id` | integer | yes | Agent identifier |
+| `agent_type` | string | yes | Agent type label |
+| `session_id` | integer | yes | Session identifier |
+| `file_path` | string | yes | Path of the source file |
+| `content` | string | yes | Full source code content |
+| `language` | string | no | Language identifier (`"rust"`, `"python"`, etc.). Auto-detected from extension if omitted. |
+| `repository` | string | no | Repository name for scoping |
+| `git_ref` | string | no | Git ref (branch, tag, commit) |
+| `enable_ast` | boolean | no | Enable AST parsing (default: false) |
+| `enable_semantic` | boolean | no | Enable NER + claim extraction (default: false) |
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "event_id": 340282366920938463463374607431768211455,
+  "nodes_created": 5,
+  "patterns_detected": 0,
+  "processing_time_ms": 45
+}
+```
+
+`nodes_created` includes both the event node and any AST-derived concept nodes (functions, structs, etc.).
+
+**What gets created in the graph:**
+
+| Source Code | Graph Node | ConceptType |
+|-------------|-----------|-------------|
+| `fn foo()` | Concept | Function |
+| `pub fn bar(&self)` (in impl) | Concept | Function (Method) |
+| `struct Point` | Concept | Class |
+| `enum Color` | Concept | Enum |
+| `trait Drawable` | Concept | Interface |
+| `mod auth` | Concept | Module |
+| `const MAX: usize` | Concept | Variable |
+| `type Alias = Vec<u8>` | Concept | TypeAlias |
+
+**Edges created:**
+
+| Relationship | EdgeType | Confidence |
+|-------------|----------|-----------|
+| Module contains Function | CodeStructure (`contains`) | 1.0 |
+| Struct contains Field | CodeStructure (`field_of`) | 1.0 |
+| File imports Module | CodeStructure (`imports`) | 1.0 |
+| Function returns Type | CodeStructure (`returns`) | 1.0 |
+| Parameter has Type | CodeStructure (`parameter_type`) | 1.0 |
+| Struct implements Trait | CodeStructure (`implements`) | 0.9 |
+
+### EventType: CodeReview
+
+Submit a code review comment, approval, or change request.
+
+#### POST /api/events/code-review
+
+**Request:**
+```json
+{
+  "agent_id": 1,
+  "agent_type": "code-reviewer",
+  "session_id": 42,
+  "review_id": "PR-123-review-1",
+  "action": "comment",
+  "body": "This function should handle the null case explicitly to avoid panics in production.",
+  "file_path": "src/auth/login.rs",
+  "line_range": [42, 50],
+  "repository": "my-app",
+  "title": "Add null safety to auth module",
+  "enable_semantic": true
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_id` | integer | yes | Agent identifier |
+| `agent_type` | string | yes | Agent type label |
+| `session_id` | integer | yes | Session identifier |
+| `review_id` | string | yes | Unique review identifier |
+| `action` | string | yes | One of: `"comment"`, `"approve"`, `"request_changes"` |
+| `body` | string | yes | Review comment text |
+| `file_path` | string | no | File being reviewed |
+| `line_range` | [int, int] | no | Line range [start, end] |
+| `repository` | string | yes | Repository name |
+| `title` | string | no | Review/PR title |
+| `enable_semantic` | boolean | no | Enable NER + claim extraction (default: false) |
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "event_id": 340282366920938463463374607431768211456,
+  "nodes_created": 1,
+  "patterns_detected": 0,
+  "processing_time_ms": 8
+}
+```
+
+Code reviews are processed through the standard pipeline. With `enable_semantic: true`, claims are extracted from the review body (e.g., "This function should handle null" becomes a `BugFix` or `CodePattern` claim).
+
+### Code Search
+
+Search for code entities in the graph by name, kind, language, or file path.
+
+#### POST /api/code/search
+
+**Request:**
+```json
+{
+  "name": "authenticate",
+  "kind": "function",
+  "language": "rust",
+  "file_path": "src/auth",
+  "limit": 20
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | no | Substring match on entity name |
+| `kind` | string | no | Filter by kind: `"function"`, `"class"`, `"enum"`, `"interface"`, `"module"`, `"variable"`, `"typealias"` |
+| `language` | string | no | Filter by language |
+| `file_path` | string | no | Substring match on file path |
+| `limit` | integer | no | Max results (default: 50) |
+
+All filters are optional. Omitting all filters returns all code entities up to the limit.
+
+**Response (200):**
+```json
+{
+  "entities": [
+    {
+      "name": "authenticate",
+      "qualified_name": "auth::login::authenticate",
+      "kind": "Function",
+      "file_path": "src/auth/login.rs",
+      "language": "rust",
+      "line_range": [10, 25],
+      "signature": "pub fn authenticate(user: &str, pass: &str) -> Result<Token, AuthError>",
+      "doc_comment": "Authenticate a user with credentials.",
+      "visibility": "pub"
+    }
+  ],
+  "total": 1
+}
+```
+
+### Code-Specific Claim Types
+
+When claim extraction processes code events, it may produce these additional claim types:
+
+| ClaimType | Half-life | Description |
+|-----------|-----------|-------------|
+| `CodePattern` | 365 days | Architectural decision or code pattern (e.g., "We use the repository pattern") |
+| `ApiContract` | 180 days | API contract or interface specification (e.g., "The endpoint accepts JSON") |
+| `BugFix` | 90 days | Bug fix or known issue (e.g., "Fixed null pointer in login flow") |
+
+These are in addition to the standard claim types (Fact, Preference, Belief, Intention, Capability, Avoidance).
+
+### Configuration
+
+Enable code intelligence in `GraphEngineConfig`:
+
+```rust
+let mut config = GraphEngineConfig::default();
+config.enable_code_intelligence = true;
+```
+
+Or via environment/server configuration:
+
+| Config Field | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `enable_code_intelligence` | bool | false | Enable AST parsing for CodeFile events |
+
+The `code-intelligence` Cargo feature must also be enabled at compile time:
+
+```bash
+cargo build --features code-intelligence
+```
 
 ---
 

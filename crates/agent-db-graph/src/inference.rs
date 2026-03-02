@@ -341,6 +341,8 @@ impl GraphInference {
                 EventType::Learning { .. } => "learning_agent",
                 EventType::Context { .. } => "context_agent",
                 EventType::Conversation { .. } => "conversation_agent",
+                EventType::CodeReview { .. } => "code_review_agent",
+                EventType::CodeFile { .. } => "code_file_agent",
             };
 
             let capability = Self::capability_from_event(event);
@@ -375,6 +377,10 @@ impl GraphInference {
                 format!("context:{}", context_type)
             },
             EventType::Conversation { .. } => "conversation".to_string(),
+            EventType::CodeReview { action, .. } => format!("code_review:{:?}", action),
+            EventType::CodeFile { language, .. } => {
+                format!("code_file:{}", language.as_deref().unwrap_or("unknown"))
+            },
         }
     }
 
@@ -390,6 +396,8 @@ impl GraphInference {
             EventType::Learning { .. } => "LearningTelemetry".to_string(),
             EventType::Context { context_type, .. } => format!("Context:{}", context_type),
             EventType::Conversation { speaker, .. } => format!("Conversation:{}", speaker),
+            EventType::CodeReview { review_id, .. } => format!("CodeReview:{}", review_id),
+            EventType::CodeFile { file_path, .. } => format!("CodeFile:{}", file_path),
         };
 
         let significance = self.calculate_event_significance(event);
@@ -498,6 +506,51 @@ impl GraphInference {
                     .insert("category".to_string(), json!(category));
             },
             EventType::Learning { .. } => {},
+            EventType::CodeReview {
+                review_id,
+                body,
+                file_path,
+                repository,
+                title,
+                ..
+            } => {
+                node.properties
+                    .insert("content_type".to_string(), json!("code"));
+                node.properties
+                    .insert("review_id".to_string(), json!(review_id));
+                node.properties.insert("content".to_string(), json!(body));
+                node.properties
+                    .insert("repository".to_string(), json!(repository));
+                if let Some(fp) = file_path {
+                    node.properties.insert("file_path".to_string(), json!(fp));
+                }
+                if let Some(t) = title {
+                    node.properties.insert("title".to_string(), json!(t));
+                }
+            },
+            EventType::CodeFile {
+                file_path,
+                language,
+                repository,
+                git_ref,
+                ..
+            } => {
+                // Do NOT dump raw content into node properties (design rule)
+                node.properties
+                    .insert("content_type".to_string(), json!("code"));
+                node.properties
+                    .insert("file_path".to_string(), json!(file_path));
+                if let Some(lang) = language {
+                    node.properties.insert("language".to_string(), json!(lang));
+                }
+                if let Some(repo) = repository {
+                    node.properties
+                        .insert("repository".to_string(), json!(repo));
+                }
+                if let Some(gr) = git_ref {
+                    node.properties.insert("git_ref".to_string(), json!(gr));
+                }
+            },
         }
 
         // Extract searchable text from event metadata
@@ -604,6 +657,8 @@ impl GraphInference {
             EventType::Learning { .. } => InteractionType::Coordination,
             EventType::Context { .. } => InteractionType::InformationExchange,
             EventType::Conversation { .. } => InteractionType::Communication,
+            EventType::CodeReview { .. } => InteractionType::Communication,
+            EventType::CodeFile { .. } => InteractionType::InformationExchange,
         };
 
         let edge = GraphEdge::new(
@@ -978,6 +1033,12 @@ impl GraphInference {
                 "conversation".to_string(),
                 self.truncate_summary(&format!("{}: {}", speaker, content)),
             )),
+            EventType::CodeReview { body, .. } => {
+                Some(("code_review".to_string(), self.truncate_summary(body)))
+            },
+            EventType::CodeFile { file_path, .. } => {
+                Some(("code_file".to_string(), self.truncate_summary(file_path)))
+            },
         }
     }
 
@@ -1003,6 +1064,8 @@ impl GraphInference {
             EventType::Learning { .. } => "Learning".to_string(),
             EventType::Context { .. } => "Context".to_string(),
             EventType::Conversation { .. } => "Conversation".to_string(),
+            EventType::CodeReview { .. } => "CodeReview".to_string(),
+            EventType::CodeFile { .. } => "CodeFile".to_string(),
         }
     }
 
@@ -1139,6 +1202,12 @@ impl GraphInference {
                         EventType::Conversation { speaker, .. } => {
                             format!("Conversation:{}", speaker)
                         },
+                        EventType::CodeReview { review_id, .. } => {
+                            format!("CodeReview:{}", review_id)
+                        },
+                        EventType::CodeFile { file_path, .. } => {
+                            format!("CodeFile:{}", file_path)
+                        },
                     })
                     .collect();
 
@@ -1243,6 +1312,8 @@ impl GraphInference {
             EventType::Learning { .. } => 0.05,
             EventType::Context { .. } => 0.15,
             EventType::Conversation { .. } => 0.15,
+            EventType::CodeReview { .. } => 0.25,
+            EventType::CodeFile { .. } => 0.15,
         };
 
         // Factor in causality chain length

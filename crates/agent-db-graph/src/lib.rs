@@ -58,6 +58,9 @@ pub mod structures;
 pub mod transitions;
 pub mod traversal;
 
+// Code intelligence
+pub mod code_graph;
+
 // New advanced graph features (2026-01-15)
 pub mod algorithms;
 pub mod analytics;

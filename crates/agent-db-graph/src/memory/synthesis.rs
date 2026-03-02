@@ -154,6 +154,21 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
                     },
                 }
             },
+            EventType::CodeReview {
+                body, file_path, ..
+            } => {
+                let truncated = truncate_str(body, 120);
+                let ctx = file_path.as_deref().unwrap_or("unknown file");
+                context_texts.push(format!("Code review on {}: {}", ctx, truncated));
+            },
+            EventType::CodeFile {
+                file_path,
+                language,
+                ..
+            } => {
+                let lang = language.as_deref().unwrap_or("unknown");
+                context_texts.push(format!("Code file: {} ({})", file_path, lang));
+            },
             _ => {},
         }
     }

@@ -42,7 +42,9 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:external_graph.com)",
       "WebFetch(domain:learnopencv.com)",
-      "WebFetch(domain:emanuelerossi.co.uk)"
+      "WebFetch(domain:emanuelerossi.co.uk)",
+      "Bash(export:*)",
+      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo build:*)"
     ]
   }
 }

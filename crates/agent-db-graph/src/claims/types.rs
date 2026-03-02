@@ -160,6 +160,12 @@ pub enum ClaimType {
     Capability,
     /// Negative lesson — "Don't do X", learned from repeated failures
     Avoidance,
+    /// Architectural decision or code pattern — "We use the repository pattern"
+    CodePattern,
+    /// API contract or interface specification — "The endpoint accepts JSON"
+    ApiContract,
+    /// Bug fix or known issue — "Fixed null pointer in login flow"
+    BugFix,
 }
 
 impl ClaimType {
@@ -168,12 +174,15 @@ impl ClaimType {
     /// After `half_life` seconds the temporal weight drops to 0.5.
     pub fn half_life_secs(&self) -> f64 {
         match self {
-            ClaimType::Intention => 3.0 * 86_400.0,    // 3 days
-            ClaimType::Belief => 14.0 * 86_400.0,      // 14 days
-            ClaimType::Preference => 30.0 * 86_400.0,  // 30 days
-            ClaimType::Capability => 180.0 * 86_400.0, // 180 days
-            ClaimType::Fact => 365.0 * 86_400.0,       // 365 days
-            ClaimType::Avoidance => 14.0 * 86_400.0,   // 14 days (same as Belief)
+            ClaimType::Intention => 3.0 * 86_400.0,     // 3 days
+            ClaimType::Belief => 14.0 * 86_400.0,       // 14 days
+            ClaimType::Preference => 30.0 * 86_400.0,   // 30 days
+            ClaimType::BugFix => 90.0 * 86_400.0,       // 90 days
+            ClaimType::Capability => 180.0 * 86_400.0,  // 180 days
+            ClaimType::ApiContract => 180.0 * 86_400.0, // 180 days
+            ClaimType::Fact => 365.0 * 86_400.0,        // 365 days
+            ClaimType::CodePattern => 365.0 * 86_400.0, // 365 days
+            ClaimType::Avoidance => 14.0 * 86_400.0,    // 14 days (same as Belief)
         }
     }
 
@@ -186,6 +195,9 @@ impl ClaimType {
             "intention" | "intent" => ClaimType::Intention,
             "capability" => ClaimType::Capability,
             "avoidance" | "avoid" | "negative" | "constraint" => ClaimType::Avoidance,
+            "code_pattern" | "pattern" | "architecture" => ClaimType::CodePattern,
+            "api" | "api_contract" | "contract" | "interface_spec" => ClaimType::ApiContract,
+            "bug" | "bugfix" | "bug_fix" | "fix" => ClaimType::BugFix,
             _ => ClaimType::Fact, // default
         }
     }
@@ -200,6 +212,9 @@ impl std::fmt::Display for ClaimType {
             ClaimType::Intention => write!(f, "Intention"),
             ClaimType::Capability => write!(f, "Capability"),
             ClaimType::Avoidance => write!(f, "Avoidance"),
+            ClaimType::CodePattern => write!(f, "CodePattern"),
+            ClaimType::ApiContract => write!(f, "ApiContract"),
+            ClaimType::BugFix => write!(f, "BugFix"),
         }
     }
 }
@@ -632,6 +647,55 @@ impl DerivedClaim {
             // Phase 2: Responsive Q-value
             self.q_value()
         }
+    }
+
+    /// Build embedding text with a type prefix and optional structured context.
+    ///
+    /// Returns `(text, context)` — the existing `OpenAiEmbeddingClient` already
+    /// prepends context to text when present, so no client changes needed.
+    pub fn embedding_text(&self) -> (String, Option<String>) {
+        let type_prefix = match self.claim_type {
+            ClaimType::Preference => "Preference",
+            ClaimType::Fact => "Fact",
+            ClaimType::Belief => "Belief",
+            ClaimType::Intention => "Intention",
+            ClaimType::Capability => "Capability",
+            ClaimType::Avoidance => "Avoidance",
+            ClaimType::CodePattern => "CodePattern",
+            ClaimType::ApiContract => "ApiContract",
+            ClaimType::BugFix => "BugFix",
+        };
+        let text = format!("{}: {}", type_prefix, self.claim_text);
+
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(ref s) = self.subject_entity {
+            parts.push(format!("Subject: {}", s));
+        }
+        if let Some(ref p) = self.predicate {
+            parts.push(format!("Predicate: {}", p));
+        }
+        if let Some(ref o) = self.object_entity {
+            parts.push(format!("Object: {}", o));
+        }
+        if let Some(ref c) = self.category {
+            parts.push(format!("Category: {}", c));
+        }
+
+        let labeled: Vec<String> = self
+            .entities
+            .iter()
+            .map(|e| format!("{} ({})", e.text, e.label))
+            .collect();
+        if !labeled.is_empty() {
+            parts.push(format!("Entities: {}", labeled.join(", ")));
+        }
+
+        let context = if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(". "))
+        };
+        (text, context)
     }
 }
 
@@ -1324,5 +1388,90 @@ mod tests {
         assert_eq!(deserialized.subject_entity.as_deref(), Some("user"));
         assert!(deserialized.predicate.is_none());
         assert!(deserialized.object_entity.is_none());
+    }
+
+    #[test]
+    fn test_embedding_text_fact_with_spo() {
+        let mut claim = DerivedClaim::new(
+            1,
+            "Alice works at Google".to_string(),
+            vec![EvidenceSpan::new(0, 5, "Alice")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.claim_type = ClaimType::Fact;
+        claim.subject_entity = Some("alice".to_string());
+        claim.predicate = Some("works at".to_string());
+        claim.object_entity = Some("google".to_string());
+
+        let (text, context) = claim.embedding_text();
+        assert_eq!(text, "Fact: Alice works at Google");
+        let ctx = context.unwrap();
+        assert!(ctx.contains("Subject: alice"));
+        assert!(ctx.contains("Predicate: works at"));
+        assert!(ctx.contains("Object: google"));
+    }
+
+    #[test]
+    fn test_embedding_text_preference_with_entities() {
+        let mut claim = DerivedClaim::new(
+            2,
+            "I prefer Rust over Python".to_string(),
+            vec![EvidenceSpan::new(0, 1, "I")],
+            0.85,
+            vec![],
+            200,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.claim_type = ClaimType::Preference;
+        claim.entities = vec![
+            ClaimEntity {
+                text: "Rust".to_string(),
+                label: "PRODUCT".to_string(),
+                normalized: "rust".to_string(),
+                confidence: 1.0,
+                role: EntityRole::default(),
+            },
+            ClaimEntity {
+                text: "Python".to_string(),
+                label: "PRODUCT".to_string(),
+                normalized: "python".to_string(),
+                confidence: 1.0,
+                role: EntityRole::default(),
+            },
+        ];
+
+        let (text, context) = claim.embedding_text();
+        assert_eq!(text, "Preference: I prefer Rust over Python");
+        let ctx = context.unwrap();
+        assert!(ctx.contains("Entities: Rust (PRODUCT), Python (PRODUCT)"));
+    }
+
+    #[test]
+    fn test_embedding_text_no_metadata() {
+        let claim = DerivedClaim::new(
+            3,
+            "Something happened".to_string(),
+            vec![EvidenceSpan::new(0, 9, "Something")],
+            0.5,
+            vec![],
+            300,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let (text, context) = claim.embedding_text();
+        assert_eq!(text, "Fact: Something happened");
+        assert!(context.is_none());
     }
 }

@@ -314,6 +314,21 @@ pub fn build_event_narrative(events: &[Event]) -> String {
                 let truncated = &content[..80.min(content.len())];
                 format!("{}. Conversation [{}]: {}", i + 1, speaker, truncated)
             },
+            EventType::CodeReview {
+                body, file_path, ..
+            } => {
+                let ctx = file_path.as_deref().unwrap_or("unknown file");
+                let truncated = &body[..120.min(body.len())];
+                format!("{}. CodeReview on {}: {}", i + 1, ctx, truncated)
+            },
+            EventType::CodeFile {
+                file_path,
+                language,
+                ..
+            } => {
+                let lang = language.as_deref().unwrap_or("unknown");
+                format!("{}. CodeFile: {} ({})", i + 1, file_path, lang)
+            },
         };
         lines.push(line);
     }

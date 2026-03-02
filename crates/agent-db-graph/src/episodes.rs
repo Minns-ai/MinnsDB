@@ -786,6 +786,8 @@ impl EpisodeDetector {
             EventType::Learning { .. } => significance += 0.1,
             EventType::Context { .. } => {},
             EventType::Conversation { .. } => significance += 0.05,
+            EventType::CodeReview { .. } => significance += 0.15,
+            EventType::CodeFile { .. } => significance += 0.10,
         }
 
         // Normalize to [0.0, 1.0]
@@ -818,6 +820,8 @@ impl EpisodeDetector {
             EventType::Learning { .. } => "Learning".to_string(),
             EventType::Context { context_type, .. } => format!("Context:{}", context_type),
             EventType::Conversation { speaker, .. } => format!("Conversation:{}", speaker),
+            EventType::CodeReview { review_id, .. } => format!("CodeReview:{}", review_id),
+            EventType::CodeFile { file_path, .. } => format!("CodeFile:{}", file_path),
         };
 
         match self.seen_event_types.get(&event_type_name) {
@@ -876,6 +880,8 @@ impl EpisodeDetector {
             EventType::Learning { .. } => "Learning".to_string(),
             EventType::Context { context_type, .. } => format!("Context:{}", context_type),
             EventType::Conversation { speaker, .. } => format!("Conversation:{}", speaker),
+            EventType::CodeReview { review_id, .. } => format!("CodeReview:{}", review_id),
+            EventType::CodeFile { file_path, .. } => format!("CodeFile:{}", file_path),
         };
         *self.seen_event_types.entry(event_type_name).or_insert(0) += 1;
 

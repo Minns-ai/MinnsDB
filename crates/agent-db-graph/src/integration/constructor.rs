@@ -563,6 +563,20 @@ impl GraphEngine {
             None
         };
 
+        // Initialize AST parser for code intelligence (feature-gated)
+        #[cfg(feature = "code-intelligence")]
+        let ast_parser = if config.enable_code_intelligence {
+            tracing::info!("Code intelligence enabled — initializing AST parser");
+            let parser = agent_db_ast::AstParser::new();
+            tracing::info!(
+                "AST parser initialized, supported languages: {:?}",
+                parser.supported_languages()
+            );
+            Some(Arc::new(parser))
+        } else {
+            None
+        };
+
         let engine = Self {
             inference,
             traversal,
@@ -619,6 +633,8 @@ impl GraphEngine {
             goal_store: Arc::new(RwLock::new(crate::goal_store::GoalStore::new())),
             active_executions: Arc::new(dashmap::DashMap::new()),
             next_execution_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            #[cfg(feature = "code-intelligence")]
+            ast_parser,
         };
 
         // Restore graph state from redb if available

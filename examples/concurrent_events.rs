@@ -334,5 +334,7 @@ fn get_event_name(event_type: &EventType) -> &str {
         EventType::Learning { .. } => "learning",
         EventType::Context { .. } => "Context",
         EventType::Conversation { .. } => "Conversation",
+        EventType::CodeReview { .. } => "CodeReview",
+        EventType::CodeFile { .. } => "CodeFile",
     }
 }
