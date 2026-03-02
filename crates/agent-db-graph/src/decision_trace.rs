@@ -126,7 +126,11 @@ impl RedbDecisionTraceStore {
         key
     }
 
-    /// Decode agent index key to extract query_id
+    /// Decode agent index key to extract query_id.
+    ///
+    /// Key layout: `[agent_id: 8 bytes][timestamp: 8 bytes][0xFF separator][query_id bytes]`
+    /// The separator search starts at byte 16 (after the fixed-size fields) because
+    /// the timestamp bytes can legitimately contain 0xFF.
     fn decode_agent_index_key(key: &[u8]) -> StorageResult<(AgentId, Timestamp, String)> {
         if key.len() < 17 {
             return Err(agent_db_storage::StorageError::DatabaseError(
@@ -137,14 +141,15 @@ impl RedbDecisionTraceStore {
         let agent_id = u64::from_be_bytes(key[0..8].try_into().unwrap());
         let timestamp = u64::from_be_bytes(key[8..16].try_into().unwrap());
 
-        // Find the separator
-        let separator_idx = key.iter().position(|&b| b == 0xFF).ok_or_else(|| {
-            agent_db_storage::StorageError::DatabaseError(
-                "No separator in agent index key".to_string(),
-            )
-        })?;
+        // The separator is at byte 16 (right after the two u64 fields).
+        // Verify it's there, then extract the query_id from byte 17 onward.
+        if key[16] != 0xFF {
+            return Err(agent_db_storage::StorageError::DatabaseError(
+                "Missing separator at expected position in agent index key".to_string(),
+            ));
+        }
 
-        let query_id = String::from_utf8_lossy(&key[separator_idx + 1..]).to_string();
+        let query_id = String::from_utf8_lossy(&key[17..]).to_string();
 
         Ok((agent_id, timestamp, query_id))
     }

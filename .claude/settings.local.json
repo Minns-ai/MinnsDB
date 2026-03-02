@@ -44,7 +44,8 @@
       "WebFetch(domain:learnopencv.com)",
       "WebFetch(domain:emanuelerossi.co.uk)",
       "Bash(export:*)",
-      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo build:*)"
+      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo build:*)",
+      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo test:*)"
     ]
   }
 }
