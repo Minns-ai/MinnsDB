@@ -51,22 +51,33 @@ fn relation_kind_to_string(kind: CodeRelationKind) -> String {
 
 /// Ingest a ParseResult into the graph.
 ///
-/// Creates Concept nodes (deduped by qualified_name via concept index).
-/// Creates CodeStructure edges for relationships.
-/// Optionally links concepts to source event node via About edges.
+/// - Nodes are deduped by `qualified_name` (used as `concept_name` in the concept index).
+///   Existing nodes get their properties updated in place.
+/// - Old `CodeStructure` edges from the same `file_path` are removed before new ones are added,
+///   so re-indexing a file replaces stale relationships.
+/// - Entities that existed in a previous parse but are absent in the new one get removed
+///   (only for entities from the same file).
 #[cfg(feature = "code-intelligence")]
 pub fn ingest_parse_result(
     graph: &mut Graph,
     parse_result: &ParseResult,
     source_event_node_id: Option<NodeId>,
 ) -> GraphResult<Vec<NodeId>> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     let mut created_nodes = Vec::with_capacity(parse_result.entities.len());
     let mut qn_to_node_id: HashMap<String, NodeId> =
         HashMap::with_capacity(parse_result.entities.len());
 
-    // Pass 1: Create Concept nodes for each entity (skip Import entities)
+    // Collect the set of qualified_names in this parse (for stale-node detection)
+    let current_qnames: HashSet<&str> = parse_result
+        .entities
+        .iter()
+        .filter(|e| e.kind != CodeEntityKind::Import)
+        .map(|e| e.qualified_name.as_str())
+        .collect();
+
+    // Pass 1: Create/update Concept nodes for each entity (skip Import entities)
     for entity in &parse_result.entities {
         if entity.kind == CodeEntityKind::Import {
             continue; // Imports → edges only, no standalone concept node
@@ -74,10 +85,10 @@ pub fn ingest_parse_result(
 
         let concept_type = entity_kind_to_concept_type(entity.kind);
 
-        // Check if a concept node with this qualified_name already exists
+        // Lookup by qualified_name — this is the concept_index key
         let existing = graph.find_concept_node(&entity.qualified_name);
         let node_id = if let Some(existing_id) = existing {
-            // Update properties on existing node (keep in sync with new-node branch below)
+            // Update properties on existing node
             if let Some(node) = graph.get_node_mut(existing_id) {
                 node.properties
                     .insert("file_path".to_string(), json!(entity.file_path));
@@ -89,6 +100,9 @@ pub fn ingest_parse_result(
                     .insert("content_type".to_string(), json!("code"));
                 node.properties
                     .insert("kind".to_string(), json!(format!("{:?}", entity.kind)));
+                // Store short name for display
+                node.properties
+                    .insert("display_name".to_string(), json!(entity.name));
                 if let Some(ref sig) = entity.signature {
                     node.properties.insert("signature".to_string(), json!(sig));
                 }
@@ -107,15 +121,18 @@ pub fn ingest_parse_result(
             }
             existing_id
         } else {
-            // Create new concept node
+            // Create new concept node — use qualified_name as concept_name so the
+            // concept_index correctly deduplicates by qualified_name on future ingests.
             let mut node = GraphNode::new(NodeType::Concept {
-                concept_name: entity.name.clone(),
+                concept_name: entity.qualified_name.clone(),
                 concept_type,
                 confidence: 1.0,
             });
 
             node.properties
                 .insert("qualified_name".to_string(), json!(entity.qualified_name));
+            node.properties
+                .insert("display_name".to_string(), json!(entity.name));
             node.properties
                 .insert("file_path".to_string(), json!(entity.file_path));
             node.properties
@@ -149,7 +166,30 @@ pub fn ingest_parse_result(
         qn_to_node_id.insert(entity.qualified_name.clone(), node_id);
     }
 
-    // Pass 2: Create CodeStructure edges for relationships
+    // Pass 2: Remove stale CodeStructure edges from the same file, then add new ones.
+    //
+    // Collect all existing CodeStructure edge IDs whose file_path matches this parse,
+    // so we can remove them before adding the fresh set.
+    let file_path = &parse_result.file_path;
+    let all_node_ids: Vec<NodeId> = qn_to_node_id.values().copied().collect();
+    let mut stale_edge_ids: Vec<crate::structures::EdgeId> = Vec::new();
+    for &nid in &all_node_ids {
+        for edge in graph.get_edges_from(nid) {
+            if let EdgeType::CodeStructure {
+                file_path: ref efp, ..
+            } = edge.edge_type
+            {
+                if efp == file_path {
+                    stale_edge_ids.push(edge.id);
+                }
+            }
+        }
+    }
+    for edge_id in stale_edge_ids {
+        graph.remove_edge(edge_id);
+    }
+
+    // Now add fresh CodeStructure edges
     for rel in &parse_result.relationships {
         let source_id = qn_to_node_id.get(&rel.source).copied();
         let target_id = qn_to_node_id.get(&rel.target).copied();
@@ -163,13 +203,39 @@ pub fn ingest_parse_result(
                     file_path: rel.file_path.clone(),
                     confidence: rel.confidence,
                 },
-                rel.confidence, // edge weight = confidence
+                rel.confidence,
             );
             graph.add_edge(edge);
         }
     }
 
-    // Pass 3: Link concepts to source event via About edges
+    // Pass 3: Remove stale concept nodes — entities from this file that no longer exist
+    // in the current parse. Only remove nodes whose file_path matches and whose
+    // qualified_name is absent from the new parse.
+    let mut stale_node_ids: Vec<NodeId> = Vec::new();
+    for node in graph.nodes() {
+        if let NodeType::Concept { .. } = &node.node_type {
+            let is_code =
+                node.properties.get("content_type").and_then(|v| v.as_str()) == Some("code");
+            let same_file =
+                node.properties.get("file_path").and_then(|v| v.as_str()) == Some(file_path);
+            if is_code && same_file {
+                let qn = node
+                    .properties
+                    .get("qualified_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !current_qnames.contains(qn) {
+                    stale_node_ids.push(node.id);
+                }
+            }
+        }
+    }
+    for nid in stale_node_ids {
+        graph.remove_node(nid);
+    }
+
+    // Pass 4: Link new concepts to source event via About edges
     if let Some(event_node_id) = source_event_node_id {
         for &node_id in &created_nodes {
             let edge = GraphEdge::new(
@@ -225,10 +291,17 @@ pub fn search_code_entities_in_graph(
                 }
             }
 
-            // Filter by name pattern (simple substring match)
+            // Filter by name pattern (match against display_name or concept_name)
             if let Some(name_pat) = name_pattern {
                 let pat = name_pat.to_lowercase();
-                if !concept_name.to_lowercase().contains(&pat) {
+                let display = node
+                    .properties
+                    .get("display_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(concept_name);
+                if !display.to_lowercase().contains(&pat)
+                    && !concept_name.to_lowercase().contains(&pat)
+                {
                     continue;
                 }
             }
@@ -257,7 +330,12 @@ pub fn search_code_entities_in_graph(
             }
 
             results.push(CodeEntityMatch {
-                name: concept_name.clone(),
+                name: node
+                    .properties
+                    .get("display_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(concept_name)
+                    .to_string(),
                 qualified_name: node
                     .properties
                     .get("qualified_name")

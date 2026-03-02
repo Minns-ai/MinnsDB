@@ -1404,6 +1404,41 @@ impl Graph {
         Some(edge_id)
     }
 
+    /// Remove an edge by ID. Returns the removed edge, or None if not found.
+    pub fn remove_edge(&mut self, edge_id: EdgeId) -> Option<GraphEdge> {
+        let edge = self.edges.remove(&edge_id)?;
+
+        // Remove from source's outgoing adjacency list
+        if let Some(out_list) = self.adjacency_out.get_mut(&edge.source) {
+            out_list.retain(|eid| *eid != edge_id);
+        }
+        // Remove from target's incoming adjacency list
+        if let Some(in_list) = self.adjacency_in.get_mut(&edge.target) {
+            in_list.retain(|eid| *eid != edge_id);
+        }
+
+        // Update degrees
+        if let Some(source) = self.nodes.get_mut(&edge.source) {
+            source.degree = source.degree.saturating_sub(1);
+            self.total_degree = self.total_degree.saturating_sub(1);
+            self.dirty_nodes.insert(edge.source);
+        }
+        if let Some(target) = self.nodes.get_mut(&edge.target) {
+            target.degree = target.degree.saturating_sub(1);
+            self.total_degree = self.total_degree.saturating_sub(1);
+            self.dirty_nodes.insert(edge.target);
+        }
+
+        // Track deletion for delta persistence
+        self.deleted_edges.insert(edge_id);
+        self.dirty_edges.remove(&edge_id);
+        self.adjacency_dirty = true;
+        self.generation += 1;
+
+        self.update_stats();
+        Some(edge)
+    }
+
     /// Get neighbors of a node (outgoing edges)
     pub fn get_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
         match self.adjacency_out.get(&node_id) {
