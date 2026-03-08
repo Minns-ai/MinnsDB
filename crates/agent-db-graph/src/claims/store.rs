@@ -438,6 +438,68 @@ impl ClaimStore {
         Ok(())
     }
 
+    /// Supersede a claim: set status to Superseded and record valid_until timestamp.
+    ///
+    /// This unifies claim temporal tracking with graph edge supersession.
+    /// The claim is removed from search indexes (BM25 + vector).
+    pub fn supersede(&self, claim_id: ClaimId, valid_until: u64) -> Result<()> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(CLAIMS_TABLE)?;
+            let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
+                let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
+                Some(claim)
+            } else {
+                None
+            };
+
+            if let Some(mut claim) = maybe_claim {
+                claim.status = ClaimStatus::Superseded;
+                claim.valid_until = Some(valid_until);
+                let serialized = rmp_serde::to_vec(&claim)?;
+                table.insert(claim_id, serialized.as_slice())?;
+                debug!(
+                    "Superseded claim {} with valid_until={}",
+                    claim_id, valid_until
+                );
+                self.pending.push(PendingIndexUpdate::Remove { claim_id });
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Merge metadata entries into a claim's existing metadata.
+    ///
+    /// Used to attach state anchors after claim extraction when graph state
+    /// is available.
+    pub fn update_metadata(
+        &self,
+        claim_id: ClaimId,
+        new_metadata: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(CLAIMS_TABLE)?;
+            let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
+                let claim: DerivedClaim = rmp_serde::from_slice(value.value())?;
+                Some(claim)
+            } else {
+                None
+            };
+
+            if let Some(mut claim) = maybe_claim {
+                for (k, v) in new_metadata {
+                    claim.metadata.insert(k.clone(), v.clone());
+                }
+                let serialized = rmp_serde::to_vec(&claim)?;
+                table.insert(claim_id, serialized.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
     /// Mark claim as accessed
     pub fn mark_accessed(&self, claim_id: ClaimId) -> Result<()> {
         let write_txn = self.db.begin_write()?;

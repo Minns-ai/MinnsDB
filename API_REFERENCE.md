@@ -2,8 +2,8 @@
 
 **Complete REST API documentation for SDK integration**
 
-Version: 2.3.0
-Last Updated: 2026-02-26
+Version: 2.4.0
+Last Updated: 2026-03-07
 
 ---
 
@@ -33,93 +33,91 @@ Last Updated: 2026-02-26
 
 ## Architecture
 
-EventGraphDB has two data ingestion paths that converge on a shared Structured Memory store and are unified at query time.
+EventGraphDB has a unified pipeline. All data — structured events and conversations — flows through the same graph engine.
 
-### Primary Path: Event Pipeline
+### Unified Event Pipeline
 
-The core self-evolution loop. Every event flows through the full pipeline:
+Every event flows through the full pipeline:
 
 ```
-Event → Graph Construction → Episode Detection → Memory Formation → Strategy Extraction
-                                    │
-                                    ├→ Reinforcement Learning (edge weights, Q-values)
-                                    ├→ World Model Training (EBM contrastive learning)
-                                    └→ Structured Memory Auto-Detection
-                                       (metadata normalization → ledgers, state machines)
+Event --> Graph Construction --> Episode Detection --> Memory Formation --> Strategy Extraction
+                                       |
+                                       +--> Reinforcement Learning (edge weights, Q-values)
+                                       +--> World Model Training (EBM contrastive learning)
+                                       +--> Claims Extraction (LLM-driven entity/fact extraction)
 ```
 
-**Entry points:** `POST /api/events`, `POST /api/events/simple`, `POST /api/events/state-change`, `POST /api/events/transaction`
+**Entry points:**
+- `POST /api/events`, `POST /api/events/simple`, `POST /api/events/state-change`, `POST /api/events/transaction` -- structured events with pre-populated metadata
+- `POST /api/conversations/ingest` -- raw conversation text (converted to events, then enriched via LLM compaction)
 
 **What it produces:**
-- Graph nodes and edges (actions, observations, concepts, tools, results)
+- Graph nodes and edges (concepts, actions, observations, relationships)
 - Episodes (bounded sequences of related events)
-- Episodic → Semantic → Schema memories (consolidation over time)
+- Episodic, Semantic, and Schema memories (consolidation over time)
 - Strategies (playbooks extracted from successful/failed episodes)
 - Reinforcement signals (transition model, success/failure posteriors)
-- Structured memory entries (auto-detected from event metadata via normalization)
 
-**Entity resolution:** Graph `concept_index` (`HashMap<Arc<str>, NodeId>`) — node IDs assigned by the graph engine during inference.
+**Entity resolution:** Graph `concept_index` (`HashMap<Arc<str>, NodeId>`) -- node IDs assigned by the graph engine during inference.
 
-### Secondary Path: Conversation Ingestion
+### Conversation Ingestion
 
-A fast-path for ingesting multi-turn conversations directly into structured memory, bypassing the event pipeline for efficiency.
-
-```
-ConversationIngest → Classify → Parse → Bridge → StructuredMemoryStore
-                                                   ├→ Ledger (transactions)
-                                                   ├→ StateMachine (state changes)
-                                                   ├→ Tree (relationships)
-                                                   └→ PreferenceList (preferences)
-```
-
-**Entry point:** `POST /api/conversations/ingest`
-
-**What it produces:**
-- Structured memory entries only (ledgers, state machines, trees, preference lists)
-
-**What it does NOT produce:**
-- No Event objects (no event store entries)
-- No graph nodes or edges
-- No episodes, memories, or strategies
-- No reinforcement learning signals
-- No world model training data
-
-**Entity resolution:** `NameRegistry` (`HashMap<String, u64>`) — sequential IDs starting from 1, scoped per `case_id`. Persistent across incremental ingestion calls for the same case.
-
-### Where the Paths Converge
-
-**Structured Memory Store** (`Arc<RwLock<StructuredMemoryStore>>`) is the shared state:
-
-| Source | Provenance Tag | Key Format |
-|--------|---------------|------------|
-| Event pipeline (auto-detected) | `EpisodePipeline` | `ledger:{node_id_a}:{node_id_b}`, `state:{node_id}:{attr}` |
-| Conversation ingestion | `EpisodePipeline` | `ledger:{registry_id_a}:{registry_id_b}`, `state:{registry_id}:{attr}` |
-| Direct API calls | `Manual` | User-defined |
-| NLQ mutations | `NlqUpsert` | Query-derived |
-
-**Important:** The event pipeline and conversation pipeline use different entity ID spaces (graph NodeIds vs NameRegistry sequential IDs). They do not collide because the ID ranges are disjoint — graph NodeIds are assigned from the graph's internal counter, while NameRegistry IDs start from 1 per case.
-
-### Query-Time Unification
-
-The query endpoint (`POST /api/conversations/query`) composes results from all three stores:
+Conversations go through the same event pipeline as structured events, with an additional LLM compaction step that extracts structured knowledge from raw text.
 
 ```
-Question → Conversation Classifier → Structured Memory (answer + memory_context)
-                │                           │
-                │ (fallback)                ├→ Memory Store (related_memories via BM25)
-                └→ NLQ Pipeline             └→ Strategy Store (related_strategies via BM25)
+ConversationIngest --> Bridge (raw Conversation events) --> Full Event Pipeline
+                                                                 |
+                                                                 +--> Graph nodes + episodes
+                                                                 +--> LLM Compaction (inline)
+                                                                        +--> LLM Cascade (facts, goals, summaries)
+                                                                        +--> NER Financial Extraction (PAYER/AMOUNT/PAYEE)
+                                                                        +--> write_fact_to_graph()
+                                                                               +--> state:location, state:work edges
+                                                                               +--> financial:payment edges
+                                                                               +--> relationship:* edges
+                                                                               +--> preference:* edges
 ```
 
-Every query response is enriched with `related_memories` and `related_strategies` from the episodic memory and strategy stores via BM25-only multi-signal retrieval. This gives downstream LLMs full context across all three knowledge sources.
+**Bridge** (`ingest_to_events`): Converts each message into an `EventType::Conversation` event with `category: "message"`. These are intentionally lightweight -- the raw text is preserved, and all semantic extraction happens in compaction.
 
-### Design Rationale
+**LLM Compaction** (`run_compaction`): Runs inline before the response returns. Per-batch extraction with rolling context:
+1. **LLM Cascade** (3-call pipeline): Entity extraction, relationship discovery, structured fact production. Each fact includes subject, predicate, object, category, temporal signals, dependencies, and financial amounts.
+2. **NER Financial Extraction** (parallel via `tokio::join!`): Specialized accounting NER model with PAYER/AMOUNT/PAYEE labels extracts financial triplets directly. Deduped against LLM facts by normalized (subject, object, category).
+3. **Two-phase graph writes**: Single-valued facts (location, work) written first to establish entity state, then multi-valued facts (routines, preferences) with auto-stamped `depends_on` from the updated graph state.
 
-The two-path design is intentional:
+**Requires a configured LLM client.** Without it, the endpoint returns an error -- raw conversation events without compaction contain no structured information.
 
-- **Event pipeline:** For agent telemetry that needs the full learning loop (episodes, memories, strategies, RL). Higher latency, richer output.
-- **Conversation ingestion:** For bulk structured fact extraction from human conversations. Lower latency, focused on structured data. No experiential learning.
+### Structured Events vs Conversations
 
-Both paths feed the same structured memory store. Queries search all stores. The system is consistent — it just has two on-ramps.
+| Aspect | Structured Events | Conversations |
+|--------|-------------------|---------------|
+| **Entry point** | `POST /api/events/*` | `POST /api/conversations/ingest` |
+| **Metadata** | Pre-populated by caller | Empty (extracted by LLM compaction) |
+| **Fact extraction** | Metadata normalization (alias + LLM fallback) | LLM cascade + NER |
+| **State tracking** | Via metadata keys (`entity`, `new_state`, `amount`) | Via compaction and `write_fact_to_graph` |
+| **LLM required** | No | Yes |
+| **Graph edges** | Created by state tracking pipeline | Created by compaction |
+
+Both paths create the same graph edge types (`state:*`, `financial:payment`, `relationship:*`, `preference:*`) and are queried identically at query time.
+
+### Query-Time Graph Projection
+
+The NLQ pipeline (`POST /api/nlq`) queries the graph directly:
+
+```
+Question --> LLM Intent Classifier --> Graph Projection (source of truth)
+                  |                          +--> Entity state (successor-state walk)
+                  |                          +--> Financial balances (net balance computation)
+                  |                          +--> Temporal views (valid_until filtering)
+                  |                          +--> Community detection (DRIFT search)
+                  |
+                  +--> Claims + BM25 + Embedding fusion (RRF)
+                  +--> Memory Store (related_memories)
+                  +--> Strategy Store (related_strategies)
+```
+
+The graph is the source of truth. Query-time projections walk edges dynamically rather than reading pre-computed values, so answers always reflect the latest state.
+
 
 ---
 
@@ -992,7 +990,7 @@ Claims are semantic assertions extracted by the NER + LLM pipeline from events.
 
 List active claims, optionally filtered by source event.
 
-**Response (200):**
+**Response (200):** Array of claim objects.
 ```json
 [
   {
@@ -1002,7 +1000,7 @@ List active claims, optionally filtered by source event.
     "source_event_id": 123456,
     "similarity": null,
     "evidence_spans": [
-      {"start": 10, "end": 45, "text": "prefers null checks"}
+      {"start_offset": 10, "end_offset": 45, "text_snippet": "prefers null checks"}
     ],
     "support_count": 3,
     "status": "Active",
@@ -1014,13 +1012,15 @@ List active claims, optionally filtered by source event.
     "temporal_weight": 1.0,
     "superseded_by": null,
     "entities": [
-      {"entity_text": "null checks", "entity_type": "Concept", "confidence": 0.95}
+      {"text": "null checks", "label": "CONCEPT"}
     ]
   }
 ]
 ```
 
-**Claim types:** `"Preference"`, `"Fact"`, `"Belief"`, `"Intention"`, `"Capability"`
+**Claim types:** `"Preference"`, `"Fact"`, `"Belief"`, `"Intention"`, `"Capability"`, `"Avoidance"`, `"CodePattern"`, `"ApiContract"`, `"BugFix"`
+
+Note: `GET /api/claims` returns a flat array. `POST /api/claims/search` returns a grouped response — see below.
 
 ### GET /api/claims/:id
 
@@ -1028,7 +1028,7 @@ Get a single claim by ID. Same response shape as list item.
 
 ### POST /api/claims/search
 
-Semantic search for claims using embeddings.
+Semantic search for claims using embeddings. Results are grouped by subject entity.
 
 **Request:**
 ```json
@@ -1039,7 +1039,69 @@ Semantic search for claims using embeddings.
 }
 ```
 
-**Response:** Array of claim objects with `similarity` field populated.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `query_text` | string | required | Natural language search query |
+| `top_k` | integer | 10 | Max results to return |
+| `min_similarity` | float | 0.7 | Minimum cosine similarity threshold |
+
+**Response (200):**
+```json
+{
+  "groups": [
+    {
+      "subject": "authentication",
+      "claims": [
+        {
+          "claim_id": 42,
+          "claim_text": "The auth module uses JWT tokens with 24h expiry",
+          "claim_type": "ApiContract",
+          "confidence": 0.92,
+          "similarity": 0.85,
+          "source_event_id": 1234,
+          "support_count": 3,
+          "status": "Active",
+          "temporal_weight": 0.97,
+          "subject_entity": "authentication",
+          "entities": [{"text": "JWT", "label": "TECHNOLOGY"}],
+          "evidence_spans": [],
+          "created_at": 1709312400000000000,
+          "last_accessed": 1709398800000000000,
+          "expires_at": null,
+          "superseded_by": null
+        }
+      ]
+    }
+  ],
+  "ungrouped": [
+    {
+      "claim_id": 55,
+      "claim_text": "We prefer returning Result over panicking",
+      "claim_type": "CodePattern",
+      "confidence": 0.88,
+      "similarity": 0.79,
+      "source_event_id": 1240,
+      "support_count": 1,
+      "status": "Active",
+      "temporal_weight": 0.99,
+      "subject_entity": null,
+      "entities": [],
+      "evidence_spans": [],
+      "created_at": 1709312400000000000,
+      "last_accessed": 1709312400000000000,
+      "expires_at": null,
+      "superseded_by": null
+    }
+  ],
+  "total_results": 2
+}
+```
+
+- `groups` — claims grouped by `subject_entity` (e.g. "authentication", "database", "error_handling")
+- `ungrouped` — claims with no `subject_entity`
+- `total_results` — total count across both groups and ungrouped
+
+Claims are ranked by `similarity` (cosine similarity to query embedding), weighted by `confidence` and `temporal_weight` (half-life decay).
 
 ### POST /api/embeddings/process?limit=10
 
@@ -1220,15 +1282,15 @@ Add a child node to a tree.
 
 ## Conversation Ingestion
 
-Ingest multi-session conversations into structured memory and query the results. Messages are automatically classified into categories (transaction, state change, relationship, preference, or chitchat) and bridged into the appropriate structured memory templates.
+Ingest multi-session conversations into the graph. Each message is converted to a `Conversation` event and processed through the full event pipeline. An inline LLM compaction step then extracts structured facts (locations, relationships, preferences, financial transactions) and writes them as graph edges.
 
-When a unified LLM client is configured (`LLM_API_KEY` / `NLQ_HINT_API_KEY`), an LLM classifier runs first with Rust-side validation of numbers and currencies. Without an LLM, a keyword-based classifier and parser pipeline handles classification as fallback. Both paths produce identical structured memory output.
+A configured LLM client is required (`LLM_API_KEY` or `OPENAI_API_KEY`). When NER is enabled (`enable_semantic_memory`), a specialized accounting NER model runs in parallel with the LLM cascade to extract PAYER/AMOUNT/PAYEE triplets for financial messages.
 
 ### Incremental Ingestion
 
 The server maintains a persistent `ConversationState` per `case_id` across API calls. This ensures:
 
-- **Stable entity IDs:** The `NameRegistry` (name→ID mapping) is preserved across calls. Alice always gets the same ID regardless of which batch she first appeared in. This prevents ledger key collisions when messages arrive incrementally.
+- **Stable entity IDs:** The `ConversationState` (participant tracking) is preserved across calls. Entity resolution uses the graph `concept_index` — Alice always maps to the same Concept node regardless of which batch she first appeared in.
 - **Idempotency:** Every processed message is tracked by `(case_id, session_id, message_index)`. Re-ingesting the same message in a later call is a no-op (0 messages processed).
 - **Participant accumulation:** Known participants grow across calls, so "split among all" always resolves to the full set.
 
@@ -1248,7 +1310,7 @@ POST /api/conversations/ingest { "case_id": "trip_2024", "sessions": [...batch2.
 
 ### POST /api/conversations/ingest
 
-Ingest one or more conversation sessions. Each message is classified, parsed, and bridged into structured memory (ledgers, state machines, trees, preference lists). Idempotent per `case_id` — re-ingesting the same `(case_id, session_id, message_index)` tuple is a no-op.
+Ingest one or more conversation sessions. Each message is converted to a Conversation event and processed through the event pipeline, then LLM compaction extracts facts and writes them as graph edges. Idempotent per `case_id` — re-ingesting the same `(case_id, session_id, message_index)` tuple is a no-op.
 
 **Request:**
 ```json
@@ -1301,48 +1363,40 @@ Ingest one or more conversation sessions. Each message is classified, parsed, an
 {
   "case_id": "trip_expenses_2024",
   "messages_processed": 7,
-  "transactions_found": 2,
-  "state_changes_found": 2,
-  "relationships_found": 1,
-  "preferences_found": 0,
-  "chitchat_skipped": 2
+  "events_submitted": 8,
+  "compaction": {
+    "facts_extracted": 5,
+    "goals_extracted": 0,
+    "goals_deduplicated": 0,
+    "procedural_steps": 0,
+    "memories_created": false,
+    "memories_updated": 0,
+    "memories_deleted": 0,
+    "playbooks_extracted": 0,
+    "llm_success": true
+  },
+  "rolling_summary_started": true
 }
 ```
 
-**Message classification categories:**
+**Compaction extracts facts with these categories (written as graph edges):**
 
-| Category | Structured Memory Type | Example Message |
-|----------|----------------------|-----------------|
-| Transaction | Ledger | `"Alice: Paid €50 for lunch - split with Bob"` |
-| State change | StateMachine | `"I'm moving to NYC"`, `"I live in Lisbon"` |
-| Relationship | Tree | `"Johnny Fisher works with Christopher Peterson"` |
-| Preference | PreferenceList | `"I love fantasy novels"`, `"My favorite is pasta"` |
-| Chitchat | *(skipped)* | `"The weather was lovely!"` |
+| Category | Edge Type | Example Message |
+|----------|-----------|-----------------|
+| `location` | `state:location` | `"I'm moving to NYC"`, `"I live in Lisbon"` |
+| `work` | `state:work` | `"I started a new job at Google"` |
+| `financial` | `financial:payment` | `"Alice: Paid €50 for lunch - split with Bob"` |
+| `relationship` | `relationship:*` | `"Johnny Fisher works with Christopher Peterson"` |
+| `preference` | `preference:*` | `"I love fantasy novels"`, `"My favorite is pasta"` |
+| `routine` | `state:routine` | `"I take morning walks in Battery Park"` |
 
-**Transaction formats recognized:**
-
-| Format | Example |
-|--------|---------|
-| Colon-paid (primary) | `"Alice: Paid €179 for museum - split with Bob"` |
-| Refund | `"Bob: Refund €27 each for all"` |
-| Verbose speaker | `"Alice: I covered the dinner expenses, €87 total for everyone"` |
-| Amount-was-cost | `"Alice: The groceries were €146"` |
-| Name-paid (no colon) | `"Alice paid $50 for lunch"` |
-| Tipped | `"Charlie tipped $10 at the restaurant"` |
-
-**Split modes:**
-
-| Keyword | Behavior |
-|---------|----------|
-| `"split with Name"` | Equal split between payer and named person |
-| `"split among all"` / `"shared equally"` | Equal split among all known participants |
-| `"split among Name1, Name2"` | Equal split among listed names |
+**NER financial extraction** (parallel with LLM cascade): When NER is enabled, the specialized accounting model extracts PAYER/AMOUNT/PAYEE triplets from financial messages and creates `financial:payment` edges. These are deduped against LLM-extracted financial facts.
 
 ### POST /api/conversations/query
 
-Query structured memory populated by conversation ingestion. First attempts conversation-specific classification; falls back to the general NLQ pipeline if no conversation pattern matches.
+Query the graph for answers to natural language questions. Uses the unified NLQ pipeline with LLM intent classification, graph projection, claims/BM25/embedding fusion, and LLM answer synthesis.
 
-Every response is enriched with `related_memories` and `related_strategies` from the episodic memory and strategy stores (via BM25 multi-signal retrieval). This gives downstream LLMs full context across structured memory, episodic memories, and learned strategies in a single call.
+Every response is enriched with `related_memories` and `related_strategies` from the episodic memory and strategy stores (via BM25 multi-signal retrieval). This gives downstream LLMs full context across graph state, episodic memories, and learned strategies in a single call.
 
 **Request:**
 ```json
@@ -1649,6 +1703,39 @@ CodeFile event → Standard Pipeline (graph node, claims, episodes)
 
 **Claim extraction for code events** uses an AST-derived summary (entity names, signatures, imports, relationships) instead of raw source code. This keeps the LLM context small and focused on structural facts.
 
+### Re-indexing Behavior
+
+Submitting the same file again performs a full replace — the graph always reflects the latest version of the code:
+
+| Scenario | Behavior |
+|----------|----------|
+| File unchanged | Existing nodes touched (timestamp updated), no new nodes created |
+| Function signature changed | Existing Concept node updated in place (same node ID, properties overwritten) |
+| New function added | New Concept node created, linked to event |
+| Function deleted from file | Old Concept node **removed** from graph along with all its edges |
+| Relationships changed | Old `CodeStructure` edges for this file **removed**, fresh edges added |
+
+Nodes are deduped by `qualified_name` (e.g. `auth::login::authenticate`). When a file is re-indexed:
+
+1. Entities present in both old and new parse → properties updated in place
+2. Entities only in new parse → new Concept node created
+3. Entities only in old parse (same `file_path`) → node and edges removed
+4. All `CodeStructure` edges for this `file_path` are replaced (old removed, new added)
+
+This means you can safely re-index files after every edit without accumulating stale nodes or duplicate edges.
+
+**Claims on re-index:**
+
+Graph nodes and edges are replaced immediately, but claims follow a different lifecycle:
+
+| Scenario | Claim behavior |
+|----------|---------------|
+| Same claim extracted again | **Deduped** — existing claim gets `add_support()`, new one merged |
+| Claim changed (e.g. new signature) | **Superseded** — old claim marked `Superseded`, new claim stored |
+| Entity deleted (no new claim generated) | **Decays** — old claim is not actively removed, but fades via half-life decay (CodePattern: 365d, ApiContract: 180d, BugFix: 90d) |
+
+This is by design: claims represent extracted knowledge that may still be relevant even after code changes (e.g. "we used the repository pattern" remains true even if specific functions change). Stale claims naturally lose confidence over time and are eventually purged by the maintenance loop (`purge_inactive_claims`).
+
 ### EventType: CodeFile
 
 Submit a source file for AST analysis and graph ingestion.
@@ -1695,7 +1782,7 @@ Submit a source file for AST analysis and graph ingestion.
 }
 ```
 
-`nodes_created` includes both the event node and any AST-derived concept nodes (functions, structs, etc.).
+`nodes_created` includes the event node plus any **new** AST-derived concept nodes. Nodes that already existed (matched by `qualified_name`) are updated in place and not counted here. On a re-index of an unchanged file, this will be `1` (the event node only).
 
 **What gets created in the graph:**
 
@@ -2013,13 +2100,13 @@ Use this path when your agent needs the full learning loop: events → episodes 
 10. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
 11. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
 
-### Conversation Ingestion (Fast Path)
+### Conversation Ingestion
 
-Use this path for bulk structured fact extraction from human conversations. No events or episodes are created — data goes directly into structured memory.
+Conversations go through the full event pipeline with LLM compaction for fact extraction. Events, episodes, memories, and graph edges are all created.
 
-12. **Conversation ingestion:** Use `POST /api/conversations/ingest` to ingest multi-session conversations. Use the same `case_id` across calls for incremental ingestion with stable entity IDs and automatic deduplication.
-13. **Multi-source queries:** Use `POST /api/conversations/query` to query structured memory. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment — pass these to your LLM alongside the `answer` and `memory_context`.
-14. **Incremental pattern:** Send messages as they arrive with the same `case_id`. The server preserves name→ID mappings and deduplicates already-processed messages automatically. No client-side state management needed.
+12. **Conversation ingestion:** Use `POST /api/conversations/ingest` to ingest multi-session conversations. Requires an LLM client. Use the same `case_id` across calls for incremental ingestion with stable entity resolution and automatic deduplication.
+13. **Multi-source queries:** Use `POST /api/conversations/query` or `POST /api/nlq` to query the graph. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment.
+14. **Incremental pattern:** Send messages as they arrive with the same `case_id`. The server preserves conversation state and deduplicates already-processed messages automatically. No client-side state management needed.
 
 ### Configuration
 

@@ -16,6 +16,7 @@ pub mod answer_composer;
 pub mod bridge;
 pub mod classifier;
 pub mod compaction;
+pub mod graph_projection;
 pub mod llm_classifier;
 pub mod nlq_ext;
 pub mod numeric_reasoning;
@@ -34,7 +35,9 @@ pub use compaction::{
     run_compaction, update_rolling_summary, CompactionResult, ConversationRollingSummary,
     GoalPlaybook,
 };
-pub use nlq_ext::{classify_conversation_query, execute_conversation_query, ConversationQueryType};
+pub use nlq_ext::{
+    execute_conversation_query, execute_conversation_query_with_graph, ConversationQueryType,
+};
 pub use types::{
     ConversationIngest, ConversationMessage, ConversationSession, ConversationState, IngestOptions,
     IngestResult, NameRegistry, SessionIngestResult,

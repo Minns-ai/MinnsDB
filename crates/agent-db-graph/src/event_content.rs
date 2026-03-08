@@ -311,14 +311,22 @@ pub fn build_event_narrative(events: &[Event]) -> String {
             EventType::Conversation {
                 speaker, content, ..
             } => {
-                let truncated = &content[..80.min(content.len())];
+                let mut end = 80.min(content.len());
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let truncated = &content[..end];
                 format!("{}. Conversation [{}]: {}", i + 1, speaker, truncated)
             },
             EventType::CodeReview {
                 body, file_path, ..
             } => {
                 let ctx = file_path.as_deref().unwrap_or("unknown file");
-                let truncated = &body[..120.min(body.len())];
+                let mut end = 120.min(body.len());
+                while end > 0 && !body.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let truncated = &body[..end];
                 format!("{}. CodeReview on {}: {}", i + 1, ctx, truncated)
             },
             EventType::CodeFile {

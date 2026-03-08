@@ -5,7 +5,6 @@
 // Automatically detects episode boundaries from event streams for memory formation.
 // Episodes are meaningful sequences of events that form coherent units of experience.
 
-use crate::structures::Graph;
 use agent_db_core::types::{AgentId, ContextHash, EventId, SessionId, Timestamp};
 use agent_db_events::core::{
     ActionOutcome, CognitiveType, Event, EventContext, EventType, MetadataValue,
@@ -13,7 +12,6 @@ use agent_db_events::core::{
 
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Unique identifier for an episode
 pub type EpisodeId = u64;
@@ -165,10 +163,6 @@ pub struct EpisodeDetector {
     /// Completed episodes
     completed_episodes: Vec<Episode>,
 
-    /// Reference to graph for relationship analysis
-    #[allow(dead_code)]
-    graph: Arc<Graph>,
-
     /// Configuration
     config: EpisodeDetectorConfig,
 
@@ -232,11 +226,10 @@ impl EpisodeDetector {
     }
 
     /// Create a new episode detector
-    pub fn new(graph: Arc<Graph>, config: EpisodeDetectorConfig) -> Self {
+    pub fn new(config: EpisodeDetectorConfig) -> Self {
         Self {
             active_episodes: FxHashMap::default(),
             completed_episodes: Vec::new(),
-            graph,
             config,
             next_episode_id: 1,
             last_consolidation: FxHashMap::default(),
@@ -837,28 +830,6 @@ impl EpisodeDetector {
     ///
     /// This is called incrementally as events are added to an active episode.
     /// The significance can increase as more goal-relevant events occur,
-    /// longer causal chains develop, or important outcomes happen.
-    #[allow(dead_code)]
-    fn update_episode_significance(&mut self, episode: &mut Episode, event: &Event) {
-        // Calculate significance for this new event
-        let event_significance = self.calculate_significance(event);
-
-        // Update episode significance by taking the maximum of:
-        // 1. Current episode significance
-        // 2. New event significance
-        // 3. Weighted average that emphasizes significant events
-
-        // Weight towards higher significance (episodes become more significant, rarely less)
-        let weighted_avg = (episode.significance * episode.events.len() as f32
-            + event_significance)
-            / (episode.events.len() as f32 + 1.0);
-
-        let max_significance = episode.significance.max(event_significance);
-
-        // Blend: 70% max (keeps highest peaks), 30% weighted average (smooth growth)
-        episode.significance = (max_significance * 0.7 + weighted_avg * 0.3).min(1.0);
-    }
-
     /// Track an event for novelty detection
     fn track_event_for_novelty(&mut self, event: &Event) {
         // Track context hash
@@ -1112,8 +1083,7 @@ mod tests {
 
     #[test]
     fn test_episode_start_on_goal_formation() {
-        let graph = Arc::new(Graph::new());
-        let mut detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let mut detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         let event = create_test_event(
             1,
@@ -1133,8 +1103,7 @@ mod tests {
 
     #[test]
     fn test_episode_end_on_success() {
-        let graph = Arc::new(Graph::new());
-        let mut detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let mut detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         // Start episode
         let start_event = create_test_event(
@@ -1170,8 +1139,7 @@ mod tests {
 
     #[test]
     fn test_significance_increases_with_goal_events() {
-        let graph = Arc::new(Graph::new());
-        let mut detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let mut detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         // Start episode with no goals
         let mut start_event = create_test_event(
@@ -1241,8 +1209,7 @@ mod tests {
 
     #[test]
     fn test_manual_significance_override() {
-        let graph = Arc::new(Graph::new());
-        let detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         // Create event with manual significance override
         let mut event = create_test_event(
@@ -1274,8 +1241,7 @@ mod tests {
 
     #[test]
     fn test_manual_significance_override_clamped() {
-        let graph = Arc::new(Graph::new());
-        let detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         // Create event with out-of-range override
         let mut event = create_test_event(
@@ -1307,8 +1273,7 @@ mod tests {
 
     #[test]
     fn test_longer_causality_increases_significance() {
-        let graph = Arc::new(Graph::new());
-        let detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         // Event with no causal chain
         let mut event_no_chain = create_test_event(
@@ -1353,8 +1318,7 @@ mod tests {
 
     #[test]
     fn test_novelty_increases_significance() {
-        let graph = Arc::new(Graph::new());
-        let mut detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let mut detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         // First event (novel)
         let event1 = create_test_event(
@@ -1392,8 +1356,7 @@ mod tests {
 
     #[test]
     fn test_context_novelty_decay() {
-        let graph = Arc::new(Graph::new());
-        let mut detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let mut detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         let context_hash = 12345u64;
 
@@ -1433,8 +1396,7 @@ mod tests {
 
     #[test]
     fn test_episode_significance_grows_incrementally() {
-        let graph = Arc::new(Graph::new());
-        let mut detector = EpisodeDetector::new(graph, EpisodeDetectorConfig::default());
+        let mut detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
 
         // Start episode with basic event
         let start_event = create_test_event(

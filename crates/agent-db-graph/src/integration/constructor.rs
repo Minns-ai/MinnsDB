@@ -50,11 +50,7 @@ impl GraphEngine {
         );
 
         // Initialize self-evolution components
-        // Note: EpisodeDetector requires an Arc<Graph> but doesn't actually use it for detection
-        // It uses event-based heuristics instead. We provide an empty graph for API compatibility.
-        let graph_for_episodes = Arc::new(Graph::new());
         let episode_detector = Arc::new(RwLock::new(EpisodeDetector::new(
-            graph_for_episodes,
             config.episode_config.clone(),
         )));
 
@@ -181,7 +177,7 @@ impl GraphEngine {
         let label_propagation = Arc::new(LabelPropagationAlgorithm::new());
 
         // Initialize semantic memory components if enabled
-        let (ner_queue, ner_store) = if config.enable_semantic_memory {
+        let (ner_queue, _ner_store) = if config.enable_semantic_memory {
             tracing::info!("Initializing semantic memory with NER extraction");
 
             // Create NER extractor (external service)
@@ -228,7 +224,7 @@ impl GraphEngine {
         };
 
         // Initialize claim extraction components if semantic memory is enabled
-        let (claim_queue, claim_store, llm_client, embedding_client) = if config
+        let (claim_queue, claim_store, _claims_llm_client, embedding_client) = if config
             .enable_semantic_memory
         {
             tracing::info!("Initializing claim extraction pipeline");
@@ -278,8 +274,29 @@ impl GraphEngine {
                 None
             };
 
-            // Create claim extraction queue (requires embedding client)
-            let queue = if let (Some(ref store), Some(ref emb)) = (&store, &embedding_client) {
+            // Create unified LLM client early (needed for claim conflict detection + NLQ)
+            let unified_llm_for_claims: Option<Arc<dyn crate::llm_client::LlmClient>> = {
+                let hint_key = config
+                    .nlq_hint_api_key
+                    .clone()
+                    .or_else(|| config.openai_api_key.clone());
+                hint_key.map(|key| {
+                    let model = config.nlq_hint_model.clone();
+                    let client: Arc<dyn crate::llm_client::LlmClient> =
+                        match config.nlq_hint_provider.as_str() {
+                            "anthropic" => {
+                                Arc::new(crate::llm_client::AnthropicLlmClient::new(key, model))
+                            },
+                            _ => Arc::new(crate::llm_client::OpenAiLlmClient::new(key, model)),
+                        };
+                    client
+                })
+            };
+
+            // Create claim extraction queue (requires embedding client + unified LLM for conflict detection)
+            let queue = if let (Some(ref store), Some(ref emb), Some(ref unified_llm)) =
+                (&store, &embedding_client, &unified_llm_for_claims)
+            {
                 let extraction_config = crate::claims::ClaimExtractionConfig {
                     max_claims_per_input: config.claim_max_per_input,
                     min_confidence: config.claim_min_confidence,
@@ -298,6 +315,7 @@ impl GraphEngine {
                     store.clone(),
                     config.claim_workers,
                     extraction_config,
+                    unified_llm.clone(),
                 ));
                 Some(queue)
             } else {
@@ -475,6 +493,33 @@ impl GraphEngine {
             }
         };
 
+        // Initialize synthesis LLM client (higher-quality model for answer composition)
+        let synthesis_llm_client: Option<Arc<dyn crate::llm_client::LlmClient>> = {
+            let key = config
+                .nlq_hint_api_key
+                .clone()
+                .or_else(|| config.openai_api_key.clone());
+            if let Some(key) = key {
+                let model = config.synthesis_model.clone();
+                let client: Arc<dyn crate::llm_client::LlmClient> =
+                    match config.nlq_hint_provider.as_str() {
+                        "anthropic" => Arc::new(crate::llm_client::AnthropicLlmClient::new(
+                            key,
+                            model.clone(),
+                        )),
+                        _ => Arc::new(crate::llm_client::OpenAiLlmClient::new(key, model.clone())),
+                    };
+                tracing::info!(
+                    "Synthesis LLM client: {} (model={})",
+                    config.nlq_hint_provider,
+                    model
+                );
+                Some(client)
+            } else {
+                None
+            }
+        };
+
         // Initialize metadata normalizer (alias matching is always on)
         let metadata_normalizer =
             crate::metadata_normalize::MetadataNormalizer::new(&config.metadata_alias_config);
@@ -577,6 +622,8 @@ impl GraphEngine {
             None
         };
 
+        let domain_registry = Arc::new(crate::domain_schema::DomainRegistry::new());
+
         let engine = Self {
             inference,
             traversal,
@@ -604,11 +651,15 @@ impl GraphEngine {
             memory_bm25_index,
             strategy_bm25_index,
             ner_queue,
-            ner_store,
             claim_queue,
             claim_store,
-            llm_client,
             embedding_queue,
+            predicate_canonicalizer: embedding_client.as_ref().map(|ec| {
+                Arc::new(crate::domain_schema::PredicateCanonicalizer::new(
+                    ec.clone(),
+                ))
+            }),
+            domain_registry: domain_registry.clone(),
             embedding_client,
             // 10x/100x: Consolidation + Refinement — built BEFORE config is moved
             consolidation_engine: consolidation_engine_arc,
@@ -625,6 +676,7 @@ impl GraphEngine {
             nlq_contexts: tokio::sync::Mutex::new(HashMap::new()),
             conversation_states: tokio::sync::Mutex::new(HashMap::new()),
             unified_llm_client,
+            synthesis_llm_client,
             metadata_normalizer,
             metadata_llm_normalizer,
             memory_audit_log: Arc::new(RwLock::new(crate::memory_audit::MemoryAuditLog::new())),
@@ -646,6 +698,16 @@ impl GraphEngine {
             Err(e) => {
                 tracing::warn!("Failed to restore graph state (starting fresh): {}", e);
             },
+        }
+
+        // Restore learned domain slots from __domain_slot:* concept nodes
+        {
+            let inf = engine.inference.read().await;
+            let learned = crate::domain_schema::restore_learned_slots_from_graph(inf.graph());
+            if !learned.is_empty() {
+                tracing::info!("Restored {} learned domain slots from graph", learned.len());
+                engine.domain_registry.load_learned(learned);
+            }
         }
 
         // BUG 3 fix: Restore transition model from redb (version-aware)

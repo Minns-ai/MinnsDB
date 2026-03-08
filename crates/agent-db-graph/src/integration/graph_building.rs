@@ -8,56 +8,73 @@ impl GraphEngine {
         session_id: Option<SessionId>,
         agent_type: Option<AgentType>,
     ) -> GraphStructure {
-        let event_store = self.event_store.read().await;
-
-        if let Some(session_id) = session_id {
-            let agent_type = agent_type.and_then(|value| {
-                if value.trim().is_empty() {
-                    None
-                } else {
-                    Some(value)
-                }
-            });
-
-            if let Some(agent_type) = agent_type {
-                let scope = crate::scoped_inference::InferenceScope {
-                    agent_type: agent_type.clone(),
-                    session_id,
-                };
-
-                if let Ok(scope_engine) = self.scoped_inference.get_scope_engine(&scope).await {
-                    let inference = scope_engine.read().await;
-                    let graph = inference.graph();
-                    return Self::build_graph_structure_from_events(
-                        graph,
-                        event_store.iter().filter(|(_, event)| {
-                            event.session_id == session_id && event.agent_type == agent_type
-                        }),
-                        limit,
-                    );
-                }
-
-                return GraphStructure {
-                    nodes: Vec::new(),
-                    edges: Vec::new(),
-                };
+        let agent_type = agent_type.and_then(|value| {
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value)
             }
+        });
 
-            // Fallback: session-only filtering on the global graph
-            let inference = self.inference.read().await;
-            let graph = inference.graph();
-            return Self::build_graph_structure_from_events(
-                graph,
-                event_store
-                    .iter()
-                    .filter(|(_, event)| event.session_id == session_id),
-                limit,
-            );
+        // Snapshot event labels quickly, then release the event_store read lock
+        // before acquiring the inference read lock. Holding both simultaneously
+        // blocks event_store writers for the entire graph iteration.
+        let event_labels: Vec<(EventId, String)> = {
+            let event_store = self.event_store.read().await;
+            event_store
+                .iter()
+                .filter(|(_, event)| {
+                    if let Some(sid) = session_id {
+                        if event.session_id != sid {
+                            return false;
+                        }
+                    }
+                    if let Some(ref at) = agent_type {
+                        if event.agent_type != *at {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .take(limit)
+                .map(|(event_id, event)| {
+                    let label = match &event.event_type {
+                        EventType::Action { action_name, .. } => action_name.clone(),
+                        EventType::Observation {
+                            observation_type, ..
+                        } => observation_type.clone(),
+                        EventType::Cognitive { process_type, .. } => {
+                            format!("{:?}", process_type)
+                        },
+                        EventType::Learning { .. } => "Learning".to_string(),
+                        _ => format!("Event {}", event.id),
+                    };
+                    (*event_id, label)
+                })
+                .collect()
+            // event_store read lock dropped here
+        };
+
+        // Now acquire only the inference read lock for graph iteration
+        if let (Some(session_id), Some(ref agent_type)) = (session_id, &agent_type) {
+            let scope = crate::scoped_inference::InferenceScope {
+                agent_type: agent_type.clone(),
+                session_id,
+            };
+            if let Ok(scope_engine) = self.scoped_inference.get_scope_engine(&scope).await {
+                let inference = scope_engine.read().await;
+                let graph = inference.graph();
+                return Self::build_graph_structure(graph, &event_labels, limit);
+            }
+            return GraphStructure {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            };
         }
 
         let inference = self.inference.read().await;
         let graph = inference.graph();
-        Self::build_graph_structure_from_events(graph, event_store.iter(), limit)
+        Self::build_graph_structure(graph, &event_labels, limit)
     }
 
     /// Get graph structure centered around a context hash
@@ -68,84 +85,92 @@ impl GraphEngine {
         session_id: Option<SessionId>,
         agent_type: Option<AgentType>,
     ) -> GraphStructure {
-        let event_store = self.event_store.read().await;
-
-        if let Some(session_id) = session_id {
-            let agent_type = agent_type.and_then(|value| {
-                if value.trim().is_empty() {
-                    None
-                } else {
-                    Some(value)
-                }
-            });
-
-            if let Some(agent_type) = agent_type {
-                let scope = crate::scoped_inference::InferenceScope {
-                    agent_type: agent_type.clone(),
-                    session_id,
-                };
-
-                if let Ok(scope_engine) = self.scoped_inference.get_scope_engine(&scope).await {
-                    let inference = scope_engine.read().await;
-                    let graph = inference.graph();
-                    return Self::build_context_graph_structure(
-                        graph,
-                        context_hash,
-                        event_store.iter().filter(|(_, event)| {
-                            event.session_id == session_id && event.agent_type == agent_type
-                        }),
-                        limit,
-                    );
-                }
-
-                return GraphStructure {
-                    nodes: Vec::new(),
-                    edges: Vec::new(),
-                };
+        let agent_type = agent_type.and_then(|value| {
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value)
             }
+        });
 
-            let inference = self.inference.read().await;
-            let graph = inference.graph();
-            return Self::build_context_graph_structure(
-                graph,
-                context_hash,
-                event_store
-                    .iter()
-                    .filter(|(_, event)| event.session_id == session_id),
-                limit,
-            );
+        // Snapshot event labels quickly, then release event_store lock
+        let event_labels: HashMap<EventId, String> = {
+            let event_store = self.event_store.read().await;
+            event_store
+                .iter()
+                .filter(|(_, event)| {
+                    if let Some(sid) = session_id {
+                        if event.session_id != sid {
+                            return false;
+                        }
+                    }
+                    if let Some(ref at) = agent_type {
+                        if event.agent_type != *at {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .take(limit)
+                .map(|(event_id, event)| {
+                    let label = match &event.event_type {
+                        EventType::Action { action_name, .. } => action_name.clone(),
+                        EventType::Observation {
+                            observation_type, ..
+                        } => observation_type.clone(),
+                        EventType::Cognitive { process_type, .. } => {
+                            format!("{:?}", process_type)
+                        },
+                        EventType::Learning { .. } => "Learning".to_string(),
+                        _ => format!("Event {}", event.id),
+                    };
+                    (*event_id, label)
+                })
+                .collect()
+            // event_store read lock dropped here
+        };
+
+        if let (Some(session_id), Some(ref agent_type)) = (session_id, &agent_type) {
+            let scope = crate::scoped_inference::InferenceScope {
+                agent_type: agent_type.clone(),
+                session_id,
+            };
+            if let Ok(scope_engine) = self.scoped_inference.get_scope_engine(&scope).await {
+                let inference = scope_engine.read().await;
+                let graph = inference.graph();
+                return Self::build_context_graph_structure(
+                    graph,
+                    context_hash,
+                    &event_labels,
+                    limit,
+                );
+            }
+            return GraphStructure {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            };
         }
 
         let inference = self.inference.read().await;
         let graph = inference.graph();
-        Self::build_context_graph_structure(graph, context_hash, event_store.iter(), limit)
+        Self::build_context_graph_structure(graph, context_hash, &event_labels, limit)
     }
 
-    fn build_graph_structure_from_events<'a, I>(
+    fn build_graph_structure(
         graph: &Graph,
-        events: I,
+        event_labels: &[(EventId, String)],
         limit: usize,
-    ) -> GraphStructure
-    where
-        I: Iterator<Item = (&'a EventId, &'a Event)>,
-    {
+    ) -> GraphStructure {
         let mut nodes: HashMap<NodeId, GraphNodeData> = HashMap::new();
         let mut edges: Vec<GraphEdgeData> = Vec::new();
 
-        // Phase 1: Traverse from event nodes (existing behavior)
-        for (event_id, event) in events.take(limit) {
+        // Phase 1: Traverse from event nodes using pre-computed labels
+        for (event_id, label) in event_labels.iter().take(limit) {
             if let Some(node) = graph.get_event_node(*event_id) {
-                let label = match &event.event_type {
-                    EventType::Action { action_name, .. } => action_name.clone(),
-                    EventType::Observation {
-                        observation_type, ..
-                    } => observation_type.clone(),
-                    EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
-                    EventType::Learning { .. } => "Learning".to_string(),
-                    _ => format!("Event {}", event.id),
-                };
-
-                nodes.insert(node.id, Self::build_graph_node_data(node, Some(label)));
+                nodes.insert(
+                    node.id,
+                    Self::build_graph_node_data(node, Some(label.clone())),
+                );
 
                 // Get edges from this node
                 let outgoing_edges = graph.get_edges_from(node.id);
@@ -165,21 +190,21 @@ impl GraphEngine {
         // that the event traversal above would miss.
         let remaining = limit.saturating_sub(nodes.len());
         if remaining > 0 {
-            for (node_id, node) in &graph.nodes {
+            for (node_id, node) in graph.nodes.iter() {
                 if nodes.len() >= limit {
                     break;
                 }
-                if nodes.contains_key(node_id) {
+                if nodes.contains_key(&node_id) {
                     continue;
                 }
                 // Skip bare Event nodes not already discovered — they lack labels
                 if matches!(node.node_type, NodeType::Event { .. }) {
                     continue;
                 }
-                nodes.insert(*node_id, Self::build_graph_node_data(node, None));
+                nodes.insert(node_id, Self::build_graph_node_data(node, None));
 
                 // Include edges from/to this node
-                for edge in graph.get_edges_from(*node_id) {
+                for edge in graph.get_edges_from(node_id) {
                     edges.push(Self::build_edge_data(edge));
                     if let Some(target) = graph.get_node(edge.target) {
                         nodes
@@ -187,7 +212,7 @@ impl GraphEngine {
                             .or_insert_with(|| Self::build_graph_node_data(target, None));
                     }
                 }
-                for edge in graph.get_edges_to(*node_id) {
+                for edge in graph.get_edges_to(node_id) {
                     edges.push(Self::build_edge_data(edge));
                     if let Some(source) = graph.get_node(edge.source) {
                         nodes
@@ -266,29 +291,12 @@ impl GraphEngine {
         }
     }
 
-    fn build_context_graph_structure<'a, I>(
+    fn build_context_graph_structure(
         graph: &Graph,
         context_hash: ContextHash,
-        events: I,
+        event_labels: &HashMap<EventId, String>,
         limit: usize,
-    ) -> GraphStructure
-    where
-        I: Iterator<Item = (&'a EventId, &'a Event)>,
-    {
-        let mut event_labels: HashMap<EventId, String> = HashMap::new();
-        for (event_id, event) in events.take(limit) {
-            let label = match &event.event_type {
-                EventType::Action { action_name, .. } => action_name.clone(),
-                EventType::Observation {
-                    observation_type, ..
-                } => observation_type.clone(),
-                EventType::Cognitive { process_type, .. } => format!("{:?}", process_type),
-                EventType::Learning { .. } => "Learning".to_string(),
-                _ => format!("Event {}", event.id),
-            };
-            event_labels.insert(*event_id, label);
-        }
-
+    ) -> GraphStructure {
         let context_node = match graph.get_context_node(context_hash) {
             Some(node) => node,
             None => {
@@ -338,18 +346,18 @@ impl GraphEngine {
         // Phase 2: Include non-event nodes not yet discovered
         let remaining = limit.saturating_sub(nodes.len());
         if remaining > 0 {
-            for (node_id, node) in &graph.nodes {
+            for (node_id, node) in graph.nodes.iter() {
                 if nodes.len() >= limit {
                     break;
                 }
-                if nodes.contains_key(node_id) {
+                if nodes.contains_key(&node_id) {
                     continue;
                 }
                 if matches!(node.node_type, NodeType::Event { .. }) {
                     continue;
                 }
-                nodes.insert(*node_id, Self::build_graph_node_data(node, None));
-                for edge in graph.get_edges_from(*node_id) {
+                nodes.insert(node_id, Self::build_graph_node_data(node, None));
+                for edge in graph.get_edges_from(node_id) {
                     edges.push(Self::build_edge_data(edge));
                     if let Some(target) = graph.get_node(edge.target) {
                         nodes
@@ -357,7 +365,7 @@ impl GraphEngine {
                             .or_insert_with(|| Self::build_graph_node_data(target, None));
                     }
                 }
-                for edge in graph.get_edges_to(*node_id) {
+                for edge in graph.get_edges_to(node_id) {
                     edges.push(Self::build_edge_data(edge));
                     if let Some(source) = graph.get_node(edge.source) {
                         nodes
@@ -713,7 +721,7 @@ impl GraphEngine {
         }
     }
 
-    fn add_or_strengthen_association(
+    pub(crate) fn add_or_strengthen_association(
         graph: &mut Graph,
         source: NodeId,
         target: NodeId,
@@ -721,22 +729,37 @@ impl GraphEngine {
         weight: EdgeWeight,
         properties: serde_json::Value,
     ) {
-        if let Some(edge) = graph.get_edge_between_mut(source, target) {
-            edge.strengthen(weight * 0.1);
-            return;
-        }
-
-        let mut edge = GraphEdge::new(
-            source,
-            target,
-            EdgeType::Association {
-                association_type: association_type.to_string(),
-                evidence_count: 1,
-                statistical_significance: weight,
-            },
-            weight,
-        );
-        edge.properties.insert("details".to_string(), properties);
-        graph.add_edge(edge);
+        add_or_strengthen_association(graph, source, target, association_type, weight, properties);
     }
+}
+
+/// Create or strengthen an Association edge between two nodes.
+///
+/// If an edge already exists between `source` and `target`, strengthens it.
+/// Otherwise creates a new `EdgeType::Association` edge.
+pub(super) fn add_or_strengthen_association(
+    graph: &mut Graph,
+    source: NodeId,
+    target: NodeId,
+    association_type: &str,
+    weight: EdgeWeight,
+    properties: serde_json::Value,
+) {
+    if let Some(edge) = graph.get_edge_between_mut(source, target) {
+        edge.strengthen(weight * 0.1);
+        return;
+    }
+
+    let mut edge = GraphEdge::new(
+        source,
+        target,
+        EdgeType::Association {
+            association_type: association_type.to_string(),
+            evidence_count: 1,
+            statistical_significance: weight,
+        },
+        weight,
+    );
+    edge.properties.insert("details".to_string(), properties);
+    graph.add_edge(edge);
 }

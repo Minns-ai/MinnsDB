@@ -201,6 +201,41 @@ impl ClaimType {
             _ => ClaimType::Fact, // default
         }
     }
+
+    /// Semantic keywords/synonyms for this claim type.
+    ///
+    /// Appended to embedding context so that queries like "user preferences",
+    /// "what does Alice like", or "code architecture" match claims even when
+    /// the claim text doesn't contain those exact words.
+    pub fn search_keywords(&self) -> Vec<&'static str> {
+        match self {
+            ClaimType::Preference => vec![
+                "likes",
+                "dislikes",
+                "favorites",
+                "taste",
+                "opinion",
+                "user preference",
+            ],
+            ClaimType::Fact => vec!["known fact", "information", "knowledge", "detail"],
+            ClaimType::Belief => vec!["thinks", "believes", "assumes", "opinion"],
+            ClaimType::Intention => vec!["plans to", "wants to", "goal", "upcoming", "future plan"],
+            ClaimType::Capability => vec!["can do", "able to", "skill", "ability", "competency"],
+            ClaimType::Avoidance => {
+                vec!["dislikes", "avoids", "refuses", "constraint", "restriction"]
+            },
+            ClaimType::CodePattern => vec![
+                "architecture",
+                "design pattern",
+                "code convention",
+                "coding style",
+            ],
+            ClaimType::ApiContract => {
+                vec!["api", "interface", "endpoint", "contract", "specification"]
+            },
+            ClaimType::BugFix => vec!["bug", "fix", "issue", "defect", "regression", "workaround"],
+        }
+    }
 }
 
 impl std::fmt::Display for ClaimType {
@@ -310,6 +345,16 @@ pub struct DerivedClaim {
     /// Determines whether this claim undergoes temporal decay.
     #[serde(default)]
     pub temporal_type: TemporalType,
+
+    /// Temporal validity start (epoch nanos). Aligns with graph edge `valid_from`
+    /// for unified temporal model. Defaults to `created_at` when unset.
+    #[serde(default)]
+    pub valid_from: Option<u64>,
+
+    /// Temporal validity end (epoch nanos). When set, this claim has been
+    /// superseded and should be treated as historical, not current.
+    #[serde(default)]
+    pub valid_until: Option<u64>,
 }
 
 /// Evidence span within source text
@@ -480,6 +525,8 @@ impl DerivedClaim {
             entities: Vec::new(),
             category: None,
             temporal_type: TemporalType::Dynamic,
+            valid_from: Some(now),
+            valid_until: None,
         }
     }
 
@@ -679,6 +726,21 @@ impl DerivedClaim {
         }
         if let Some(ref c) = self.category {
             parts.push(format!("Category: {}", c));
+        }
+
+        // Semantic keywords: type synonyms that help queries like "user preferences"
+        // or "what does Alice like" match claims of type Preference even when the
+        // claim text doesn't contain those words.
+        let keywords = self.claim_type.search_keywords();
+        if !keywords.is_empty() {
+            parts.push(format!("Keywords: {}", keywords.join(", ")));
+        }
+
+        // Temporal stability helps distinguish permanent facts from fleeting intentions
+        match self.temporal_type {
+            TemporalType::Static => parts.push("Stability: permanent fact".to_string()),
+            TemporalType::Dynamic => parts.push("Stability: may change over time".to_string()),
+            TemporalType::Atemporal => {},
         }
 
         let labeled: Vec<String> = self
@@ -1453,6 +1515,8 @@ mod tests {
         assert_eq!(text, "Preference: I prefer Rust over Python");
         let ctx = context.unwrap();
         assert!(ctx.contains("Entities: Rust (PRODUCT), Python (PRODUCT)"));
+        assert!(ctx.contains("Keywords:"));
+        assert!(ctx.contains("favorites"));
     }
 
     #[test]
@@ -1472,6 +1536,80 @@ mod tests {
 
         let (text, context) = claim.embedding_text();
         assert_eq!(text, "Fact: Something happened");
-        assert!(context.is_none());
+        // Even without SPO/entities, keywords are always present
+        let ctx = context.unwrap();
+        assert!(ctx.contains("Keywords:"));
+        assert!(ctx.contains("known fact"));
+    }
+
+    #[test]
+    fn test_embedding_text_keywords_for_preference() {
+        let mut claim = DerivedClaim::new(
+            4,
+            "Alice likes pizza".to_string(),
+            vec![EvidenceSpan::new(0, 5, "Alice")],
+            0.9,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.claim_type = ClaimType::Preference;
+        claim.subject_entity = Some("alice".to_string());
+        claim.category = Some("food".to_string());
+
+        let (text, context) = claim.embedding_text();
+        assert_eq!(text, "Preference: Alice likes pizza");
+        let ctx = context.unwrap();
+        // Should have type-specific keywords
+        assert!(ctx.contains("favorites"));
+        assert!(ctx.contains("user preference"));
+        // And the existing structured fields
+        assert!(ctx.contains("Subject: alice"));
+        assert!(ctx.contains("Category: food"));
+    }
+
+    #[test]
+    fn test_embedding_text_temporal_static() {
+        let mut claim = DerivedClaim::new(
+            5,
+            "Earth orbits the Sun".to_string(),
+            vec![EvidenceSpan::new(0, 5, "Earth")],
+            1.0,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.temporal_type = TemporalType::Static;
+
+        let (_, context) = claim.embedding_text();
+        let ctx = context.unwrap();
+        assert!(ctx.contains("permanent fact"));
+    }
+
+    #[test]
+    fn test_embedding_text_temporal_dynamic() {
+        let mut claim = DerivedClaim::new(
+            6,
+            "Alice is in New York".to_string(),
+            vec![EvidenceSpan::new(0, 5, "Alice")],
+            0.8,
+            vec![],
+            100,
+            None,
+            None,
+            None,
+            None,
+        );
+        claim.temporal_type = TemporalType::Dynamic;
+
+        let (_, context) = claim.embedding_text();
+        let ctx = context.unwrap();
+        assert!(ctx.contains("may change over time"));
     }
 }

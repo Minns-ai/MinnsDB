@@ -29,9 +29,6 @@ type AdjList = SmallVec<[EdgeId; 8]>;
 const TABLE_GRAPH_NODES: &str = "graph_nodes";
 const TABLE_GRAPH_ADJACENCY: &str = "graph_adjacency";
 const TABLE_GRAPH_EDGES: &str = "graph_edges";
-#[allow(dead_code)]
-const TABLE_GRAPH_BUCKETS: &str = "graph_buckets";
-
 // ============================================================================
 // Key Design (Hierarchical, inspired by Dgraph)
 // ============================================================================
@@ -44,8 +41,6 @@ enum KeyType {
     AdjacencyForward = 0x02, // Forward edges (A -> [B, C, D])
     AdjacencyReverse = 0x03, // Reverse edges (backlinks)
     EdgeMeta = 0x04,         // Edge metadata by EdgeId
-    #[allow(dead_code)]
-    BucketCatalog = 0x05, // Partition statistics
     HeaderMeta = 0x06,       // NodeHeader for fast scoring
     DirEdgeOut = 0x07,       // Direction-encoded outgoing: [bucket][source][edge_id] → edge
     DirEdgeIn = 0x08,        // Direction-encoded incoming: [bucket][target][edge_id] → edge
@@ -1589,6 +1584,7 @@ mod tests {
                 props
             },
             degree: 0,
+            embedding: Vec::new(),
         }
     }
 
@@ -1609,6 +1605,8 @@ mod tests {
             observation_count: 1,
             confidence: 0.9,
             properties: std::collections::HashMap::new(),
+            confidence_history: crate::tcell::TCell::Empty,
+            weight_history: crate::tcell::TCell::Empty,
         }
     }
 

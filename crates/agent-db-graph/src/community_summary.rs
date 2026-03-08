@@ -138,7 +138,7 @@ pub async fn generate_community_summary(
 /// Returns owned data so the graph lock can be released before LLM calls.
 pub fn extract_community_data(graph: &Graph) -> HashMap<u64, Vec<(u64, String)>> {
     let mut communities: HashMap<u64, Vec<(u64, String)>> = HashMap::new();
-    for (&node_id, node) in &graph.nodes {
+    for (node_id, node) in graph.nodes.iter() {
         if let Some(cid) = node.properties.get("community_id").and_then(|v| v.as_u64()) {
             let label = node.label().to_string();
             communities.entry(cid).or_default().push((node_id, label));

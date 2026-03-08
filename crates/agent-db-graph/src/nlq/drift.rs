@@ -1,9 +1,11 @@
 //! DRIFT-style adaptive search pipeline.
 //!
-//! 3-phase pipeline:
+//! 5-phase pipeline:
 //! 1. **Primer** — Score community summaries against query, generate follow-up queries via LLM
 //! 2. **Follow-up** — Execute follow-up queries across BM25/memory/claims, deduplicate
-//! 3. **Synthesis** — LLM synthesizes a comprehensive answer from all retrieved context
+//! 3. **Temporal Context Assembly** — Build entity timelines and current state
+//! 4. **Fact Summary** — LLM verifies and labels facts as CURRENT/HISTORICAL/UNCERTAIN
+//! 5. **Synthesis** — LLM synthesizes a comprehensive answer from verified facts
 
 use crate::community_summary::CommunitySummary;
 use crate::llm_client::{parse_json_from_llm, LlmClient, LlmRequest};
@@ -25,6 +27,10 @@ pub struct DriftConfig {
     pub synthesis_max_tokens: u32,
     /// Overall timeout in seconds.
     pub timeout_secs: u64,
+    /// LLM temperature for fact summary phase.
+    pub fact_summary_temperature: f32,
+    /// Maximum tokens for fact summary response.
+    pub fact_summary_max_tokens: u32,
 }
 
 impl Default for DriftConfig {
@@ -36,8 +42,21 @@ impl Default for DriftConfig {
             synthesis_temperature: 0.3,
             synthesis_max_tokens: 512,
             timeout_secs: 30,
+            fact_summary_temperature: 0.1,
+            fact_summary_max_tokens: 512,
         }
     }
+}
+
+/// Temporal context assembled from graph projections for DRIFT.
+#[derive(Debug, Clone, Default)]
+pub struct DriftTemporalContext {
+    /// Timeline summaries per entity (from `build_entity_timeline_summary`).
+    pub entity_timelines: Vec<String>,
+    /// Current projected state per entity (from `project_entity_state`).
+    pub current_state: Vec<String>,
+    /// The temporal frame for this query.
+    pub temporal_frame: String,
 }
 
 /// Result of a DRIFT search.
@@ -47,6 +66,8 @@ pub struct DriftResult {
     pub primer_communities_used: Vec<u64>,
     pub followup_queries: Vec<String>,
     pub total_items_retrieved: usize,
+    /// Verified fact sheet from the fact summary phase (if available).
+    pub fact_summary: Option<String>,
 }
 
 /// Parsed LLM response for follow-up query generation.
@@ -191,17 +212,109 @@ pub fn drift_followup_merge(results_per_query: &[Vec<(u64, f32)>]) -> Vec<(u64, 
     merged
 }
 
-/// Phase 3: Synthesize a comprehensive answer from community context and retrieved snippets.
+/// Phase 3: Produce a verified fact sheet from retrieved snippets and temporal context.
 ///
-/// Returns the synthesized text, or falls back to a formatted version of the raw snippets.
+/// Takes retrieved snippets + temporal context from graph projections, and asks the LLM
+/// to label each fact as CURRENT/HISTORICAL/UNCERTAIN. Current projected state is the
+/// source of truth. Returns the fact sheet text.
+pub async fn drift_fact_summary(
+    client: &dyn LlmClient,
+    question: &str,
+    retrieved_snippets: &[String],
+    temporal_context: &DriftTemporalContext,
+    config: &DriftConfig,
+) -> String {
+    let mut user_parts = String::with_capacity(4096);
+
+    if !temporal_context.current_state.is_empty() {
+        user_parts.push_str("CURRENT PROJECTED STATE (source of truth):\n");
+        for s in &temporal_context.current_state {
+            user_parts.push_str(&format!("- {}\n", s));
+        }
+        user_parts.push('\n');
+    }
+
+    if !temporal_context.entity_timelines.is_empty() {
+        user_parts.push_str("ENTITY TIMELINES:\n");
+        for t in &temporal_context.entity_timelines {
+            user_parts.push_str(&format!("{}\n", t));
+        }
+        user_parts.push('\n');
+    }
+
+    if !retrieved_snippets.is_empty() {
+        user_parts.push_str("RETRIEVED SNIPPETS:\n");
+        for (i, snippet) in retrieved_snippets.iter().take(20).enumerate() {
+            user_parts.push_str(&format!("{}. {}\n", i + 1, snippet));
+        }
+    }
+
+    if user_parts.is_empty() {
+        return String::new();
+    }
+
+    // Truncate to ~10K chars
+    if user_parts.len() > 10_000 {
+        user_parts.truncate(10_000);
+        user_parts.push_str("\n... (truncated)");
+    }
+
+    let system = "You are a fact verifier. Given retrieved snippets and the current known state, \
+                  produce a FACT SHEET. For each distinct fact:\n\
+                  - Mark it as CURRENT, HISTORICAL, or UNCERTAIN\n\
+                  - Remove duplicates\n\
+                  - The current projected state is the source of truth — if a snippet disagrees \
+                  with the projected state, mark it HISTORICAL\n\
+                  - Output a concise numbered list of verified facts with their labels";
+
+    let user = format!("{}\n\nQuestion being answered: {}", user_parts, question);
+
+    let request = LlmRequest {
+        system_prompt: system.to_string(),
+        user_prompt: user,
+        temperature: config.fact_summary_temperature,
+        max_tokens: config.fact_summary_max_tokens,
+        json_mode: false,
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(15), client.complete(request)).await {
+        Ok(Ok(response)) if !response.content.trim().is_empty() => response.content,
+        _ => String::new(),
+    }
+}
+
+/// Phase 4: Synthesize a comprehensive answer from community context, retrieved snippets,
+/// temporal context, and the verified fact sheet.
+///
+/// Returns the synthesized text, or an error if LLM fails/times out.
 pub async fn drift_synthesis(
     client: &dyn LlmClient,
     question: &str,
     community_context: &[String],
     retrieved_snippets: &[String],
+    temporal_context: &DriftTemporalContext,
+    fact_summary: Option<&str>,
     config: &DriftConfig,
-) -> String {
+) -> Result<String, String> {
     let mut context = String::with_capacity(4096);
+
+    // Fact sheet is primary context when available
+    if let Some(facts) = fact_summary {
+        if !facts.is_empty() {
+            context.push_str("VERIFIED FACT SHEET:\n");
+            context.push_str(facts);
+            context.push_str("\n\n");
+        }
+    }
+
+    // Current state from temporal context
+    if !temporal_context.current_state.is_empty() {
+        context.push_str("Current state:\n");
+        for s in &temporal_context.current_state {
+            context.push_str(&format!("- {}\n", s));
+        }
+        context.push('\n');
+    }
 
     if !community_context.is_empty() {
         context.push_str("Community summaries:\n");
@@ -219,7 +332,7 @@ pub async fn drift_synthesis(
     }
 
     if context.is_empty() {
-        return format!("No information found for: {}", question);
+        return Err("No context available for synthesis".to_string());
     }
 
     // Truncate context to ~12K chars
@@ -228,9 +341,30 @@ pub async fn drift_synthesis(
         context.push_str("\n... (truncated)");
     }
 
-    let system = "Answer the user's question comprehensively based on the provided context. \
-                  Be specific and reference the information given. If the context doesn't fully \
-                  answer the question, say what is known and what is missing.";
+    // Frame-specific synthesis instructions
+    let system = match temporal_context.temporal_frame.as_str() {
+        "Current" => {
+            "Answer the user's question based on the provided context. \
+             Use ONLY facts marked CURRENT in the fact sheet. Ignore HISTORICAL facts \
+             unless the question explicitly asks about history. The current state section \
+             is authoritative. Be specific and concise."
+        },
+        "Historical" => {
+            "Answer the user's question based on the provided context. \
+             Include the timeline of changes. Reference both current and historical facts. \
+             Be specific about when things changed."
+        },
+        "Comparative" => {
+            "Answer the user's question by comparing past and present state. \
+             Use the entity timelines to show what changed and when. \
+             Highlight differences between then and now."
+        },
+        _ => {
+            "Answer the user's question comprehensively based on the provided context. \
+             Be specific and reference the information given. If the context doesn't fully \
+             answer the question, say what is known and what is missing."
+        },
+    };
 
     let user = format!("Context:\n{}\n\nQuestion: {}", context, question);
 
@@ -248,15 +382,10 @@ pub async fn drift_synthesis(
     )
     .await
     {
-        Ok(Ok(response)) if !response.content.trim().is_empty() => response.content,
-        _ => {
-            // Fail-open: format raw snippets
-            let mut fallback = format!("Information related to: {}\n\n", question);
-            for snippet in retrieved_snippets.iter().take(10) {
-                fallback.push_str(&format!("- {}\n", snippet));
-            }
-            fallback
-        },
+        Ok(Ok(response)) if !response.content.trim().is_empty() => Ok(response.content),
+        Ok(Ok(_)) => Err("LLM returned empty synthesis".to_string()),
+        Ok(Err(e)) => Err(format!("LLM synthesis failed: {}", e)),
+        Err(_) => Err("LLM synthesis timed out".to_string()),
     }
 }
 
@@ -270,6 +399,8 @@ mod tests {
         assert_eq!(config.max_primer_communities, 5);
         assert_eq!(config.max_followup_queries, 3);
         assert_eq!(config.timeout_secs, 30);
+        assert!((config.fact_summary_temperature - 0.1).abs() < f32::EPSILON);
+        assert_eq!(config.fact_summary_max_tokens, 512);
     }
 
     #[test]

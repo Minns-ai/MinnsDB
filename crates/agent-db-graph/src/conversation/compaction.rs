@@ -8,7 +8,9 @@
 //! Extracted data is converted into Events (Observation, Cognitive, Action)
 //! and a procedural Memory, then fed back through the pipeline.
 
+use crate::conversation::graph_projection;
 use crate::conversation::types::ConversationIngest;
+use crate::conversation::types::ConversationMessage;
 use crate::episodes::EpisodeOutcome;
 use crate::llm_client::{parse_json_from_llm, LlmClient, LlmRequest};
 use crate::memory::{Memory, MemoryTier, MemoryType};
@@ -16,6 +18,7 @@ use crate::memory_audit::MutationActor;
 use crate::memory_classifier::{
     classify_memory_updates, resolve_target, ClassifiedOperation, MemoryAction,
 };
+use crate::structures::Graph;
 use agent_db_events::core::{ActionOutcome, CognitiveType, EventContext, EventType, MetadataValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -149,14 +152,53 @@ pub struct CompactionResponse {
     pub procedural_summary: Option<ProceduralSummary>,
 }
 
-/// A single extracted fact (cross-message inference).
+/// A single extracted fact — a self-contained proposition with context.
+///
+/// Goes beyond simple (subject, predicate, object) triplets by preserving:
+/// - Temporal signals (when things changed, duration, recency)
+/// - Conditional dependencies (fact X is only true while condition Y holds)
+/// - Supersession markers (this fact replaces a previous one)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedFact {
+    /// Self-contained proposition preserving full context.
+    /// Should be understandable without reference to the conversation.
     pub statement: String,
     pub subject: String,
     pub predicate: String,
     pub object: String,
+    #[serde(default)]
     pub confidence: f32,
+    /// Semantic category for state supersession grouping.
+    /// Facts with the same entity + category supersede each other (latest wins).
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Numeric amount for financial facts (extracted by LLM).
+    #[serde(default)]
+    pub amount: Option<f64>,
+    /// Who the cost is split with for financial facts.
+    /// Contains person names, or ["all"] for split among all participants.
+    #[serde(default)]
+    pub split_with: Option<Vec<String>>,
+    /// Temporal signal detected in the text (e.g., "recently", "since last week", "used to").
+    /// Helps the system understand temporal ordering and state transitions.
+    #[serde(default)]
+    pub temporal_signal: Option<String>,
+    /// If this fact is only valid while a condition holds (e.g., "while living in Tokyo").
+    /// When the condition becomes false, this fact should be invalidated.
+    #[serde(default)]
+    pub depends_on: Option<String>,
+    /// If true, this fact explicitly supersedes a previous fact in the same category.
+    /// E.g., "moved to Tokyo" supersedes previous location facts.
+    #[serde(default)]
+    pub is_update: Option<bool>,
+    /// Cardinality hint for unknown categories: "single"|"multi"|"append".
+    /// Used to auto-register new domain slots when the LLM assigns a novel category.
+    #[serde(default)]
+    pub cardinality_hint: Option<String>,
+    /// Sentiment polarity for preference facts (-1.0 = strong dislike, +1.0 = strong like).
+    /// Only set when category is "preference".
+    #[serde(default)]
+    pub sentiment: Option<f32>,
 }
 
 /// A user goal/intention detected in the conversation.
@@ -202,6 +244,103 @@ pub struct CompactionResult {
     pub tokens_used: u32,
 }
 
+// ────────── LLM Financial Extraction ──────────
+
+#[derive(Deserialize)]
+struct LlmTransaction {
+    payer: String,
+    payee: String,
+    #[serde(default)]
+    amount: f64,
+}
+
+/// Use LLM to extract financial transactions from text and convert them into `ExtractedFact`s.
+///
+/// Replaces the NER-based extraction with a structured LLM call that returns
+/// payer/payee/amount triples directly.
+async fn extract_financial_facts_llm(llm: &dyn LlmClient, text: &str) -> Vec<ExtractedFact> {
+    let request = LlmRequest {
+        system_prompt:
+            "You are a financial transaction parser with access to a settlement solver tool.\n\n\
+            Step 1: Extract all transactions from the text as structured triples.\n\
+            Step 2: Pass them to the solver tool.\n\n\
+            For each transaction, identify:\n\
+            - payer: who pays\n\
+            - payee: who receives\n\
+            - amount: the number (0 if not stated)\n\n\
+            IMPORTANT:\n\
+            - Only include transactions that ACTUALLY happened\n\
+            - If corrected, use corrected amount\n\
+            - Payer paying for a group they're in → payer only, not payee\n\n\
+            Output as JSON array for the solver:\n\
+            [{\"payer\": \"name\", \"payee\": \"name\", \"amount\": number}, ...]"
+                .to_string(),
+        user_prompt: format!("Extract transactions and compute settlement:\n\n{}", text),
+        temperature: 0.0,
+        max_tokens: 512,
+        json_mode: true,
+    };
+
+    let response = match llm.complete(request).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("LLM financial extraction failed (non-fatal): {}", e);
+            return Vec::new();
+        },
+    };
+
+    let parsed = match parse_json_from_llm(&response.content) {
+        Some(v) => v,
+        None => {
+            tracing::debug!("LLM financial extraction returned unparseable JSON");
+            return Vec::new();
+        },
+    };
+
+    let transactions: Vec<LlmTransaction> = match serde_json::from_value(parsed) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!("LLM financial extraction deserialization failed: {}", e);
+            return Vec::new();
+        },
+    };
+
+    let facts: Vec<ExtractedFact> = transactions
+        .into_iter()
+        .map(|tx| {
+            let amount = if tx.amount != 0.0 {
+                Some(tx.amount)
+            } else {
+                None
+            };
+            let statement = if let Some(amt) = amount {
+                format!("{} paid {} {:.2}", tx.payer, tx.payee, amt)
+            } else {
+                format!("{} paid {}", tx.payer, tx.payee)
+            };
+            ExtractedFact {
+                statement,
+                subject: tx.payer,
+                predicate: "paid".to_string(),
+                object: tx.payee,
+                confidence: 1.0,
+                category: Some("financial".to_string()),
+                amount,
+                split_with: None,
+                temporal_signal: None,
+                depends_on: None,
+                is_update: Some(false),
+                cardinality_hint: None,
+                sentiment: None,
+            }
+        })
+        .collect();
+
+    tracing::info!("LLM financial extraction produced {} facts", facts.len(),);
+
+    facts
+}
+
 /// Retrospective playbook for a single goal extracted from conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalPlaybook {
@@ -227,51 +366,931 @@ pub struct PlaybookExtractionResponse {
 
 // ────────── System Prompt ──────────
 
-const COMPACTION_SYSTEM_PROMPT: &str = r#"You are an information extraction system. Given a conversation transcript, extract:
+fn compaction_system_prompt(categories: &str, category_enum: &str) -> String {
+    format!(
+        r#"You are an information extraction system. Given a conversation transcript, extract:
 
-1. "facts": Atomic statements (cross-message inferences, implicit knowledge).
-   Each: { "statement", "subject", "predicate", "object", "confidence": 0.0-1.0 }
+1. "facts": Self-contained propositions (cross-message inferences, implicit knowledge).
+   Each fact must be understandable on its own without the conversation context.
+
+   Each: {{
+     "statement": "self-contained proposition preserving full context",
+     "subject": "entity name", "predicate": "relationship/attribute", "object": "value/target",
+     "category": "{category_enum}",
+     "temporal_signal": "recently|since last week|every morning|null",
+     "depends_on": "condition for this fact to hold, or null",
+     "is_update": true if this replaces a previous fact in the same category,
+     "cardinality_hint": "single|multi|append (only if category is not in the known list)"
+   }}
+
+   CRITICAL:
+   - FIRST-PERSON REFERENCES: When the speaker refers to themselves (I, me, my, we, our,
+     myself, etc. in ANY language), always use "user" as the subject or object name.
+     BAD:  "I live in Tokyo" / subject: "I"
+     GOOD: "User lives in Tokyo" / subject: "user"
+     This applies to ALL languages — use "user" regardless of source language.
+   - Extract PROPOSITIONS not bare triplets:
+     BAD:  "User lives_in Tokyo"
+     GOOD: "User recently moved to Tokyo for a six-month work assignment"
+   - Conditional facts MUST include depends_on:
+     "User walks in Yoyogi Park on Saturdays" → depends_on: "User lives in Tokyo"
+   - State changes MUST set is_update: true
+   - Extract ONLY the CURRENT/LATEST state. Do NOT extract superseded historical states.
+
+   Category determines supersession:
+{categories}
+   - "other": anything else
+
+   If you use a category not in the list above, include "cardinality_hint": "single"|"multi"|"append"
+   to indicate: single = one value at a time (newest supersedes all), multi = multiple values coexist, append = never supersede.
+
+   For multi-valued categories (routine, preference, relationship), the predicate must describe
+   the SPECIFIC role or type of that fact — never use the category name itself as the predicate.
+   Derive the predicate from the context: time-of-day, frequency, activity type, relationship role, etc.
+
+   For "preference" category facts, include "sentiment": a value from -1.0 to 1.0.
+   -1.0 = strong dislike, 0.0 = neutral, 1.0 = strong like.
 
 2. "goals": User objectives/intentions detected.
-   Each: { "description", "status": "active"|"completed"|"abandoned", "owner" }
+   Each: {{ "description", "status": "active"|"completed"|"abandoned", "owner" }}
 
 3. "procedural_summary": Structured session summary, or null if no procedural content.
-   { "objective", "progress_status": "completed"|"in_progress"|"blocked"|"abandoned",
-     "steps": [{ "step_number", "action", "result", "outcome": "success"|"failure"|"partial"|"pending" }],
-     "overall_summary", "takeaway" }
+   {{ "objective", "progress_status": "completed"|"in_progress"|"blocked"|"abandoned",
+     "steps": [{{ "step_number", "action", "result", "outcome": "success"|"failure"|"partial"|"pending" }}],
+     "overall_summary", "takeaway" }}
 
 Rules:
-- Look for cross-message inferences: facts that only become apparent when combining information from multiple messages (e.g., user says "I live in NYC" in one message and asks about "nearby restaurants" later → user wants restaurants in NYC)
-- Detect implicit goals from questions: if the user asks "How do I deploy to AWS?", the implicit goal is "Deploy application to AWS"
-- Detect commercial/purchase intent: phrases like "I want to order", "I need to buy", "place an order for" indicate purchase goals
+- Look for cross-message inferences: facts apparent only by combining multiple messages
 - Focus on relationships, preferences, states, and implicit knowledge
-- For goals, look for intent/desire/objective expressions including "I would like to", "I need to", "Can you help me"
+- For state changes across sessions, extract the LATEST state only
 - Output ONLY valid JSON
 
-Example output:
-{
+Example:
+{{
   "facts": [
-    {"statement": "User lives in New York", "subject": "User", "predicate": "lives_in", "object": "New York", "confidence": 0.9}
+    {{"statement": "User recently moved to New York for work", "subject": "User", "predicate": "lives_in", "object": "New York", "category": "location", "temporal_signal": "recently", "is_update": true}},
+    {{"statement": "User takes morning walks in Battery Park on weekends", "subject": "User", "predicate": "weekend_activity", "object": "Battery Park", "category": "routine", "depends_on": "User lives in New York"}}
   ],
-  "goals": [
-    {"description": "Order blue jeans online", "status": "active", "owner": "user"}
-  ],
-  "procedural_summary": {
-    "objective": "Set up development environment",
-    "progress_status": "completed",
-    "steps": [
-      {"step_number": 1, "action": "Install Node.js", "result": "Installed v18.0", "outcome": "success"},
-      {"step_number": 2, "action": "Configure ESLint", "result": "Config file created", "outcome": "success"}
-    ],
-    "overall_summary": "Successfully set up dev environment with Node.js and ESLint",
-    "takeaway": "Use nvm for Node.js version management"
-  }
-}"#;
+  "goals": [],
+  "procedural_summary": null
+}}"#
+    )
+}
 
 // ────────── Transcript Formatting ──────────
 
 /// Maximum transcript length sent to the LLM (chars). Keeps the tail.
 const MAX_TRANSCRIPT_CHARS: usize = 16_000;
+
+/// Gap in nanoseconds between turn timestamps (1 second).
+/// Turn N's facts get `base_ts + N * TURN_GAP + offset * 1000`.
+const TURN_GAP: u64 = 1_000_000_000;
+
+// ────────── Per-Turn Processing ──────────
+
+/// A single conversation turn (user+assistant pair) with positional metadata.
+#[derive(Debug, Clone)]
+pub struct ConversationTurn {
+    pub messages: Vec<ConversationMessage>,
+    pub session_index: usize,
+    pub turn_index: usize,
+}
+
+/// Split a `ConversationIngest` into individual turns (user+assistant pairs).
+///
+/// Each turn contains one user message and the following assistant message (if any).
+/// The `turn_index` is a global counter across all sessions, establishing temporal order.
+pub fn split_into_turns(data: &ConversationIngest) -> Vec<ConversationTurn> {
+    let mut turns = Vec::new();
+    let mut global_turn = 0usize;
+
+    for (session_idx, session) in data.sessions.iter().enumerate() {
+        let mut i = 0;
+        while i < session.messages.len() {
+            let mut turn_msgs = Vec::new();
+
+            // Take the current message (should be user)
+            turn_msgs.push(session.messages[i].clone());
+            i += 1;
+
+            // If next message is assistant, include it in the same turn
+            if i < session.messages.len() && session.messages[i].role == "assistant" {
+                turn_msgs.push(session.messages[i].clone());
+                i += 1;
+            }
+
+            turns.push(ConversationTurn {
+                messages: turn_msgs,
+                session_index: session_idx,
+                turn_index: global_turn,
+            });
+            global_turn += 1;
+        }
+    }
+
+    turns
+}
+
+/// Per-turn extraction prompt that takes rolling context and graph state.
+const TURN_EXTRACTION_PROMPT: &str = r#"You are an information extraction system. Given a single conversation exchange, extract ONLY NEW facts or state changes as self-contained propositions.
+
+PREVIOUSLY ESTABLISHED FACTS (do NOT re-extract these):
+{rolling_facts}
+
+CURRENT ENTITY STATES (from the knowledge graph):
+{graph_state}
+
+CURRENT EXCHANGE:
+{messages}
+
+Extract ONLY new facts or state changes introduced in the current exchange.
+Each fact must be a SELF-CONTAINED PROPOSITION — understandable on its own without the conversation.
+If a fact changes a previously established state, extract ONLY the NEW value and mark is_update: true.
+Use entity names that match existing graph entities when referring to the same thing.
+
+Output format:
+{
+  "facts": [
+    {
+      "statement": "self-contained proposition preserving full context",
+      "subject": "entity name",
+      "predicate": "relationship or attribute",
+      "object": "value or target entity",
+      "category": "location|routine|preference|relationship|work|financial|health|education|other",
+      "temporal_signal": "recently|since last week|used to|every morning|null",
+      "depends_on": "condition that must be true for this fact to hold, or null",
+      "is_update": true if this replaces a previous fact in the same category
+    }
+  ]
+}
+
+CRITICAL RULES:
+
+1. PROPOSITIONS, NOT TRIPLETS:
+   BAD:  {"subject": "User", "predicate": "lives_in", "object": "Tokyo"}
+   GOOD: {"statement": "User recently moved to Tokyo for a work assignment", "subject": "User", "predicate": "lives_in", "object": "Tokyo", "temporal_signal": "recently", "is_update": true}
+
+2. CONDITIONAL DEPENDENCIES — location-dependent facts MUST specify depends_on:
+   "User explores Yoyogi Park on Saturdays" → depends_on: "User lives in Tokyo"
+   "User visits Feira da Ladra flea market on Saturdays" → depends_on: "User lives in Lisbon"
+   When the user moves, dependent facts automatically become stale.
+
+3. TEMPORAL SIGNALS — capture when things changed:
+   "moved last week" → temporal_signal: "last week"
+   "every morning" → temporal_signal: "every morning"
+   "used to" → temporal_signal: "used to" (marks historical, not current)
+   "since moving" → temporal_signal: "since moving"
+
+4. STATE CHANGES — mark updates explicitly:
+   "I moved to NYC" → is_update: true (supersedes previous location)
+   "I switched jobs" → is_update: true (supersedes previous work)
+   "I started running" → is_update: false (new habit, doesn't replace anything)
+
+5. CATEGORY determines supersession:
+   - "location": where someone lives, moved to
+   - "routine": daily habits, regular activities
+   - "preference": likes, dislikes, favorites
+   - "relationship": connections between people
+   - "work": job, employer, role
+   - "financial": payments, debts, expenses
+   - "other": anything else
+
+6. FINANCIAL facts — extract structured payment details:
+   - "subject": the payer
+   - "predicate": what was paid for
+   - "object": amount with currency (e.g. "179 EUR")
+   - "amount": numeric amount (e.g. 179.0)
+   - "split_with": list of people to split with, or ["all"]
+
+7. SENTIMENT for preference facts:
+   When category is "preference", include "sentiment": a value from -1.0 to 1.0.
+   -1.0 = strong dislike, 0.0 = neutral, 1.0 = strong like.
+   "I love sushi" → sentiment: 0.9
+   "I hate early mornings" → sentiment: -0.8
+   "Coffee is okay" → sentiment: 0.2
+
+8. FIRST-PERSON NORMALIZATION:
+   When the speaker refers to themselves, always use "user" as the entity name.
+   "I moved to NYC" → subject: "user", object: "NYC"
+   "My sister is Alice" → subject: "user", object: "Alice"
+   "Je vis à Paris" → subject: "user", object: "Paris"
+   Never use pronouns (I, me, my, we, our) as entity names.
+
+Output ONLY valid JSON."#;
+
+// ────────── 3-Call Cascade Types ──────────
+
+/// Entity discovered in Call 1 of the cascade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CascadeEntity {
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "type")]
+    entity_type: String,
+    #[serde(default)]
+    mentions: Vec<String>,
+}
+
+/// Response from Call 1: entity extraction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CascadeEntitiesResponse {
+    #[serde(default)]
+    entities: Vec<CascadeEntity>,
+}
+
+/// Relationship discovered in Call 2 of the cascade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CascadeRelationship {
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    predicate: String,
+    #[serde(default)]
+    object: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_bool_lenient")]
+    is_state_change: Option<bool>,
+    #[serde(default)]
+    temporal_hint: Option<String>,
+}
+
+/// Response from Call 2: relationship discovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CascadeRelationshipsResponse {
+    #[serde(default)]
+    relationships: Vec<CascadeRelationship>,
+}
+
+// ────────── Cascade Prompts ──────────
+
+const CASCADE_ENTITY_SYSTEM: &str = r#"Extract ALL entity mentions from the conversation exchange.
+Entities include: people, places, organizations, things, concepts.
+Use existing entity names when referring to the same entity (normalize).
+Resolve pronouns when the referent is clear.
+When the speaker refers to themselves (I, me, my, we, our, etc.), use "user" as the entity name.
+
+Output ONLY valid JSON:
+{ "entities": [{ "name": "entity name", "type": "person|place|organization|thing|concept", "mentions": ["exact text mentions"] }] }"#;
+
+fn cascade_relationship_prompt(categories: &str, category_enum: &str) -> String {
+    format!(
+        r#"Discover relationships between entities. Focus on NEW or CHANGED relationships not already in graph state. Identify category and state changes.
+
+Categories:
+{categories}
+- "other": anything else
+
+For multi-valued categories (routine, preference, relationship), the predicate must describe
+the SPECIFIC role or type — never use the category name itself as the predicate.
+Derive the predicate from the context: time-of-day, frequency, activity type, relationship role, etc.
+
+If you use a category not in the list above, include "cardinality_hint": "single"|"multi"|"append"
+to indicate: single = one value at a time (newest supersedes all), multi = multiple values coexist, append = never supersede.
+
+When the speaker refers to themselves, always use "user" as subject or object.
+
+Output ONLY valid JSON:
+{{ "relationships": [{{ "subject": "entity", "predicate": "relationship", "object": "value", "category": "{category_enum}", "is_state_change": true/false, "temporal_hint": "recently|since last week|null" }}] }}"#
+    )
+}
+
+fn cascade_fact_prompt(category_enum: &str) -> String {
+    format!(
+        r#"Produce self-contained factual propositions from discovered relationships.
+Each statement must be understandable without conversation context.
+Mark is_update=true for state changes. Add depends_on for location-dependent facts.
+
+For multi-valued categories (routine, preference, relationship), the predicate must describe
+the SPECIFIC role or type — never use the category name itself as the predicate.
+Derive the predicate from the context: time-of-day, frequency, activity type, relationship role, etc.
+
+If you use a category not in the list above, include "cardinality_hint": "single"|"multi"|"append"
+to indicate: single = one value at a time (newest supersedes all), multi = multiple values coexist, append = never supersede.
+
+When the speaker refers to themselves, always use "user" as subject or object.
+
+For "preference" category facts, include "sentiment": -1.0 to 1.0 (-1.0 = strong dislike, 1.0 = strong like).
+
+Output ONLY valid JSON:
+{{
+  "facts": [
+    {{
+      "statement": "self-contained proposition preserving full context",
+      "subject": "entity name",
+      "predicate": "relationship or attribute",
+      "object": "value or target entity",
+      "category": "{category_enum}",
+      "temporal_signal": "recently|since last week|used to|every morning|null",
+      "depends_on": "condition that must be true for this fact to hold, or null",
+      "is_update": true if this replaces a previous fact in the same category,
+      "cardinality_hint": "single|multi|append (only if category is not in the known list)"
+    }}
+  ]
+}}
+
+CRITICAL RULES:
+1. PROPOSITIONS, NOT TRIPLETS:
+   BAD:  {{"subject": "User", "predicate": "lives_in", "object": "Tokyo"}}
+   GOOD: {{"statement": "User recently moved to Tokyo for a work assignment", ...}}
+2. CONDITIONAL DEPENDENCIES — location-dependent facts MUST specify depends_on
+3. STATE CHANGES — mark is_update: true for superseding facts
+4. FINANCIAL facts — include "amount" (numeric) and "split_with" (list) when applicable"#
+    )
+}
+
+// ────────── Cascade Functions ──────────
+
+/// Format just the turn messages as "role: content\n" without injecting rolling context.
+fn format_messages(turn: &ConversationTurn) -> String {
+    let mut buf = String::new();
+    for msg in &turn.messages {
+        buf.push_str(&msg.role);
+        buf.push_str(": ");
+        buf.push_str(&msg.content);
+        buf.push('\n');
+    }
+    buf
+}
+
+/// Convert a CascadeRelationship into a basic ExtractedFact deterministically (no LLM).
+/// Used as fallback when Call 3 fails.
+fn relationship_to_basic_fact(rel: &CascadeRelationship) -> ExtractedFact {
+    let statement = format!("{} {} {}", rel.subject, rel.predicate, rel.object);
+    ExtractedFact {
+        statement,
+        subject: rel.subject.clone(),
+        predicate: rel.predicate.clone(),
+        object: rel.object.clone(),
+        confidence: 0.7,
+        category: rel.category.clone(),
+        amount: None,
+        split_with: None,
+        temporal_signal: rel.temporal_hint.clone(),
+        depends_on: None,
+        is_update: rel.is_state_change,
+        cardinality_hint: None,
+        sentiment: None,
+    }
+}
+
+/// 3-call cascade extraction: entities → relationships → structured facts.
+///
+/// Falls back to single-call `extract_turn_facts` on early failures.
+async fn extract_turn_facts_cascade(
+    llm: &dyn LlmClient,
+    messages_text: &str,
+    rolling_facts: Option<&str>,
+    graph_state: &str,
+    known_entities: &[String],
+    category_block: &str,
+    category_enum: &str,
+) -> Option<Vec<ExtractedFact>> {
+    if messages_text.is_empty() {
+        return None;
+    }
+
+    // ── Call 1: Entity Extraction ──
+    let known_list = if known_entities.is_empty() {
+        "(none)".to_string()
+    } else {
+        known_entities.join(", ")
+    };
+    let entity_user_prompt = format!(
+        "KNOWN ENTITIES: {}\nEXCHANGE:\n{}",
+        known_list, messages_text
+    );
+
+    let entity_request = LlmRequest {
+        system_prompt: CASCADE_ENTITY_SYSTEM.to_string(),
+        user_prompt: entity_user_prompt,
+        temperature: 0.0,
+        max_tokens: 512,
+        json_mode: true,
+    };
+
+    let entities = match tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        llm.complete(entity_request),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            match parse_json_from_llm(&resp.content)
+                .and_then(|v| serde_json::from_value::<CascadeEntitiesResponse>(v).ok())
+            {
+                Some(parsed) => {
+                    tracing::info!(
+                        "CASCADE call 1: extracted {} entities",
+                        parsed.entities.len()
+                    );
+                    parsed.entities
+                },
+                None => {
+                    tracing::warn!("CASCADE call 1: parse failed, falling back to single-call");
+                    return extract_turn_facts_single_call_fallback(
+                        llm,
+                        messages_text,
+                        rolling_facts,
+                        graph_state,
+                    )
+                    .await;
+                },
+            }
+        },
+        Ok(Err(e)) => {
+            tracing::warn!("CASCADE call 1 failed: {}, falling back to single-call", e);
+            return extract_turn_facts_single_call_fallback(
+                llm,
+                messages_text,
+                rolling_facts,
+                graph_state,
+            )
+            .await;
+        },
+        Err(_) => {
+            tracing::warn!("CASCADE call 1 timed out, falling back to single-call");
+            return extract_turn_facts_single_call_fallback(
+                llm,
+                messages_text,
+                rolling_facts,
+                graph_state,
+            )
+            .await;
+        },
+    };
+
+    // ── Call 2: Relationship Discovery ──
+    let entities_json = serde_json::to_string(&entities).unwrap_or_default();
+    let rolling = rolling_facts.unwrap_or("(none)");
+    let gs = if graph_state.is_empty() {
+        "(none)"
+    } else {
+        graph_state
+    };
+
+    let rel_user_prompt = format!(
+        "PREVIOUSLY ESTABLISHED FACTS:\n{}\n\nCURRENT ENTITY STATES:\n{}\n\nENTITIES FOUND:\n{}\n\nEXCHANGE:\n{}",
+        rolling, gs, entities_json, messages_text
+    );
+
+    let rel_request = LlmRequest {
+        system_prompt: cascade_relationship_prompt(category_block, category_enum),
+        user_prompt: rel_user_prompt,
+        temperature: 0.0,
+        max_tokens: 768,
+        json_mode: true,
+    };
+
+    let relationships = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        llm.complete(rel_request),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            match parse_json_from_llm(&resp.content)
+                .and_then(|v| serde_json::from_value::<CascadeRelationshipsResponse>(v).ok())
+            {
+                Some(parsed) => {
+                    tracing::info!(
+                        "CASCADE call 2: discovered {} relationships",
+                        parsed.relationships.len()
+                    );
+                    parsed.relationships
+                },
+                None => {
+                    tracing::warn!("CASCADE call 2: parse failed, falling back to single-call");
+                    return extract_turn_facts_single_call_fallback(
+                        llm,
+                        messages_text,
+                        rolling_facts,
+                        graph_state,
+                    )
+                    .await;
+                },
+            }
+        },
+        Ok(Err(e)) => {
+            tracing::warn!("CASCADE call 2 failed: {}, falling back to single-call", e);
+            return extract_turn_facts_single_call_fallback(
+                llm,
+                messages_text,
+                rolling_facts,
+                graph_state,
+            )
+            .await;
+        },
+        Err(_) => {
+            tracing::warn!("CASCADE call 2 timed out, falling back to single-call");
+            return extract_turn_facts_single_call_fallback(
+                llm,
+                messages_text,
+                rolling_facts,
+                graph_state,
+            )
+            .await;
+        },
+    };
+
+    if relationships.is_empty() {
+        tracing::info!("CASCADE call 2: no relationships found, returning empty");
+        return Some(vec![]);
+    }
+
+    // ── Call 3: Structured Fact Formation ──
+    let rels_json = serde_json::to_string(&relationships).unwrap_or_default();
+
+    let fact_user_prompt = format!(
+        "PREVIOUSLY ESTABLISHED FACTS:\n{}\n\nCURRENT ENTITY STATES:\n{}\n\nDISCOVERED RELATIONSHIPS:\n{}\n\nORIGINAL EXCHANGE:\n{}",
+        rolling, gs, rels_json, messages_text
+    );
+
+    let fact_request = LlmRequest {
+        system_prompt: cascade_fact_prompt(category_enum),
+        user_prompt: fact_user_prompt,
+        temperature: 0.0,
+        max_tokens: 1024,
+        json_mode: true,
+    };
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        llm.complete(fact_request),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            match parse_json_from_llm(&resp.content) {
+                Some(value) => {
+                    // Reuse existing LenientFact deserialization
+                    #[derive(Deserialize)]
+                    struct LenientFact {
+                        #[serde(default)]
+                        statement: String,
+                        #[serde(default)]
+                        subject: String,
+                        #[serde(default)]
+                        predicate: String,
+                        #[serde(default)]
+                        object: String,
+                        #[serde(default, deserialize_with = "deserialize_f32_lenient")]
+                        confidence: f32,
+                        #[serde(default)]
+                        category: Option<String>,
+                        #[serde(default)]
+                        amount: Option<f64>,
+                        #[serde(default)]
+                        split_with: Option<Vec<String>>,
+                        #[serde(default)]
+                        temporal_signal: Option<String>,
+                        #[serde(default)]
+                        depends_on: Option<String>,
+                        #[serde(default, deserialize_with = "deserialize_bool_lenient")]
+                        is_update: Option<bool>,
+                        #[serde(default)]
+                        cardinality_hint: Option<String>,
+                        #[serde(default)]
+                        sentiment: Option<f32>,
+                    }
+
+                    #[derive(Deserialize)]
+                    struct TurnResponse {
+                        #[serde(default)]
+                        facts: Vec<LenientFact>,
+                    }
+
+                    match serde_json::from_value::<TurnResponse>(value) {
+                        Ok(parsed) => {
+                            let facts: Vec<ExtractedFact> = parsed
+                                .facts
+                                .into_iter()
+                                .filter(|f| !f.statement.is_empty() || !f.subject.is_empty())
+                                .map(|f| ExtractedFact {
+                                    statement: f.statement,
+                                    subject: f.subject,
+                                    predicate: f.predicate,
+                                    object: f.object,
+                                    confidence: if f.confidence > 0.0 {
+                                        f.confidence
+                                    } else {
+                                        0.8
+                                    },
+                                    category: f.category,
+                                    amount: f.amount,
+                                    split_with: f.split_with,
+                                    temporal_signal: f.temporal_signal,
+                                    depends_on: f.depends_on,
+                                    is_update: f.is_update,
+                                    cardinality_hint: f.cardinality_hint,
+                                    sentiment: f.sentiment,
+                                })
+                                .collect();
+                            tracing::info!(
+                                "CASCADE call 3: produced {} structured facts",
+                                facts.len()
+                            );
+                            Some(facts)
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                "CASCADE call 3: deser failed ({}), converting relationships deterministically",
+                                e
+                            );
+                            let facts: Vec<ExtractedFact> = relationships
+                                .iter()
+                                .map(relationship_to_basic_fact)
+                                .collect();
+                            Some(facts)
+                        },
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        "CASCADE call 3: JSON parse failed, converting relationships deterministically"
+                    );
+                    let facts: Vec<ExtractedFact> = relationships
+                        .iter()
+                        .map(relationship_to_basic_fact)
+                        .collect();
+                    Some(facts)
+                },
+            }
+        },
+        Ok(Err(e)) => {
+            tracing::warn!(
+                "CASCADE call 3 failed ({}), converting relationships deterministically",
+                e
+            );
+            let facts: Vec<ExtractedFact> = relationships
+                .iter()
+                .map(relationship_to_basic_fact)
+                .collect();
+            Some(facts)
+        },
+        Err(_) => {
+            tracing::warn!("CASCADE call 3 timed out, converting relationships deterministically");
+            let facts: Vec<ExtractedFact> = relationships
+                .iter()
+                .map(relationship_to_basic_fact)
+                .collect();
+            Some(facts)
+        },
+    }
+}
+
+/// Fallback: format a single-call transcript and use `extract_turn_facts`.
+/// Used when cascade Call 1 or Call 2 fails.
+async fn extract_turn_facts_single_call_fallback(
+    llm: &dyn LlmClient,
+    messages_text: &str,
+    rolling_facts: Option<&str>,
+    graph_state: &str,
+) -> Option<Vec<ExtractedFact>> {
+    let transcript = TURN_EXTRACTION_PROMPT
+        .replace("{rolling_facts}", rolling_facts.unwrap_or("(none)"))
+        .replace(
+            "{graph_state}",
+            if graph_state.is_empty() {
+                "(none)"
+            } else {
+                graph_state
+            },
+        )
+        .replace("{messages}", messages_text);
+    extract_turn_facts(llm, &transcript).await
+}
+
+/// Build graph context string showing current entity states for known entities.
+///
+/// For each known entity, queries the graph for current state edges (max valid_from per category)
+/// and formats them as contextual information for the LLM.
+pub fn build_graph_context_for_turn(graph: &Graph, known_entities: &[String]) -> String {
+    if known_entities.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = Vec::new();
+
+    for entity_name in known_entities {
+        let facts = graph_projection::collect_entity_facts(graph, entity_name);
+        if facts.is_empty() {
+            continue;
+        }
+
+        // Group by category prefix (state:location, preference:food, etc.)
+        let mut by_category: HashMap<String, Vec<&graph_projection::EntityFact>> = HashMap::new();
+        for fact in &facts {
+            by_category
+                .entry(fact.association_type.clone())
+                .or_default()
+                .push(fact);
+        }
+
+        let mut entity_parts = Vec::new();
+        for (assoc_type, cat_facts) in &by_category {
+            // Find the current one (highest valid_from)
+            if let Some(current) = cat_facts
+                .iter()
+                .filter(|f| f.is_current)
+                .max_by_key(|f| f.valid_from.unwrap_or(0))
+            {
+                entity_parts.push(format!("{}={}", assoc_type, current.target_name));
+            }
+        }
+
+        if !entity_parts.is_empty() {
+            lines.push(format!("{}: {}", entity_name, entity_parts.join(", ")));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Format a single turn's transcript with rolling context and graph state for per-turn extraction.
+pub fn format_turn_transcript(
+    turn: &ConversationTurn,
+    rolling_facts: Option<&str>,
+    graph_state: &str,
+) -> String {
+    let mut messages_text = String::new();
+    for msg in &turn.messages {
+        messages_text.push_str(&msg.role);
+        messages_text.push_str(": ");
+        messages_text.push_str(&msg.content);
+        messages_text.push('\n');
+    }
+
+    TURN_EXTRACTION_PROMPT
+        .replace("{rolling_facts}", rolling_facts.unwrap_or("(none)"))
+        .replace(
+            "{graph_state}",
+            if graph_state.is_empty() {
+                "(none)"
+            } else {
+                graph_state
+            },
+        )
+        .replace("{messages}", &messages_text)
+}
+
+/// Extract facts from a single turn using the per-turn prompt.
+///
+/// Returns only the facts portion (no goals or procedural summary).
+async fn extract_turn_facts(llm: &dyn LlmClient, transcript: &str) -> Option<Vec<ExtractedFact>> {
+    if transcript.is_empty() {
+        return None;
+    }
+
+    let request = LlmRequest {
+        system_prompt: String::new(),
+        user_prompt: transcript.to_string(),
+        temperature: 0.0,
+        max_tokens: 1024,
+        json_mode: true,
+    };
+
+    let response = match llm.complete(request).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("extract_turn_facts LLM call failed: {}", e);
+            return None;
+        },
+    };
+    let value = match parse_json_from_llm(&response.content) {
+        Some(v) => v,
+        None => {
+            tracing::warn!(
+                "extract_turn_facts JSON parse failed, raw response: {}",
+                &response.content[..response.content.len().min(300)]
+            );
+            return None;
+        },
+    };
+
+    // Parse as a partial CompactionResponse (only facts field needed)
+    // Use a lenient struct that accepts flexible types from the LLM
+    #[derive(Deserialize)]
+    struct LenientFact {
+        #[serde(default)]
+        statement: String,
+        #[serde(default)]
+        subject: String,
+        #[serde(default)]
+        predicate: String,
+        #[serde(default)]
+        object: String,
+        #[serde(default, deserialize_with = "deserialize_f32_lenient")]
+        confidence: f32,
+        #[serde(default)]
+        category: Option<String>,
+        #[serde(default)]
+        amount: Option<f64>,
+        #[serde(default)]
+        split_with: Option<Vec<String>>,
+        #[serde(default)]
+        temporal_signal: Option<String>,
+        #[serde(default)]
+        depends_on: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_bool_lenient")]
+        is_update: Option<bool>,
+        #[serde(default)]
+        cardinality_hint: Option<String>,
+        #[serde(default)]
+        sentiment: Option<f32>,
+    }
+
+    #[derive(Deserialize)]
+    struct TurnResponse {
+        #[serde(default)]
+        facts: Vec<LenientFact>,
+    }
+
+    match serde_json::from_value::<TurnResponse>(value.clone()) {
+        Ok(parsed) => {
+            let facts: Vec<ExtractedFact> = parsed
+                .facts
+                .into_iter()
+                .filter(|f| !f.statement.is_empty() || !f.subject.is_empty())
+                .map(|f| ExtractedFact {
+                    statement: f.statement,
+                    subject: f.subject,
+                    predicate: f.predicate,
+                    object: f.object,
+                    confidence: if f.confidence > 0.0 {
+                        f.confidence
+                    } else {
+                        0.8
+                    },
+                    category: f.category,
+                    amount: f.amount,
+                    split_with: f.split_with,
+                    temporal_signal: f.temporal_signal,
+                    depends_on: f.depends_on,
+                    is_update: f.is_update,
+                    cardinality_hint: f.cardinality_hint,
+                    sentiment: f.sentiment,
+                })
+                .collect();
+            Some(facts)
+        },
+        Err(e) => {
+            tracing::warn!(
+                "extract_turn_facts deserialization failed: {}. JSON: {}",
+                e,
+                &value.to_string()[..value.to_string().len().min(500)]
+            );
+            None
+        },
+    }
+}
+
+/// Deserialize f32 leniently: accept numbers, strings ("0.9"), or default to 0.8
+fn deserialize_f32_lenient<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    match &val {
+        serde_json::Value::Number(n) => Ok(n.as_f64().unwrap_or(0.8) as f32),
+        serde_json::Value::String(s) => Ok(s.parse::<f32>().unwrap_or(0.8)),
+        serde_json::Value::Null => Ok(0.8),
+        _ => Ok(0.8),
+    }
+}
+
+/// Deserialize Option<bool> leniently: accept booleans, strings ("true"/"false"), or null
+fn deserialize_bool_lenient<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    match &val {
+        serde_json::Value::Bool(b) => Ok(Some(*b)),
+        serde_json::Value::String(s) => match s.to_lowercase().as_str() {
+            "true" | "yes" | "1" => Ok(Some(true)),
+            "false" | "no" | "0" => Ok(Some(false)),
+            _ => Ok(None),
+        },
+        serde_json::Value::Null => Ok(None),
+        _ => Ok(None),
+    }
+}
+
+/// Deserialize Option<f32> leniently: accept numbers, strings ("0.9"), or null.
+/// Used for sentiment values where the LLM may return a string instead of a number.
+fn deserialize_f32_option_lenient<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    match &val {
+        serde_json::Value::Number(n) => Ok(Some(n.as_f64().unwrap_or(0.5) as f32)),
+        serde_json::Value::String(s) => Ok(s.parse::<f32>().ok()),
+        serde_json::Value::Null => Ok(None),
+        _ => Ok(None),
+    }
+}
 
 /// Format a `ConversationIngest` into a text transcript for the LLM.
 pub fn format_transcript(data: &ConversationIngest) -> String {
@@ -306,9 +1325,11 @@ pub fn format_transcript(data: &ConversationIngest) -> String {
 pub async fn extract_compaction(
     llm: &dyn LlmClient,
     data: &ConversationIngest,
+    category_block: &str,
+    category_enum: &str,
 ) -> Option<CompactionResponse> {
     let transcript = format_transcript(data);
-    extract_compaction_from_transcript(llm, &transcript).await
+    extract_compaction_from_transcript(llm, &transcript, category_block, category_enum).await
 }
 
 /// Extract compaction from a pre-formatted transcript string.
@@ -317,13 +1338,15 @@ pub async fn extract_compaction(
 pub async fn extract_compaction_from_transcript(
     llm: &dyn LlmClient,
     transcript: &str,
+    category_block: &str,
+    category_enum: &str,
 ) -> Option<CompactionResponse> {
     if transcript.is_empty() {
         return None;
     }
 
     let request = LlmRequest {
-        system_prompt: COMPACTION_SYSTEM_PROMPT.to_string(),
+        system_prompt: compaction_system_prompt(category_block, category_enum),
         user_prompt: transcript.to_string(),
         temperature: 0.0,
         max_tokens: 2048,
@@ -466,7 +1489,7 @@ pub fn compaction_to_events(
         ts
     };
 
-    // Facts → Observation events
+    // Facts → Events (state-aware: predicate determines edge type)
     for fact in &response.facts {
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -477,6 +1500,40 @@ pub fn compaction_to_events(
             "case_id".to_string(),
             MetadataValue::String(case_id.to_string()),
         );
+
+        // Include entity + new_state + predicate so the pipeline creates
+        // graph edges directly from LLM-extracted facts.
+        metadata.insert(
+            "entity".to_string(),
+            MetadataValue::String(fact.subject.clone()),
+        );
+        metadata.insert(
+            "new_state".to_string(),
+            MetadataValue::String(fact.object.clone()),
+        );
+        metadata.insert(
+            "attribute".to_string(),
+            MetadataValue::String(fact.predicate.clone()),
+        );
+        metadata.insert(
+            "entity_state".to_string(),
+            MetadataValue::String("true".to_string()),
+        );
+        // Category for semantic supersession grouping
+        if let Some(cat) = &fact.category {
+            metadata.insert("category".to_string(), MetadataValue::String(cat.clone()));
+        }
+        // Conditional dependency — this fact is only valid while the condition holds
+        if let Some(dep) = &fact.depends_on {
+            metadata.insert("depends_on".to_string(), MetadataValue::String(dep.clone()));
+        }
+        // Explicit state update marker
+        if fact.is_update == Some(true) {
+            metadata.insert(
+                "is_update".to_string(),
+                MetadataValue::String("true".to_string()),
+            );
+        }
 
         let evt = agent_db_events::Event {
             id: agent_db_core::types::generate_event_id(),
@@ -933,274 +1990,562 @@ pub async fn run_compaction(
         .unwrap_or_default()
         .as_nanos() as u64;
 
-    // If rolling summary exists, use it + last N messages instead of full transcript
-    let transcript = {
-        let summaries = engine.conversation_summaries.read().await;
-        if let Some(summary) = summaries.get(case_id) {
-            format_with_summary(summary, data, engine.config.rolling_summary_recent_messages)
-        } else {
-            format_transcript(data)
-        }
-    };
+    // ── Phase 1: Per-turn extraction with rolling context + graph state ──
+    // Batch adjacent turns in pairs (2 user+assistant exchanges per LLM call)
+    // to reduce API calls while maintaining temporal ordering between batches.
+    let turns = split_into_turns(data);
+    let mut rolling_facts: Vec<String> = Vec::new();
+    let mut known_entities: HashSet<String> = HashSet::new();
+    let mut all_extracted_facts: Vec<ExtractedFact> = Vec::new();
 
-    // Enrich transcript with community context if enabled
+    // Batch turns in pairs: [0,1], [2,3], [4,5], ...
+    let batches: Vec<Vec<&ConversationTurn>> = turns
+        .iter()
+        .collect::<Vec<_>>()
+        .chunks(2)
+        .map(|c| c.to_vec())
+        .collect();
+
+    tracing::info!(
+        "COMPACTION per-turn extraction: {} turns in {} batches for case_id={}",
+        turns.len(),
+        batches.len(),
+        case_id
+    );
+
+    for batch in &batches {
+        let batch_start_idx = batch[0].turn_index;
+
+        // Query graph for current entity states
+        let known_entities_vec: Vec<String> = known_entities.iter().cloned().collect();
+        let graph_ctx = {
+            let inf = engine.inference.read().await;
+            build_graph_context_for_turn(inf.graph(), &known_entities_vec)
+        };
+
+        let rolling_ctx = if rolling_facts.is_empty() {
+            None
+        } else {
+            Some(rolling_facts.join("\n"))
+        };
+
+        // Merge batch turns into a single transcript
+        let mut merged_turn = ConversationTurn {
+            messages: Vec::new(),
+            session_index: batch[0].session_index,
+            turn_index: batch_start_idx,
+        };
+        for turn in batch {
+            merged_turn.messages.extend(turn.messages.clone());
+        }
+
+        let messages_text = format_messages(&merged_turn);
+        let cat_block = engine.domain_registry.prompt_category_block();
+        let cat_enum = engine.domain_registry.prompt_category_enum();
+
+        // Extract facts: LLM cascade + LLM financial extraction in parallel
+        let (turn_facts, ner_financial_facts) = tokio::join!(
+            extract_turn_facts_cascade(
+                llm.as_ref(),
+                &messages_text,
+                rolling_ctx.as_deref(),
+                &graph_ctx,
+                &known_entities_vec,
+                &cat_block,
+                &cat_enum,
+            ),
+            extract_financial_facts_llm(llm.as_ref(), &messages_text)
+        );
+
+        let batch_label = if batch.len() > 1 {
+            format!(
+                "batch {}-{}",
+                batch_start_idx,
+                batch.last().unwrap().turn_index
+            )
+        } else {
+            format!("turn {}", batch_start_idx)
+        };
+
+        match &turn_facts {
+            None => {
+                tracing::warn!(
+                    "COMPACTION {} returned None (extraction failed)",
+                    batch_label
+                );
+            },
+            Some(f) if f.is_empty() => {
+                tracing::info!(
+                    "COMPACTION {} extracted 0 facts (empty response)",
+                    batch_label
+                );
+            },
+            _ => {},
+        }
+
+        // Merge LLM facts with NER financial facts, deduplicating by
+        // normalized (subject, object, category=financial).
+        let mut facts_combined = turn_facts.unwrap_or_default();
+        if !ner_financial_facts.is_empty() {
+            let existing_financial: HashSet<(String, String)> = facts_combined
+                .iter()
+                .filter(|f| f.category.as_deref() == Some("financial"))
+                .map(|f| (f.subject.to_lowercase(), f.object.to_lowercase()))
+                .collect();
+
+            for nf in ner_financial_facts {
+                let key = (nf.subject.to_lowercase(), nf.object.to_lowercase());
+                if !existing_financial.contains(&key) {
+                    facts_combined.push(nf);
+                }
+            }
+        }
+
+        if !facts_combined.is_empty() {
+            let mut facts = facts_combined;
+            let turn_base = base_ts + batch_start_idx as u64 * TURN_GAP;
+
+            tracing::info!(
+                "COMPACTION {} extracted {} facts, writing directly to graph",
+                batch_label,
+                facts.len(),
+            );
+
+            // ── Two-phase write: single-valued first, then multi-valued ──
+            // Single-valued facts (location, work, education) establish entity
+            // state. Writing them first ensures that:
+            //   1. The depends_on stamp on multi-valued facts sees the correct
+            //      current location (not the previous one or nothing)
+            //   2. The supersession cascade triggers correctly when a new
+            //      location replaces an old one, catching old depends_on edges
+
+            // Phase A: write single-valued facts (they establish state)
+            let mut sv_offset = 0u64;
+            for fact in facts.iter() {
+                let cat = fact.category.as_deref().unwrap_or("");
+                if engine.domain_registry.is_single_valued(cat) {
+                    let fact_ts = turn_base + sv_offset * 1_000;
+                    engine.write_fact_to_graph(fact, fact_ts).await;
+                    sv_offset += 1;
+                }
+            }
+
+            // Phase B: stamp depends_on on multi-valued facts using
+            // the NOW-UPDATED graph state (after single-valued writes)
+            {
+                let inf = engine.inference.read().await;
+                let graph = inf.graph();
+                for fact in facts.iter_mut() {
+                    // Skip if already set by the LLM
+                    if fact.depends_on.is_some() {
+                        continue;
+                    }
+                    // Skip single-valued categories — they ARE the state
+                    let cat = match &fact.category {
+                        Some(c) => c.as_str(),
+                        None => continue,
+                    };
+                    if engine.domain_registry.is_single_valued(cat) {
+                        continue;
+                    }
+                    // For multi-valued facts: check if the subject has a current location.
+                    // Normalize the subject name (lowercase, strip articles) to match
+                    // the concept_index key, which uses the same normalization.
+                    let subject_normalized = fact.subject.to_lowercase();
+                    let subject_normalized = subject_normalized.trim();
+                    let projected = graph_projection::project_entity_state(
+                        graph,
+                        subject_normalized,
+                        u64::MAX,
+                        Some(&engine.domain_registry),
+                    );
+                    if let Some(loc_slot) = projected.slots.get("location") {
+                        let loc_val = loc_slot.value.as_deref().unwrap_or(&loc_slot.target_name);
+                        fact.depends_on = Some(format!("{} lives in {}", fact.subject, loc_val));
+                        tracing::debug!(
+                            "COMPACTION: auto-stamped depends_on='{}' on fact '{}'",
+                            fact.depends_on.as_ref().unwrap(),
+                            fact.statement,
+                        );
+                    }
+                }
+            }
+
+            // Phase C: write multi-valued facts (with correct depends_on)
+            let mut mv_offset = sv_offset;
+            for fact in facts.iter() {
+                let cat = fact.category.as_deref().unwrap_or("");
+                if !engine.domain_registry.is_single_valued(cat) {
+                    let fact_ts = turn_base + mv_offset * 1_000;
+                    engine.write_fact_to_graph(fact, fact_ts).await;
+                    mv_offset += 1;
+                }
+            }
+
+            // Update rolling context
+            for fact in &facts {
+                rolling_facts.push(fact.statement.clone());
+                known_entities.insert(fact.subject.clone());
+                known_entities.insert(fact.object.clone());
+            }
+            const MAX_ROLLING_FACTS: usize = 30;
+            if rolling_facts.len() > MAX_ROLLING_FACTS {
+                rolling_facts.drain(..rolling_facts.len() - MAX_ROLLING_FACTS);
+            }
+
+            result.facts_extracted += facts.len();
+            all_extracted_facts.extend(facts);
+        }
+    }
+
+    result.llm_success = true;
+
+    // ── Run community detection so DRIFT search has data ──
+    if engine.config.enable_louvain && !all_extracted_facts.is_empty() {
+        tracing::info!("COMPACTION: triggering community detection after per-turn extraction");
+        if let Err(e) = engine.run_community_detection().await {
+            tracing::warn!("COMPACTION: community detection failed: {}", e);
+        }
+    }
+
+    // ── Embed concept nodes + create claims for extracted facts ──
+    // Without this, node vector search and claim hybrid search find nothing
+    // for compaction-created artifacts. This must complete BEFORE queries.
+    if !all_extracted_facts.is_empty() {
+        embed_nodes_and_create_claims(engine, &all_extracted_facts, base_ts).await;
+    }
+
+    // ── Active Retrieval Testing (ART): spawn background validation ──
+    // Non-blocking — doesn't delay ingest response.
+    if engine.config.art_config.enabled {
+        if let (Some(ref llm_client), Some(ref embedding_client)) =
+            (&engine.unified_llm_client, &engine.embedding_client)
+        {
+            // Collect recently embedded concept node IDs
+            let candidate_node_ids: Vec<u64> = {
+                let inf = engine.inference.read().await;
+                let graph = inf.graph();
+                graph
+                    .concept_index
+                    .values()
+                    .copied()
+                    .filter(|&nid| {
+                        graph
+                            .get_node(nid)
+                            .map(|n| !n.embedding.is_empty())
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            };
+
+            if !candidate_node_ids.is_empty() {
+                let inference = engine.inference.clone();
+                let llm = llm_client.clone();
+                let embedder = embedding_client.clone();
+                let art_config = engine.config.art_config.clone();
+
+                tokio::spawn(async move {
+                    let result = crate::active_retrieval_test::run_art_pass(
+                        candidate_node_ids,
+                        &inference,
+                        llm.as_ref(),
+                        embedder.as_ref(),
+                        &art_config,
+                    )
+                    .await;
+                    tracing::info!(
+                        "ART background pass: tested={}, enhanced={}, hits={}, misses={}",
+                        result.nodes_tested,
+                        result.nodes_enhanced,
+                        result.total_hits,
+                        result.total_misses,
+                    );
+                });
+            }
+        }
+    }
+
+    // ── Goals + procedural summary: ONE call at end using full transcript ──
+    let full_transcript = format_transcript(data);
+
+    // Enrich with community context if enabled
     let enriched_transcript = if engine.config.enable_context_enrichment {
         let summaries = engine.community_summaries.read().await;
         if summaries.is_empty() {
-            transcript
+            full_transcript.clone()
         } else {
-            let topic_slice = &transcript[..transcript.len().min(500)];
+            let topic_slice = &full_transcript[..full_transcript.len().min(500)];
             let ctx = crate::context_enrichment::community_context_for_topic(
                 topic_slice,
                 &summaries,
                 &engine.config.enrichment_config,
             );
             if ctx.is_empty() {
-                transcript
+                full_transcript.clone()
             } else {
-                format!("{}\n\n[Knowledge Context]\n{}", transcript, ctx)
+                format!("{}\n\n[Knowledge Context]\n{}", full_transcript, ctx)
             }
         }
     } else {
-        transcript
+        full_transcript.clone()
     };
 
-    // LLM extraction with 30-second timeout
-    let extraction = tokio::time::timeout(
+    // Extract goals + procedural summary from full transcript
+    let goal_extraction = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        extract_compaction_from_transcript(llm.as_ref(), &enriched_transcript),
+        extract_compaction_from_transcript(
+            llm.as_ref(),
+            &enriched_transcript,
+            &engine.domain_registry.prompt_category_block(),
+            &engine.domain_registry.prompt_category_enum(),
+        ),
     )
     .await;
 
-    let response = match extraction {
-        Ok(Some(r)) => r,
-        _ => return result,
-    };
+    if let Ok(Some(response)) = goal_extraction {
+        result.goals_extracted = response.goals.len();
+        result.procedural_steps_extracted = response
+            .procedural_summary
+            .as_ref()
+            .map(|s| s.steps.len())
+            .unwrap_or(0);
 
-    result.llm_success = true;
-    result.facts_extracted = response.facts.len();
-    result.goals_extracted = response.goals.len();
-    result.procedural_steps_extracted = response
-        .procedural_summary
-        .as_ref()
-        .map(|s| s.steps.len())
-        .unwrap_or(0);
-
-    // ── Fast goal dedup via GoalStore (no LLM needed) ──
-    let mut fast_dedup_count = 0usize;
-    let pre_filtered_goals: Vec<ExtractedGoal> = {
-        let mut goal_store = engine.goal_store.write().await;
-        let mut kept = Vec::new();
-        for goal in &response.goals {
-            match goal_store.store_or_dedup(&goal.description, &goal.status, &goal.owner, case_id) {
-                crate::goal_store::GoalDedupDecision::NewGoal => {
-                    kept.push(goal.clone());
-                },
-                crate::goal_store::GoalDedupDecision::Duplicate { .. } => {
-                    fast_dedup_count += 1;
-                },
-                crate::goal_store::GoalDedupDecision::StatusUpdate {
-                    existing_id,
-                    new_status,
-                } => {
-                    goal_store.update_status(existing_id, new_status);
-                    fast_dedup_count += 1;
-                },
-            }
-        }
-        kept
-    };
-    result.goals_deduplicated += fast_dedup_count;
-
-    // Use pre-filtered goals for the rest of the pipeline
-    let response = CompactionResponse {
-        facts: response.facts,
-        goals: pre_filtered_goals,
-        procedural_summary: response.procedural_summary,
-    };
-
-    let has_goals = !response.goals.is_empty();
-    let has_summary = response.procedural_summary.is_some();
-
-    if has_goals || has_summary {
-        // Collect classifiable items: goal descriptions + summary (if present)
-        let goal_count = response.goals.len();
-        let mut classifiable: Vec<String> = response
-            .goals
-            .iter()
-            .map(|g| g.description.clone())
-            .collect();
-        if let Some(ref summary) = response.procedural_summary {
-            classifiable.push(summary.overall_summary.clone());
-        }
-        let classifiable_refs: Vec<&str> = classifiable.iter().map(|s| s.as_str()).collect();
-
-        // BM25 search: union of hits across all items (HashSet dedup)
-        let similar_memories = {
-            let bm25 = engine.memory_bm25_index.read().await;
-            let mut seen_ids = HashSet::new();
-            let mut all_memories = Vec::new();
-
-            for item in &classifiable_refs {
-                let hits = bm25.search(item, 10);
-                for (id, _score) in &hits {
-                    if seen_ids.insert(*id) {
-                        // new ID
-                    }
+        // ── Fast goal dedup via GoalStore (no LLM needed) ──
+        let mut fast_dedup_count = 0usize;
+        let pre_filtered_goals: Vec<ExtractedGoal> = {
+            let mut goal_store = engine.goal_store.write().await;
+            let mut kept = Vec::new();
+            for goal in &response.goals {
+                match goal_store.store_or_dedup(
+                    &goal.description,
+                    &goal.status,
+                    &goal.owner,
+                    case_id,
+                ) {
+                    crate::goal_store::GoalDedupDecision::NewGoal => {
+                        kept.push(goal.clone());
+                    },
+                    crate::goal_store::GoalDedupDecision::Duplicate { .. } => {
+                        fast_dedup_count += 1;
+                    },
+                    crate::goal_store::GoalDedupDecision::StatusUpdate {
+                        existing_id,
+                        new_status,
+                    } => {
+                        goal_store.update_status(existing_id, new_status);
+                        fast_dedup_count += 1;
+                    },
                 }
             }
-            drop(bm25);
+            kept
+        };
+        result.goals_deduplicated += fast_dedup_count;
 
-            let store = engine.memory_store.read().await;
-            for id in &seen_ids {
-                if let Some(mem) = store.get_memory(*id) {
-                    all_memories.push(mem);
-                }
-            }
-            all_memories
+        let response = CompactionResponse {
+            facts: vec![], // Facts already processed per-turn above
+            goals: pre_filtered_goals,
+            procedural_summary: response.procedural_summary,
         };
 
-        let similar_refs: Vec<&Memory> = similar_memories.iter().collect();
+        let has_goals = !response.goals.is_empty();
+        let has_summary = response.procedural_summary.is_some();
 
-        // Build community context for classifier enrichment
-        let classifier_ctx = if engine.config.enable_context_enrichment {
-            let summaries = engine.community_summaries.read().await;
-            if summaries.is_empty() {
-                None
-            } else {
-                let topic = classifiable.join(" ");
-                let ctx = crate::context_enrichment::community_context_for_topic(
-                    &topic[..topic.len().min(500)],
-                    &summaries,
-                    &engine.config.enrichment_config,
-                );
-                if ctx.is_empty() {
+        if has_goals || has_summary {
+            let goal_count = response.goals.len();
+            let mut classifiable: Vec<String> = response
+                .goals
+                .iter()
+                .map(|g| g.description.clone())
+                .collect();
+            if let Some(ref summary) = response.procedural_summary {
+                classifiable.push(summary.overall_summary.clone());
+            }
+            let classifiable_refs: Vec<&str> = classifiable.iter().map(|s| s.as_str()).collect();
+
+            let similar_memories = {
+                let bm25 = engine.memory_bm25_index.read().await;
+                let mut seen_ids = HashSet::new();
+                let mut all_memories = Vec::new();
+
+                for item in &classifiable_refs {
+                    let hits = bm25.search(item, 10);
+                    for (id, _score) in &hits {
+                        seen_ids.insert(*id);
+                    }
+                }
+                drop(bm25);
+
+                let store = engine.memory_store.read().await;
+                for id in &seen_ids {
+                    if let Some(mem) = store.get_memory(*id) {
+                        all_memories.push(mem);
+                    }
+                }
+                all_memories
+            };
+
+            let similar_refs: Vec<&Memory> = similar_memories.iter().collect();
+
+            let classifier_ctx = if engine.config.enable_context_enrichment {
+                let summaries = engine.community_summaries.read().await;
+                if summaries.is_empty() {
                     None
                 } else {
-                    Some(ctx)
+                    let topic = classifiable.join(" ");
+                    let ctx = crate::context_enrichment::community_context_for_topic(
+                        &topic[..topic.len().min(500)],
+                        &summaries,
+                        &engine.config.enrichment_config,
+                    );
+                    if ctx.is_empty() {
+                        None
+                    } else {
+                        Some(ctx)
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
-        // Single classify_memory_updates() call (batched)
-        let classification = classify_memory_updates(
-            llm.as_ref(),
-            &classifiable_refs,
-            &similar_refs,
-            classifier_ctx.as_deref(),
-        )
-        .await;
+            let classification = classify_memory_updates(
+                llm.as_ref(),
+                &classifiable_refs,
+                &similar_refs,
+                classifier_ctx.as_deref(),
+            )
+            .await;
 
-        match classification {
-            Ok(class_result) => {
-                // Split results: goal_ops[0..goal_count] + proc_ops[goal_count..]
-                let goal_ops =
-                    &class_result.operations[..goal_count.min(class_result.operations.len())];
-                let proc_ops = if class_result.operations.len() > goal_count {
-                    &class_result.operations[goal_count..]
-                } else {
-                    &[]
-                };
+            match classification {
+                Ok(class_result) => {
+                    let goal_ops =
+                        &class_result.operations[..goal_count.min(class_result.operations.len())];
+                    let proc_ops = if class_result.operations.len() > goal_count {
+                        &class_result.operations[goal_count..]
+                    } else {
+                        &[]
+                    };
 
-                // Filter goals by classification
-                let (approved_goals, dedup_count) =
-                    filter_goals_by_classification(&response.goals, goal_ops);
-                result.goals_deduplicated = dedup_count;
+                    let (approved_goals, dedup_count) =
+                        filter_goals_by_classification(&response.goals, goal_ops);
+                    result.goals_deduplicated = dedup_count;
 
-                // Handle goal UPDATE audit trails
-                for (i, op) in goal_ops.iter().enumerate() {
-                    if op.action == MemoryAction::Update {
-                        if let Some(target_id) = resolve_target(op, &similar_refs) {
-                            let store = engine.memory_store.read().await;
-                            let existing = store.get_memory(target_id);
-                            drop(store);
-
-                            if let Some(existing_mem) = existing {
-                                let goal_desc = response
-                                    .goals
-                                    .get(i)
-                                    .map(|g| g.description.as_str())
-                                    .unwrap_or("");
-                                let mut audit = engine.memory_audit_log.write().await;
-                                audit.record_update(
-                                    target_id,
-                                    &existing_mem.summary,
-                                    goal_desc,
-                                    &existing_mem.takeaway,
-                                    goal_desc,
-                                    MutationActor::LlmClassifier,
-                                    Some(format!("Compaction goal UPDATE for case {}", case_id)),
-                                );
-                            }
-                        }
-                    } else if op.action == MemoryAction::Delete {
-                        if let Some(target_id) = resolve_target(op, &similar_refs) {
-                            let store = engine.memory_store.read().await;
-                            let existing = store.get_memory(target_id);
-                            drop(store);
-
-                            if let Some(existing_mem) = existing {
-                                let old_summary = existing_mem.summary.clone();
-                                let old_takeaway = existing_mem.takeaway.clone();
-
-                                let mut store = engine.memory_store.write().await;
-                                store.delete_memories_batch(vec![target_id]);
+                    for (i, op) in goal_ops.iter().enumerate() {
+                        if op.action == MemoryAction::Update {
+                            if let Some(target_id) = resolve_target(op, &similar_refs) {
+                                let store = engine.memory_store.read().await;
+                                let existing = store.get_memory(target_id);
                                 drop(store);
 
-                                result.memories_deleted += 1;
+                                if let Some(existing_mem) = existing {
+                                    let goal_desc = response
+                                        .goals
+                                        .get(i)
+                                        .map(|g| g.description.as_str())
+                                        .unwrap_or("");
+                                    let mut audit = engine.memory_audit_log.write().await;
+                                    audit.record_update(
+                                        target_id,
+                                        &existing_mem.summary,
+                                        goal_desc,
+                                        &existing_mem.takeaway,
+                                        goal_desc,
+                                        MutationActor::LlmClassifier,
+                                        Some(format!(
+                                            "Compaction goal UPDATE for case {}",
+                                            case_id
+                                        )),
+                                    );
+                                }
+                            }
+                        } else if op.action == MemoryAction::Delete {
+                            if let Some(target_id) = resolve_target(op, &similar_refs) {
+                                let store = engine.memory_store.read().await;
+                                let existing = store.get_memory(target_id);
+                                drop(store);
 
-                                let mut audit = engine.memory_audit_log.write().await;
-                                audit.record_delete(
-                                    target_id,
-                                    &old_summary,
-                                    &old_takeaway,
-                                    MutationActor::LlmClassifier,
-                                    Some(format!("Compaction goal DELETE for case {}", case_id)),
-                                );
+                                if let Some(existing_mem) = existing {
+                                    let old_summary = existing_mem.summary.clone();
+                                    let old_takeaway = existing_mem.takeaway.clone();
+
+                                    let mut store = engine.memory_store.write().await;
+                                    store.delete_memories_batch(vec![target_id]);
+                                    drop(store);
+
+                                    result.memories_deleted += 1;
+
+                                    let mut audit = engine.memory_audit_log.write().await;
+                                    audit.record_delete(
+                                        target_id,
+                                        &old_summary,
+                                        &old_takeaway,
+                                        MutationActor::LlmClassifier,
+                                        Some(format!(
+                                            "Compaction goal DELETE for case {}",
+                                            case_id
+                                        )),
+                                    );
+                                }
                             }
                         }
                     }
-                }
 
-                // Build filtered response with approved goals only
-                let filtered_response = CompactionResponse {
-                    facts: response.facts.clone(),
-                    goals: approved_goals,
-                    procedural_summary: response.procedural_summary.clone(),
-                };
+                    // Process goal events (no facts — those were already processed per-turn)
+                    let filtered_response = CompactionResponse {
+                        facts: vec![],
+                        goals: approved_goals,
+                        procedural_summary: response.procedural_summary.clone(),
+                    };
 
-                // Convert to events and process through pipeline
-                let events = compaction_to_events(
-                    &filtered_response,
-                    case_id,
-                    agent_id,
-                    session_id,
-                    base_ts,
-                );
-                for event in events {
-                    if let Err(e) = engine.process_event_with_options(event, Some(true)).await {
-                        tracing::debug!("Compaction event pipeline error: {}", e);
+                    let goal_base_ts = base_ts + (turns.len() as u64 + 1) * TURN_GAP;
+                    let events = compaction_to_events(
+                        &filtered_response,
+                        case_id,
+                        agent_id,
+                        session_id,
+                        goal_base_ts,
+                    );
+                    for event in events {
+                        if let Err(e) = engine.process_event_with_options(event, Some(true)).await {
+                            tracing::info!("COMPACTION goal event pipeline error: {}", e);
+                        }
                     }
-                }
 
-                // Handle procedural memory using proc_ops
-                if let Some(ref summary) = response.procedural_summary {
-                    if let Some(proc_op) = proc_ops.first() {
-                        handle_procedural_memory(
-                            engine,
-                            summary,
-                            proc_op,
-                            &similar_refs,
-                            case_id,
-                            agent_id,
-                            session_id,
-                            &mut result,
-                        )
-                        .await;
-                    } else {
-                        // No proc op returned — fail-open: create unconditionally
+                    if let Some(ref summary) = response.procedural_summary {
+                        if let Some(proc_op) = proc_ops.first() {
+                            handle_procedural_memory(
+                                engine,
+                                summary,
+                                proc_op,
+                                &similar_refs,
+                                case_id,
+                                agent_id,
+                                session_id,
+                                &mut result,
+                            )
+                            .await;
+                        } else {
+                            handle_procedural_memory_fallback(
+                                engine,
+                                summary,
+                                case_id,
+                                agent_id,
+                                session_id,
+                                &mut result,
+                            )
+                            .await;
+                        }
+                    }
+                },
+                Err(_) => {
+                    let events =
+                        compaction_to_events(&response, case_id, agent_id, session_id, base_ts);
+                    for event in events {
+                        if let Err(e) = engine.process_event_with_options(event, Some(true)).await {
+                            tracing::debug!("Compaction event pipeline error: {}", e);
+                        }
+                    }
+
+                    if let Some(ref summary) = response.procedural_summary {
                         handle_procedural_memory_fallback(
                             engine,
                             summary,
@@ -1211,90 +2556,382 @@ pub async fn run_compaction(
                         )
                         .await;
                     }
-                }
-            },
-            Err(_) => {
-                // Fallback: create all events + unconditional procedural memory (fail-open)
-                let events =
-                    compaction_to_events(&response, case_id, agent_id, session_id, base_ts);
-                for event in events {
-                    if let Err(e) = engine.process_event_with_options(event, Some(true)).await {
-                        tracing::debug!("Compaction event pipeline error: {}", e);
-                    }
-                }
-
-                if let Some(ref summary) = response.procedural_summary {
-                    handle_procedural_memory_fallback(
-                        engine,
-                        summary,
-                        case_id,
-                        agent_id,
-                        session_id,
-                        &mut result,
-                    )
-                    .await;
-                }
-            },
-        }
-    } else {
-        // Only facts/steps — no goals or summary to classify
-        let events = compaction_to_events(&response, case_id, agent_id, session_id, base_ts);
-        for event in events {
-            if let Err(e) = engine.process_event_with_options(event, Some(true)).await {
-                tracing::debug!("Compaction event pipeline error: {}", e);
+                },
             }
         }
-    }
 
-    // ── Playbook extraction (separate LLM call, fail-open, 30s timeout) ──
-    if !response.goals.is_empty() {
-        let transcript = format_transcript(data);
-
-        // Enrich with prior playbook experience if enabled
-        let enriched_pb_transcript = if engine.config.enable_context_enrichment {
-            let goal_store = engine.goal_store.read().await;
-            let mut existing = Vec::new();
-            for goal in &response.goals {
-                for (id, _score) in goal_store.find_similar(&goal.description, 3) {
-                    if let Some(entry) = goal_store.get(id) {
-                        if let Some(ref pb) = entry.playbook {
-                            existing.push((entry.description.clone(), pb.clone()));
+        // ── Playbook extraction ──
+        if !response.goals.is_empty() {
+            let enriched_pb_transcript = if engine.config.enable_context_enrichment {
+                let goal_store = engine.goal_store.read().await;
+                let mut existing = Vec::new();
+                for goal in &response.goals {
+                    for (id, _score) in goal_store.find_similar(&goal.description, 3) {
+                        if let Some(entry) = goal_store.get(id) {
+                            if let Some(ref pb) = entry.playbook {
+                                existing.push((entry.description.clone(), pb.clone()));
+                            }
                         }
                     }
                 }
-            }
-            drop(goal_store);
-            if existing.is_empty() {
-                transcript.clone()
+                drop(goal_store);
+                if existing.is_empty() {
+                    full_transcript.clone()
+                } else {
+                    let ctx = crate::context_enrichment::build_playbook_context(
+                        &existing,
+                        engine.config.enrichment_config.max_similar_playbooks,
+                    );
+                    format!(
+                        "{}\n\n[Prior Playbook Experience]\n{}",
+                        full_transcript, ctx
+                    )
+                }
             } else {
-                let ctx = crate::context_enrichment::build_playbook_context(
-                    &existing,
-                    engine.config.enrichment_config.max_similar_playbooks,
-                );
-                format!("{}\n\n[Prior Playbook Experience]\n{}", transcript, ctx)
-            }
-        } else {
-            transcript.clone()
-        };
+                full_transcript.clone()
+            };
 
-        if let Ok(Some(pb_response)) = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            extract_playbooks(llm.as_ref(), &enriched_pb_transcript, &response.goals),
-        )
-        .await
-        {
-            // Filter out low-confidence and empty playbooks
-            let quality_playbooks: Vec<_> = pb_response
-                .playbooks
-                .into_iter()
-                .filter(|pb| pb.confidence >= MIN_PLAYBOOK_CONFIDENCE && !pb.steps_taken.is_empty())
-                .collect();
-            result.playbooks_extracted = quality_playbooks.len();
-            attach_playbooks(engine, &quality_playbooks, case_id).await;
+            if let Ok(Some(pb_response)) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                extract_playbooks(llm.as_ref(), &enriched_pb_transcript, &response.goals),
+            )
+            .await
+            {
+                let quality_playbooks: Vec<_> = pb_response
+                    .playbooks
+                    .into_iter()
+                    .filter(|pb| {
+                        pb.confidence >= MIN_PLAYBOOK_CONFIDENCE && !pb.steps_taken.is_empty()
+                    })
+                    .collect();
+                result.playbooks_extracted = quality_playbooks.len();
+                attach_playbooks(engine, &quality_playbooks, case_id).await;
+            }
         }
     }
 
     result
+}
+
+// ────────── Rich Edge Text for Embedding ──────────
+
+/// Build rich embedding text for an edge that goes beyond bare triplets.
+///
+/// Instead of "user location tokyo", produces something like:
+/// "User currently lives in Tokyo. (recently moved, depends on: User relocated for work)"
+///
+/// Uses the original `statement` property (a self-contained natural language
+/// proposition) when available, and appends qualifiers: temporal signal,
+/// dependency, current/historical status.
+fn build_rich_edge_text(
+    source: &str,
+    association_type: &str,
+    target: &str,
+    properties: &HashMap<String, serde_json::Value>,
+    is_current: bool,
+) -> String {
+    // Prefer the original statement (richest representation)
+    let base = if let Some(serde_json::Value::String(stmt)) = properties.get("statement") {
+        stmt.clone()
+    } else {
+        // Fallback: reconstruct from triplet
+        let predicate = association_type
+            .split(':')
+            .nth(1)
+            .unwrap_or(association_type)
+            .replace('_', " ");
+        format!("{} {} {}", source, predicate, target)
+    };
+
+    let mut parts = vec![base];
+
+    // Temporal qualifier
+    if let Some(serde_json::Value::String(ts)) = properties.get("temporal_signal") {
+        if !ts.is_empty() {
+            parts.push(format!("({})", ts));
+        }
+    }
+
+    // Dependency qualifier — what condition must hold for this fact
+    if let Some(serde_json::Value::String(dep)) = properties.get("depends_on") {
+        if !dep.is_empty() {
+            parts.push(format!("[while: {}]", dep));
+        }
+    }
+
+    // Current vs historical status
+    if is_current {
+        parts.push("[current]".to_string());
+    } else {
+        parts.push("[historical/superseded]".to_string());
+    }
+
+    parts.join(" ")
+}
+
+// ────────── Post-Compaction Embedding + Claim Creation ──────────
+
+/// Embed all un-embedded concept nodes and create claims from extracted facts.
+///
+/// This ensures that node vector search and claim hybrid search (BM25+vector)
+/// can find compaction-created artifacts. Must complete BEFORE queries execute.
+async fn embed_nodes_and_create_claims(
+    engine: &crate::integration::GraphEngine,
+    facts: &[ExtractedFact],
+    base_ts: u64,
+) {
+    let embedding_client = match &engine.embedding_client {
+        Some(ec) => ec.clone(),
+        None => {
+            tracing::debug!("COMPACTION: no embedding client — skipping node/claim embedding");
+            return;
+        },
+    };
+
+    // 1. Embed un-embedded concept nodes
+    let nodes_to_embed: Vec<(u64, String)> = {
+        let inference = engine.inference.read().await;
+        let graph = inference.graph();
+        graph
+            .concept_index
+            .iter()
+            .filter_map(|(name, &nid)| {
+                graph.get_node(nid).and_then(|node| {
+                    if node.embedding.is_empty() {
+                        Some((nid, name.to_string()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    };
+
+    if !nodes_to_embed.is_empty() {
+        tracing::info!(
+            "COMPACTION: embedding {} concept nodes for vector search",
+            nodes_to_embed.len()
+        );
+        for (nid, text) in &nodes_to_embed {
+            match embedding_client
+                .embed(crate::claims::EmbeddingRequest {
+                    text: text.clone(),
+                    context: None,
+                })
+                .await
+            {
+                Ok(resp) if !resp.embedding.is_empty() => {
+                    let mut inf = engine.inference.write().await;
+                    let graph = inf.graph_mut();
+                    if let Some(node) = graph.get_node_mut(*nid) {
+                        node.embedding = resp.embedding.clone();
+                    }
+                    graph.node_vector_index.insert(*nid, resp.embedding);
+                },
+                Ok(_) => {},
+                Err(e) => {
+                    tracing::debug!("COMPACTION: node embedding failed for '{}': {}", text, e);
+                },
+            }
+        }
+    }
+
+    // 2. Embed triplets (subject + predicate + object) for edge vector search.
+    // This enables triplet scoring where the query is compared
+    // against the full context of each edge, not just individual nodes.
+    {
+        let edges_to_embed: Vec<(u64, String)> = {
+            let inference = engine.inference.read().await;
+            let graph = inference.graph();
+            let mut edges = Vec::new();
+            for (eid, edge) in graph.edges.iter() {
+                if let crate::structures::EdgeType::Association {
+                    association_type, ..
+                } = &edge.edge_type
+                {
+                    let source_name =
+                        crate::conversation::graph_projection::concept_name_of(graph, edge.source)
+                            .unwrap_or_default();
+                    let target_name =
+                        crate::conversation::graph_projection::concept_name_of(graph, edge.target)
+                            .unwrap_or_default();
+                    if !source_name.is_empty() && !target_name.is_empty() {
+                        // Build rich embedding text: statement + qualifiers.
+                        // Goes beyond bare triplets — includes context, temporal
+                        // signals, and dependency info stored on the edge.
+                        let rich_text = build_rich_edge_text(
+                            &source_name,
+                            association_type,
+                            &target_name,
+                            &edge.properties,
+                            edge.valid_until.is_none(),
+                        );
+                        edges.push((eid as u64, rich_text));
+                    }
+                }
+            }
+            edges
+        };
+
+        if !edges_to_embed.is_empty() {
+            tracing::info!(
+                "COMPACTION: embedding {} edge triplets for vector search",
+                edges_to_embed.len()
+            );
+            for (eid, text) in &edges_to_embed {
+                match embedding_client
+                    .embed(crate::claims::EmbeddingRequest {
+                        text: text.clone(),
+                        context: None,
+                    })
+                    .await
+                {
+                    Ok(resp) if !resp.embedding.is_empty() => {
+                        let mut inf = engine.inference.write().await;
+                        let graph = inf.graph_mut();
+                        graph.edge_vector_index.insert(*eid, resp.embedding);
+                    },
+                    Ok(_) => {},
+                    Err(e) => {
+                        tracing::debug!("COMPACTION: edge embedding failed for '{}': {}", text, e);
+                    },
+                }
+            }
+        }
+    }
+
+    // 3. Create claims from extracted facts (for claim hybrid search)
+    let claim_store = match &engine.claim_store {
+        Some(cs) => cs.clone(),
+        None => return,
+    };
+
+    let mut claims_created = 0usize;
+    for (i, fact) in facts.iter().enumerate() {
+        // Embed the fact statement
+        let embedding = match embedding_client
+            .embed(crate::claims::EmbeddingRequest {
+                text: fact.statement.clone(),
+                context: Some(format!(
+                    "{} {} {}",
+                    fact.subject, fact.predicate, fact.object
+                )),
+            })
+            .await
+        {
+            Ok(resp) => resp.embedding,
+            Err(_) => vec![], // store claim without embedding — BM25 still works
+        };
+
+        let claim_id = match claim_store.next_id() {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let claim_type = match fact.category.as_deref() {
+            Some("preference") => crate::claims::ClaimType::Preference,
+            Some("intention") | Some("goal") => crate::claims::ClaimType::Intention,
+            Some("belief") | Some("opinion") => crate::claims::ClaimType::Belief,
+            _ => crate::claims::ClaimType::Fact,
+        };
+
+        let claim = crate::claims::DerivedClaim {
+            id: claim_id,
+            claim_text: fact.statement.clone(),
+            supporting_evidence: vec![crate::claims::EvidenceSpan::new(
+                0,
+                fact.statement.len(),
+                &fact.statement,
+            )],
+            confidence: fact.confidence,
+            embedding,
+            source_event_id: 0,
+            episode_id: None,
+            thread_id: None,
+            user_id: None,
+            workspace_id: None,
+            created_at: now,
+            last_accessed: now,
+            access_count: 0,
+            status: crate::claims::ClaimStatus::Active,
+            support_count: 1,
+            metadata: HashMap::new(),
+            claim_type,
+            subject_entity: Some(fact.subject.to_lowercase()),
+            predicate: Some(fact.predicate.clone()),
+            object_entity: Some(fact.object.to_lowercase()),
+            expires_at: None,
+            superseded_by: None,
+            entities: vec![],
+            category: fact.category.clone(),
+            temporal_type: crate::claims::TemporalType::Dynamic,
+            valid_from: Some(base_ts + i as u64 * 1_000),
+            valid_until: None,
+        };
+
+        if let Ok(()) = claim_store.store(&claim) {
+            // ── State anchor stamping ──
+            // Mirror the anchor logic from integration_claims.rs so that
+            // apply_state_anchor_filter() can detect stale compaction claims.
+            if let Some(ref subj) = claim.subject_entity {
+                let subj_normalized = subj.to_lowercase();
+                let inf = engine.inference.read().await;
+                let projected = graph_projection::project_entity_state(
+                    inf.graph(),
+                    subj_normalized.trim(),
+                    u64::MAX,
+                    Some(&engine.domain_registry),
+                );
+                drop(inf);
+                let mut anchor_meta: HashMap<String, String> = HashMap::new();
+                for slot in projected.slots.values() {
+                    let cat = slot.association_type.split(':').next().unwrap_or("");
+                    if engine.domain_registry.is_single_valued(cat) {
+                        let key = format!("state_anchor:{}", slot.association_type);
+                        let val = slot.value.as_deref().unwrap_or(&slot.target_name);
+                        anchor_meta.insert(key, val.to_string());
+                    }
+                }
+                if !anchor_meta.is_empty() {
+                    let _ = claim_store.update_metadata(claim.id, &anchor_meta);
+                    tracing::debug!(
+                        "COMPACTION: stamped {} state anchors on claim {}",
+                        anchor_meta.len(),
+                        claim.id,
+                    );
+                }
+            }
+
+            // Also add a Claim node to the graph for unified retrieval
+            let mut inf = engine.inference.write().await;
+            let graph = inf.graph_mut();
+            let claim_node =
+                crate::structures::GraphNode::new(crate::structures::NodeType::Claim {
+                    claim_id,
+                    claim_text: fact.statement.clone(),
+                    confidence: fact.confidence,
+                    source_event_id: 0,
+                });
+            if let Ok(node_id) = graph.add_node(claim_node) {
+                graph.claim_index.insert(claim_id, node_id);
+                // Index in BM25
+                graph.bm25_index.index_document(node_id, &fact.statement);
+            }
+            claims_created += 1;
+        }
+    }
+
+    if claims_created > 0 {
+        tracing::info!(
+            "COMPACTION: created {} claims from extracted facts for hybrid search",
+            claims_created
+        );
+    }
 }
 
 // ────────── Tests ──────────
@@ -1302,7 +2939,7 @@ pub async fn run_compaction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::types::{ConversationMessage, ConversationSession};
+    use crate::conversation::types::ConversationSession;
 
     fn make_ingest(messages: Vec<(&str, &str)>) -> ConversationIngest {
         ConversationIngest {
@@ -1324,6 +2961,97 @@ mod tests {
             }],
             queries: vec![],
         }
+    }
+
+    #[test]
+    fn test_split_into_turns() {
+        let data = ConversationIngest {
+            case_id: Some("test".to_string()),
+            sessions: vec![
+                ConversationSession {
+                    session_id: "s1".to_string(),
+                    topic: None,
+                    messages: vec![
+                        ConversationMessage {
+                            role: "user".to_string(),
+                            content: "Hi".to_string(),
+                        },
+                        ConversationMessage {
+                            role: "assistant".to_string(),
+                            content: "Hello!".to_string(),
+                        },
+                        ConversationMessage {
+                            role: "user".to_string(),
+                            content: "Where am I?".to_string(),
+                        },
+                        ConversationMessage {
+                            role: "assistant".to_string(),
+                            content: "Lisbon".to_string(),
+                        },
+                    ],
+                    contains_fact: None,
+                    fact_id: None,
+                    fact_quote: None,
+                    answers: vec![],
+                },
+                ConversationSession {
+                    session_id: "s2".to_string(),
+                    topic: None,
+                    messages: vec![
+                        ConversationMessage {
+                            role: "user".to_string(),
+                            content: "I moved".to_string(),
+                        },
+                        ConversationMessage {
+                            role: "assistant".to_string(),
+                            content: "Where?".to_string(),
+                        },
+                    ],
+                    contains_fact: None,
+                    fact_id: None,
+                    fact_quote: None,
+                    answers: vec![],
+                },
+            ],
+            queries: vec![],
+        };
+
+        let turns = split_into_turns(&data);
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].turn_index, 0);
+        assert_eq!(turns[0].session_index, 0);
+        assert_eq!(turns[0].messages.len(), 2);
+        assert_eq!(turns[1].turn_index, 1);
+        assert_eq!(turns[1].session_index, 0);
+        assert_eq!(turns[2].turn_index, 2);
+        assert_eq!(turns[2].session_index, 1);
+    }
+
+    #[test]
+    fn test_format_turn_transcript() {
+        let turn = ConversationTurn {
+            messages: vec![
+                ConversationMessage {
+                    role: "user".to_string(),
+                    content: "I moved to NYC".to_string(),
+                },
+                ConversationMessage {
+                    role: "assistant".to_string(),
+                    content: "Great!".to_string(),
+                },
+            ],
+            session_index: 0,
+            turn_index: 1,
+        };
+
+        let transcript = format_turn_transcript(
+            &turn,
+            Some("User lives in Lisbon"),
+            "User: state:location=Lisbon",
+        );
+        assert!(transcript.contains("User lives in Lisbon"));
+        assert!(transcript.contains("state:location=Lisbon"));
+        assert!(transcript.contains("user: I moved to NYC"));
     }
 
     // 1. test_format_transcript
@@ -1441,6 +3169,14 @@ mod tests {
                     predicate: "lives_in".to_string(),
                     object: "Paris".to_string(),
                     confidence: 0.9,
+                    category: None,
+                    amount: None,
+                    split_with: None,
+                    temporal_signal: None,
+                    depends_on: None,
+                    is_update: None,
+                    cardinality_hint: None,
+                    sentiment: None,
                 },
                 ExtractedFact {
                     statement: "Bob works at Google".to_string(),
@@ -1448,6 +3184,14 @@ mod tests {
                     predicate: "works_at".to_string(),
                     object: "Google".to_string(),
                     confidence: 0.85,
+                    category: None,
+                    amount: None,
+                    split_with: None,
+                    temporal_signal: None,
+                    depends_on: None,
+                    is_update: None,
+                    cardinality_hint: None,
+                    sentiment: None,
                 },
                 ExtractedFact {
                     statement: "Alice and Bob are friends".to_string(),
@@ -1455,6 +3199,14 @@ mod tests {
                     predicate: "friends_with".to_string(),
                     object: "Bob".to_string(),
                     confidence: 0.75,
+                    category: None,
+                    amount: None,
+                    split_with: None,
+                    temporal_signal: None,
+                    depends_on: None,
+                    is_update: None,
+                    cardinality_hint: None,
+                    sentiment: None,
                 },
             ],
             goals: vec![],
@@ -1593,6 +3345,14 @@ mod tests {
                     predicate: "p".to_string(),
                     object: "o".to_string(),
                     confidence: 0.9,
+                    category: None,
+                    amount: None,
+                    split_with: None,
+                    temporal_signal: None,
+                    depends_on: None,
+                    is_update: None,
+                    cardinality_hint: None,
+                    sentiment: None,
                 },
                 ExtractedFact {
                     statement: "F2".to_string(),
@@ -1600,6 +3360,14 @@ mod tests {
                     predicate: "p".to_string(),
                     object: "o".to_string(),
                     confidence: 0.8,
+                    category: None,
+                    amount: None,
+                    split_with: None,
+                    temporal_signal: None,
+                    depends_on: None,
+                    is_update: None,
+                    cardinality_hint: None,
+                    sentiment: None,
                 },
             ],
             goals: vec![ExtractedGoal {
@@ -1846,6 +3614,14 @@ mod tests {
                 predicate: "p".to_string(),
                 object: "o".to_string(),
                 confidence: 0.9,
+                category: None,
+                amount: None,
+                split_with: None,
+                temporal_signal: None,
+                depends_on: None,
+                is_update: None,
+                cardinality_hint: None,
+                sentiment: None,
             }],
             goals: vec![], // all goals filtered out
             procedural_summary: Some(ProceduralSummary {

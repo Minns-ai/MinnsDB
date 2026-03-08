@@ -1,11 +1,10 @@
 //! LLM hint classifier for NLQ intent routing.
 //!
-//! Provides an async LLM advisory classifier that can override the rule-based
-//! intent classifier when it detects structured memory types or when rules
-//! return Unknown.
+//! Provides an async LLM classifier that maps natural language questions to
+//! structure and intent hints.
 
 use crate::llm_client::{parse_json_from_llm, LlmClient, LlmRequest};
-use crate::nlq::intent::{ClassifiedIntent, QueryIntent, StructuredQueryType};
+use crate::nlq::intent::{QueryIntent, StructuredQueryType};
 use serde::{Deserialize, Serialize};
 
 /// What kind of structured memory the query targets.
@@ -23,7 +22,10 @@ pub enum StructureHint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntentHint {
+    /// Pairwise balance between two specific entities
     Balance,
+    /// Aggregate balance across ALL entities: "who owes the most", "all balances"
+    AggregateBalance,
     CurrentState,
     Children,
     Ranking,
@@ -37,26 +39,47 @@ pub enum IntentHint {
     Unknown,
 }
 
+/// Temporal frame: how the query relates to time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemporalFrame {
+    /// "where do I live now" — filter to current state
+    Current,
+    /// "where did I used to live" — include historical state
+    Historical,
+    /// "how has my routine changed" — compare across time
+    Comparative,
+    /// "who is my sister" — time-independent facts
+    Timeless,
+}
+
+impl Default for TemporalFrame {
+    fn default() -> Self {
+        Self::Current
+    }
+}
+
 /// Response parsed from the LLM's JSON output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmHintResponse {
     pub structure_hint: StructureHint,
     pub intent_hint: IntentHint,
-}
-
-/// Result of merging rule-based classification with LLM hint.
-#[derive(Debug, Clone)]
-pub struct MergedClassification {
-    pub intent: ClassifiedIntent,
-    pub llm_overrode: bool,
-    pub raw_hint: Option<LlmHintResponse>,
+    #[serde(default)]
+    pub temporal_frame: TemporalFrame,
 }
 
 const SYSTEM_PROMPT: &str = concat!(
-    "You classify graph database queries. Output strict JSON with exactly two fields:\n",
+    "You classify graph database queries. Output strict JSON with exactly three fields:\n",
     "- \"structure_hint\": one of \"ledger\", \"tree\", \"state_machine\", \"preference_list\", \"generic_graph\"\n",
-    "- \"intent_hint\": one of \"balance\", \"current_state\", \"children\", \"ranking\", ",
+    "- \"intent_hint\": one of \"balance\", \"aggregate_balance\", \"current_state\", \"children\", \"ranking\", ",
     "\"path\", \"neighbors\", \"similarity\", \"aggregate\", \"temporal\", \"subgraph\", \"knowledge\", \"unknown\"\n",
+    "- \"temporal_frame\": one of \"current\", \"historical\", \"comparative\", \"timeless\"\n",
+    "  - \"current\": query asks about present state (\"where do I live now\", \"what's my routine\")\n",
+    "  - \"historical\": query asks about past state (\"where did I used to live\", \"what was my old job\")\n",
+    "  - \"comparative\": query compares across time (\"how has my routine changed\", \"compared to before\")\n",
+    "  - \"timeless\": query asks about time-independent facts (\"who is my sister\", \"what's my blood type\")\n\n",
+    "Use \"balance\" for pairwise queries between two specific entities (e.g. \"balance between Alice and Bob\").\n",
+    "Use \"aggregate_balance\" for queries across ALL entities (e.g. \"who owes the most\", \"show all balances\", \"biggest debtor\").\n",
     "No markdown fences, no explanation, no other fields.",
 );
 
@@ -88,67 +111,53 @@ pub fn parse_hint_response(text: &str) -> Option<LlmHintResponse> {
     serde_json::from_value::<LlmHintResponse>(value).ok()
 }
 
-// ────────── Merge logic ──────────
-
-/// Merge rule-based classification with LLM hint.
+/// Rule-based fallback for temporal frame detection when LLM is unavailable.
 ///
-/// Rules (purely categorical, no confidence scores):
-/// 1. No LLM hint → keep rule-based
-/// 2. Rule returns Unknown → use LLM's categorical hint
-/// 3. LLM says structured memory type (not GenericGraph) AND rules didn't → override
-/// 4. Both agree → keep rule-based (has more detail)
-/// 5. Disagree on generic intents → keep rule-based (deterministic wins)
-pub fn merge_classification(
-    rule_based: ClassifiedIntent,
-    llm_hint: Option<LlmHintResponse>,
-) -> MergedClassification {
-    // Rule 1
-    let hint = match llm_hint {
-        None => {
-            return MergedClassification {
-                intent: rule_based,
-                llm_overrode: false,
-                raw_hint: None,
-            }
-        },
-        Some(h) => h,
-    };
+/// Uses keyword patterns to classify the temporal intent of a question.
+pub fn detect_temporal_frame(question: &str) -> TemporalFrame {
+    let q = question.to_lowercase();
 
-    // Rule 2: Rules returned Unknown → use LLM
-    if matches!(rule_based.intent, QueryIntent::Unknown) {
-        let intent = intent_from_hint(&hint);
-        return MergedClassification {
-            intent: ClassifiedIntent {
-                intent,
-                negated: rule_based.negated,
-            },
-            llm_overrode: true,
-            raw_hint: Some(hint),
-        };
-    }
-
-    // Rule 3: LLM says structured memory AND rules didn't
-    if !matches!(hint.structure_hint, StructureHint::GenericGraph)
-        && !matches!(rule_based.intent, QueryIntent::StructuredMemoryQuery { .. })
+    // Historical patterns
+    if q.contains("used to")
+        || q.contains("when i lived in")
+        || q.contains("back when")
+        || q.contains("before i moved")
+        || q.contains("did i")
+        || q.contains("previously")
+        || q.contains("in the past")
+        || q.contains("old job")
+        || q.contains("former")
     {
-        if let Some(intent) = structured_intent_from_hint(&hint.structure_hint) {
-            return MergedClassification {
-                intent: ClassifiedIntent {
-                    intent,
-                    negated: rule_based.negated,
-                },
-                llm_overrode: true,
-                raw_hint: Some(hint),
-            };
-        }
+        return TemporalFrame::Historical;
     }
 
-    // Rules 4 & 5: keep rule-based
-    MergedClassification {
-        intent: rule_based,
-        llm_overrode: false,
-        raw_hint: Some(hint),
+    // Comparative patterns
+    if q.contains("how has")
+        || q.contains("changed")
+        || q.contains("compared to")
+        || q.contains("over time")
+        || q.contains("difference between")
+        || q.contains("evolution of")
+    {
+        return TemporalFrame::Comparative;
     }
+
+    // Timeless patterns (identity, family, immutable facts)
+    if q.contains("who is my")
+        || q.contains("birthday")
+        || q.contains("blood type")
+        || q.contains("sister")
+        || q.contains("brother")
+        || q.contains("parent")
+        || q.contains("mother")
+        || q.contains("father")
+        || q.contains("maiden name")
+        || q.contains("born")
+    {
+        return TemporalFrame::Timeless;
+    }
+
+    TemporalFrame::Current
 }
 
 /// Map an LLM hint to a `QueryIntent`.
@@ -164,6 +173,9 @@ pub fn intent_from_hint(hint: &LlmHintResponse) -> QueryIntent {
     match hint.intent_hint {
         IntentHint::Balance => QueryIntent::StructuredMemoryQuery {
             query_type: StructuredQueryType::LedgerBalance,
+        },
+        IntentHint::AggregateBalance => QueryIntent::StructuredMemoryQuery {
+            query_type: StructuredQueryType::AggregateBalance,
         },
         IntentHint::CurrentState => QueryIntent::StructuredMemoryQuery {
             query_type: StructuredQueryType::CurrentState,
@@ -197,6 +209,8 @@ pub fn intent_from_hint(hint: &LlmHintResponse) -> QueryIntent {
 /// Map a structure hint to a structured memory `QueryIntent`.
 ///
 /// Returns `None` for `GenericGraph` (not a structured memory type).
+/// Note: For Ledger, defaults to LedgerBalance. The caller should check
+/// `intent_hint` for `AggregateBalance` to distinguish pairwise vs aggregate.
 pub fn structured_intent_from_hint(hint: &StructureHint) -> Option<QueryIntent> {
     match hint {
         StructureHint::Ledger => Some(QueryIntent::StructuredMemoryQuery {
@@ -215,51 +229,9 @@ pub fn structured_intent_from_hint(hint: &StructureHint) -> Option<QueryIntent> 
     }
 }
 
-/// Check if two intents agree on the same broad category.
-pub fn intents_agree(rule_based: &QueryIntent, hint: &IntentHint) -> bool {
-    matches!(
-        (rule_based, hint),
-        (QueryIntent::FindNeighbors { .. }, IntentHint::Neighbors)
-            | (QueryIntent::FindPath { .. }, IntentHint::Path)
-            | (QueryIntent::SimilaritySearch, IntentHint::Similarity)
-            | (QueryIntent::Ranking { .. }, IntentHint::Ranking)
-            | (QueryIntent::Aggregate { .. }, IntentHint::Aggregate)
-            | (QueryIntent::TemporalChain { .. }, IntentHint::Temporal)
-            | (QueryIntent::Subgraph { .. }, IntentHint::Subgraph)
-            | (
-                QueryIntent::StructuredMemoryQuery {
-                    query_type: StructuredQueryType::LedgerBalance
-                },
-                IntentHint::Balance
-            )
-            | (
-                QueryIntent::StructuredMemoryQuery {
-                    query_type: StructuredQueryType::CurrentState
-                },
-                IntentHint::CurrentState
-            )
-            | (
-                QueryIntent::StructuredMemoryQuery {
-                    query_type: StructuredQueryType::TreeChildren
-                },
-                IntentHint::Children
-            )
-            | (
-                QueryIntent::StructuredMemoryQuery {
-                    query_type: StructuredQueryType::PreferenceRanking
-                },
-                IntentHint::Ranking
-            )
-            | (QueryIntent::KnowledgeQuery, IntentHint::Knowledge)
-            | (QueryIntent::Unknown, IntentHint::Unknown)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nlq::intent::RankingMetric;
-    use crate::structures::Direction;
 
     #[test]
     fn test_parse_valid_json() {
@@ -302,129 +274,11 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_no_hint() {
-        let rule = ClassifiedIntent {
-            intent: QueryIntent::FindNeighbors {
-                direction: Direction::Both,
-                edge_hint: None,
-            },
-            negated: false,
-        };
-        let merged = merge_classification(rule, None);
-        assert!(!merged.llm_overrode);
-        assert!(merged.raw_hint.is_none());
-        assert!(matches!(
-            merged.intent.intent,
-            QueryIntent::FindNeighbors { .. }
-        ));
-    }
-
-    #[test]
-    fn test_merge_unknown_uses_llm() {
-        let rule = ClassifiedIntent {
-            intent: QueryIntent::Unknown,
-            negated: false,
-        };
-        let hint = LlmHintResponse {
-            structure_hint: StructureHint::GenericGraph,
-            intent_hint: IntentHint::Neighbors,
-        };
-        let merged = merge_classification(rule, Some(hint));
-        assert!(merged.llm_overrode);
-        assert!(matches!(
-            merged.intent.intent,
-            QueryIntent::FindNeighbors { .. }
-        ));
-    }
-
-    #[test]
-    fn test_merge_llm_structured_override() {
-        let rule = ClassifiedIntent {
-            intent: QueryIntent::FindNeighbors {
-                direction: Direction::Both,
-                edge_hint: None,
-            },
-            negated: false,
-        };
-        let hint = LlmHintResponse {
-            structure_hint: StructureHint::Ledger,
-            intent_hint: IntentHint::Balance,
-        };
-        let merged = merge_classification(rule, Some(hint));
-        assert!(merged.llm_overrode);
-        assert!(matches!(
-            merged.intent.intent,
-            QueryIntent::StructuredMemoryQuery {
-                query_type: StructuredQueryType::LedgerBalance
-            }
-        ));
-    }
-
-    #[test]
-    fn test_merge_both_agree_keeps_rules() {
-        let rule = ClassifiedIntent {
-            intent: QueryIntent::FindNeighbors {
-                direction: Direction::Out,
-                edge_hint: Some("knows".to_string()),
-            },
-            negated: false,
-        };
-        let hint = LlmHintResponse {
-            structure_hint: StructureHint::GenericGraph,
-            intent_hint: IntentHint::Neighbors,
-        };
-        let merged = merge_classification(rule, Some(hint));
-        assert!(!merged.llm_overrode);
-        // Rule-based kept with more detail (Outgoing direction, edge_hint)
-        if let QueryIntent::FindNeighbors {
-            direction,
-            edge_hint,
-        } = &merged.intent.intent
-        {
-            assert!(matches!(direction, Direction::Out));
-            assert_eq!(edge_hint.as_deref(), Some("knows"));
-        } else {
-            panic!("Expected FindNeighbors");
-        }
-    }
-
-    #[test]
-    fn test_merge_disagree_keeps_rules() {
-        let rule = ClassifiedIntent {
-            intent: QueryIntent::Ranking {
-                metric: RankingMetric::PageRank,
-            },
-            negated: false,
-        };
-        let hint = LlmHintResponse {
-            structure_hint: StructureHint::GenericGraph,
-            intent_hint: IntentHint::Neighbors,
-        };
-        let merged = merge_classification(rule, Some(hint));
-        assert!(!merged.llm_overrode);
-        assert!(matches!(merged.intent.intent, QueryIntent::Ranking { .. }));
-    }
-
-    #[test]
-    fn test_merge_preserves_negation() {
-        let rule = ClassifiedIntent {
-            intent: QueryIntent::Unknown,
-            negated: true,
-        };
-        let hint = LlmHintResponse {
-            structure_hint: StructureHint::Ledger,
-            intent_hint: IntentHint::Balance,
-        };
-        let merged = merge_classification(rule, Some(hint));
-        assert!(merged.llm_overrode);
-        assert!(merged.intent.negated);
-    }
-
-    #[test]
     fn test_intent_from_hint_structured() {
         let hint = LlmHintResponse {
             structure_hint: StructureHint::StateMachine,
             intent_hint: IntentHint::CurrentState,
+            temporal_frame: TemporalFrame::Current,
         };
         let intent = intent_from_hint(&hint);
         assert!(matches!(
@@ -440,6 +294,7 @@ mod tests {
         let hint = LlmHintResponse {
             structure_hint: StructureHint::GenericGraph,
             intent_hint: IntentHint::Path,
+            temporal_frame: TemporalFrame::Current,
         };
         let intent = intent_from_hint(&hint);
         assert!(matches!(intent, QueryIntent::FindPath { .. }));
@@ -471,54 +326,93 @@ mod tests {
         let hint = LlmHintResponse {
             structure_hint: StructureHint::GenericGraph,
             intent_hint: IntentHint::Knowledge,
+            temporal_frame: TemporalFrame::Current,
         };
         let intent = intent_from_hint(&hint);
         assert!(matches!(intent, QueryIntent::KnowledgeQuery));
     }
 
     #[test]
-    fn test_merge_unknown_uses_knowledge() {
-        let rule = ClassifiedIntent {
-            intent: QueryIntent::Unknown,
-            negated: false,
-        };
-        let hint = LlmHintResponse {
-            structure_hint: StructureHint::GenericGraph,
-            intent_hint: IntentHint::Knowledge,
-        };
-        let merged = merge_classification(rule, Some(hint));
-        assert!(merged.llm_overrode);
-        assert!(matches!(merged.intent.intent, QueryIntent::KnowledgeQuery));
+    fn test_parse_aggregate_balance_hint() {
+        let json = r#"{"structure_hint": "ledger", "intent_hint": "aggregate_balance"}"#;
+        let result = parse_hint_response(json);
+        assert!(result.is_some());
+        let hint = result.unwrap();
+        assert_eq!(hint.structure_hint, StructureHint::Ledger);
+        assert_eq!(hint.intent_hint, IntentHint::AggregateBalance);
     }
 
     #[test]
-    fn test_intents_agree_knowledge() {
-        assert!(intents_agree(
-            &QueryIntent::KnowledgeQuery,
-            &IntentHint::Knowledge,
-        ));
-        assert!(!intents_agree(
-            &QueryIntent::KnowledgeQuery,
-            &IntentHint::Neighbors,
-        ));
+    fn test_temporal_frame_defaults_to_current() {
+        let json = r#"{"structure_hint": "generic_graph", "intent_hint": "knowledge"}"#;
+        let hint = parse_hint_response(json).unwrap();
+        assert_eq!(hint.temporal_frame, TemporalFrame::Current);
     }
 
     #[test]
-    fn test_intents_agree() {
-        assert!(intents_agree(
-            &QueryIntent::FindNeighbors {
-                direction: Direction::Both,
-                edge_hint: None,
-            },
-            &IntentHint::Neighbors,
-        ));
-        assert!(!intents_agree(
-            &QueryIntent::FindNeighbors {
-                direction: Direction::Both,
-                edge_hint: None,
-            },
-            &IntentHint::Path,
-        ));
-        assert!(intents_agree(&QueryIntent::Unknown, &IntentHint::Unknown));
+    fn test_parse_temporal_frame_from_json() {
+        let json = r#"{"structure_hint": "generic_graph", "intent_hint": "knowledge", "temporal_frame": "historical"}"#;
+        let hint = parse_hint_response(json).unwrap();
+        assert_eq!(hint.temporal_frame, TemporalFrame::Historical);
+    }
+
+    #[test]
+    fn test_detect_temporal_frame_historical() {
+        assert_eq!(
+            detect_temporal_frame("Where did I used to live?"),
+            TemporalFrame::Historical
+        );
+        assert_eq!(
+            detect_temporal_frame("What did I do back when I was in Tokyo?"),
+            TemporalFrame::Historical
+        );
+        assert_eq!(
+            detect_temporal_frame("Before I moved, who were my neighbors?"),
+            TemporalFrame::Historical
+        );
+    }
+
+    #[test]
+    fn test_detect_temporal_frame_comparative() {
+        assert_eq!(
+            detect_temporal_frame("How has my routine changed?"),
+            TemporalFrame::Comparative
+        );
+        assert_eq!(
+            detect_temporal_frame("Compared to before, what's different?"),
+            TemporalFrame::Comparative
+        );
+        assert_eq!(
+            detect_temporal_frame("How have things changed over time?"),
+            TemporalFrame::Comparative
+        );
+    }
+
+    #[test]
+    fn test_detect_temporal_frame_timeless() {
+        assert_eq!(
+            detect_temporal_frame("Who is my sister?"),
+            TemporalFrame::Timeless
+        );
+        assert_eq!(
+            detect_temporal_frame("When is my birthday?"),
+            TemporalFrame::Timeless
+        );
+        assert_eq!(
+            detect_temporal_frame("What's my blood type?"),
+            TemporalFrame::Timeless
+        );
+    }
+
+    #[test]
+    fn test_detect_temporal_frame_current_default() {
+        assert_eq!(
+            detect_temporal_frame("Where do I live?"),
+            TemporalFrame::Current
+        );
+        assert_eq!(
+            detect_temporal_frame("What's my morning routine?"),
+            TemporalFrame::Current
+        );
     }
 }

@@ -88,6 +88,15 @@ pub mod event_content;
 // Temporal views (snapshot, rolling window)
 pub mod temporal_view;
 
+// GraphView trait: composable, zero-copy graph views
+pub mod graph_view;
+
+// TCell: time-indexed property container
+pub mod tcell;
+
+// Dense Vec storage for O(1) node/edge access
+pub mod slot_vec;
+
 // String interning pool
 pub mod intern;
 
@@ -121,8 +130,14 @@ pub mod goal_store;
 // Resilient metadata normalization for structured memory auto-detection
 pub mod metadata_normalize;
 
+// Canonical domain registry for temporal state predicates
+pub mod domain_schema;
+
 // Community summaries for graph communities
 pub mod community_summary;
+
+// Active Retrieval Testing (ART) — validates embedding retrievability
+pub mod active_retrieval_test;
 
 // Community-enriched context injection for formation pipelines
 pub mod context_enrichment;
@@ -140,6 +155,7 @@ pub use decision_trace::{
 };
 pub use episodes::{Episode, EpisodeDetector, EpisodeDetectorConfig, EpisodeId, EpisodeOutcome};
 pub use error::{GraphError, GraphResult};
+pub use graph_view::{EdgeTypeFilter, GraphView, NodeSubgraph};
 pub use inference::{
     ContextualAssociation, EntityReference, EpisodeMetrics, GraphInference, InferenceConfig,
     InferenceResults, InferenceStats, ReinforcementResult, ReinforcementStats, TemporalPattern,

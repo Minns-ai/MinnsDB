@@ -1,79 +1,18 @@
-//! Conversation ingestion and query handlers.
+//! Conversation ingestion handler.
 //!
 //! ## POST /api/conversations/ingest
 //!
-//! Ingest one or more conversation sessions into structured memory.
-//! Messages are classified (transaction, state change, relationship, preference,
-//! or chitchat) and bridged into the appropriate structured memory templates
-//! (ledgers, state machines, trees, preference lists).
+//! Ingest one or more conversation sessions into the graph.
+//! Messages are stored as raw Conversation events, then LLM compaction
+//! extracts facts (subject/predicate/object triples), goals, and procedural
+//! summaries. The extracted facts are fed back through the pipeline to create
+//! Concept nodes and graph edges.
 //!
-//! When a unified LLM client is configured, messages are classified by the LLM
-//! with Rust-side validation of numbers and currencies. Without an LLM, a
-//! keyword-based classifier and parser pipeline is used as fallback.
+//! **Requires a configured LLM client.** Without it, the system cannot extract
+//! any structured information from conversations and will return an error.
 //!
-//! ### Request body
-//!
-//! ```json
-//! {
-//!   "case_id": "optional-string",       // auto-generated if omitted
-//!   "sessions": [
-//!     {
-//!       "session_id": "session_01",
-//!       "topic": "optional topic label",
-//!       "messages": [
-//!         { "role": "user",      "content": "Alice: Paid €50 for lunch - split with Bob" },
-//!         { "role": "assistant", "content": "Got it!" }
-//!       ],
-//!       "contains_fact": false,          // benchmark metadata (optional)
-//!       "fact_id": null,                 // benchmark metadata (optional)
-//!       "fact_quote": null               // benchmark metadata (optional)
-//!     }
-//!   ],
-//!   "include_assistant_facts": false     // if true, also extract facts from assistant messages
-//! }
-//! ```
-//!
-//! ### Response body
-//!
-//! ```json
-//! {
-//!   "case_id": "case_abc123",
-//!   "messages_processed": 42,
-//!   "transactions_found": 12,
-//!   "state_changes_found": 3,
-//!   "relationships_found": 5,
-//!   "preferences_found": 8,
-//!   "chitchat_skipped": 14
-//! }
-//! ```
-//!
-//! ## POST /api/conversations/query
-//!
-//! Query the structured memory populated by conversation ingestion.
-//! First attempts conversation-specific classification (numeric/balance,
-//! state, entity summary, preference, relationship path). Falls back to the
-//! general NLQ pipeline if no conversation pattern matches.
-//!
-//! ### Request body
-//!
-//! ```json
-//! {
-//!   "question": "Who owes whom?",
-//!   "session_id": "optional-session-for-nlq-context"
-//! }
-//! ```
-//!
-//! ### Response body
-//!
-//! ```json
-//! {
-//!   "answer": "Settlement: Alice -> Bob : 172.50 EUR, Charlie -> Bob : 60.00 EUR",
-//!   "query_type": "numeric"
-//! }
-//! ```
-//!
-//! Query types: `"numeric"`, `"state"`, `"entity_summary"`, `"preference"`,
-//! `"relationship"`, `"nlq"` (fallback).
+//! For querying, use `POST /api/nlq` which provides the unified multi-source
+//! pipeline (BM25 + memory + claims + graph entity resolution with RRF fusion).
 
 use crate::errors::ApiError;
 use crate::state::AppState;
@@ -132,16 +71,6 @@ pub struct MessageInput {
     pub content: String,
 }
 
-/// Query request for `POST /api/conversations/query`.
-#[derive(Debug, Deserialize)]
-pub struct ConversationQueryRequest {
-    /// The question to answer against structured memory.
-    pub question: String,
-    /// Optional session ID for NLQ conversational context.
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -154,6 +83,18 @@ pub async fn ingest_conversation(
     State(state): State<AppState>,
     Json(request): Json<ConversationIngestRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Hard fail: LLM is required for conversation ingest.
+    // Without it, no facts can be extracted and the graph would contain only
+    // raw Conversation events with no structure.
+    if state.engine.unified_llm_client().is_none() {
+        return Err(ApiError::BadRequest(
+            "LLM client is required for conversation ingest. \
+             Configure an OpenAI-compatible API key (OPENAI_API_KEY or LLM_API_KEY) \
+             and restart the server."
+                .to_string(),
+        ));
+    }
+
     let case_id = request.case_id.clone().unwrap_or_else(uuid_v4_simple);
 
     info!("Ingesting conversation case_id={}", case_id);
@@ -227,6 +168,10 @@ pub async fn ingest_conversation(
                         }
 
                         // 3. Submit each event through the full pipeline
+                        // Disable per-event claim extraction (semantic=false) because
+                        // LLM compaction handles all fact extraction. Running both would
+                        // flood the LLM API with redundant calls and cause rate-limit
+                        // failures that make compaction drop extracted facts.
                         let mut events_processed = 0usize;
                         for event in events {
                             match engine
@@ -308,36 +253,33 @@ pub async fn ingest_conversation(
                             });
                         }
 
-                        // 6. Fire-and-forget: LLM compaction (if enabled)
-                        let compaction_started =
+                        // 6. LLM compaction: extract facts, goals, procedural
+                        //    summaries and feed them back through the pipeline.
+                        //    Runs INLINE so extracted data is in the graph before
+                        //    the response returns.
+                        let compaction_result =
                             if engine.config.enable_conversation_compaction {
-                                let engine_cmp = engine.clone();
-                                let ingest_cmp = ingest_data_clone.clone();
-                                let case_id_cmp = case_id.clone();
-                                tokio::spawn(async move {
-                                    let result =
-                                        agent_db_graph::conversation::run_compaction(
-                                            &engine_cmp,
-                                            &ingest_cmp,
-                                            &case_id_cmp,
-                                        )
-                                        .await;
-                                    tracing::info!(
-                                        "Compaction case_id={}: facts={} goals={} goals_deduped={} steps={} memory={} updated={} deleted={} playbooks={}",
-                                        case_id_cmp,
-                                        result.facts_extracted,
-                                        result.goals_extracted,
-                                        result.goals_deduplicated,
-                                        result.procedural_steps_extracted,
-                                        result.procedural_memory_created,
-                                        result.memories_updated,
-                                        result.memories_deleted,
-                                        result.playbooks_extracted,
-                                    );
-                                });
-                                true
+                                let cr = agent_db_graph::conversation::run_compaction(
+                                    &engine,
+                                    &ingest_data_clone,
+                                    &case_id,
+                                )
+                                .await;
+                                tracing::info!(
+                                    "Compaction case_id={}: facts={} goals={} goals_deduped={} steps={} memory={} updated={} deleted={} playbooks={}",
+                                    case_id,
+                                    cr.facts_extracted,
+                                    cr.goals_extracted,
+                                    cr.goals_deduplicated,
+                                    cr.procedural_steps_extracted,
+                                    cr.procedural_memory_created,
+                                    cr.memories_updated,
+                                    cr.memories_deleted,
+                                    cr.playbooks_extracted,
+                                );
+                                Some(cr)
                             } else {
-                                false
+                                None
                             };
 
                         let rolling_summary_started = engine.config.enable_rolling_summary;
@@ -345,13 +287,18 @@ pub async fn ingest_conversation(
                         Ok(json!({
                             "case_id": result.case_id,
                             "messages_processed": result.messages_processed,
-                            "transactions_found": result.transactions_found,
-                            "state_changes_found": result.state_changes_found,
-                            "relationships_found": result.relationships_found,
-                            "preferences_found": result.preferences_found,
-                            "chitchat_skipped": result.chitchat_skipped,
                             "events_submitted": events_processed,
-                            "compaction_started": compaction_started,
+                            "compaction": compaction_result.as_ref().map(|cr| json!({
+                                "facts_extracted": cr.facts_extracted,
+                                "goals_extracted": cr.goals_extracted,
+                                "goals_deduplicated": cr.goals_deduplicated,
+                                "procedural_steps": cr.procedural_steps_extracted,
+                                "memories_created": cr.procedural_memory_created,
+                                "memories_updated": cr.memories_updated,
+                                "memories_deleted": cr.memories_deleted,
+                                "playbooks_extracted": cr.playbooks_extracted,
+                                "llm_success": cr.llm_success,
+                            })),
                             "rolling_summary_started": rolling_summary_started,
                         }))
                     })
@@ -361,159 +308,6 @@ pub async fn ingest_conversation(
         .await?;
 
     Ok(Json(result))
-}
-
-/// POST /api/conversations/query — query with conversation context.
-pub async fn query_conversation(
-    State(state): State<AppState>,
-    Json(request): Json<ConversationQueryRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let _permit = state
-        .read_gate
-        .acquire()
-        .await
-        .map_err(ApiError::ServiceUnavailable)?;
-
-    info!("Conversation query: {}", request.question);
-
-    // Retrieve related memories and strategies for context enrichment (BM25-only)
-    let related_memories = retrieve_related_memories(&state, &request.question).await;
-    let related_strategies = retrieve_related_strategies(&state, &request.question).await;
-
-    // First try conversation-specific query classification
-    let sm_guard = state.engine.structured_memory().read().await;
-
-    if let Some(cq) = agent_db_graph::conversation::classify_conversation_query(&request.question) {
-        let registry = build_registry_from_store(&sm_guard);
-
-        let answer = agent_db_graph::conversation::execute_conversation_query(
-            &cq,
-            &sm_guard,
-            &registry,
-            &request.question,
-        );
-        let memory_context =
-            agent_db_graph::conversation::gather_memory_context(&cq, &sm_guard, &registry);
-        let query_type = match &cq {
-            agent_db_graph::conversation::ConversationQueryType::Numeric { .. } => "numeric",
-            agent_db_graph::conversation::ConversationQueryType::State { .. } => "state",
-            agent_db_graph::conversation::ConversationQueryType::EntitySummary { .. } => {
-                "entity_summary"
-            },
-            agent_db_graph::conversation::ConversationQueryType::Preference { .. } => "preference",
-            agent_db_graph::conversation::ConversationQueryType::RelationshipPath { .. } => {
-                "relationship"
-            },
-        };
-        return Ok(Json(json!({
-            "answer": answer,
-            "query_type": query_type,
-            "memory_context": memory_context,
-            "related_memories": related_memories,
-            "related_strategies": related_strategies,
-        })));
-    }
-
-    drop(sm_guard);
-
-    // Fall back to general NLQ pipeline
-    let pagination = agent_db_graph::nlq::NlqPagination::default();
-    match state
-        .engine
-        .natural_language_query(
-            &request.question,
-            &pagination,
-            request.session_id.as_deref(),
-        )
-        .await
-    {
-        Ok(response) => Ok(Json(json!({
-            "answer": response.answer,
-            "query_type": "nlq",
-            "related_memories": related_memories,
-            "related_strategies": related_strategies,
-        }))),
-        Err(e) => Err(ApiError::Internal(format!("NLQ error: {}", e))),
-    }
-}
-
-/// Retrieve related memories via BM25-only multi-signal retrieval.
-async fn retrieve_related_memories(
-    state: &AppState,
-    question: &str,
-) -> Vec<agent_db_graph::MemorySummary> {
-    let query = agent_db_graph::MemoryRetrievalQuery {
-        query_text: question.to_string(),
-        query_embedding: vec![],
-        context: None,
-        anchor_node: None,
-        agent_id: None,
-        session_id: None,
-        now: None,
-        limit: 5,
-    };
-    let memories = state
-        .engine
-        .retrieve_memories_multi_signal(query, None)
-        .await;
-    memories
-        .iter()
-        .map(agent_db_graph::MemorySummary::from_memory)
-        .collect()
-}
-
-/// Retrieve related strategies via BM25-only multi-signal retrieval.
-async fn retrieve_related_strategies(
-    state: &AppState,
-    question: &str,
-) -> Vec<agent_db_graph::StrategySummary> {
-    let query = agent_db_graph::StrategyRetrievalQuery {
-        query_text: question.to_string(),
-        query_embedding: vec![],
-        anchor_node: None,
-        now: None,
-        limit: 3,
-    };
-    let strategies = state
-        .engine
-        .retrieve_strategies_multi_signal(query, None)
-        .await;
-    strategies
-        .iter()
-        .map(agent_db_graph::StrategySummary::from_strategy)
-        .collect()
-}
-
-/// Build a minimal NameRegistry from the structured memory store.
-fn build_registry_from_store(
-    store: &agent_db_graph::StructuredMemoryStore,
-) -> agent_db_graph::NameRegistry {
-    let mut registry = agent_db_graph::NameRegistry::new();
-
-    // Extract names from ledger entity_pairs
-    for key in store.list_keys("ledger:") {
-        if let Some(agent_db_graph::MemoryTemplate::Ledger { entity_pair, .. }) = store.get(key) {
-            registry.get_or_create(&entity_pair.0);
-            registry.get_or_create(&entity_pair.1);
-        }
-    }
-
-    // Extract entity names from state machines
-    for key in store.list_keys("state:") {
-        if let Some(agent_db_graph::MemoryTemplate::StateMachine { entity, .. }) = store.get(key) {
-            registry.get_or_create(entity);
-        }
-    }
-
-    // Extract entity names from preference lists
-    for key in store.list_keys("prefs:") {
-        if let Some(agent_db_graph::MemoryTemplate::PreferenceList { entity, .. }) = store.get(key)
-        {
-            registry.get_or_create(entity);
-        }
-    }
-
-    registry
 }
 
 /// Generate a simple pseudo-UUID (no external dependency).

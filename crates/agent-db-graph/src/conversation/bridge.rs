@@ -3,12 +3,9 @@
 //! Populates the existing `StructuredMemoryStore` directly, bypassing the
 //! full event pipeline for efficiency.
 
-use super::parsers;
 use super::types::*;
 use crate::llm_client::LlmClient;
-use crate::structured_memory::{
-    LedgerDirection, LedgerEntry, MemoryProvenance, MemoryTemplate, StructuredMemoryStore,
-};
+use crate::structured_memory::StructuredMemoryStore;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -33,7 +30,7 @@ pub fn ingest(
 /// Messages already in `state.processed_messages` are skipped automatically.
 pub fn ingest_incremental(
     data: &ConversationIngest,
-    store: &mut StructuredMemoryStore,
+    _store: &mut StructuredMemoryStore,
     options: &IngestOptions,
     state: &mut ConversationState,
 ) -> IngestResult {
@@ -57,77 +54,16 @@ pub fn ingest_incremental(
         }
     }
 
-    // Second pass: classify, parse, and bridge each message
+    // Second pass: count messages (no rule-based classification).
+    // LLM compaction handles all fact extraction.
     for session in &data.sessions {
-        for (idx, msg) in session.messages.iter().enumerate() {
-            // Idempotency check
+        for (idx, _msg) in session.messages.iter().enumerate() {
             let dedup_key = (case_id.clone(), session.session_id.clone(), idx);
             if state.processed_messages.contains(&dedup_key) {
                 continue;
             }
             state.processed_messages.insert(dedup_key);
-
-            let ctx = ConversationContext {
-                case_id: case_id.clone(),
-                session_id: session.session_id.clone(),
-                message_index: idx,
-                speaker_entity: None,
-                ingest_options: options.clone(),
-            };
-
-            let parsed = parsers::classify_and_parse(
-                &ctx,
-                state,
-                &msg.content,
-                &msg.role,
-                session.topic.as_deref(),
-            );
-
             result.messages_processed += 1;
-
-            match &parsed.parsed {
-                ParsedPayload::Transaction(tx) => {
-                    bridge_transaction(tx, state, store);
-                    result.transactions_found += 1;
-                },
-                ParsedPayload::StateChange(sc) => {
-                    bridge_state_change(sc, state, store);
-                    result.state_changes_found += 1;
-                },
-                ParsedPayload::Relationship(rel) => {
-                    bridge_relationship(rel, state, store);
-                    result.relationships_found += 1;
-                },
-                ParsedPayload::Preference(pref) => {
-                    bridge_preference(pref, state, store);
-                    result.preferences_found += 1;
-                },
-                ParsedPayload::Chitchat(_) => {
-                    result.chitchat_skipped += 1;
-                },
-            }
-        }
-
-        // Bridge fact_quote from session metadata into preferences
-        if session.contains_fact == Some(true) {
-            if let (Some(ref quote), Some(ref fact_id)) = (&session.fact_quote, &session.fact_id) {
-                let category = parsers::infer_preference_category(quote, session.topic.as_deref());
-                let sentiment = if fact_id.contains("negative") {
-                    0.2
-                } else if fact_id.contains("mixed") {
-                    0.5
-                } else {
-                    0.8
-                };
-                let pref = PreferenceData {
-                    entity: "user".to_string(),
-                    item: format!("[{}] {}", fact_id, quote),
-                    category,
-                    sentiment,
-                };
-                bridge_preference(&pref, state, store);
-                result.facts_captured.push((fact_id.clone(), quote.clone()));
-            }
         }
     }
 
@@ -160,13 +96,12 @@ pub async fn ingest_with_llm(
 /// Messages already in `state.processed_messages` are skipped automatically.
 pub async fn ingest_with_llm_incremental(
     data: &ConversationIngest,
-    store: &mut StructuredMemoryStore,
+    _store: &mut StructuredMemoryStore,
     options: &IngestOptions,
-    llm_client: Option<Arc<dyn LlmClient>>,
+    _llm_client: Option<Arc<dyn LlmClient>>,
     state: &mut ConversationState,
 ) -> IngestResult {
-    let llm_classifier = llm_client.map(super::llm_classifier::ConversationLlmClassifier::new);
-
+    // No per-message classification. LLM compaction handles all extraction.
     let case_id = data
         .case_id
         .clone()
@@ -177,7 +112,6 @@ pub async fn ingest_with_llm_incremental(
         ..Default::default()
     };
 
-    // First pass: collect all participant names
     for session in &data.sessions {
         for msg in &session.messages {
             if msg.role == "assistant" && !options.include_assistant_facts {
@@ -187,105 +121,14 @@ pub async fn ingest_with_llm_incremental(
         }
     }
 
-    // Second pass: classify, parse, and bridge each message
     for session in &data.sessions {
-        for (idx, msg) in session.messages.iter().enumerate() {
+        for (idx, _msg) in session.messages.iter().enumerate() {
             let dedup_key = (case_id.clone(), session.session_id.clone(), idx);
             if state.processed_messages.contains(&dedup_key) {
                 continue;
             }
             state.processed_messages.insert(dedup_key);
-
-            let ctx = ConversationContext {
-                case_id: case_id.clone(),
-                session_id: session.session_id.clone(),
-                message_index: idx,
-                speaker_entity: None,
-                ingest_options: options.clone(),
-            };
-
-            // Try LLM classification first, fall back to keyword path
-            let parsed = if let Some(ref classifier) = llm_classifier {
-                match classifier
-                    .classify_and_extract(
-                        &msg.content,
-                        &state.known_participants,
-                        session.topic.as_deref(),
-                    )
-                    .await
-                {
-                    Some(mut llm_msg) => {
-                        llm_msg.session_id = ctx.session_id.clone();
-                        llm_msg.message_index = ctx.message_index;
-                        llm_msg.original_content = msg.content.clone();
-                        llm_msg
-                    },
-                    None => {
-                        tracing::debug!("LLM classify failed, falling back to keyword path");
-                        parsers::classify_and_parse(
-                            &ctx,
-                            state,
-                            &msg.content,
-                            &msg.role,
-                            session.topic.as_deref(),
-                        )
-                    },
-                }
-            } else {
-                parsers::classify_and_parse(
-                    &ctx,
-                    state,
-                    &msg.content,
-                    &msg.role,
-                    session.topic.as_deref(),
-                )
-            };
-
             result.messages_processed += 1;
-
-            match &parsed.parsed {
-                ParsedPayload::Transaction(tx) => {
-                    bridge_transaction(tx, state, store);
-                    result.transactions_found += 1;
-                },
-                ParsedPayload::StateChange(sc) => {
-                    bridge_state_change(sc, state, store);
-                    result.state_changes_found += 1;
-                },
-                ParsedPayload::Relationship(rel) => {
-                    bridge_relationship(rel, state, store);
-                    result.relationships_found += 1;
-                },
-                ParsedPayload::Preference(pref) => {
-                    bridge_preference(pref, state, store);
-                    result.preferences_found += 1;
-                },
-                ParsedPayload::Chitchat(_) => {
-                    result.chitchat_skipped += 1;
-                },
-            }
-        }
-
-        // Bridge fact_quote from session metadata
-        if session.contains_fact == Some(true) {
-            if let (Some(ref quote), Some(ref fact_id)) = (&session.fact_quote, &session.fact_id) {
-                let category = parsers::infer_preference_category(quote, session.topic.as_deref());
-                let sentiment = if fact_id.contains("negative") {
-                    0.2
-                } else if fact_id.contains("mixed") {
-                    0.5
-                } else {
-                    0.8
-                };
-                let pref = PreferenceData {
-                    entity: "user".to_string(),
-                    item: format!("[{}] {}", fact_id, quote),
-                    category,
-                    sentiment,
-                };
-                bridge_preference(&pref, state, store);
-                result.facts_captured.push((fact_id.clone(), quote.clone()));
-            }
         }
     }
 
@@ -308,7 +151,7 @@ pub fn ingest_per_session(
     let mut results = Vec::new();
 
     for session in &data.sessions {
-        let mut store = StructuredMemoryStore::new();
+        let store = StructuredMemoryStore::new();
         let mut state = ConversationState::new();
         let mut result = IngestResult {
             case_id: case_id.clone(),
@@ -323,53 +166,15 @@ pub fn ingest_per_session(
             collect_participants(&msg.content, &mut state.known_participants);
         }
 
-        // Second pass: classify, parse, and bridge
-        for (idx, msg) in session.messages.iter().enumerate() {
+        // Second pass: count messages (no rule-based classification).
+        // LLM compaction handles all fact extraction.
+        for (idx, _msg) in session.messages.iter().enumerate() {
             let dedup_key = (case_id.clone(), session.session_id.clone(), idx);
             if state.processed_messages.contains(&dedup_key) {
                 continue;
             }
             state.processed_messages.insert(dedup_key);
-
-            let ctx = ConversationContext {
-                case_id: case_id.clone(),
-                session_id: session.session_id.clone(),
-                message_index: idx,
-                speaker_entity: None,
-                ingest_options: options.clone(),
-            };
-
-            let parsed = parsers::classify_and_parse(
-                &ctx,
-                &state,
-                &msg.content,
-                &msg.role,
-                session.topic.as_deref(),
-            );
-
             result.messages_processed += 1;
-
-            match &parsed.parsed {
-                ParsedPayload::Transaction(tx) => {
-                    bridge_transaction(tx, &mut state, &mut store);
-                    result.transactions_found += 1;
-                },
-                ParsedPayload::StateChange(sc) => {
-                    bridge_state_change(sc, &mut state, &mut store);
-                    result.state_changes_found += 1;
-                },
-                ParsedPayload::Relationship(rel) => {
-                    bridge_relationship(rel, &mut state, &mut store);
-                    result.relationships_found += 1;
-                },
-                ParsedPayload::Preference(pref) => {
-                    bridge_preference(pref, &mut state, &mut store);
-                    result.preferences_found += 1;
-                },
-                ParsedPayload::Chitchat(_) => {
-                    result.chitchat_skipped += 1;
-                },
-            }
         }
 
         results.push(SessionIngestResult {
@@ -544,321 +349,9 @@ fn extract_person_names_only(text: &str) -> Vec<String> {
     names
 }
 
-// ---------------------------------------------------------------------------
-// Transaction → Ledger
-// ---------------------------------------------------------------------------
-
-/// Sanitize a name: trim whitespace and trailing punctuation.
-fn sanitize_name(name: &str) -> String {
-    name.trim()
-        .trim_end_matches(|c: char| !c.is_alphanumeric())
-        .trim_start_matches(|c: char| !c.is_alphanumeric())
-        .to_string()
-}
-
-fn bridge_transaction(
-    tx: &TransactionData,
-    state: &mut ConversationState,
-    store: &mut StructuredMemoryStore,
-) {
-    let payer_name = sanitize_name(&tx.payer);
-    if payer_name.is_empty() {
-        return;
-    }
-    let payer_id = state.name_registry.get_or_create(&payer_name);
-
-    // Resolve beneficiaries
-    let beneficiaries: Vec<String> = if tx.participants_scope == ParticipantsScope::EveryoneKnown {
-        let mut all: Vec<String> = state
-            .known_participants
-            .iter()
-            .map(|n| sanitize_name(n))
-            .filter(|n| !n.is_empty())
-            .collect();
-        all.sort();
-        all.dedup();
-        all
-    } else {
-        tx.beneficiaries
-            .iter()
-            .map(|n| sanitize_name(n))
-            .filter(|n| !n.is_empty())
-            .collect()
-    };
-
-    // Handle refund: reverses the direction of a normal payment.
-    // If Alice gave a refund of €24 each for Bob and Charlie, it means
-    // Alice is REDUCING what Bob/Charlie owe her (or increasing what she owes them).
-    // So the direction is INVERTED compared to a normal payment.
-    if tx.kind == TransactionKind::Reimbursement {
-        // Determine per-person refund amount
-        let num_beneficiaries = beneficiaries.len().max(1) as f64;
-        let per_person = tx.amount / num_beneficiaries;
-
-        for beneficiary_name in &beneficiaries {
-            if beneficiary_name == &payer_name {
-                continue;
-            }
-            let beneficiary_id = state.name_registry.get_or_create(beneficiary_name);
-            let key = crate::structured_memory::ledger_key(payer_id, beneficiary_id);
-
-            // Entity pair names must match the key's ID ordering (lo_id, hi_id)
-            let (entity_a_name, entity_b_name) = if payer_id <= beneficiary_id {
-                (payer_name.clone(), beneficiary_name.clone())
-            } else {
-                (beneficiary_name.clone(), payer_name.clone())
-            };
-            ensure_ledger(store, &key, &entity_a_name, &entity_b_name);
-
-            // INVERTED direction: refund reverses the normal Credit/Debit
-            let direction = if payer_id <= beneficiary_id {
-                LedgerDirection::Debit // was Credit for normal payment
-            } else {
-                LedgerDirection::Credit // was Debit for normal payment
-            };
-
-            if let Err(e) = store.ledger_append(
-                &key,
-                LedgerEntry {
-                    timestamp: 0,
-                    amount: per_person,
-                    description: format!("refund: {}", tx.description),
-                    direction,
-                },
-            ) {
-                tracing::warn!("Failed to append refund ledger entry: {}", e);
-            }
-        }
-        return;
-    }
-
-    // Normal payment: compute per-person share
-    let num_beneficiaries = beneficiaries.len().max(1) as f64;
-    let per_person = match &tx.split_mode {
-        SplitMode::Equal => tx.amount / num_beneficiaries,
-        SplitMode::Percentage(_) => {
-            // Will be handled per-beneficiary below
-            0.0 // placeholder
-        },
-        SplitMode::ExplicitShares(_) => 0.0,
-        SplitMode::SoleBeneficiary => tx.amount,
-        SplitMode::Unknown => tx.amount / num_beneficiaries,
-    };
-
-    for beneficiary_name in &beneficiaries {
-        if beneficiary_name == &payer_name {
-            continue; // Skip self — payer doesn't owe themselves
-        }
-
-        let beneficiary_id = state.name_registry.get_or_create(beneficiary_name);
-        let key = crate::structured_memory::ledger_key(payer_id, beneficiary_id);
-
-        // Entity pair names must match the key's ID ordering (lo_id, hi_id)
-        let (entity_a_name, entity_b_name) = if payer_id <= beneficiary_id {
-            (payer_name.clone(), beneficiary_name.clone())
-        } else {
-            (beneficiary_name.clone(), payer_name.clone())
-        };
-        ensure_ledger(store, &key, &entity_a_name, &entity_b_name);
-
-        let share = match &tx.split_mode {
-            SplitMode::Percentage(pcts) => {
-                if let Some((_, pct)) = pcts.iter().find(|(n, _)| n == beneficiary_name) {
-                    tx.amount * pct / 100.0
-                } else {
-                    per_person
-                }
-            },
-            SplitMode::ExplicitShares(shares) => {
-                if let Some((_, amt)) = shares.iter().find(|(n, _)| n == beneficiary_name) {
-                    *amt
-                } else {
-                    per_person
-                }
-            },
-            _ => per_person,
-        };
-
-        // Payer paid for beneficiary → beneficiary owes payer
-        // In the ledger keyed by (lo_id, hi_id):
-        // If payer_id <= beneficiary_id: payer is entity_a → Credit (entity_a is owed)
-        // If payer_id > beneficiary_id: beneficiary is entity_a → Debit (entity_b is owed)
-        let direction = if payer_id <= beneficiary_id {
-            LedgerDirection::Credit
-        } else {
-            LedgerDirection::Debit
-        };
-
-        if let Err(e) = store.ledger_append(
-            &key,
-            LedgerEntry {
-                timestamp: 0,
-                amount: share,
-                description: tx.description.clone(),
-                direction,
-            },
-        ) {
-            tracing::warn!("Failed to append ledger entry: {}", e);
-        }
-    }
-}
-
-/// Ensure a ledger exists for the given key.
-fn ensure_ledger(store: &mut StructuredMemoryStore, key: &str, name_a: &str, name_b: &str) {
-    if store.get(key).is_none() {
-        store.upsert(
-            key,
-            MemoryTemplate::Ledger {
-                entity_pair: (name_a.to_string(), name_b.to_string()),
-                entries: vec![],
-                balance: 0.0,
-                provenance: MemoryProvenance::EpisodePipeline,
-            },
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// StateChange → StateMachine / PreferenceList (for facts)
-// ---------------------------------------------------------------------------
-
-fn bridge_state_change(
-    sc: &StateChangeData,
-    state: &mut ConversationState,
-    store: &mut StructuredMemoryStore,
-) {
-    let entity_id = state.name_registry.get_or_create(&sc.entity);
-
-    if sc.attribute == "location" || sc.attribute == "status" {
-        // Mutable state → StateMachine
-        let key = format!("state:{}:{}", entity_id, sc.attribute);
-        if store.get(&key).is_none() {
-            store.upsert(
-                &key,
-                MemoryTemplate::StateMachine {
-                    entity: sc.entity.clone(),
-                    current_state: sc.new_value.clone(),
-                    history: vec![],
-                    provenance: MemoryProvenance::EpisodePipeline,
-                },
-            );
-        } else if let Err(e) = store.state_transition(&key, &sc.new_value, "conversation", 0) {
-            tracing::warn!("Failed to apply state transition: {}", e);
-        }
-    } else if sc.attribute.starts_with("routine:") || sc.attribute == "activity" {
-        // Facts (routines, activities) → stored as PreferenceList items
-        let key = format!("prefs:{}:facts", entity_id);
-        if store.get(&key).is_none() {
-            store.upsert(
-                &key,
-                MemoryTemplate::PreferenceList {
-                    entity: sc.entity.clone(),
-                    ranked_items: vec![],
-                    provenance: MemoryProvenance::EpisodePipeline,
-                },
-            );
-        }
-        if let Err(e) = store.preference_update(&key, &sc.new_value, 0, Some(1.0)) {
-            tracing::warn!("Failed to update preference (facts): {}", e);
-        }
-    } else if sc.attribute == "landmark" {
-        // Landmarks → stored as PreferenceList items
-        let key = format!("prefs:{}:landmarks", entity_id);
-        if store.get(&key).is_none() {
-            store.upsert(
-                &key,
-                MemoryTemplate::PreferenceList {
-                    entity: sc.entity.clone(),
-                    ranked_items: vec![],
-                    provenance: MemoryProvenance::EpisodePipeline,
-                },
-            );
-        }
-        if let Err(e) = store.preference_update(&key, &sc.new_value, 0, Some(1.0)) {
-            tracing::warn!("Failed to update preference (landmarks): {}", e);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Relationship → Tree (adjacency)
-// ---------------------------------------------------------------------------
-
-fn bridge_relationship(
-    rel: &RelationshipData,
-    state: &mut ConversationState,
-    store: &mut StructuredMemoryStore,
-) {
-    let _subject_id = state.name_registry.get_or_create(&rel.subject);
-    let _object_id = state.name_registry.get_or_create(&rel.object);
-
-    // Store relationships in a tree keyed by relation type
-    let key = format!("tree:relations:{}", rel.relation_type);
-    if store.get(&key).is_none() {
-        store.upsert(
-            &key,
-            MemoryTemplate::Tree {
-                root: rel.relation_type.clone(),
-                children: std::collections::HashMap::new(),
-                provenance: MemoryProvenance::EpisodePipeline,
-            },
-        );
-    }
-
-    // Add bidirectional edges: subject → object and object → subject
-    if let Err(e) = store.tree_add_child(&key, &rel.subject, &rel.object) {
-        tracing::warn!(
-            "Failed to add tree child ({} → {}): {}",
-            rel.subject,
-            rel.object,
-            e
-        );
-    }
-    if let Err(e) = store.tree_add_child(&key, &rel.object, &rel.subject) {
-        tracing::warn!(
-            "Failed to add tree child ({} → {}): {}",
-            rel.object,
-            rel.subject,
-            e
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Preference → PreferenceList
-// ---------------------------------------------------------------------------
-
-fn bridge_preference(
-    pref: &PreferenceData,
-    state: &mut ConversationState,
-    store: &mut StructuredMemoryStore,
-) {
-    let entity_id = state.name_registry.get_or_create(&pref.entity);
-    let key = crate::structured_memory::prefs_key(entity_id, &pref.category);
-
-    if store.get(&key).is_none() {
-        store.upsert(
-            &key,
-            MemoryTemplate::PreferenceList {
-                entity: pref.entity.clone(),
-                ranked_items: vec![],
-                provenance: MemoryProvenance::EpisodePipeline,
-            },
-        );
-    }
-
-    // Rank by insertion order (lower = earlier = higher preference)
-    // Score represents sentiment
-    let rank = if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&key) {
-        ranked_items.len()
-    } else {
-        0
-    };
-
-    if let Err(e) = store.preference_update(&key, &pref.item, rank, Some(pref.sentiment as f64)) {
-        tracing::warn!("Failed to update preference ({}): {}", pref.category, e);
-    }
-}
+// Rule-based bridge functions (bridge_transaction, bridge_state_change,
+// bridge_relationship, bridge_preference) have been removed.
+// All fact extraction is now handled by LLM compaction.
 
 // ---------------------------------------------------------------------------
 // Event pipeline bridge — produces real Event structs
@@ -934,174 +427,13 @@ pub fn ingest_to_events(
             }
             state.processed_messages.insert(dedup_key);
 
-            let ctx = ConversationContext {
-                case_id: case_id.clone(),
-                session_id: session.session_id.clone(),
-                message_index: idx,
-                speaker_entity: None,
-                ingest_options: options.clone(),
-            };
-
-            let parsed = parsers::classify_and_parse(
-                &ctx,
-                &state,
-                &msg.content,
-                &msg.role,
-                session.topic.as_deref(),
-            );
-
             result.messages_processed += 1;
 
             let timestamp = base_timestamp + (global_msg_idx as u64) * 1_000_000;
             global_msg_idx += 1;
 
-            // Determine category string and build metadata
-            let (category_str, metadata) = match &parsed.parsed {
-                ParsedPayload::Transaction(tx) => {
-                    result.transactions_found += 1;
-                    // Emit one event per beneficiary pair
-                    let payer_name = sanitize_name(&tx.payer);
-                    let beneficiaries: Vec<String> =
-                        if tx.participants_scope == ParticipantsScope::EveryoneKnown {
-                            let mut all: Vec<String> = state
-                                .known_participants
-                                .iter()
-                                .map(|n| sanitize_name(n))
-                                .filter(|n| !n.is_empty())
-                                .collect();
-                            all.sort();
-                            all.dedup();
-                            all
-                        } else {
-                            tx.beneficiaries
-                                .iter()
-                                .map(|n| sanitize_name(n))
-                                .filter(|n| !n.is_empty())
-                                .collect()
-                        };
-
-                    let num_beneficiaries = beneficiaries.len().max(1) as f64;
-                    let per_person = tx.amount / num_beneficiaries;
-
-                    for beneficiary_name in &beneficiaries {
-                        if beneficiary_name == &payer_name {
-                            continue;
-                        }
-                        let share = per_person;
-                        let mut meta = HashMap::new();
-                        meta.insert(
-                            "from".to_string(),
-                            MetadataValue::String(payer_name.clone()),
-                        );
-                        meta.insert(
-                            "to".to_string(),
-                            MetadataValue::String(beneficiary_name.clone()),
-                        );
-                        meta.insert("amount".to_string(), MetadataValue::Float(share));
-                        meta.insert(
-                            "transaction".to_string(),
-                            MetadataValue::String("true".to_string()),
-                        );
-                        meta.insert(
-                            "description".to_string(),
-                            MetadataValue::String(tx.description.clone()),
-                        );
-
-                        let evt = agent_db_events::Event {
-                            id: agent_db_core::types::generate_event_id(),
-                            timestamp,
-                            agent_id,
-                            agent_type: "conversation_agent".to_string(),
-                            session_id: session_id_hash,
-                            event_type: EventType::Conversation {
-                                speaker: parsed
-                                    .original_content
-                                    .split(':')
-                                    .next()
-                                    .unwrap_or("unknown")
-                                    .trim()
-                                    .to_string(),
-                                content: msg.content.clone(),
-                                category: "transaction".to_string(),
-                            },
-                            causality_chain: Vec::new(),
-                            context: EventContext::default(),
-                            metadata: meta,
-                            context_size_bytes: 0,
-                            segment_pointer: None,
-                            is_code: false,
-                        };
-                        events.push(evt);
-                    }
-                    continue; // Already pushed events per-beneficiary
-                },
-                ParsedPayload::StateChange(sc) => {
-                    result.state_changes_found += 1;
-                    let mut meta = HashMap::new();
-                    meta.insert(
-                        "entity".to_string(),
-                        MetadataValue::String(sc.entity.clone()),
-                    );
-                    meta.insert(
-                        "new_state".to_string(),
-                        MetadataValue::String(sc.new_value.clone()),
-                    );
-                    meta.insert(
-                        "entity_state".to_string(),
-                        MetadataValue::String("true".to_string()),
-                    );
-                    ("state_change".to_string(), meta)
-                },
-                ParsedPayload::Relationship(rel) => {
-                    result.relationships_found += 1;
-                    let mut meta = HashMap::new();
-                    meta.insert(
-                        "subject".to_string(),
-                        MetadataValue::String(rel.subject.clone()),
-                    );
-                    meta.insert(
-                        "object".to_string(),
-                        MetadataValue::String(rel.object.clone()),
-                    );
-                    meta.insert(
-                        "relation_type".to_string(),
-                        MetadataValue::String(rel.relation_type.clone()),
-                    );
-                    meta.insert(
-                        "relationship".to_string(),
-                        MetadataValue::String("true".to_string()),
-                    );
-                    ("relationship".to_string(), meta)
-                },
-                ParsedPayload::Preference(pref) => {
-                    result.preferences_found += 1;
-                    let mut meta = HashMap::new();
-                    meta.insert(
-                        "entity".to_string(),
-                        MetadataValue::String(pref.entity.clone()),
-                    );
-                    meta.insert("item".to_string(), MetadataValue::String(pref.item.clone()));
-                    meta.insert(
-                        "category".to_string(),
-                        MetadataValue::String(pref.category.clone()),
-                    );
-                    meta.insert(
-                        "sentiment".to_string(),
-                        MetadataValue::Float(pref.sentiment as f64),
-                    );
-                    meta.insert(
-                        "preference".to_string(),
-                        MetadataValue::String("true".to_string()),
-                    );
-                    ("preference".to_string(), meta)
-                },
-                ParsedPayload::Chitchat(_) => {
-                    result.chitchat_skipped += 1;
-                    ("chitchat".to_string(), HashMap::new())
-                },
-            };
-
-            // Extract speaker from message content
+            // No rule-based classification — every message is a raw Conversation event.
+            // The LLM compaction (run_compaction) handles all fact extraction.
             let speaker = msg
                 .content
                 .split(':')
@@ -1119,11 +451,11 @@ pub fn ingest_to_events(
                 event_type: EventType::Conversation {
                     speaker,
                     content: msg.content.clone(),
-                    category: category_str,
+                    category: "message".to_string(),
                 },
                 causality_chain: Vec::new(),
                 context: EventContext::default(),
-                metadata,
+                metadata: HashMap::new(),
                 context_size_bytes: 0,
                 segment_pointer: None,
                 is_code: false,
@@ -1166,7 +498,10 @@ pub fn ingest_to_events(
         // Bridge fact_quote from session metadata
         if session.contains_fact == Some(true) {
             if let (Some(ref quote), Some(ref fact_id)) = (&session.fact_quote, &session.fact_id) {
-                let category = parsers::infer_preference_category(quote, session.topic.as_deref());
+                let category = session
+                    .topic
+                    .clone()
+                    .unwrap_or_else(|| "general".to_string());
                 let sentiment = if fact_id.contains("negative") {
                     0.2
                 } else if fact_id.contains("mixed") {
@@ -1254,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_simple_transaction() {
+    fn bridge_counts_messages() {
         let data = make_ingest(vec![
             ("user", "Alice: Paid €100 for dinner - split among all"),
             ("user", "Bob: Paid €60 for lunch - split with Alice"),
@@ -1262,78 +597,9 @@ mod tests {
         let mut store = StructuredMemoryStore::new();
         let result = ingest(&data, &mut store, &IngestOptions::default());
 
-        assert_eq!(result.transactions_found, 2);
-        assert!(!store.is_empty());
-    }
-
-    #[test]
-    fn bridge_relationship_chain() {
-        let data = make_ingest(vec![
-            ("user", "Johnny Fisher works with Christopher Peterson."),
-            (
-                "user",
-                "Christopher Peterson is a colleague of Kathleen Herrera.",
-            ),
-        ]);
-        let mut store = StructuredMemoryStore::new();
-        let result = ingest(&data, &mut store, &IngestOptions::default());
-
-        assert_eq!(result.relationships_found, 2);
-
-        // Check tree has both relationships
-        let key = "tree:relations:colleague";
-        let children = store.tree_children(key, "Johnny Fisher");
-        assert!(children.is_some());
-        assert!(children
-            .unwrap()
-            .contains(&"Christopher Peterson".to_string()));
-
-        // Check reverse direction
-        let children = store.tree_children(key, "Christopher Peterson");
-        assert!(children.is_some());
-        let c = children.unwrap();
-        assert!(c.contains(&"Johnny Fisher".to_string()));
-        assert!(c.contains(&"Kathleen Herrera".to_string()));
-    }
-
-    #[test]
-    fn bridge_state_change_location() {
-        let data = make_ingest(vec![("user", "I live in Alfama, Lisbon.")]);
-        let mut store = StructuredMemoryStore::new();
-        let result = ingest(&data, &mut store, &IngestOptions::default());
-
-        assert!(result.state_changes_found >= 1);
-        // Should have a state machine for location
-        let keys = store.list_keys("state:");
-        assert!(!keys.is_empty());
-    }
-
-    #[test]
-    fn bridge_preference() {
-        let data = ConversationIngest {
-            case_id: Some("test".to_string()),
-            sessions: vec![ConversationSession {
-                session_id: "s1".to_string(),
-                topic: Some("Monet's Water Lilies".to_string()),
-                messages: vec![ConversationMessage {
-                    role: "user".to_string(),
-                    content:
-                        "Monet's Water Lilies series captures light in a way that feels alive."
-                            .to_string(),
-                }],
-                contains_fact: None,
-                fact_id: None,
-                fact_quote: None,
-                answers: vec![],
-            }],
-            queries: vec![],
-        };
-        let mut store = StructuredMemoryStore::new();
-        let result = ingest(&data, &mut store, &IngestOptions::default());
-
-        assert!(result.preferences_found >= 1);
-        let keys = store.list_keys("prefs:");
-        assert!(!keys.is_empty());
+        // Rule-based classification is unplugged; messages are just counted.
+        // LLM compaction handles all fact extraction.
+        assert_eq!(result.messages_processed, 2);
     }
 
     #[test]
@@ -1351,75 +617,6 @@ mod tests {
     }
 
     #[test]
-    fn bridge_skips_assistant() {
-        let data = make_ingest(vec![
-            ("assistant", "That's a beautiful area!"),
-            ("user", "Alice: Paid €50 for coffee - split among all"),
-        ]);
-        let mut store = StructuredMemoryStore::new();
-        let result = ingest(&data, &mut store, &IngestOptions::default());
-
-        assert_eq!(result.chitchat_skipped, 1);
-        assert_eq!(result.transactions_found, 1);
-    }
-
-    #[test]
-    fn test_incremental_preserves_registry() {
-        // First batch: Alice and Bob
-        let data1 = make_ingest(vec![(
-            "user",
-            "Alice: Paid €100 for dinner - split with Bob",
-        )]);
-        let mut store = StructuredMemoryStore::new();
-        let mut state = ConversationState::new();
-        let r1 = ingest_incremental(&data1, &mut store, &IngestOptions::default(), &mut state);
-        assert_eq!(r1.transactions_found, 1);
-
-        // Record Alice and Bob's IDs
-        let alice_id = state.name_registry.id_for_name("Alice").unwrap();
-        let bob_id = state.name_registry.id_for_name("Bob").unwrap();
-
-        // Second batch: Charlie and Dave (new session to avoid dedup)
-        let data2 = ConversationIngest {
-            case_id: Some("test".to_string()),
-            sessions: vec![ConversationSession {
-                session_id: "s2".to_string(),
-                topic: None,
-                messages: vec![ConversationMessage {
-                    role: "user".to_string(),
-                    content: "Charlie: Paid €80 for lunch - split with Dave".to_string(),
-                }],
-                contains_fact: None,
-                fact_id: None,
-                fact_quote: None,
-                answers: vec![],
-            }],
-            queries: vec![],
-        };
-        let r2 = ingest_incremental(&data2, &mut store, &IngestOptions::default(), &mut state);
-        assert_eq!(r2.transactions_found, 1);
-
-        // Alice and Bob should retain their original IDs
-        assert_eq!(state.name_registry.id_for_name("Alice").unwrap(), alice_id);
-        assert_eq!(state.name_registry.id_for_name("Bob").unwrap(), bob_id);
-
-        // Charlie and Dave should have new distinct IDs
-        let charlie_id = state.name_registry.id_for_name("Charlie").unwrap();
-        let dave_id = state.name_registry.id_for_name("Dave").unwrap();
-        assert_ne!(charlie_id, alice_id);
-        assert_ne!(charlie_id, bob_id);
-        assert_ne!(dave_id, alice_id);
-        assert_ne!(dave_id, bob_id);
-
-        // Ledger keys should be distinct (no collisions)
-        let ledger_keys = store.list_keys("ledger:");
-        assert!(
-            ledger_keys.len() >= 2,
-            "Should have at least 2 distinct ledgers"
-        );
-    }
-
-    #[test]
     fn test_incremental_idempotency() {
         let data = make_ingest(vec![
             ("user", "Alice: Paid €100 for dinner - split with Bob"),
@@ -1431,12 +628,10 @@ mod tests {
         // First ingest
         let r1 = ingest_incremental(&data, &mut store, &IngestOptions::default(), &mut state);
         assert_eq!(r1.messages_processed, 2);
-        assert_eq!(r1.transactions_found, 2);
 
         // Second ingest with same data and same state — should skip all
         let r2 = ingest_incremental(&data, &mut store, &IngestOptions::default(), &mut state);
         assert_eq!(r2.messages_processed, 0);
-        assert_eq!(r2.transactions_found, 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1466,76 +661,28 @@ mod tests {
     }
 
     #[test]
-    fn test_ingest_to_events_transaction() {
-        let data = make_ingest_for_events(vec![(
-            "user",
-            "Alice: Paid €100 for dinner - split with Bob",
-        )]);
+    fn test_ingest_to_events_creates_conversation_events() {
+        let data = make_ingest_for_events(vec![
+            ("user", "Alice: Paid €100 for dinner - split with Bob"),
+            ("user", "I live in Alfama, Lisbon."),
+        ]);
         let (events, _state, result) = ingest_to_events(&data, &IngestOptions::default());
 
-        assert_eq!(result.transactions_found, 1);
-        // Should have at least 1 transaction event + 1 sentinel
-        assert!(
-            events.len() >= 2,
-            "Expected at least 2 events, got {}",
-            events.len()
-        );
+        // Rule-based classification is unplugged; all messages become
+        // raw Conversation events. LLM compaction handles fact extraction.
+        assert_eq!(result.messages_processed, 2);
 
-        // Find a transaction event
-        let tx_event = events
+        // Should have conversation events + sentinel
+        let conv_events: Vec<_> = events
             .iter()
-            .find(|e| e.metadata.contains_key("transaction"));
-        assert!(tx_event.is_some(), "Expected a transaction event");
-        let tx = tx_event.unwrap();
-        assert!(tx.metadata.contains_key("from"));
-        assert!(tx.metadata.contains_key("to"));
-        assert!(tx.metadata.contains_key("amount"));
-    }
-
-    #[test]
-    fn test_ingest_to_events_state_change() {
-        let data = make_ingest_for_events(vec![("user", "Alice: I'm moving to Paris")]);
-        let (events, _state, result) = ingest_to_events(&data, &IngestOptions::default());
-
-        assert_eq!(result.state_changes_found, 1);
-        let state_event = events
-            .iter()
-            .find(|e| e.metadata.contains_key("entity_state"));
-        assert!(state_event.is_some(), "Expected a state change event");
-        let se = state_event.unwrap();
-        assert!(se.metadata.contains_key("entity"));
-        assert!(se.metadata.contains_key("new_state"));
-    }
-
-    #[test]
-    fn test_ingest_to_events_relationship() {
-        let data = make_ingest_for_events(vec![("user", "Alice works with Bob")]);
-        let (events, _state, result) = ingest_to_events(&data, &IngestOptions::default());
-
-        assert_eq!(result.relationships_found, 1);
-        let rel_event = events
-            .iter()
-            .find(|e| e.metadata.contains_key("relationship"));
-        assert!(rel_event.is_some(), "Expected a relationship event");
-        let re = rel_event.unwrap();
-        assert!(re.metadata.contains_key("subject"));
-        assert!(re.metadata.contains_key("object"));
-        assert!(re.metadata.contains_key("relation_type"));
-    }
-
-    #[test]
-    fn test_ingest_to_events_preference() {
-        let data = make_ingest_for_events(vec![("user", "Alice: I love sushi")]);
-        let (events, _state, result) = ingest_to_events(&data, &IngestOptions::default());
-
-        assert_eq!(result.preferences_found, 1);
-        let pref_event = events
-            .iter()
-            .find(|e| e.metadata.contains_key("preference"));
-        assert!(pref_event.is_some(), "Expected a preference event");
-        let pe = pref_event.unwrap();
-        assert!(pe.metadata.contains_key("entity"));
-        assert!(pe.metadata.contains_key("item"));
+            .filter(|e| {
+                matches!(
+                    &e.event_type,
+                    agent_db_events::core::EventType::Conversation { .. }
+                )
+            })
+            .collect();
+        assert_eq!(conv_events.len(), 2, "Expected 2 conversation events");
     }
 
     #[test]

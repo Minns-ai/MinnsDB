@@ -310,12 +310,14 @@ impl RefinementEngine {
                 .await
             {
                 Ok(refined) => {
-                    info!(
-                        "Refined memory {} summary: {} -> {}",
-                        memory_id,
-                        &memory.summary[..memory.summary.len().min(50)],
-                        &refined.summary[..refined.summary.len().min(50)]
-                    );
+                    {
+                        let old_preview: String = memory.summary.chars().take(50).collect();
+                        let new_preview: String = refined.summary.chars().take(50).collect();
+                        info!(
+                            "Refined memory {} summary: {} -> {}",
+                            memory_id, old_preview, new_preview,
+                        );
+                    }
                     updated_memory.summary = refined.summary;
                     updated_memory.takeaway = refined.takeaway;
                     updated_memory.causal_note = refined.causal_note;
@@ -382,12 +384,14 @@ impl RefinementEngine {
                 .await
             {
                 Ok(refined) => {
-                    info!(
-                        "Refined strategy {} summary: {} -> {}",
-                        strategy.id,
-                        &strategy.summary[..strategy.summary.len().min(50)],
-                        &refined.summary[..refined.summary.len().min(50)]
-                    );
+                    {
+                        let old_preview: String = strategy.summary.chars().take(50).collect();
+                        let new_preview: String = refined.summary.chars().take(50).collect();
+                        info!(
+                            "Refined strategy {} summary: {} -> {}",
+                            strategy.id, old_preview, new_preview,
+                        );
+                    }
                     updated.summary = refined.summary;
                     updated.when_to_use = refined.when_to_use;
                     updated.when_not_to_use = refined.when_not_to_use;

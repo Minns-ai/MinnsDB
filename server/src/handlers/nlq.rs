@@ -26,13 +26,21 @@ pub async fn nlq_query(
 
     let response = state
         .engine
-        .natural_language_query(
+        .natural_language_query_with_options(
             &request.question,
             &pagination,
             request.session_id.as_deref(),
+            request.include_context,
         )
         .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("timed out") || msg.contains("synthesis failed") {
+                ApiError::GatewayTimeout(msg)
+            } else {
+                ApiError::BadRequest(msg)
+            }
+        })?;
 
     let entities: Vec<NlqEntity> = response
         .entities_resolved
@@ -47,6 +55,15 @@ pub async fn nlq_query(
 
     let result_count = agent_db_graph::nlq::formatter::result_count(&response.result);
 
+    // Retrieve related context when requested
+    let (related_memories, related_strategies) = if request.include_context {
+        let memories = retrieve_related_memories(&state, &request.question).await;
+        let strategies = retrieve_related_strategies(&state, &request.question).await;
+        (memories, strategies)
+    } else {
+        (vec![], vec![])
+    };
+
     Ok(Json(NlqResponseBody {
         answer: response.answer,
         intent: agent_db_graph::nlq::intent::intent_display_name(&response.intent).to_string(),
@@ -57,5 +74,54 @@ pub async fn nlq_query(
         query_used: format!("{:?}", response.query_used),
         explanation: response.explanation,
         total_count: response.total_count,
+        related_memories,
+        related_strategies,
     }))
+}
+
+/// Retrieve related memories via BM25-only multi-signal retrieval.
+async fn retrieve_related_memories(
+    state: &AppState,
+    question: &str,
+) -> Vec<agent_db_graph::MemorySummary> {
+    let query = agent_db_graph::MemoryRetrievalQuery {
+        query_text: question.to_string(),
+        query_embedding: vec![],
+        context: None,
+        anchor_node: None,
+        agent_id: None,
+        session_id: None,
+        now: None,
+        limit: 5,
+    };
+    let memories = state
+        .engine
+        .retrieve_memories_multi_signal(query, None)
+        .await;
+    memories
+        .iter()
+        .map(agent_db_graph::MemorySummary::from_memory)
+        .collect()
+}
+
+/// Retrieve related strategies via BM25-only multi-signal retrieval.
+async fn retrieve_related_strategies(
+    state: &AppState,
+    question: &str,
+) -> Vec<agent_db_graph::StrategySummary> {
+    let query = agent_db_graph::StrategyRetrievalQuery {
+        query_text: question.to_string(),
+        query_embedding: vec![],
+        anchor_node: None,
+        now: None,
+        limit: 3,
+    };
+    let strategies = state
+        .engine
+        .retrieve_strategies_multi_signal(query, None)
+        .await;
+    strategies
+        .iter()
+        .map(agent_db_graph::StrategySummary::from_strategy)
+        .collect()
 }

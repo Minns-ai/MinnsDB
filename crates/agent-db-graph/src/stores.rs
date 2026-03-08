@@ -466,13 +466,6 @@ impl RedbMemoryStore {
         Ok(ops)
     }
 
-    /// Delete a memory from redb
-    #[allow(dead_code)]
-    fn delete_memory(&self, memory: &Memory) -> StorageResult<()> {
-        let ops = self.delete_memory_ops(memory);
-        self.backend.write_batch(ops)
-    }
-
     /// Build batch operations to delete a memory (record + all indexes).
     fn delete_memory_ops(&self, memory: &Memory) -> Vec<BatchOperation> {
         let mut ops = Vec::with_capacity(4);

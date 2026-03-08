@@ -141,7 +141,7 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
     config.enable_nlq_hint = env::var("ENABLE_NLQ_HINT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(false);
+        .unwrap_or(true);
     config.nlq_hint_api_key = env::var("NLQ_HINT_API_KEY")
         .ok()
         .or_else(|| env::var("LLM_API_KEY").ok());
@@ -149,6 +149,7 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
         env::var("NLQ_HINT_PROVIDER").unwrap_or_else(|_| "openai".to_string());
     config.nlq_hint_model =
         env::var("NLQ_HINT_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    config.synthesis_model = env::var("SYNTHESIS_MODEL").unwrap_or_else(|_| "gpt-4.1".to_string());
 
     // Metadata normalization configuration
     config.enable_metadata_normalization = env::var("ENABLE_METADATA_NORMALIZATION")

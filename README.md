@@ -409,13 +409,13 @@ Retrieves relevant memories using hybrid semantic search. Maps to `POST /api/cla
 ```bash
 POST /api/claims/search
 {
-  "query": "authentication error handling",
-  "limit": 10,
-  "min_confidence": 0.3
+  "query_text": "authentication error handling",
+  "top_k": 10,
+  "min_similarity": 0.3
 }
 ```
 
-Returns claims ranked by `combined_score` (semantic similarity * confidence * temporal decay).
+Returns claims in a grouped response: `{ groups: [{subject, claims}], ungrouped: [...], total_results }`. Claims are ranked by similarity, weighted by confidence and temporal decay.
 
 #### `index_code` — Parse and remember code structure
 
@@ -599,11 +599,16 @@ server.tool(
     const res = await fetch(`${EVENTGRAPHDB_URL}/api/claims/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, limit, min_confidence: 0.3 }),
+      body: JSON.stringify({ query_text: query, top_k: limit, min_similarity: 0.3 }),
     });
     const data = await res.json();
-    const memories = (data.claims || [])
-      .map((c, i) => `${i + 1}. [${c.claim_type}] ${c.subject}: ${c.claim} (confidence: ${c.confidence?.toFixed(2)})`)
+    // Response has { groups: [{subject, claims}], ungrouped: [...], total_results }
+    const allClaims = [
+      ...data.groups.flatMap((g) => g.claims),
+      ...data.ungrouped,
+    ];
+    const memories = allClaims
+      .map((c, i) => `${i + 1}. [${c.claim_type}] ${c.subject_entity || "general"}: ${c.claim_text} (confidence: ${c.confidence?.toFixed(2)})`)
       .join("\n");
     return { content: [{ type: "text", text: memories || "No memories found." }] };
   }

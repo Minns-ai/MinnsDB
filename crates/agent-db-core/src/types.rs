@@ -36,6 +36,8 @@ pub type ContextHash = u64;
 /// Partition identifier for storage
 pub type PartitionId = u64;
 
+pub use crate::event_time::EventTime;
+
 /// Current timestamp in nanoseconds
 pub fn current_timestamp() -> Timestamp {
     SystemTime::now()

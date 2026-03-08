@@ -9,10 +9,14 @@ use crate::event_content::{
 };
 use agent_db_events::core::{ActionOutcome, Event, EventType};
 
-/// Truncate a string to `max_len` chars, appending "..." if truncated.
+/// Truncate a string to `max_len` bytes (on a char boundary), appending "..." if truncated.
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() > max_len {
-        format!("{}...", &s[..max_len])
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     } else {
         s.to_string()
     }

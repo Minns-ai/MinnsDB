@@ -4,6 +4,7 @@
 //! between agents, events, and contexts in the agentic database.
 
 use crate::intern::Interner;
+use crate::slot_vec::SlotVec;
 use agent_db_core::types::{AgentId, ContextHash, EventId, Timestamp};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -299,6 +300,11 @@ pub struct GraphNode {
 
     /// Cached degree for performance
     pub degree: u32,
+
+    /// Optional embedding vector for semantic similarity search.
+    /// Empty if not yet embedded.
+    #[serde(default)]
+    pub embedding: Vec<f32>,
 }
 
 /// Number of distinct `NodeType` variants. Keep in sync with `NodeType::discriminant()`.
@@ -603,6 +609,16 @@ pub struct GraphEdge {
 
     /// Additional edge properties
     pub properties: HashMap<String, serde_json::Value>,
+
+    /// Temporal history of confidence values (optional, populated by temporal API).
+    /// When empty, `self.confidence` is the canonical value.
+    #[serde(default, skip_serializing_if = "crate::tcell::TCell::is_empty")]
+    pub confidence_history: crate::tcell::TCell<f32>,
+
+    /// Temporal history of weight values (optional).
+    /// When empty, `self.weight` is the canonical value.
+    #[serde(default, skip_serializing_if = "crate::tcell::TCell::is_empty")]
+    pub weight_history: crate::tcell::TCell<f32>,
 }
 
 /// Types of relationships between nodes
@@ -709,20 +725,117 @@ pub enum GoalRelationType {
     Support,    // Goals are mutually supportive
 }
 
-/// Graph structure with optimized storage and indexing
+// ============================================================================
+// Node Vector Index (brute-force cosine similarity)
+// ============================================================================
+
+/// Entry in the node vector index.
+#[derive(Debug, Clone)]
+struct NodeVectorEntry {
+    node_id: NodeId,
+    embedding: Vec<f32>,
+}
+
+/// Brute-force vector index for graph node embeddings.
+///
+/// Used for semantic entity resolution and hybrid search.
+/// At small scale (<10k nodes), brute-force is fast enough.
+#[derive(Debug, Clone, Default)]
+pub struct NodeVectorIndex {
+    entries: Vec<NodeVectorEntry>,
+}
+
+impl NodeVectorIndex {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Number of entries in the index.
+    pub fn entries_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Insert or update a node's embedding.
+    pub fn insert(&mut self, node_id: NodeId, embedding: Vec<f32>) {
+        if embedding.is_empty() {
+            return;
+        }
+        // Update existing if present
+        for entry in &mut self.entries {
+            if entry.node_id == node_id {
+                entry.embedding = embedding;
+                return;
+            }
+        }
+        self.entries.push(NodeVectorEntry { node_id, embedding });
+    }
+
+    /// Search for the top-k most similar nodes by cosine similarity.
+    pub fn search(&self, query: &[f32], top_k: usize, min_sim: f32) -> Vec<(NodeId, f32)> {
+        if query.is_empty() || self.entries.is_empty() {
+            return Vec::new();
+        }
+
+        let query_norm = dot(query, query).sqrt();
+        if query_norm == 0.0 {
+            return Vec::new();
+        }
+
+        let mut scored: Vec<(NodeId, f32)> = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let entry_norm = dot(&entry.embedding, &entry.embedding).sqrt();
+                if entry_norm == 0.0 {
+                    return None;
+                }
+                let sim = dot(query, &entry.embedding) / (query_norm * entry_norm);
+                if sim >= min_sim {
+                    Some((entry.node_id, sim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        scored
+    }
+
+    /// Number of indexed nodes.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Dot product of two f32 slices.
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// Graph structure with optimized storage and indexing.
+///
+/// Core storage uses `SlotVec` for O(1) node/edge access by monotonic ID.
 #[derive(Debug)]
 pub struct Graph {
-    /// All nodes in the graph
-    pub(crate) nodes: FxHashMap<NodeId, GraphNode>,
+    /// All nodes in the graph (O(1) access by NodeId via dense Vec)
+    pub(crate) nodes: SlotVec<GraphNode>,
 
-    /// All edges in the graph
-    pub(crate) edges: FxHashMap<EdgeId, GraphEdge>,
+    /// All edges in the graph (O(1) access by EdgeId via dense Vec)
+    pub(crate) edges: SlotVec<GraphEdge>,
 
-    /// Adjacency list for fast traversal (outgoing edges)
-    pub(crate) adjacency_out: FxHashMap<NodeId, AdjList>,
+    /// Adjacency list for fast traversal (outgoing edges, indexed by NodeId)
+    pub(crate) adjacency_out: SlotVec<AdjList>,
 
-    /// Reverse adjacency list (incoming edges)
-    pub(crate) adjacency_in: FxHashMap<NodeId, AdjList>,
+    /// Reverse adjacency list (incoming edges, indexed by NodeId)
+    pub(crate) adjacency_in: SlotVec<AdjList>,
 
     /// Index by node type discriminant (u8) for O(1) type-filtered queries.
     /// Key is `NodeType::discriminant()` (0–10), not a heap-allocated string.
@@ -773,12 +886,16 @@ pub struct Graph {
     /// BM25 full-text search index
     pub(crate) bm25_index: crate::indexing::Bm25Index,
 
+    /// Node vector index for semantic similarity search on graph nodes
+    pub(crate) node_vector_index: NodeVectorIndex,
+
+    /// Edge/triplet vector index for semantic similarity search on graph edges.
+    /// Stores embeddings of "subject predicate object" triplet text, keyed by EdgeId.
+    /// Enables triplet scoring: query vs full triplet context.
+    pub(crate) edge_vector_index: NodeVectorIndex,
+
     /// String interner for deduplicating repeated string values
     pub(crate) interner: Interner,
-
-    /// Next available IDs
-    pub(crate) next_node_id: NodeId,
-    pub(crate) next_edge_id: EdgeId,
 
     /// Statistics
     pub(crate) stats: GraphStats,
@@ -834,6 +951,7 @@ impl GraphNode {
             updated_at: timestamp,
             properties: HashMap::new(),
             degree: 0,
+            embedding: Vec::new(),
         }
     }
 
@@ -923,6 +1041,8 @@ impl GraphEdge {
             observation_count: 1,
             confidence: 0.5, // Start with medium confidence
             properties: HashMap::new(),
+            confidence_history: crate::tcell::TCell::Empty,
+            weight_history: crate::tcell::TCell::Empty,
         }
     }
 
@@ -936,6 +1056,38 @@ impl GraphEdge {
         self.confidence = (self.confidence + confidence_boost).min(1.0);
 
         self.touch();
+    }
+
+    /// Get confidence at a specific time, falling back to the snapshot value.
+    pub fn confidence_at(&self, time: agent_db_core::event_time::EventTime) -> f32 {
+        self.confidence_history
+            .last_at_or_before(time)
+            .map(|(_, v)| *v)
+            .unwrap_or(self.confidence)
+    }
+
+    /// Update confidence with temporal tracking.
+    pub fn set_confidence_temporal(
+        &mut self,
+        time: agent_db_core::event_time::EventTime,
+        value: f32,
+    ) {
+        self.confidence_history.set(time, value);
+        self.confidence = value; // keep snapshot in sync
+    }
+
+    /// Get weight at a specific time, falling back to the snapshot value.
+    pub fn weight_at(&self, time: agent_db_core::event_time::EventTime) -> f32 {
+        self.weight_history
+            .last_at_or_before(time)
+            .map(|(_, v)| *v)
+            .unwrap_or(self.weight)
+    }
+
+    /// Update weight with temporal tracking.
+    pub fn set_weight_temporal(&mut self, time: agent_db_core::event_time::EventTime, value: f32) {
+        self.weight_history.set(time, value);
+        self.weight = value; // keep snapshot in sync
     }
 
     /// Weaken the edge based on negative outcomes
@@ -1133,6 +1285,39 @@ impl Default for Graph {
     }
 }
 
+/// Extract searchable text from a graph edge for BM25 indexing.
+///
+/// Converts edge labels like "preference:food" into "preference food" and
+/// includes edge property values (category, details) so that queries for
+/// edge-related terms can find the connected nodes.
+pub(crate) fn edge_text_for_bm25(edge: &GraphEdge) -> String {
+    let mut parts = Vec::new();
+    match &edge.edge_type {
+        EdgeType::Association {
+            association_type, ..
+        } => {
+            // "preference:food" → "preference food"
+            parts.push(association_type.replace(':', " "));
+            // Include property values (sentiment, category, etc.)
+            if let Some(details) = edge.properties.get("details") {
+                if let Some(cat) = details.get("category").and_then(|v| v.as_str()) {
+                    parts.push(cat.to_string());
+                }
+            }
+            if let Some(cat) = edge.properties.get("category").and_then(|v| v.as_str()) {
+                parts.push(cat.to_string());
+            }
+        },
+        EdgeType::About { predicate, .. } => {
+            if let Some(p) = predicate {
+                parts.push(p.clone());
+            }
+        },
+        _ => {}, // Other edge types don't need BM25 indexing
+    }
+    parts.join(" ")
+}
+
 impl Graph {
     /// Create a new empty graph with default max size (1,000,000 nodes)
     pub fn new() -> Self {
@@ -1142,10 +1327,10 @@ impl Graph {
     /// Create a new empty graph with a specific max node capacity
     pub fn with_max_size(max_graph_size: usize) -> Self {
         Self {
-            nodes: FxHashMap::default(),
-            edges: FxHashMap::default(),
-            adjacency_out: FxHashMap::default(),
-            adjacency_in: FxHashMap::default(),
+            nodes: SlotVec::new(),
+            edges: SlotVec::new(),
+            adjacency_out: SlotVec::new(),
+            adjacency_in: SlotVec::new(),
             type_index: FxHashMap::default(),
             temporal_index: BTreeMap::new(),
             generation: 0,
@@ -1161,9 +1346,9 @@ impl Graph {
             claim_index: FxHashMap::default(),
             concept_index: HashMap::new(),
             bm25_index: crate::indexing::Bm25Index::new(),
+            node_vector_index: NodeVectorIndex::new(),
+            edge_vector_index: NodeVectorIndex::new(),
             interner: Interner::new(),
-            next_node_id: 1,
-            next_edge_id: 1,
             stats: GraphStats::default(),
             max_graph_size,
             dirty_nodes: HashSet::new(),
@@ -1188,8 +1373,9 @@ impl Graph {
             )));
         }
 
-        let node_id = self.next_node_id;
-        self.next_node_id += 1;
+        // SlotVec manages ID assignment (monotonic, starts at 1).
+        // We peek at next_id and then insert to get that ID.
+        let node_id = self.nodes.next_id();
 
         node.id = node_id;
 
@@ -1247,10 +1433,6 @@ impl Graph {
                 self.concept_index.insert(key, node_id);
             },
         }
-
-        // Initialize adjacency lists
-        self.adjacency_out.insert(node_id, AdjList::new());
-        self.adjacency_in.insert(node_id, AdjList::new());
 
         // Index text content with BM25 for full-text search
         let mut text_parts = Vec::new();
@@ -1352,7 +1534,11 @@ impl Graph {
             }
         }
 
-        self.nodes.insert(node_id, node);
+        let inserted_id = self.nodes.insert(node);
+        debug_assert_eq!(inserted_id, node_id);
+        // Initialize adjacency lists for this node
+        self.adjacency_out.insert_at(node_id, AdjList::new());
+        self.adjacency_in.insert_at(node_id, AdjList::new());
         self.dirty_nodes.insert(node_id);
         self.adjacency_dirty = true;
         self.update_stats();
@@ -1363,26 +1549,25 @@ impl Graph {
     /// Add an edge to the graph
     pub fn add_edge(&mut self, mut edge: GraphEdge) -> Option<EdgeId> {
         // Verify both nodes exist
-        if !self.nodes.contains_key(&edge.source) || !self.nodes.contains_key(&edge.target) {
+        if !self.nodes.contains_key(edge.source) || !self.nodes.contains_key(edge.target) {
             return None;
         }
 
-        let edge_id = self.next_edge_id;
-        self.next_edge_id += 1;
+        let edge_id = self.edges.next_id();
 
         edge.id = edge_id;
 
         // Update adjacency lists
-        self.adjacency_out.get_mut(&edge.source)?.push(edge_id);
-        self.adjacency_in.get_mut(&edge.target)?.push(edge_id);
+        self.adjacency_out.get_mut(edge.source)?.push(edge_id);
+        self.adjacency_in.get_mut(edge.target)?.push(edge_id);
 
         // Update node degrees
-        if let Some(source_node) = self.nodes.get_mut(&edge.source) {
+        if let Some(source_node) = self.nodes.get_mut(edge.source) {
             source_node.degree += 1;
             self.total_degree += 1;
             source_node.touch();
         }
-        if let Some(target_node) = self.nodes.get_mut(&edge.target) {
+        if let Some(target_node) = self.nodes.get_mut(edge.target) {
             target_node.degree += 1;
             self.total_degree += 1;
             target_node.touch();
@@ -1390,11 +1575,23 @@ impl Graph {
 
         let source = edge.source;
         let target = edge.target;
-        self.edges.insert(edge_id, edge);
+        let inserted_id = self.edges.insert(edge);
+        debug_assert_eq!(inserted_id, edge_id);
         self.dirty_edges.insert(edge_id);
         self.dirty_nodes.insert(source);
         self.dirty_nodes.insert(target);
         self.adjacency_dirty = true;
+
+        // Index edge metadata into BM25 for both source and target nodes
+        if let Some(edge_ref) = self.edges.get(edge_id) {
+            let edge_text = edge_text_for_bm25(edge_ref);
+            if !edge_text.is_empty() {
+                // Rebuild BM25 for source node with edge text appended
+                self.reindex_node_with_edges(source);
+                // Rebuild BM25 for target node with edge text appended
+                self.reindex_node_with_edges(target);
+            }
+        }
 
         // Bump generation for cache invalidation
         self.generation += 1;
@@ -1404,26 +1601,99 @@ impl Graph {
         Some(edge_id)
     }
 
+    /// Rebuild BM25 index for a node, including text from all its edges.
+    pub(crate) fn reindex_node_with_edges(&mut self, node_id: NodeId) {
+        let mut text_parts: Vec<String> = Vec::new();
+
+        // Collect node text
+        if let Some(node) = self.nodes.get(node_id) {
+            match &node.node_type {
+                NodeType::Claim { claim_text, .. } => text_parts.push(claim_text.clone()),
+                NodeType::Goal { description, .. } => text_parts.push(description.clone()),
+                NodeType::Strategy { name, .. } => text_parts.push(name.clone()),
+                NodeType::Result { summary, .. } => text_parts.push(summary.clone()),
+                NodeType::Concept { concept_name, .. } => text_parts.push(concept_name.clone()),
+                NodeType::Tool { tool_name, .. } => text_parts.push(tool_name.clone()),
+                NodeType::Episode { outcome, .. } => text_parts.push(outcome.clone()),
+                _ => {},
+            }
+
+            // Extract searchable text from properties
+            for (key, value) in &node.properties {
+                let key_lower = key.to_lowercase();
+                if key_lower.contains("text")
+                    || key_lower.contains("description")
+                    || key_lower.contains("content")
+                    || key_lower.contains("name")
+                    || key_lower.contains("summary")
+                    || key_lower == "data"
+                    || key_lower == "category"
+                    || key_lower == "metadata_text"
+                {
+                    if let Some(text) = value.as_str() {
+                        text_parts.push(text.to_string());
+                    } else {
+                        let flat = Self::flatten_json_to_text(value);
+                        if !flat.is_empty() {
+                            text_parts.push(flat);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collect edge text from all outgoing edges
+        if let Some(out_edges) = self.adjacency_out.get(node_id) {
+            for &eid in out_edges.iter() {
+                if let Some(edge) = self.edges.get(eid) {
+                    let et = edge_text_for_bm25(edge);
+                    if !et.is_empty() {
+                        text_parts.push(et);
+                    }
+                }
+            }
+        }
+
+        // Collect edge text from all incoming edges
+        if let Some(in_edges) = self.adjacency_in.get(node_id) {
+            for &eid in in_edges.iter() {
+                if let Some(edge) = self.edges.get(eid) {
+                    let et = edge_text_for_bm25(edge);
+                    if !et.is_empty() {
+                        text_parts.push(et);
+                    }
+                }
+            }
+        }
+
+        if !text_parts.is_empty() {
+            let combined = text_parts.join(" ");
+            // Remove old entry first to keep corpus stats accurate
+            self.bm25_index.remove_document(node_id);
+            self.bm25_index.index_document(node_id, &combined);
+        }
+    }
+
     /// Remove an edge by ID. Returns the removed edge, or None if not found.
     pub fn remove_edge(&mut self, edge_id: EdgeId) -> Option<GraphEdge> {
-        let edge = self.edges.remove(&edge_id)?;
+        let edge = self.edges.remove(edge_id)?;
 
         // Remove from source's outgoing adjacency list
-        if let Some(out_list) = self.adjacency_out.get_mut(&edge.source) {
+        if let Some(out_list) = self.adjacency_out.get_mut(edge.source) {
             out_list.retain(|eid| *eid != edge_id);
         }
         // Remove from target's incoming adjacency list
-        if let Some(in_list) = self.adjacency_in.get_mut(&edge.target) {
+        if let Some(in_list) = self.adjacency_in.get_mut(edge.target) {
             in_list.retain(|eid| *eid != edge_id);
         }
 
         // Update degrees
-        if let Some(source) = self.nodes.get_mut(&edge.source) {
+        if let Some(source) = self.nodes.get_mut(edge.source) {
             source.degree = source.degree.saturating_sub(1);
             self.total_degree = self.total_degree.saturating_sub(1);
             self.dirty_nodes.insert(edge.source);
         }
-        if let Some(target) = self.nodes.get_mut(&edge.target) {
+        if let Some(target) = self.nodes.get_mut(edge.target) {
             target.degree = target.degree.saturating_sub(1);
             self.total_degree = self.total_degree.saturating_sub(1);
             self.dirty_nodes.insert(edge.target);
@@ -1441,10 +1711,10 @@ impl Graph {
 
     /// Get neighbors of a node (outgoing edges)
     pub fn get_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
-        match self.adjacency_out.get(&node_id) {
+        match self.adjacency_out.get(node_id) {
             Some(edges) => edges
                 .iter()
-                .filter_map(|&edge_id| self.edges.get(&edge_id).map(|edge| edge.target))
+                .filter_map(|&edge_id| self.edges.get(edge_id).map(|edge| edge.target))
                 .collect(),
             None => Vec::new(),
         }
@@ -1452,10 +1722,10 @@ impl Graph {
 
     /// Get incoming neighbors of a node
     pub fn get_incoming_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
-        match self.adjacency_in.get(&node_id) {
+        match self.adjacency_in.get(node_id) {
             Some(edges) => edges
                 .iter()
-                .filter_map(|&edge_id| self.edges.get(&edge_id).map(|edge| edge.source))
+                .filter_map(|&edge_id| self.edges.get(edge_id).map(|edge| edge.source))
                 .collect(),
             None => Vec::new(),
         }
@@ -1473,7 +1743,7 @@ impl Graph {
             .get(&disc)
             .map(|set| {
                 set.iter()
-                    .filter_map(|&node_id| self.nodes.get(&node_id))
+                    .filter_map(|&node_id| self.nodes.get(node_id))
                     .collect()
             })
             .unwrap_or_default()
@@ -1586,88 +1856,88 @@ impl Graph {
 
     /// Get node by ID
     pub fn get_node(&self, node_id: NodeId) -> Option<&GraphNode> {
-        self.nodes.get(&node_id)
+        self.nodes.get(node_id)
     }
 
     /// Get edge by ID
     pub fn get_edge(&self, edge_id: EdgeId) -> Option<&GraphEdge> {
-        self.edges.get(&edge_id)
+        self.edges.get(edge_id)
     }
 
     /// Get node by agent ID
     pub fn get_agent_node(&self, agent_id: AgentId) -> Option<&GraphNode> {
         self.agent_index
             .get(&agent_id)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by event ID
     pub fn get_event_node(&self, event_id: EventId) -> Option<&GraphNode> {
         self.event_index
             .get(&event_id)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by context hash
     pub fn get_context_node(&self, context_hash: ContextHash) -> Option<&GraphNode> {
         self.context_index
             .get(&context_hash)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by goal ID
     pub fn get_goal_node(&self, goal_id: u64) -> Option<&GraphNode> {
         self.goal_index
             .get(&goal_id)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by episode ID
     pub fn get_episode_node(&self, episode_id: u64) -> Option<&GraphNode> {
         self.episode_index
             .get(&episode_id)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by memory ID
     pub fn get_memory_node(&self, memory_id: u64) -> Option<&GraphNode> {
         self.memory_index
             .get(&memory_id)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by strategy ID
     pub fn get_strategy_node(&self, strategy_id: u64) -> Option<&GraphNode> {
         self.strategy_index
             .get(&strategy_id)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by tool name
     pub fn get_tool_node(&self, tool_name: &str) -> Option<&GraphNode> {
         self.tool_index
             .get(tool_name)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by result key
     pub fn get_result_node(&self, result_key: &str) -> Option<&GraphNode> {
         self.result_index
             .get(result_key)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get mutable reference to node by ID
     pub fn get_node_mut(&mut self, node_id: NodeId) -> Option<&mut GraphNode> {
-        self.nodes.get_mut(&node_id)
+        self.nodes.get_mut(node_id)
     }
 
     /// Get edge between two nodes (source -> target)
     pub fn get_edge_between(&self, source: NodeId, target: NodeId) -> Option<&GraphEdge> {
         // Use adjacency list to find the edge efficiently
-        if let Some(edge_ids) = self.adjacency_out.get(&source) {
+        if let Some(edge_ids) = self.adjacency_out.get(source) {
             for &edge_id in edge_ids {
-                if let Some(edge) = self.edges.get(&edge_id) {
+                if let Some(edge) = self.edges.get(edge_id) {
                     if edge.target == target {
                         return Some(edge);
                     }
@@ -1684,17 +1954,17 @@ impl Graph {
         target: NodeId,
     ) -> Option<&mut GraphEdge> {
         // Find the edge ID first
-        let edge_id_opt = self.adjacency_out.get(&source).and_then(|edge_ids| {
+        let edge_id_opt = self.adjacency_out.get(source).and_then(|edge_ids| {
             edge_ids.iter().find_map(|&edge_id| {
                 self.edges
-                    .get(&edge_id)
+                    .get(edge_id)
                     .filter(|edge| edge.target == target)
                     .map(|_| edge_id)
             })
         });
 
         if let Some(edge_id) = edge_id_opt {
-            self.edges.get_mut(&edge_id)
+            self.edges.get_mut(edge_id)
         } else {
             None
         }
@@ -1703,11 +1973,11 @@ impl Graph {
     /// Get all edges from a source node
     pub fn get_edges_from(&self, source: NodeId) -> Vec<&GraphEdge> {
         self.adjacency_out
-            .get(&source)
+            .get(source)
             .map(|edge_ids| {
                 edge_ids
                     .iter()
-                    .filter_map(|&edge_id| self.edges.get(&edge_id))
+                    .filter_map(|&edge_id| self.edges.get(edge_id))
                     .collect()
             })
             .unwrap_or_default()
@@ -1716,11 +1986,11 @@ impl Graph {
     /// Get all edges to a target node
     pub fn get_edges_to(&self, target: NodeId) -> Vec<&GraphEdge> {
         self.adjacency_in
-            .get(&target)
+            .get(target)
             .map(|edge_ids| {
                 edge_ids
                     .iter()
-                    .filter_map(|&edge_id| self.edges.get(&edge_id))
+                    .filter_map(|&edge_id| self.edges.get(edge_id))
                     .collect()
             })
             .unwrap_or_default()
@@ -1730,14 +2000,14 @@ impl Graph {
     pub fn get_claim_node(&self, claim_id: u64) -> Option<&GraphNode> {
         self.claim_index
             .get(&claim_id)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Get node by concept name
     pub fn get_concept_node(&self, concept_name: &str) -> Option<&GraphNode> {
         self.concept_index
             .get(concept_name)
-            .and_then(|&node_id| self.nodes.get(&node_id))
+            .and_then(|&node_id| self.nodes.get(node_id))
     }
 
     /// Iterate over all nodes in the graph.
@@ -1762,7 +2032,7 @@ impl Graph {
 
     /// Get all node IDs
     pub fn node_ids(&self) -> Vec<NodeId> {
-        self.nodes.keys().copied().collect()
+        self.nodes.keys().collect()
     }
 
     /// Current generation counter (monotonically increasing on every mutation).
@@ -1777,7 +2047,7 @@ impl Graph {
         self.temporal_index
             .range(start..=end)
             .flat_map(|(_, ids)| ids.iter())
-            .filter_map(|&nid| self.nodes.get(&nid))
+            .filter_map(|&nid| self.nodes.get(nid))
             .collect()
     }
 
@@ -1854,13 +2124,13 @@ impl Graph {
     /// Get valid neighbors (outgoing, filtering soft-deleted edges).
     pub fn get_valid_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
         self.adjacency_out
-            .get(&node_id)
+            .get(node_id)
             .map(|edge_ids| {
                 edge_ids
                     .iter()
                     .filter_map(|&edge_id| {
                         self.edges
-                            .get(&edge_id)
+                            .get(edge_id)
                             .filter(|e| e.is_valid())
                             .map(|e| e.target)
                     })
@@ -1872,13 +2142,13 @@ impl Graph {
     /// Get valid incoming neighbors (filtering soft-deleted edges).
     pub fn get_valid_incoming_neighbors(&self, node_id: NodeId) -> Vec<NodeId> {
         self.adjacency_in
-            .get(&node_id)
+            .get(node_id)
             .map(|edge_ids| {
                 edge_ids
                     .iter()
                     .filter_map(|&edge_id| {
                         self.edges
-                            .get(&edge_id)
+                            .get(edge_id)
                             .filter(|e| e.is_valid())
                             .map(|e| e.source)
                     })
@@ -1889,7 +2159,7 @@ impl Graph {
 
     /// Soft-delete an edge by ID, marking it invalid with a reason.
     pub fn invalidate_edge(&mut self, edge_id: EdgeId, reason: &str) -> bool {
-        if let Some(edge) = self.edges.get_mut(&edge_id) {
+        if let Some(edge) = self.edges.get_mut(edge_id) {
             edge.invalidate(reason);
             self.dirty_edges.insert(edge_id);
             self.generation += 1;
@@ -1956,7 +2226,7 @@ impl Graph {
     /// bm25_index, outgoing edges, incoming edges, adjacency lists,
     /// degree updates on neighbors, and stats.
     pub fn remove_node(&mut self, node_id: NodeId) -> Option<GraphNode> {
-        let node = self.nodes.remove(&node_id)?;
+        let node = self.nodes.remove(node_id)?;
 
         // Subtract the removed node's degree from the running total
         self.total_degree = self.total_degree.saturating_sub(node.degree as u64);
@@ -2022,19 +2292,19 @@ impl Graph {
         self.bm25_index.remove_document(node_id);
 
         // Collect edge IDs to remove (outgoing + incoming)
-        let outgoing_edge_ids = self.adjacency_out.remove(&node_id).unwrap_or_default();
-        let incoming_edge_ids = self.adjacency_in.remove(&node_id).unwrap_or_default();
+        let outgoing_edge_ids = self.adjacency_out.remove(node_id).unwrap_or_default();
+        let incoming_edge_ids = self.adjacency_in.remove(node_id).unwrap_or_default();
 
         // Remove outgoing edges and update targets' incoming adjacency + degree
         for edge_id in &outgoing_edge_ids {
-            if let Some(edge) = self.edges.remove(edge_id) {
+            if let Some(edge) = self.edges.remove(*edge_id) {
                 self.deleted_edges.insert(*edge_id);
                 self.dirty_edges.remove(edge_id);
                 if edge.target != node_id {
-                    if let Some(in_list) = self.adjacency_in.get_mut(&edge.target) {
+                    if let Some(in_list) = self.adjacency_in.get_mut(edge.target) {
                         in_list.retain(|eid| *eid != *edge_id);
                     }
-                    if let Some(target) = self.nodes.get_mut(&edge.target) {
+                    if let Some(target) = self.nodes.get_mut(edge.target) {
                         target.degree = target.degree.saturating_sub(1);
                         self.total_degree = self.total_degree.saturating_sub(1);
                         self.dirty_nodes.insert(edge.target);
@@ -2045,14 +2315,14 @@ impl Graph {
 
         // Remove incoming edges and update sources' outgoing adjacency + degree
         for edge_id in &incoming_edge_ids {
-            if let Some(edge) = self.edges.remove(edge_id) {
+            if let Some(edge) = self.edges.remove(*edge_id) {
                 self.deleted_edges.insert(*edge_id);
                 self.dirty_edges.remove(edge_id);
                 if edge.source != node_id {
-                    if let Some(out_list) = self.adjacency_out.get_mut(&edge.source) {
+                    if let Some(out_list) = self.adjacency_out.get_mut(edge.source) {
                         out_list.retain(|eid| *eid != *edge_id);
                     }
-                    if let Some(source) = self.nodes.get_mut(&edge.source) {
+                    if let Some(source) = self.nodes.get_mut(edge.source) {
                         source.degree = source.degree.saturating_sub(1);
                         self.total_degree = self.total_degree.saturating_sub(1);
                         self.dirty_nodes.insert(edge.source);
@@ -2084,17 +2354,17 @@ impl Graph {
         absorbed_id: NodeId,
     ) -> Result<GraphNode, String> {
         // Verify both exist
-        if !self.nodes.contains_key(&survivor_id) {
+        if !self.nodes.contains_key(survivor_id) {
             return Err(format!("Survivor node {} not found", survivor_id));
         }
-        if !self.nodes.contains_key(&absorbed_id) {
+        if !self.nodes.contains_key(absorbed_id) {
             return Err(format!("Absorbed node {} not found", absorbed_id));
         }
 
         // Same variant check
         {
-            let survivor = &self.nodes[&survivor_id];
-            let absorbed = &self.nodes[&absorbed_id];
+            let survivor = self.nodes.get(survivor_id).unwrap();
+            let absorbed = self.nodes.get(absorbed_id).unwrap();
             if std::mem::discriminant(&survivor.node_type)
                 != std::mem::discriminant(&absorbed.node_type)
             {
@@ -2109,12 +2379,12 @@ impl Graph {
         // Collect absorbed edges before mutation
         let absorbed_out = self
             .adjacency_out
-            .get(&absorbed_id)
+            .get(absorbed_id)
             .cloned()
             .unwrap_or_default();
         let absorbed_in = self
             .adjacency_in
-            .get(&absorbed_id)
+            .get(absorbed_id)
             .cloned()
             .unwrap_or_default();
 
@@ -2122,7 +2392,7 @@ impl Graph {
         // First pass: gather info we need (targets, weights, existing edges)
         let mut out_redirects: Vec<(EdgeId, NodeId, f32)> = Vec::new(); // (edge_id, target, weight)
         for edge_id in &absorbed_out {
-            if let Some(edge) = self.edges.get(edge_id) {
+            if let Some(edge) = self.edges.get(*edge_id) {
                 let target = edge.target;
                 if target == survivor_id || target == absorbed_id {
                     continue;
@@ -2135,26 +2405,25 @@ impl Graph {
             // Check if survivor already has an edge to this target
             let existing_eid = self
                 .adjacency_out
-                .get(&survivor_id)
+                .get(survivor_id)
                 .and_then(|ids| {
                     ids.iter()
-                        .find(|&&eid| self.edges.get(&eid).is_some_and(|e| e.target == target))
+                        .find(|&&eid| self.edges.get(eid).is_some_and(|e| e.target == target))
                 })
                 .copied();
 
             if let Some(existing_eid) = existing_eid {
                 // Strengthen existing edge
-                if let Some(existing_edge) = self.edges.get_mut(&existing_eid) {
+                if let Some(existing_edge) = self.edges.get_mut(existing_eid) {
                     existing_edge.strengthen(weight * 0.5);
                 }
             } else {
                 // Redirect edge to survivor
-                if let Some(edge) = self.edges.get_mut(&edge_id) {
+                if let Some(edge) = self.edges.get_mut(edge_id) {
                     edge.source = survivor_id;
                 }
                 self.adjacency_out
-                    .entry(survivor_id)
-                    .or_default()
+                    .ensure_at(survivor_id, AdjList::new())
                     .push(edge_id);
             }
         }
@@ -2162,7 +2431,7 @@ impl Graph {
         // Redirect incoming edges: X -> absorbed becomes X -> survivor
         let mut in_redirects: Vec<(EdgeId, NodeId, f32)> = Vec::new();
         for edge_id in &absorbed_in {
-            if let Some(edge) = self.edges.get(edge_id) {
+            if let Some(edge) = self.edges.get(*edge_id) {
                 let source = edge.source;
                 if source == survivor_id || source == absorbed_id {
                     continue;
@@ -2175,32 +2444,31 @@ impl Graph {
             // Check if survivor already has an incoming edge from this source
             let existing_eid = self
                 .adjacency_in
-                .get(&survivor_id)
+                .get(survivor_id)
                 .and_then(|ids| {
                     ids.iter()
-                        .find(|&&eid| self.edges.get(&eid).is_some_and(|e| e.source == source))
+                        .find(|&&eid| self.edges.get(eid).is_some_and(|e| e.source == source))
                 })
                 .copied();
 
             if let Some(existing_eid) = existing_eid {
                 // Strengthen existing edge
-                if let Some(existing_edge) = self.edges.get_mut(&existing_eid) {
+                if let Some(existing_edge) = self.edges.get_mut(existing_eid) {
                     existing_edge.strengthen(weight * 0.5);
                 }
             } else {
                 // Redirect edge to survivor
-                if let Some(edge) = self.edges.get_mut(&edge_id) {
+                if let Some(edge) = self.edges.get_mut(edge_id) {
                     edge.target = survivor_id;
                 }
                 self.adjacency_in
-                    .entry(survivor_id)
-                    .or_default()
+                    .ensure_at(survivor_id, AdjList::new())
                     .push(edge_id);
             }
         }
 
         // Boost survivor's signal via properties
-        if let Some(survivor) = self.nodes.get_mut(&survivor_id) {
+        if let Some(survivor) = self.nodes.get_mut(survivor_id) {
             let current_boost = survivor
                 .properties
                 .get("merge_boost")
@@ -2217,17 +2485,17 @@ impl Graph {
         self.remove_node(absorbed_id);
 
         // Update survivor degree and total_degree
-        if let Some(survivor) = self.nodes.get_mut(&survivor_id) {
+        if let Some(survivor) = self.nodes.get_mut(survivor_id) {
             let old_degree = survivor.degree as u64;
-            let out_count = self.adjacency_out.get(&survivor_id).map_or(0, |v| v.len());
-            let in_count = self.adjacency_in.get(&survivor_id).map_or(0, |v| v.len());
+            let out_count = self.adjacency_out.get(survivor_id).map_or(0, |v| v.len());
+            let in_count = self.adjacency_in.get(survivor_id).map_or(0, |v| v.len());
             survivor.degree = (out_count + in_count) as u32;
             let new_degree = survivor.degree as u64;
             // Adjust total_degree for the difference
             self.total_degree = self.total_degree.saturating_sub(old_degree) + new_degree;
         }
 
-        Ok(self.nodes[&survivor_id].clone())
+        Ok(self.nodes.get(survivor_id).unwrap().clone())
     }
 
     // ========================================================================
@@ -2373,55 +2641,43 @@ impl Graph {
             }
         }
 
-        // Initialize adjacency if needed
-        self.adjacency_out.entry(node_id).or_default();
-        self.adjacency_in.entry(node_id).or_default();
+        // Initialize adjacency if needed (ensure_at is a no-op if already occupied)
+        self.adjacency_out.ensure_at(node_id, AdjList::new());
+        self.adjacency_in.ensure_at(node_id, AdjList::new());
 
-        // Advance next_node_id past this ID
-        if node_id >= self.next_node_id {
-            self.next_node_id = node_id + 1;
-        }
-
-        self.nodes.insert(node_id, node);
+        self.nodes.insert_at(node_id, node);
         self.dirty_nodes.insert(node_id);
         self.adjacency_dirty = true;
         self.update_stats();
     }
 
     /// Insert an edge preserving its original ID. Both endpoints must exist.
-    /// Advances next_edge_id if needed.
     pub fn insert_existing_edge(&mut self, edge: GraphEdge) -> Option<EdgeId> {
-        if !self.nodes.contains_key(&edge.source) || !self.nodes.contains_key(&edge.target) {
+        if !self.nodes.contains_key(edge.source) || !self.nodes.contains_key(edge.target) {
             return None;
         }
 
         let edge_id = edge.id;
 
         self.adjacency_out
-            .entry(edge.source)
-            .or_default()
+            .ensure_at(edge.source, AdjList::new())
             .push(edge_id);
         self.adjacency_in
-            .entry(edge.target)
-            .or_default()
+            .ensure_at(edge.target, AdjList::new())
             .push(edge_id);
 
-        if let Some(source) = self.nodes.get_mut(&edge.source) {
+        if let Some(source) = self.nodes.get_mut(edge.source) {
             source.degree += 1;
             self.total_degree += 1;
         }
-        if let Some(target) = self.nodes.get_mut(&edge.target) {
+        if let Some(target) = self.nodes.get_mut(edge.target) {
             target.degree += 1;
             self.total_degree += 1;
         }
 
-        if edge_id >= self.next_edge_id {
-            self.next_edge_id = edge_id + 1;
-        }
-
         let source = edge.source;
         let target = edge.target;
-        self.edges.insert(edge_id, edge);
+        self.edges.insert_at(edge_id, edge);
         self.dirty_edges.insert(edge_id);
         self.dirty_nodes.insert(source);
         self.dirty_nodes.insert(target);
@@ -2895,6 +3151,8 @@ mod tests {
             observation_count: 1,
             confidence: 0.5,
             properties: HashMap::new(), // No is_valid property
+            confidence_history: crate::tcell::TCell::Empty,
+            weight_history: crate::tcell::TCell::Empty,
         };
         assert!(
             edge.is_valid(),
@@ -2921,6 +3179,8 @@ mod tests {
             observation_count: 1,
             confidence: 0.9,
             properties: HashMap::new(),
+            confidence_history: crate::tcell::TCell::Empty,
+            weight_history: crate::tcell::TCell::Empty,
         }
     }
 

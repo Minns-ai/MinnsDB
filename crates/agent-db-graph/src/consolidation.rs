@@ -12,6 +12,7 @@
 //   4. Marks consolidated episodes for accelerated decay
 
 use crate::episodes::EpisodeOutcome;
+use crate::llm_client::{parse_json_from_llm, LlmClient, LlmRequest};
 use crate::memory::{ConsolidationStatus, Memory, MemoryId, MemoryTier, MemoryType};
 use crate::stores::MemoryStore;
 use agent_db_core::types::current_timestamp;
@@ -103,8 +104,14 @@ impl ConsolidationEngine {
 
     /// Run a full consolidation pass over the memory store.
     ///
-    /// Returns details of what was created / consolidated.
-    pub fn run_consolidation(&mut self, store: &mut dyn MemoryStore) -> ConsolidationResult {
+    /// `goal_overrides` maps `goal_bucket_id` to an LLM-inferred goal label,
+    /// used when episodes have no explicit `active_goals`.
+    /// Pass an empty map to skip overrides (sync-only codepath).
+    pub fn run_consolidation(
+        &mut self,
+        store: &mut dyn MemoryStore,
+        goal_overrides: &HashMap<u64, String>,
+    ) -> ConsolidationResult {
         let mut result = ConsolidationResult::default();
 
         // --- Phase 1: Episodic → Semantic (multi-semantic chunking) ---
@@ -140,7 +147,24 @@ impl ConsolidationEngine {
                 let start = chunk_idx * threshold;
                 let chunk = &eligible[start..start + threshold];
 
-                let semantic = self.synthesize_semantic(chunk, *goal_bucket_id);
+                // Skip zero-signal chunks: if none of the source episodes have
+                // summaries, takeaways, or causal notes, the consolidated strategy
+                // will just be "Approach needs improvement for goal bucket <hash>"
+                // — useless noise for search and embedding.
+                let has_signal = chunk.iter().any(|m| {
+                    !m.summary.trim().is_empty()
+                        || !m.takeaway.trim().is_empty()
+                        || !m.causal_note.trim().is_empty()
+                });
+                if !has_signal {
+                    tracing::debug!(
+                        goal_bucket_id,
+                        "Skipping zero-signal semantic strategy (no actionable content)"
+                    );
+                    continue;
+                }
+
+                let semantic = self.synthesize_semantic(chunk, *goal_bucket_id, goal_overrides);
                 let semantic_id = semantic.id;
                 let episode_ids: Vec<MemoryId> = chunk.iter().map(|m| m.id).collect();
 
@@ -212,7 +236,8 @@ impl ConsolidationEngine {
                 }
 
                 let group_refs: Vec<&Memory> = group.to_vec();
-                let mut schema = self.synthesize_schema(&group_refs, *goal_bucket_id);
+                let mut schema =
+                    self.synthesize_schema(&group_refs, *goal_bucket_id, goal_overrides);
 
                 // Annotate schema metadata with grouping info
                 schema.metadata.insert(
@@ -445,8 +470,13 @@ impl ConsolidationEngine {
     // ---- Synthesis helpers ----
 
     /// Extract deduplicated goal descriptions from source memories' active_goals.
-    /// Falls back to "goal bucket {id}" if no descriptions are found.
-    fn extract_goal_descriptions(memories: &[&Memory], goal_bucket_id: u64) -> String {
+    /// Falls back to LLM-inferred overrides, then "goal bucket {id}" as last resort.
+    fn extract_goal_descriptions(
+        memories: &[&Memory],
+        goal_bucket_id: u64,
+        goal_overrides: &HashMap<u64, String>,
+    ) -> String {
+        // 1. Check explicit active_goals on the memories
         let mut seen = std::collections::HashSet::new();
         let mut descriptions = Vec::new();
         for m in memories {
@@ -457,14 +487,24 @@ impl ConsolidationEngine {
                 }
             }
         }
-        if descriptions.is_empty() {
-            format!("goal bucket {}", goal_bucket_id)
-        } else {
-            descriptions.join("; ")
+        if !descriptions.is_empty() {
+            return descriptions.join("; ");
         }
+
+        // 2. Check LLM-inferred goal overrides (computed async before consolidation)
+        if let Some(label) = goal_overrides.get(&goal_bucket_id) {
+            return label.clone();
+        }
+
+        format!("goal bucket {}", goal_bucket_id)
     }
 
-    fn synthesize_semantic(&mut self, memories: &[&Memory], goal_bucket_id: u64) -> Memory {
+    fn synthesize_semantic(
+        &mut self,
+        memories: &[&Memory],
+        goal_bucket_id: u64,
+        goal_overrides: &HashMap<u64, String>,
+    ) -> Memory {
         let id = self.next_id();
         let agent_id = memories[0].agent_id;
 
@@ -486,7 +526,7 @@ impl ConsolidationEngine {
         }
 
         // Extract goal descriptions for human-readable output
-        let goals_label = Self::extract_goal_descriptions(memories, goal_bucket_id);
+        let goals_label = Self::extract_goal_descriptions(memories, goal_bucket_id, goal_overrides);
 
         // Partition episodes by outcome for actionable summaries
         let success_summaries: Vec<&str> = memories
@@ -628,7 +668,12 @@ impl ConsolidationEngine {
         }
     }
 
-    fn synthesize_schema(&mut self, semantics: &[&Memory], goal_bucket_id: u64) -> Memory {
+    fn synthesize_schema(
+        &mut self,
+        semantics: &[&Memory],
+        goal_bucket_id: u64,
+        goal_overrides: &HashMap<u64, String>,
+    ) -> Memory {
         let id = self.next_id();
         let agent_id = semantics[0].agent_id;
 
@@ -649,7 +694,8 @@ impl ConsolidationEngine {
         }
 
         // Extract goal descriptions from semantic source memories
-        let goals_label = Self::extract_goal_descriptions(semantics, goal_bucket_id);
+        let goals_label =
+            Self::extract_goal_descriptions(semantics, goal_bucket_id, goal_overrides);
 
         // Collect success/failure takeaways and causes from semantic memories
         let success_takeaways: Vec<&str> = semantics
@@ -813,6 +859,106 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (mag_a * mag_b)
 }
 
+// ────────── LLM Goal Inference ──────────
+
+const GOAL_INFERENCE_SYSTEM_PROMPT: &str = concat!(
+    "You are a goal inference system. Given episode summaries and takeaways from a user's ",
+    "interaction with an AI agent, infer the user's primary goal or objective.\n\n",
+    "Output ONLY valid JSON: { \"goal\": \"Concise goal description (1-2 sentences)\" }\n\n",
+    "Rules:\n",
+    "- Infer the overarching goal that connects these episodes\n",
+    "- Focus on what the user was trying to achieve, not the specific steps\n",
+    "- Be concise and specific (e.g. \"Deploy web service to AWS\" not \"Do something with code\")\n",
+    "- If summaries are too vague to infer a goal, output { \"goal\": null }",
+);
+
+/// Infer goal labels for memory buckets that have no explicit `active_goals`.
+///
+/// Groups memories by `goal_bucket_id`, filters to buckets where no memory has
+/// explicit goals, sends episode summaries/takeaways to the LLM, and returns
+/// a mapping of `goal_bucket_id → inferred goal description`.
+///
+/// Fail-open: LLM errors are logged and skipped (returns empty map for those buckets).
+pub async fn infer_goal_labels(llm: &dyn LlmClient, memories: &[Memory]) -> HashMap<u64, String> {
+    let mut overrides = HashMap::new();
+
+    // Group by goal_bucket_id
+    let mut buckets: HashMap<u64, Vec<&Memory>> = HashMap::new();
+    for m in memories {
+        if m.tier == crate::memory::MemoryTier::Episodic
+            && m.consolidation_status == crate::memory::ConsolidationStatus::Active
+        {
+            buckets.entry(m.context.goal_bucket_id).or_default().push(m);
+        }
+    }
+
+    for (bucket_id, mems) in &buckets {
+        // Skip buckets where any memory already has explicit goals
+        let has_explicit_goals = mems.iter().any(|m| {
+            m.context
+                .active_goals
+                .iter()
+                .any(|g| !g.description.trim().is_empty())
+        });
+        if has_explicit_goals {
+            continue;
+        }
+
+        // Skip buckets with no summaries (nothing to infer from)
+        let has_content = mems
+            .iter()
+            .any(|m| !m.summary.trim().is_empty() || !m.takeaway.trim().is_empty());
+        if !has_content {
+            continue;
+        }
+
+        // Build episode context for the LLM
+        let mut prompt = String::from("Episodes:\n");
+        for (i, m) in mems.iter().enumerate().take(10) {
+            prompt.push_str(&format!("{}. Summary: \"{}\"\n", i + 1, m.summary.trim()));
+            let takeaway = m.takeaway.trim();
+            if !takeaway.is_empty() {
+                prompt.push_str(&format!("   Takeaway: \"{}\"\n", takeaway));
+            }
+            let causal = m.causal_note.trim();
+            if !causal.is_empty() {
+                prompt.push_str(&format!("   Cause: \"{}\"\n", causal));
+            }
+        }
+
+        let request = LlmRequest {
+            system_prompt: GOAL_INFERENCE_SYSTEM_PROMPT.to_string(),
+            user_prompt: prompt,
+            temperature: 0.0,
+            max_tokens: 256,
+            json_mode: true,
+        };
+
+        match llm.complete(request).await {
+            Ok(response) => {
+                if let Some(value) = parse_json_from_llm(&response.content) {
+                    if let Some(goal) = value.get("goal").and_then(|v| v.as_str()) {
+                        let goal = goal.trim();
+                        if !goal.is_empty() {
+                            tracing::info!(
+                                bucket_id,
+                                goal,
+                                "Inferred goal label for goalless bucket"
+                            );
+                            overrides.insert(*bucket_id, goal.to_string());
+                        }
+                    }
+                }
+            },
+            Err(e) => {
+                tracing::warn!(bucket_id, error = %e, "Failed to infer goal label via LLM");
+            },
+        }
+    }
+
+    overrides
+}
+
 /// Strategy evolution engine — detects when a new strategy supersedes an older one.
 pub struct StrategyEvolution;
 
@@ -845,10 +991,11 @@ impl StrategyEvolution {
         strategy: &crate::strategies::Strategy,
         all_strategies: &[crate::strategies::Strategy],
     ) -> u32 {
+        let strategy_map: HashMap<_, _> = all_strategies.iter().map(|s| (s.id, s)).collect();
         let mut depth = 0u32;
         let mut current = strategy;
         while let Some(parent_id) = current.parent_strategy {
-            if let Some(parent) = all_strategies.iter().find(|s| s.id == parent_id) {
+            if let Some(parent) = strategy_map.get(&parent_id) {
                 depth += 1;
                 current = parent;
                 if depth > 100 {
@@ -930,7 +1077,7 @@ mod tests {
         assert_eq!(store.list_all_memories().len(), 4);
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
 
         assert_eq!(
             result.semantic_created, 1,
@@ -1013,7 +1160,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 200);
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
 
         assert_eq!(result.schema_created, 1, "Should create 1 schema");
         assert_eq!(result.consolidated_semantic_ids.len(), 3);
@@ -1072,7 +1219,7 @@ mod tests {
         let mut engine = ConsolidationEngine::new(config.clone(), 100);
 
         // Single pass: Phase 1 creates 3 semantics, Phase 2 immediately creates a schema from them
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
         assert_eq!(
             result.semantic_created, 3,
             "Should create 3 semantics from 9 episodics (3 chunks of 3)"
@@ -1162,7 +1309,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
 
         // With chunking: 4 episodics / threshold 3 = 1 full chunk of 3
         assert_eq!(
@@ -1201,7 +1348,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
 
         assert_eq!(
             result.semantic_created, 0,
@@ -1233,7 +1380,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
 
         assert_eq!(
             result.semantic_created, 3,
@@ -1328,7 +1475,7 @@ mod tests {
         store.store_consolidated_memory(make_semantic_with_embedding(52, 42, 3000, emb3));
 
         let mut engine = ConsolidationEngine::new(config, 200);
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
 
         assert_eq!(
             result.schema_created, 1,
@@ -1375,7 +1522,7 @@ mod tests {
         store.store_consolidated_memory(make_semantic_with_embedding(52, 42, 3000, emb3));
 
         let mut engine = ConsolidationEngine::new(config, 200);
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
 
         assert_eq!(
             result.schema_created, 1,
@@ -1453,7 +1600,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store);
+        let result = engine.run_consolidation(&mut store, &HashMap::new());
 
         assert_eq!(result.semantic_created, 1);
 
@@ -1473,6 +1620,145 @@ mod tests {
         assert!(
             !semantic[0].summary.contains("goal bucket"),
             "Summary should NOT contain 'goal bucket' when descriptions available, got: {}",
+            semantic[0].summary
+        );
+    }
+
+    #[test]
+    fn test_semantic_uses_goal_overrides_when_no_active_goals() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+            ..Default::default()
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // Create 3 episodic memories WITHOUT active_goals (empty goals)
+        for i in 1..=3u64 {
+            let mut mem = make_episodic_memory(i, 888, EpisodeOutcome::Success);
+            mem.formed_at = 1000 + i;
+            // No active_goals set — goal_bucket_id = 888 from context
+            store.store_consolidated_memory(mem);
+        }
+
+        // Provide LLM-inferred goal overrides
+        let mut overrides = HashMap::new();
+        overrides.insert(888u64, "Set up CI/CD pipeline for the project".to_string());
+
+        let mut engine = ConsolidationEngine::new(config, 100);
+        let result = engine.run_consolidation(&mut store, &overrides);
+
+        assert_eq!(result.semantic_created, 1);
+
+        let all = store.list_all_memories();
+        let semantic: Vec<&Memory> = all
+            .iter()
+            .filter(|m| m.tier == MemoryTier::Semantic)
+            .collect();
+        assert_eq!(semantic.len(), 1);
+
+        // Summary should use the LLM-inferred goal, not "goal bucket 888"
+        assert!(
+            semantic[0]
+                .summary
+                .contains("Set up CI/CD pipeline for the project"),
+            "Summary should use LLM-inferred goal override, got: {}",
+            semantic[0].summary
+        );
+        assert!(
+            !semantic[0].summary.contains("goal bucket"),
+            "Summary should NOT fall back to 'goal bucket' when override available, got: {}",
+            semantic[0].summary
+        );
+    }
+
+    #[test]
+    fn test_explicit_goals_take_priority_over_overrides() {
+        use crate::stores::InMemoryMemoryStore;
+
+        let config = ConsolidationConfig {
+            episodic_threshold: 3,
+            semantic_threshold: 3,
+            post_consolidation_decay: 0.3,
+            archive_after_consolidation: false,
+            ..Default::default()
+        };
+
+        let mut store = InMemoryMemoryStore::new(MemoryFormationConfig::default());
+
+        // Create 3 episodic memories WITH explicit active_goals
+        for i in 1..=3u64 {
+            let ctx = EventContext {
+                fingerprint: 555,
+                goal_bucket_id: 555,
+                active_goals: vec![Goal {
+                    id: 1,
+                    description: "Deploy the web service".to_string(),
+                    priority: 1.0,
+                    deadline: None,
+                    progress: 0.0,
+                    subgoals: vec![],
+                }],
+                ..Default::default()
+            };
+            let mem = Memory {
+                id: i,
+                agent_id: 1,
+                session_id: 100,
+                episode_id: i,
+                summary: format!("Episode {} happened", i),
+                takeaway: format!("Lesson from episode {}", i),
+                causal_note: format!("Because of X in episode {}", i),
+                summary_embedding: Vec::new(),
+                tier: MemoryTier::Episodic,
+                consolidated_from: Vec::new(),
+                schema_id: None,
+                consolidation_status: ConsolidationStatus::Active,
+                context: ctx,
+                key_events: Vec::new(),
+                strength: 0.8,
+                relevance_score: 0.7,
+                formed_at: 1000 + i,
+                last_accessed: 1000 + i,
+                access_count: 0,
+                outcome: EpisodeOutcome::Success,
+                memory_type: MemoryType::Episodic { significance: 0.8 },
+                metadata: HashMap::new(),
+                expires_at: None,
+            };
+            store.store_consolidated_memory(mem);
+        }
+
+        // Provide a competing override — should NOT be used
+        let mut overrides = HashMap::new();
+        overrides.insert(555u64, "LLM inferred something else".to_string());
+
+        let mut engine = ConsolidationEngine::new(config, 100);
+        let result = engine.run_consolidation(&mut store, &overrides);
+
+        assert_eq!(result.semantic_created, 1);
+
+        let all = store.list_all_memories();
+        let semantic: Vec<&Memory> = all
+            .iter()
+            .filter(|m| m.tier == MemoryTier::Semantic)
+            .collect();
+        assert_eq!(semantic.len(), 1);
+
+        // Should use explicit goal, NOT the override
+        assert!(
+            semantic[0].summary.contains("Deploy the web service"),
+            "Explicit goals must take priority over overrides, got: {}",
+            semantic[0].summary
+        );
+        assert!(
+            !semantic[0].summary.contains("LLM inferred"),
+            "Override should NOT be used when explicit goals exist, got: {}",
             semantic[0].summary
         );
     }

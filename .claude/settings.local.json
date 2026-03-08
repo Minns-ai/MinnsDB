@@ -45,7 +45,18 @@
       "WebFetch(domain:emanuelerossi.co.uk)",
       "Bash(export:*)",
       "Bash(/Users/jonathanfarrow/.cargo/bin/cargo build:*)",
-      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo test:*)"
+      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo test:*)",
+      "Bash(~/.cargo/bin/cargo test:*)",
+      "Bash(source:*)",
+      "Bash(git:*)",
+      "Bash(BENCH_VERBOSE=1 python3:*)",
+      "Bash(do:*)",
+      "Bash($HOME/.cargo/bin/cargo build:*)",
+      "Bash(BENCH_VERBOSE=1 /Users/jonathanfarrow/EventGraphDB/ref/benchmark/StructMemEval/.venv/bin/python:*)",
+      "Bash(PATH=\"$HOME/.cargo/bin:$PATH\" cargo build:*)",
+      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo check:*)",
+      "Bash(RUSTFLAGS=\"-W dead_code -W unused-imports -W unused-variables -W unreachable-code\" $HOME/.cargo/bin/cargo build:*)",
+      "Bash(/tmp/temporal_tracking_analysis.md:*)"
     ]
   }
 }

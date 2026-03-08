@@ -146,7 +146,7 @@ fn analyze(query: &GraphQuery, graph: &Graph) -> Check {
 fn check_nodes_exist(graph: &Graph, node_ids: &[u64]) -> Option<String> {
     let missing: Vec<u64> = node_ids
         .iter()
-        .filter(|id| !graph.nodes.contains_key(id))
+        .filter(|id| !graph.nodes.contains_key(**id))
         .copied()
         .collect();
     if missing.is_empty() {

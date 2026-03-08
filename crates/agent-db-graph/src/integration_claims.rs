@@ -675,9 +675,8 @@ impl GraphEngine {
 
         // Explicitly clone only the Arcs we need for the background task
         // This avoids cloning the entire GraphEngine struct
-        let ner_queue: Option<Arc<agent_db_ner::NerExtractionQueue>> = self.ner_queue.clone();
-        let ner_store: Option<Arc<agent_db_ner::NerFeatureStore>> = self.ner_store.clone();
         let inference: Arc<RwLock<crate::inference::GraphInference>> = self.inference.clone();
+        let claim_store_ref: Option<Arc<crate::claims::ClaimStore>> = self.claim_store.clone();
         let ner_promotion_threshold = self.config.ner_promotion_threshold;
 
         // Snapshot rolling summary for context enrichment (best-effort)
@@ -986,38 +985,13 @@ impl GraphEngine {
         let event_id = event.id;
         let agent_id = event.agent_id;
         let session_id = event.session_id;
+        let domain_registry = self.domain_registry.clone();
 
         // Spawn background task
         tokio::spawn(async move {
-            // Step 1: Wait for NER features to be ready
-            let ner_features = if let Some(queue) = ner_queue {
-                debug!("Waiting for NER features for event {}...", event_id);
-                match queue.extract(event_id, canonical_text.clone()).await {
-                    Ok(features) => {
-                        debug!(
-                            "NER features ready for event {}: {} entities",
-                            event_id,
-                            features.entity_spans.len()
-                        );
-
-                        // Store features if store is available
-                        if let Some(ref store) = ner_store {
-                            let _ = store.store(&features);
-                        }
-
-                        Some(features)
-                    },
-                    Err(e) => {
-                        warn!(
-                            "NER extraction failed during claim pipeline for event {}: {}",
-                            event_id, e
-                        );
-                        None
-                    },
-                }
-            } else {
-                None
-            };
+            // NER is no longer used for claim entity enrichment — the LLM handles that.
+            // NER is specialized for financial extraction and called only during compaction.
+            let ner_features: Option<agent_db_events::ExtractedFeatures> = None;
 
             // Build claim extraction request
             let request = ClaimExtractionRequest {
@@ -1051,10 +1025,37 @@ impl GraphEngine {
                     }
 
                     // Step 2: Integrate accepted claims into the graph
-                    for claim in result.accepted_claims {
-                        // We do the integration directly using the cloned inference Arc
+                    // Anchor each claim to the current entity state so temporal
+                    // queries can filter stale claims.
+                    for mut claim in result.accepted_claims {
                         let mut inference_lock = inference.write().await;
                         let graph = inference_lock.graph_mut();
+
+                        // Capture state anchor from the subject entity's projected state
+                        if let Some(ref subj) = claim.subject_entity {
+                            let projected =
+                                crate::conversation::graph_projection::project_entity_state(
+                                    graph,
+                                    subj,
+                                    u64::MAX,
+                                    Some(&domain_registry),
+                                );
+                            for slot in projected.slots.values() {
+                                // Anchor single-valued state slots (location, work, etc.)
+                                if domain_registry.is_single_valued(
+                                    slot.association_type.split(':').next().unwrap_or(""),
+                                ) {
+                                    let key = format!("state_anchor:{}", slot.association_type);
+                                    let val = slot.value.as_deref().unwrap_or(&slot.target_name);
+                                    claim.metadata.insert(key, val.to_string());
+                                }
+                            }
+                        }
+
+                        // Also update the claim in the store with anchor metadata
+                        if let Some(ref cs) = claim_store_ref {
+                            let _ = cs.update_metadata(claim.id, &claim.metadata);
+                        }
 
                         if let Some(node_id) = graph.add_claim_node(&claim) {
                             debug!(

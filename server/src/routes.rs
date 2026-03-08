@@ -164,10 +164,6 @@ pub fn create_router(state: AppState) -> Router {
             "/api/conversations/ingest",
             post(handlers::ingest_conversation),
         )
-        .route(
-            "/api/conversations/query",
-            post(handlers::query_conversation),
-        )
         // Admin: Export/Import
         .route("/api/admin/export", post(handlers::export_handler))
         .route("/api/admin/import", post(handlers::import_handler))

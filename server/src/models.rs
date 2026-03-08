@@ -708,6 +708,9 @@ pub struct NlqRequest {
     /// Optional session ID for conversational context.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// If true, include related memories and strategies in the response.
+    #[serde(default)]
+    pub include_context: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -723,6 +726,12 @@ pub struct NlqResponseBody {
     pub explanation: Vec<String>,
     /// Total result count before pagination.
     pub total_count: usize,
+    /// Related memories (only populated when `include_context` is true).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub related_memories: Vec<agent_db_graph::MemorySummary>,
+    /// Related strategies (only populated when `include_context` is true).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub related_strategies: Vec<agent_db_graph::StrategySummary>,
 }
 
 #[derive(Debug, Serialize)]

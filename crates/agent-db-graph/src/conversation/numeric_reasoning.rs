@@ -272,57 +272,6 @@ pub fn common_preferences(
 }
 
 // ---------------------------------------------------------------------------
-// Relationship path queries
-// ---------------------------------------------------------------------------
-
-/// Check if two people are connected through the relationship tree.
-///
-/// Returns the path if found, or None.
-pub fn find_relationship_path(
-    store: &StructuredMemoryStore,
-    from: &str,
-    to: &str,
-    relation_type: &str,
-) -> Option<Vec<String>> {
-    let key = format!("tree:relations:{}", relation_type);
-    store.get(&key)?;
-
-    // BFS through the tree
-    let mut visited = std::collections::HashSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    let mut predecessors: HashMap<String, String> = HashMap::new();
-
-    visited.insert(from.to_string());
-    queue.push_back(from.to_string());
-
-    while let Some(current) = queue.pop_front() {
-        if current == to {
-            // Reconstruct path
-            let mut path = vec![to.to_string()];
-            let mut node = to.to_string();
-            while let Some(prev) = predecessors.get(&node) {
-                path.push(prev.clone());
-                node = prev.clone();
-            }
-            path.reverse();
-            return Some(path);
-        }
-
-        if let Some(children) = store.tree_children(&key, &current) {
-            for child in children {
-                if !visited.contains(child) {
-                    visited.insert(child.clone());
-                    predecessors.insert(child.clone(), current.clone());
-                    queue.push_back(child.clone());
-                }
-            }
-        }
-    }
-
-    None
-}
-
-// ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
 
@@ -484,56 +433,6 @@ mod tests {
         // So one transfer: Charlie → Alice: €60
         let total_transfers: f64 = transfers.iter().map(|t| t.amount).sum();
         assert!(total_transfers > 0.0);
-    }
-
-    #[test]
-    fn test_relationship_path() {
-        let mut store = StructuredMemoryStore::new();
-        store.upsert(
-            "tree:relations:colleague",
-            MemoryTemplate::Tree {
-                root: "colleague".to_string(),
-                children: std::collections::HashMap::new(),
-                provenance: MemoryProvenance::EpisodePipeline,
-            },
-        );
-
-        // Chain: A → B → C → D
-        let _ = store.tree_add_child("tree:relations:colleague", "Alice", "Bob");
-        let _ = store.tree_add_child("tree:relations:colleague", "Bob", "Alice");
-        let _ = store.tree_add_child("tree:relations:colleague", "Bob", "Charlie");
-        let _ = store.tree_add_child("tree:relations:colleague", "Charlie", "Bob");
-        let _ = store.tree_add_child("tree:relations:colleague", "Charlie", "Dave");
-        let _ = store.tree_add_child("tree:relations:colleague", "Dave", "Charlie");
-
-        let path = find_relationship_path(&store, "Alice", "Dave", "colleague");
-        assert!(path.is_some());
-        let p = path.unwrap();
-        assert_eq!(p[0], "Alice");
-        assert_eq!(p[p.len() - 1], "Dave");
-        assert!(p.len() <= 4);
-    }
-
-    #[test]
-    fn test_no_relationship_path() {
-        let mut store = StructuredMemoryStore::new();
-        store.upsert(
-            "tree:relations:colleague",
-            MemoryTemplate::Tree {
-                root: "colleague".to_string(),
-                children: std::collections::HashMap::new(),
-                provenance: MemoryProvenance::EpisodePipeline,
-            },
-        );
-
-        let _ = store.tree_add_child("tree:relations:colleague", "Alice", "Bob");
-        let _ = store.tree_add_child("tree:relations:colleague", "Bob", "Alice");
-        // Charlie is disconnected
-        let _ = store.tree_add_child("tree:relations:colleague", "Charlie", "Dave");
-        let _ = store.tree_add_child("tree:relations:colleague", "Dave", "Charlie");
-
-        let path = find_relationship_path(&store, "Alice", "Charlie", "colleague");
-        assert!(path.is_none());
     }
 
     #[test]

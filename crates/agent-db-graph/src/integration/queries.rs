@@ -1,5 +1,432 @@
 use super::*;
 
+// ────────── Answer Synthesis ──────────
+
+const SYNTHESIS_SYSTEM_PROMPT: &str = r#"You are answering a question about a user based on stored knowledge. Answer the question directly and concisely using ONLY the information provided in the context.
+
+Rules:
+- Give a direct, focused answer — not a list of facts
+- Use only information present in the context
+- The "Current state" section contains AUTHORITATIVE facts about what is true RIGHT NOW
+- Current state facts (location, routine, preferences, relationships) are ALWAYS sufficient to answer questions about the user's current life, activities, and recommendations
+- When asked "what should I do", "what to do this weekend", etc., use the user's current routine and location to answer directly
+- Write naturally, as if you personally know the user
+- Do NOT add speculation or information not in the context
+- Only say "I don't have enough information" if the context has NO relevant facts at all
+- For preference/recommendation questions: Compare categories, count positive vs negative, identify patterns, and make a clear recommendation with reasoning. Cite specific items.
+- For "what do X have in common" questions: Identify shared themes across items.
+
+CRITICAL — TEMPORAL STATE RULES:
+- The "Current state" section is the AUTHORITATIVE ground truth. It shows what is true RIGHT NOW.
+- If the current state says "location: Vancouver", the user is in Vancouver. Period.
+- ALL other facts must be CONSISTENT with the current state. Discard any known facts about activities, routines, landmarks, or places from a DIFFERENT or superseded state.
+- NEVER reference activities, places, or routines from superseded locations/states unless the question explicitly asks about history."#;
+
+/// Use the LLM to synthesize a focused answer from retrieved context.
+///
+/// Takes the question and the raw retrieval context (facts, claims, entity state)
+/// and produces a direct, concise answer instead of a bullet-point dump.
+async fn synthesize_answer(
+    llm: &dyn crate::llm_client::LlmClient,
+    question: &str,
+    context: &str,
+) -> anyhow::Result<String> {
+    let user_prompt = format!("Context:\n{}\n\nQuestion: {}", context, question);
+    tracing::info!("NLQ synthesis context:\n{}", context);
+
+    let request = crate::llm_client::LlmRequest {
+        system_prompt: SYNTHESIS_SYSTEM_PROMPT.to_string(),
+        user_prompt,
+        temperature: 0.0,
+        max_tokens: 256,
+        json_mode: false,
+    };
+
+    let response = llm.complete(request).await?;
+    let answer = response.content.trim().to_string();
+    if answer.is_empty() {
+        anyhow::bail!("Empty LLM response");
+    }
+    Ok(answer)
+}
+
+/// Temporal validity filter: remove results linked to superseded `state:*` edges.
+///
+/// Returns the set of superseded target names for downstream filtering.
+///
+/// For multi-transition scenarios (2tr, 3tr, 4tr+), this is the critical gate
+/// that prevents historical facts from polluting the synthesis context.
+/// Superseded results are zeroed out (removed), not just soft-demoted.
+fn apply_temporal_validity_filter(
+    results: &mut Vec<(u64, f32)>,
+    graph: &crate::structures::Graph,
+) -> std::collections::HashSet<String> {
+    use crate::conversation::graph_projection::concept_name_of;
+    use crate::structures::{EdgeType, NodeType};
+
+    // Phase 1: Collect superseded state target names.
+    let mut superseded_targets: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    // Any structured "category:predicate" edge is potentially stateful.
+    // The LLM generates arbitrary categories so we accept all of them —
+    // supersession (valid_until) already distinguishes current vs old.
+    let is_stateful = |assoc: &str| -> bool { assoc.contains(':') };
+
+    for (_eid, edge) in graph.edges.iter() {
+        if let EdgeType::Association {
+            association_type, ..
+        } = &edge.edge_type
+        {
+            if is_stateful(association_type) && edge.valid_until.is_some() {
+                if let Some(name) = concept_name_of(graph, edge.target) {
+                    superseded_targets.insert(name.to_lowercase());
+                }
+            }
+        }
+    }
+
+    // Phase 1d: depends_on cascade — edges whose depends_on property references
+    // a superseded target should also have their targets added to superseded_targets.
+    // E.g., edge with depends_on: "User lives in Tokyo" → if "tokyo" is in
+    // superseded_targets, add this edge's target too.
+    if !superseded_targets.is_empty() {
+        let mut dep_cascade_targets: Vec<String> = Vec::new();
+        for (_eid, edge) in graph.edges.iter() {
+            if edge.valid_until.is_some() {
+                continue; // already superseded
+            }
+            if let Some(serde_json::Value::String(dep)) = edge.properties.get("depends_on") {
+                let dep_lower = dep.to_lowercase();
+                let is_dep_stale = superseded_targets
+                    .iter()
+                    .any(|t| dep_lower.contains(t.as_str()));
+                if is_dep_stale {
+                    if let Some(name) = concept_name_of(graph, edge.target) {
+                        dep_cascade_targets.push(name.to_lowercase());
+                    }
+                }
+            }
+        }
+        for t in dep_cascade_targets {
+            superseded_targets.insert(t);
+        }
+    }
+
+    // Phase 1c: Also collect current targets so we never accidentally filter them
+    let mut current_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (_eid, edge) in graph.edges.iter() {
+        if let EdgeType::Association {
+            association_type, ..
+        } = &edge.edge_type
+        {
+            if is_stateful(association_type) && edge.valid_until.is_none() {
+                if let Some(name) = concept_name_of(graph, edge.target) {
+                    current_targets.insert(name.to_lowercase());
+                }
+            }
+        }
+    }
+    // Remove anything that's also a current target (safety: don't filter current state)
+    for ct in &current_targets {
+        superseded_targets.remove(ct);
+    }
+
+    // Phase 2: Zero out nodes that are direct targets of superseded state edges
+    for (node_id, score) in results.iter_mut() {
+        for edge in graph.get_edges_to(*node_id) {
+            if let EdgeType::Association {
+                association_type, ..
+            } = &edge.edge_type
+            {
+                if association_type.starts_with("state:") {
+                    if edge.valid_until.is_some() {
+                        *score = 0.0; // Hard remove — superseded state target
+                        break;
+                    }
+                    // Check if a newer edge exists (implicit supersession)
+                    let edge_vf = edge.valid_from.unwrap_or(0);
+                    let source = edge.source;
+                    let assoc = association_type.clone();
+
+                    let is_superseded = graph.get_edges_from(source).iter().any(|other| {
+                        if let EdgeType::Association {
+                            association_type: ref at,
+                            ..
+                        } = other.edge_type
+                        {
+                            at == &assoc
+                                && other.target != *node_id
+                                && other.valid_from.unwrap_or(0) > edge_vf
+                        } else {
+                            false
+                        }
+                    });
+
+                    if is_superseded {
+                        *score = 0.0; // Hard remove
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 3: Zero out Claim nodes that mention superseded targets
+    if !superseded_targets.is_empty() {
+        for (node_id, score) in results.iter_mut() {
+            if *score == 0.0 {
+                continue; // Already removed
+            }
+            if let Some(n) = graph.get_node(*node_id) {
+                if let NodeType::Claim { claim_text, .. } = &n.node_type {
+                    let text_lower = claim_text.to_lowercase();
+                    for target in &superseded_targets {
+                        if target.len() >= 3 && text_lower.contains(target.as_str()) {
+                            *score = 0.0; // Hard remove — references superseded entity
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove zeroed entries and re-sort
+    results.retain(|(_, score)| *score > 0.0);
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    superseded_targets
+}
+
+/// Filter claims whose state_anchor metadata disagrees with the current projected state.
+///
+/// Claims ingested while the user was in Amsterdam will have
+/// `state_anchor:location:lives_in = Amsterdam`. If the current state is Vancouver,
+/// those claims are zeroed out. Claims without state anchors pass through.
+fn apply_state_anchor_filter(
+    results: &mut Vec<(u64, f32)>,
+    graph: &crate::structures::Graph,
+    claim_store: &crate::claims::ClaimStore,
+) {
+    use crate::conversation::graph_projection;
+    use crate::structures::NodeType;
+
+    // Project current state for "user" entity (the primary entity in personal knowledge graphs)
+    let projected = graph_projection::project_entity_state(graph, "user", u64::MAX, None);
+    if projected.slots.is_empty() {
+        return; // No state to filter against
+    }
+
+    // Build map of current state values: "location:lives_in" → "Vancouver"
+    let mut current_state: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for slot in projected.slots.values() {
+        let category = slot.association_type.split(':').next().unwrap_or("");
+        if crate::domain_schema::is_single_valued(category) {
+            let val = slot.value.as_deref().unwrap_or(&slot.target_name);
+            current_state.insert(
+                format!("state_anchor:{}", slot.association_type),
+                val.to_lowercase(),
+            );
+        }
+    }
+
+    if current_state.is_empty() {
+        return;
+    }
+
+    for (node_id, score) in results.iter_mut() {
+        if *score == 0.0 {
+            continue;
+        }
+        // Only filter Claim nodes
+        let claim_id = if let Some(node) = graph.get_node(*node_id) {
+            if let NodeType::Claim { claim_id, .. } = &node.node_type {
+                *claim_id
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
+
+        // Look up claim metadata from store
+        if let Ok(Some(claim)) = claim_store.get(claim_id) {
+            for (anchor_key, anchor_val) in &claim.metadata {
+                if !anchor_key.starts_with("state_anchor:") {
+                    continue;
+                }
+                // Check if current state has a different value for this anchor
+                if let Some(current_val) = current_state.get(anchor_key) {
+                    if *current_val != anchor_val.to_lowercase() {
+                        // Claim was anchored to a different state — filter it out
+                        tracing::debug!(
+                            "State anchor filter: claim {} anchored to {}={}, current={}",
+                            claim_id,
+                            anchor_key,
+                            anchor_val,
+                            current_val
+                        );
+                        *score = 0.0;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove zeroed entries
+    results.retain(|(_, score)| *score > 0.0);
+}
+
+/// Build a dynamic projection from graph edges based on LLM classification.
+///
+/// Maps LLM hints to `ConversationQueryType` variants and delegates to the
+/// unified conversation query path (`execute_conversation_query_with_graph`).
+/// This ensures a single, complete execution path for all structured queries.
+fn build_dynamic_projection(
+    graph: &crate::structures::Graph,
+    hint: &crate::nlq::llm_hint::LlmHintResponse,
+    question: &str,
+    store: &crate::structured_memory::StructuredMemoryStore,
+    name_registry: &crate::conversation::types::NameRegistry,
+) -> Option<String> {
+    use crate::conversation::nlq_ext::{
+        execute_conversation_query_with_graph, ConversationQueryType, NumericOp,
+    };
+    use crate::nlq::llm_hint::{IntentHint, StructureHint};
+
+    let entities = extract_entity_names_from_question(graph, question);
+    let primary_entity = entities.first().cloned();
+
+    let query_type = match (&hint.structure_hint, &hint.intent_hint) {
+        (StructureHint::Ledger, IntentHint::Balance | IntentHint::AggregateBalance) => {
+            ConversationQueryType::Numeric {
+                op: NumericOp::NetBalance,
+            }
+        },
+        (StructureHint::StateMachine, IntentHint::CurrentState) => ConversationQueryType::State {
+            entity: primary_entity,
+            attribute: None,
+        },
+        (StructureHint::PreferenceList, IntentHint::Ranking) => ConversationQueryType::Preference {
+            entity: primary_entity,
+            category: None,
+        },
+        (_, IntentHint::Path) if entities.len() >= 2 => ConversationQueryType::RelationshipPath {
+            from: entities[0].clone(),
+            to: entities[1].clone(),
+            relation: None,
+        },
+        (StructureHint::GenericGraph, IntentHint::Neighbors | IntentHint::Subgraph) => {
+            match primary_entity {
+                Some(e) => ConversationQueryType::EntitySummary { entity: e },
+                None => return None,
+            }
+        },
+        _ => return None,
+    };
+
+    let result = execute_conversation_query_with_graph(
+        &query_type,
+        store,
+        name_registry,
+        question,
+        Some(graph),
+    );
+    if result.is_empty() || result.contains("No ") {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Extract entity names mentioned in a question by checking against graph concept index.
+///
+/// Also resolves implicit relational references (e.g., "my neighbor" → look for
+/// `relationship:neighbor` edges from user → return the target entity name).
+fn extract_entity_names_from_question(
+    graph: &crate::structures::Graph,
+    question: &str,
+) -> Vec<String> {
+    let lower = question.to_lowercase();
+    let mut found = Vec::new();
+
+    // Always include "user" for first-person queries
+    let has_first_person = lower.contains(" i ")
+        || lower.contains("my ")
+        || lower.starts_with("i ")
+        || lower.contains(" me");
+    if has_first_person {
+        found.push("user".to_string());
+    }
+
+    // Check all concept names against the question
+    for concept_name in graph.concept_index.keys() {
+        if lower.contains(&concept_name.to_lowercase()) {
+            found.push(concept_name.to_string());
+        }
+    }
+
+    // Resolve implicit relational references from the "user" node.
+    // E.g., "my neighbor" → look for `relationship:neighbor` edges from user.
+    if has_first_person {
+        if let Some(&user_nid) = graph.concept_index.get("user") {
+            // Common relational words to check
+            let relational_words = [
+                "neighbor",
+                "neighbour",
+                "boss",
+                "manager",
+                "sister",
+                "brother",
+                "mother",
+                "father",
+                "friend",
+                "partner",
+                "colleague",
+                "coworker",
+                "wife",
+                "husband",
+                "child",
+                "doctor",
+                "teacher",
+            ];
+            for rel_word in &relational_words {
+                if lower.contains(rel_word) {
+                    // Look for relationship edges from user matching this word
+                    for edge in graph.get_edges_from(user_nid) {
+                        if let crate::structures::EdgeType::Association {
+                            association_type, ..
+                        } = &edge.edge_type
+                        {
+                            if association_type.starts_with("relationship:") {
+                                let rel_suffix =
+                                    association_type.strip_prefix("relationship:").unwrap_or("");
+                                if rel_suffix.to_lowercase().contains(rel_word) {
+                                    if let Some(name) =
+                                        crate::conversation::graph_projection::concept_name_of(
+                                            graph,
+                                            edge.target,
+                                        )
+                                    {
+                                        if !found.contains(&name) {
+                                            found.push(name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    found
+}
+
 impl GraphEngine {
     /// Get reference to claim store (if semantic memory is enabled)
     pub fn claim_store(&self) -> Option<&Arc<crate::claims::ClaimStore>> {
@@ -21,8 +448,17 @@ impl GraphEngine {
     /// Manually trigger a consolidation pass
     pub async fn run_consolidation(&self) -> crate::consolidation::ConsolidationResult {
         let mut store = self.memory_store.write().await;
+
+        // Infer goal labels for goalless buckets if LLM is available
+        let goal_overrides = if let Some(ref llm) = self.unified_llm_client {
+            let all_memories = store.list_all_memories();
+            crate::consolidation::infer_goal_labels(llm.as_ref(), &all_memories).await
+        } else {
+            std::collections::HashMap::new()
+        };
+
         let mut engine = self.consolidation_engine.write().await;
-        engine.run_consolidation(store.as_mut())
+        engine.run_consolidation(store.as_mut(), &goal_overrides)
     }
 
     /// Execute a graph query
@@ -119,7 +555,7 @@ impl GraphEngine {
     /// Get a node by ID for search results
     pub async fn get_node(&self, node_id: u64) -> Option<crate::structures::GraphNode> {
         let inference = self.inference.read().await;
-        inference.graph().nodes.get(&node_id).cloned()
+        inference.graph().nodes.get(node_id).cloned()
     }
 
     /// Search claims using hybrid BM25 + semantic search.
@@ -573,6 +1009,11 @@ impl GraphEngine {
         &self.structured_memory
     }
 
+    /// Get a reference to the inference engine (for graph access in server handlers).
+    pub fn inference(&self) -> &Arc<RwLock<GraphInference>> {
+        &self.inference
+    }
+
     /// Get a reference to the memory audit log.
     pub fn memory_audit_log(&self) -> &Arc<RwLock<crate::memory_audit::MemoryAuditLog>> {
         &self.memory_audit_log
@@ -673,8 +1114,8 @@ impl GraphEngine {
 
     /// Execute a natural language query against the graph.
     ///
-    /// Translates the question into a `GraphQuery`, executes it, and returns
-    /// a human-readable answer along with raw results and metadata.
+    /// Routes all queries through the unified multi-source pipeline (BM25 +
+    /// memory + claims + graph entity resolution with RRF fusion).
     ///
     /// Supports pagination and conversational context via `session_id`.
     pub async fn natural_language_query(
@@ -683,8 +1124,21 @@ impl GraphEngine {
         pagination: &crate::nlq::NlqPagination,
         session_id: Option<&str>,
     ) -> GraphResult<crate::nlq::NlqResponse> {
-        let start = std::time::Instant::now();
+        self.natural_language_query_with_options(question, pagination, session_id, false)
+            .await
+    }
 
+    /// Execute a natural language query with options.
+    ///
+    /// When `include_memories` is true, memory retrieval is included in the
+    /// fusion pipeline and memory summaries appear in the answer.
+    pub async fn natural_language_query_with_options(
+        &self,
+        question: &str,
+        pagination: &crate::nlq::NlqPagination,
+        session_id: Option<&str>,
+        include_memories: bool,
+    ) -> GraphResult<crate::nlq::NlqResponse> {
         // Resolve follow-up questions using conversational context
         let effective_question = if let Some(sid) = session_id {
             let contexts = self.nlq_contexts.lock().await;
@@ -697,129 +1151,13 @@ impl GraphEngine {
             question.to_string()
         };
 
-        // LLM hint classifier: run rule-based + LLM in parallel, merge results
-        let intent_override = if self.config.enable_nlq_hint {
-            if let Some(ref llm_client) = self.unified_llm_client {
-                let rule_based = crate::nlq::intent::classify_intent_full(&effective_question);
-                let llm_result = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    crate::nlq::llm_hint::classify_with_llm(
-                        llm_client.as_ref(),
-                        &effective_question,
-                    ),
-                )
-                .await;
-                let llm_hint = match llm_result {
-                    Ok(Ok(hint)) => hint,
-                    Ok(Err(e)) => {
-                        tracing::warn!("NLQ hint classifier error: {}", e);
-                        None
-                    },
-                    Err(_) => {
-                        tracing::warn!("NLQ hint classifier timed out (5s)");
-                        None
-                    },
-                };
-                let merged = crate::nlq::llm_hint::merge_classification(rule_based, llm_hint);
-                if merged.llm_overrode {
-                    tracing::info!(
-                        "NLQ hint classifier overrode rule-based intent to {:?}",
-                        crate::nlq::intent::intent_display_name(&merged.intent.intent),
-                    );
-                }
-                Some(merged.intent)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Check if this should route through the unified pipeline
-        let is_full_pipeline = self.config.enable_unified_nlq
-            && match &intent_override {
-                Some(ci) => matches!(
-                    ci.intent,
-                    crate::nlq::intent::QueryIntent::KnowledgeQuery
-                        | crate::nlq::intent::QueryIntent::SimilaritySearch
-                        | crate::nlq::intent::QueryIntent::Unknown
-                ),
-                None => {
-                    // Also check rule-based classification for routing
-                    let probe = crate::nlq::intent::classify_intent(&effective_question);
-                    matches!(
-                        probe,
-                        crate::nlq::intent::QueryIntent::KnowledgeQuery
-                            | crate::nlq::intent::QueryIntent::Unknown
-                    )
-                },
-            };
-
-        if is_full_pipeline {
-            return self
-                .execute_unified_query(&effective_question, pagination, session_id)
-                .await;
-        }
-
-        let response = {
-            let inference = self.inference.read().await;
-            let sm_guard = self.structured_memory.read().await;
-            self.nlq_pipeline.execute_with_hint(
-                &effective_question,
-                inference.graph(),
-                &self.traversal,
-                pagination,
-                Some(&sm_guard),
-                intent_override,
-            )?
-        };
-
-        // Push exchange to conversational context
-        if let Some(sid) = session_id {
-            let mut contexts = self.nlq_contexts.lock().await;
-            let ctx = contexts
-                .entry(sid.to_string())
-                .or_insert_with(crate::nlq::ConversationContext::new);
-            ctx.push(crate::nlq::ConversationExchange {
-                question: effective_question.clone(),
-                intent: crate::nlq::intent::intent_display_name(&response.intent).to_string(),
-                entities: response
-                    .entities_resolved
-                    .iter()
-                    .map(|e| e.mention.text.clone())
-                    .collect(),
-                timestamp: crate::nlq::now_millis(),
-            });
-
-            // LRU eviction: cap at 1000 sessions to prevent unbounded growth
-            const MAX_NLQ_SESSIONS: usize = 1000;
-            if contexts.len() > MAX_NLQ_SESSIONS {
-                if let Some(oldest_key) = contexts
-                    .iter()
-                    .min_by_key(|(_, ctx)| ctx.last_activity())
-                    .map(|(k, _)| k.clone())
-                {
-                    contexts.remove(&oldest_key);
-                }
-            }
-        }
-
-        // Log feedback
-        let feedback = crate::nlq::feedback::NlqFeedback {
-            question: question.to_string(),
-            intent: crate::nlq::intent::intent_display_name(&response.intent).to_string(),
-            entities_found: response.entities_resolved.len(),
-            template_used: Some(format!("{:?}", response.query_used)),
-            query_built: true,
-            validation_result: "Valid".to_string(),
-            execution_success: true,
-            result_count: crate::nlq::formatter::result_count(&response.result),
-            confidence: response.confidence,
-            execution_time_ms: start.elapsed().as_millis() as u64,
-        };
-        crate::nlq::feedback::log_nlq_feedback(&feedback);
-
-        Ok(response)
+        self.execute_unified_query(
+            &effective_question,
+            pagination,
+            session_id,
+            include_memories,
+        )
+        .await
     }
 
     /// Execute a unified multi-source query (BM25 + memory + claims + graph + optional DRIFT).
@@ -831,6 +1169,7 @@ impl GraphEngine {
         question: &str,
         pagination: &crate::nlq::NlqPagination,
         session_id: Option<&str>,
+        include_memories: bool,
     ) -> GraphResult<crate::nlq::NlqResponse> {
         let start = std::time::Instant::now();
         let mut explanation = vec!["Unified NLQ pipeline activated".to_string()];
@@ -842,6 +1181,9 @@ impl GraphEngine {
             explanation.push(format!("BM25: {} results", bm25.len()));
             ranked_lists.push(bm25);
         }
+
+        // 1b. Node vector search (if embedding client available)
+        // Generates query embedding early so it can be reused for memory + claims below.
 
         // Generate query embedding if embedding client is available (reused for memory + claims)
         let query_embedding = if let Some(ref ec) = self.embedding_client {
@@ -859,39 +1201,61 @@ impl GraphEngine {
             vec![]
         };
 
-        // 2. Memory retrieval (with semantic signal when embedding is available)
-        let memories = self
-            .retrieve_memories_multi_signal(
-                crate::retrieval::MemoryRetrievalQuery {
-                    query_text: question.to_string(),
-                    query_embedding: query_embedding.clone(),
-                    context: None,
-                    anchor_node: None,
-                    agent_id: None,
-                    session_id: None,
-                    now: None,
-                    limit: 20,
-                },
-                None,
-            )
-            .await;
-        if !memories.is_empty() {
-            explanation.push(format!("Memory retrieval: {} results", memories.len()));
-            // Convert to ranked list using position-based scoring
-            let memory_ranked: Vec<(u64, f32)> = {
-                let inference = self.inference.read().await;
-                let graph = inference.graph();
-                memories
-                    .iter()
-                    .enumerate()
-                    .map(|(rank, mem)| {
-                        let node_id = graph.memory_index.get(&mem.id).copied().unwrap_or(mem.id);
-                        (node_id, 1.0 / (rank as f32 + 1.0))
-                    })
-                    .collect()
-            };
-            ranked_lists.push(memory_ranked);
+        // 1c. Hybrid node vector search: fuse BM25 node results with vector similarity
+        if !query_embedding.is_empty() {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            let vector_hits = graph.node_vector_index.search(&query_embedding, 20, 0.3);
+            if !vector_hits.is_empty() {
+                explanation.push(format!("Node vector: {} results", vector_hits.len()));
+                ranked_lists.push(vector_hits);
+            }
+
+            // 1d. Edge/triplet vector search: find edges whose "subject predicate object"
+            // text is semantically similar to the query. Resolve hits to source+target nodes.
+            let edge_hits = graph.edge_vector_index.search(&query_embedding, 10, 0.4);
+            if !edge_hits.is_empty() {
+                let mut triplet_node_hits: Vec<(u64, f32)> = Vec::new();
+                for &(edge_id, sim) in &edge_hits {
+                    if let Some(edge) = graph.edges.get(edge_id) {
+                        // Both source and target nodes are relevant
+                        triplet_node_hits.push((edge.source, sim));
+                        triplet_node_hits.push((edge.target, sim * 0.8)); // target slightly lower
+                    }
+                }
+                if !triplet_node_hits.is_empty() {
+                    explanation.push(format!(
+                        "Triplet vector: {} edges -> {} nodes",
+                        edge_hits.len(),
+                        triplet_node_hits.len()
+                    ));
+                    ranked_lists.push(triplet_node_hits);
+                }
+            }
         }
+
+        // 2. Memory retrieval — only when explicitly requested via include_memories.
+        // By default NLQ returns only claims and graph-edge facts.
+        // Memories are also available separately via the /memory endpoint.
+        let memories: Vec<crate::memory::Memory> = if include_memories {
+            let mem_query = crate::MemoryRetrievalQuery {
+                query_text: question.to_string(),
+                query_embedding: query_embedding.clone(),
+                context: None,
+                anchor_node: None,
+                agent_id: None,
+                session_id: None,
+                now: None,
+                limit: 5,
+            };
+            let retrieved = self.retrieve_memories_multi_signal(mem_query, None).await;
+            if !retrieved.is_empty() {
+                explanation.push(format!("Memories: {} results", retrieved.len()));
+            }
+            retrieved
+        } else {
+            Vec::new()
+        };
 
         // 3. Claim search (always hybrid BM25 + semantic via RRF)
         if let Some(ref store) = self.claim_store {
@@ -927,6 +1291,7 @@ impl GraphEngine {
         }
 
         // 4. Graph entity BFS (resolve entities → 1-hop neighbors)
+        // Only include Claim and Concept neighbors — skip Memory/Strategy/Event nodes.
         {
             let inference = self.inference.read().await;
             let graph = inference.graph();
@@ -940,13 +1305,20 @@ impl GraphEngine {
                 let mut entity_hits: Vec<(u64, f32)> = Vec::new();
                 for entity in &resolved {
                     entity_hits.push((entity.node_id, 1.0));
-                    // 1-hop neighbors (both directions: outgoing + incoming)
-                    // Incoming edges capture claims linked via ABOUT edges (Claim→Concept)
+                    // 1-hop neighbors — only Claims and Concepts (fact-bearing nodes)
                     for &neighbor_id in graph
                         .neighbors_directed(entity.node_id, crate::structures::Direction::Both)
                         .iter()
                     {
-                        entity_hits.push((neighbor_id, 0.5));
+                        if let Some(node) = graph.get_node(neighbor_id) {
+                            match &node.node_type {
+                                crate::structures::NodeType::Claim { .. }
+                                | crate::structures::NodeType::Concept { .. } => {
+                                    entity_hits.push((neighbor_id, 0.5));
+                                },
+                                _ => {}, // Skip Memory, Strategy, Event, etc.
+                            }
+                        }
                     }
                 }
                 if !entity_hits.is_empty() {
@@ -961,18 +1333,204 @@ impl GraphEngine {
         }
 
         // 5. Fuse via RRF
-        let fused = crate::retrieval::multi_list_rrf(&ranked_lists, 60.0);
+        let mut fused = crate::retrieval::multi_list_rrf(&ranked_lists, 60.0);
 
-        // 6. Format answer from top results
-        let answer = {
-            let inference = self.inference.read().await;
-            let graph = inference.graph();
-            crate::nlq::unified::format_unified_results(&fused, question, graph, &memories)
+        // 5a. Classify query intent + temporal frame (LLM, fallback to rule-based).
+        // Must run BEFORE temporal filter so we know whether to apply it.
+        let (llm_hint, temporal_frame) = if let Some(ref llm_client) = self.unified_llm_client {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                crate::nlq::llm_hint::classify_with_llm(llm_client.as_ref(), question),
+            )
+            .await
+            {
+                Ok(Ok(Some(hint))) => {
+                    let frame = hint.temporal_frame.clone();
+                    (Some(hint), frame)
+                },
+                Ok(Ok(None)) => (None, crate::nlq::llm_hint::detect_temporal_frame(question)),
+                Ok(Err(e)) => {
+                    tracing::debug!("LLM classification failed (non-fatal): {}", e);
+                    (None, crate::nlq::llm_hint::detect_temporal_frame(question))
+                },
+                Err(_) => {
+                    tracing::debug!("LLM classification timed out");
+                    (None, crate::nlq::llm_hint::detect_temporal_frame(question))
+                },
+            }
+        } else {
+            (None, crate::nlq::llm_hint::detect_temporal_frame(question))
         };
 
-        // 7. Optionally run DRIFT for synthesized answer
-        // Clone summaries snapshot to avoid holding read lock during LLM calls.
-        let (final_answer, drift_explanation) = if self.config.enable_drift_search {
+        // 5b. Temporal validity filter: only apply for Current temporal frame.
+        // Historical/Comparative/Timeless queries need access to superseded state.
+        let superseded_targets = if temporal_frame == crate::nlq::llm_hint::TemporalFrame::Current {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            apply_temporal_validity_filter(&mut fused, graph)
+        } else {
+            tracing::info!("Skipping temporal filter for {:?} frame", temporal_frame);
+            std::collections::HashSet::new()
+        };
+
+        // 5b2. State-anchor filter: remove claims whose state_anchor metadata
+        // disagrees with the current projected entity state. Only for Current frame.
+        if temporal_frame == crate::nlq::llm_hint::TemporalFrame::Current {
+            if let Some(ref store) = self.claim_store {
+                let inference = self.inference.read().await;
+                let graph = inference.graph();
+                apply_state_anchor_filter(&mut fused, graph, store);
+            }
+        }
+
+        // 5c. LLM-driven dynamic projection from graph edges.
+        // Maps LLM hints to ConversationQueryType and uses the unified query path.
+        // Both locks are scoped tightly and released after projection completes.
+        let dynamic_projection = if let Some(ref hint) = llm_hint {
+            let proj = {
+                let inference = self.inference.read().await;
+                let graph = inference.graph();
+                let store = self.structured_memory.read().await;
+                let name_registry = crate::conversation::types::NameRegistry::new();
+                build_dynamic_projection(graph, hint, question, &store, &name_registry)
+            }; // both locks released here
+            if let Some(ref _text) = proj {
+                explanation.push(format!(
+                    "Projection: {:?}/{:?}",
+                    hint.structure_hint, hint.intent_hint
+                ));
+                tracing::info!(
+                    "Dynamic projection: {:?}/{:?}",
+                    hint.structure_hint,
+                    hint.intent_hint
+                );
+            }
+            proj
+        } else {
+            None
+        };
+
+        // Track whether the fast path answered the query (used for DRIFT gating)
+        let had_dynamic_projection = dynamic_projection.is_some();
+
+        // 6. Build retrieval context from top results + optional projection
+        let retrieval_context = {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            let retrieval = crate::nlq::unified::format_unified_results(
+                &fused,
+                question,
+                graph,
+                &memories,
+                &superseded_targets,
+            );
+            match dynamic_projection {
+                Some(proj) if !proj.is_empty() => {
+                    if retrieval == "No relevant information found." {
+                        proj
+                    } else {
+                        format!("{}\n\n{}", proj, retrieval)
+                    }
+                },
+                _ => retrieval,
+            }
+        };
+
+        // 6a. Enrich context for preference/recommendation queries with structured analysis
+        let retrieval_context = if matches!(
+            llm_hint.as_ref().map(|h| &h.structure_hint),
+            Some(crate::nlq::llm_hint::StructureHint::PreferenceList)
+        ) {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            let entities = extract_entity_names_from_question(graph, question);
+            let mut analysis = String::new();
+            for entity in &entities {
+                let facts =
+                    crate::conversation::graph_projection::collect_entity_facts(graph, entity);
+                for fact in &facts {
+                    if fact.association_type.starts_with("preference:") {
+                        analysis.push_str(&format!(
+                            "- {} {} (sentiment: {:.1}, current: {})\n",
+                            entity, fact.target_name, fact.sentiment, fact.is_current
+                        ));
+                    }
+                }
+            }
+            if analysis.is_empty() {
+                retrieval_context
+            } else {
+                format!(
+                    "PREFERENCE ANALYSIS:\n{}\n\n{}",
+                    analysis, retrieval_context
+                )
+            }
+        } else {
+            retrieval_context
+        };
+
+        // 6b. LLM answer synthesis: produce a focused answer from retrieved context.
+        // If the LLM is available, we ask it to answer the question using ONLY the
+        // retrieved facts. This replaces the raw bullet-point dump with a direct answer.
+        // Falls back to the raw retrieval context if LLM is unavailable or fails.
+        let answer = if retrieval_context != "No relevant information found." {
+            let synth_client = self
+                .synthesis_llm_client
+                .as_ref()
+                .or(self.unified_llm_client.as_ref());
+            if let Some(llm_client) = synth_client {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    synthesize_answer(llm_client.as_ref(), question, &retrieval_context),
+                )
+                .await
+                {
+                    Ok(Ok(synthesized)) => {
+                        explanation.push("LLM synthesis: ok".to_string());
+                        synthesized
+                    },
+                    Ok(Err(e)) => {
+                        tracing::warn!("LLM synthesis failed: {}", e);
+                        return Err(GraphError::OperationError(format!(
+                            "Answer synthesis failed: {}",
+                            e
+                        )));
+                    },
+                    Err(_) => {
+                        tracing::warn!("LLM synthesis timed out");
+                        return Err(GraphError::OperationError(
+                            "Answer synthesis timed out".to_string(),
+                        ));
+                    },
+                }
+            } else {
+                retrieval_context
+            }
+        } else {
+            retrieval_context
+        };
+
+        // 7. Run DRIFT for cross-entity / multi-hop / exploration queries only.
+        // Simple current-state lookups are better served by the filtered synthesis
+        // above (fewer LLM calls, no stale community summary leakage).
+        // Skip DRIFT if the dynamic projection already answered the query.
+        let use_drift = self.config.enable_drift_search && !had_dynamic_projection && {
+            match llm_hint.as_ref().map(|h| &h.intent_hint) {
+                // Multi-hop / cross-entity intents benefit from DRIFT's community context
+                Some(crate::nlq::llm_hint::IntentHint::Path)
+                | Some(crate::nlq::llm_hint::IntentHint::Subgraph)
+                | Some(crate::nlq::llm_hint::IntentHint::Aggregate)
+                | Some(crate::nlq::llm_hint::IntentHint::AggregateBalance)
+                | Some(crate::nlq::llm_hint::IntentHint::Similarity)
+                | Some(crate::nlq::llm_hint::IntentHint::Knowledge) => true,
+                // GenericGraph structure hint also suggests cross-entity traversal
+                _ => matches!(
+                    llm_hint.as_ref().map(|h| &h.structure_hint),
+                    Some(crate::nlq::llm_hint::StructureHint::GenericGraph)
+                ),
+            }
+        };
+        let (final_answer, drift_explanation) = if use_drift {
             if let Some(ref llm_client) = self.unified_llm_client {
                 let summaries_snapshot = {
                     let guard = self.community_summaries.read().await;
@@ -985,11 +1543,17 @@ impl GraphEngine {
                 if let Some(summaries) = summaries_snapshot {
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(self.config.drift_config.timeout_secs),
-                        self.run_drift_search(question, &summaries, &fused, llm_client.as_ref()),
+                        self.run_drift_search(
+                            question,
+                            &summaries,
+                            &fused,
+                            llm_client.as_ref(),
+                            &temporal_frame,
+                        ),
                     )
                     .await
                     {
-                        Ok(drift_result) => {
+                        Ok(Ok(drift_result)) => {
                             let explain = format!(
                                 "DRIFT: {} communities, {} follow-ups, {} items",
                                 drift_result.primer_communities_used.len(),
@@ -998,9 +1562,18 @@ impl GraphEngine {
                             );
                             (drift_result.answer, Some(explain))
                         },
+                        Ok(Err(synth_err)) => {
+                            tracing::warn!("DRIFT synthesis failed: {}", synth_err);
+                            return Err(GraphError::OperationError(format!(
+                                "Answer synthesis failed: {}",
+                                synth_err
+                            )));
+                        },
                         Err(_) => {
-                            tracing::warn!("DRIFT search timed out, using standard results");
-                            (answer, None)
+                            tracing::warn!("DRIFT search timed out");
+                            return Err(GraphError::OperationError(
+                                "Answer synthesis timed out".to_string(),
+                            ));
                         },
                     }
                 } else {
@@ -1053,14 +1626,21 @@ impl GraphEngine {
         })
     }
 
-    /// Run DRIFT search: primer → follow-up → synthesis.
+    /// Run DRIFT search: primer → follow-up → temporal context → fact summary → synthesis.
     async fn run_drift_search(
         &self,
         question: &str,
         community_summaries: &HashMap<u64, crate::community_summary::CommunitySummary>,
         initial_fused: &[(u64, f32)],
         llm_client: &dyn crate::llm_client::LlmClient,
-    ) -> crate::nlq::drift::DriftResult {
+        temporal_frame: &crate::nlq::llm_hint::TemporalFrame,
+    ) -> Result<crate::nlq::drift::DriftResult, String> {
+        // Use synthesis client for final answer composition if available
+        let synthesis_client: &dyn crate::llm_client::LlmClient = self
+            .synthesis_llm_client
+            .as_ref()
+            .map(|c| c.as_ref())
+            .unwrap_or(llm_client);
         let config = &self.config.drift_config;
 
         // Phase 1: Primer — score communities + generate follow-up queries
@@ -1089,7 +1669,8 @@ impl GraphEngine {
         }
 
         let mut retrieved_snippets = Vec::new();
-        {
+        // Phase 3: Temporal Context Assembly — build entity timelines + current state
+        let temporal_context = {
             let inference = self.inference.read().await;
             let graph = inference.graph();
             let mut seen = std::collections::HashSet::new();
@@ -1104,26 +1685,115 @@ impl GraphEngine {
                     retrieved_snippets.push(label);
                 }
             }
-        }
+
+            // Resolve entity mentions from question and build temporal context
+            let entities = extract_entity_names_from_question(graph, question);
+            let mut entity_timelines = Vec::new();
+            let mut current_state = Vec::new();
+
+            for entity in &entities {
+                if let Some(timeline) =
+                    crate::conversation::graph_projection::build_entity_timeline_summary(
+                        graph, entity,
+                    )
+                {
+                    entity_timelines.push(timeline);
+                }
+                let projected = crate::conversation::graph_projection::project_entity_state(
+                    graph,
+                    entity,
+                    u64::MAX,
+                    None,
+                );
+                for slot in projected.slots.values() {
+                    let value = slot.value.as_deref().unwrap_or(&slot.target_name);
+                    current_state
+                        .push(format!("{}: {} = {}", entity, slot.association_type, value));
+                }
+            }
+
+            crate::nlq::drift::DriftTemporalContext {
+                entity_timelines,
+                current_state,
+                temporal_frame: format!("{:?}", temporal_frame),
+            }
+        };
 
         let total_items = merged.len();
 
-        // Phase 3: Synthesis
+        // ── DRIFT debug logging ──
+        tracing::info!(
+            "DRIFT community context ({} items):",
+            community_context.len()
+        );
+        for (i, c) in community_context.iter().enumerate() {
+            tracing::info!("  community[{}]: {}", i, &c[..c.len().min(300)]);
+        }
+        tracing::info!(
+            "DRIFT retrieved snippets ({} items):",
+            retrieved_snippets.len()
+        );
+        for (i, s) in retrieved_snippets.iter().enumerate() {
+            tracing::info!("  snippet[{}]: {}", i, &s[..s.len().min(300)]);
+        }
+        tracing::info!(
+            "DRIFT temporal context: frame={}",
+            temporal_context.temporal_frame
+        );
+        for s in &temporal_context.current_state {
+            tracing::info!("  current_state: {}", s);
+        }
+        for t in &temporal_context.entity_timelines {
+            tracing::info!("  timeline: {}", &t[..t.len().min(500)]);
+        }
+
+        // Phase 4: Fact Summary — LLM verifies facts against temporal context
+        let fact_summary = if !retrieved_snippets.is_empty() {
+            let summary = crate::nlq::drift::drift_fact_summary(
+                llm_client,
+                question,
+                &retrieved_snippets,
+                &temporal_context,
+                config,
+            )
+            .await;
+            if summary.is_empty() {
+                tracing::info!("DRIFT fact_summary: (empty)");
+                None
+            } else {
+                tracing::info!(
+                    "DRIFT fact_summary:\n{}",
+                    &summary[..summary.len().min(1000)]
+                );
+                Some(summary)
+            }
+        } else {
+            None
+        };
+
+        // Phase 5: Synthesis — with temporal awareness and fact sheet (uses higher-quality model)
         let answer = crate::nlq::drift::drift_synthesis(
-            llm_client,
+            synthesis_client,
             question,
             &community_context,
             &retrieved_snippets,
+            &temporal_context,
+            fact_summary.as_deref(),
             config,
         )
-        .await;
+        .await
+        .map_err(|e| {
+            tracing::warn!("DRIFT synthesis failed: {}", e);
+            e
+        })?;
 
-        crate::nlq::drift::DriftResult {
+        Ok(crate::nlq::drift::DriftResult {
             answer,
             primer_communities_used: primer_communities,
             followup_queries,
             total_items_retrieved: total_items,
-        }
+            fact_summary,
+        })
     }
 
     /// Search code entities in the graph by filtering Concept nodes with code metadata.

@@ -25,7 +25,7 @@ use crate::structures::Graph;
 use crate::traversal::{GraphQuery, GraphTraversal, QueryResult};
 use crate::{GraphError, GraphResult};
 use entity::{EntityResolver, ResolvedEntity};
-use intent::{classify_intent_full, intent_display_name, QueryIntent};
+use intent::{intent_display_name, ClassifiedIntent, QueryIntent};
 use std::collections::{HashMap, HashSet, VecDeque};
 use template::TemplateRegistry;
 use validator::ValidationResult;
@@ -194,8 +194,8 @@ impl NlqPipeline {
     /// Execute with pagination, optional structured memory store, and optional
     /// intent override from an LLM hint classifier.
     ///
-    /// When `intent_override` is `Some`, the rule-based `classify_intent_full()`
-    /// is skipped and the provided classification is used directly.
+    /// When `intent_override` is `Some`, the provided classification is used
+    /// directly. Otherwise defaults to KnowledgeQuery.
     pub fn execute_with_hint(
         &self,
         question: &str,
@@ -223,7 +223,10 @@ impl NlqPipeline {
         }
 
         // 1. Classify intent (with negation) — use override if provided
-        let classified = intent_override.unwrap_or_else(|| classify_intent_full(question));
+        let classified = intent_override.unwrap_or(ClassifiedIntent {
+            intent: QueryIntent::KnowledgeQuery,
+            negated: false,
+        });
         let intent = classified.intent;
         let negated = classified.negated;
         explanation.push(format!(
@@ -330,7 +333,24 @@ impl NlqPipeline {
             });
         }
 
-        let (template, params) = template_match.unwrap();
+        let Some((template, params)) = template_match else {
+            // Unreachable: is_none() check above returns early.
+            // Defensive: return empty result instead of panicking.
+            return Ok(NlqResponse {
+                answer: "No relevant information found.".to_string(),
+                query_used: GraphQuery::PageRank {
+                    iterations: 0,
+                    damping_factor: 0.0,
+                },
+                result: QueryResult::Rankings(vec![]),
+                entities_resolved: resolved,
+                intent,
+                confidence: 0.0,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                explanation,
+                total_count: 0,
+            });
+        };
         explanation.push(format!("Matched template '{}'", template.name));
 
         // 6. Build query
@@ -525,7 +545,7 @@ fn compute_confidence(
 fn execute_structured_memory_query(
     query_type: &intent::StructuredQueryType,
     resolved_entities: &[ResolvedEntity],
-    _graph: &Graph,
+    graph: &Graph,
     structured_store: Option<&crate::structured_memory::StructuredMemoryStore>,
     _question: &str,
 ) -> QueryResult {
@@ -646,15 +666,54 @@ fn execute_structured_memory_query(
                 props.insert("confidence".to_string(), json!(0.0));
             }
         },
+        intent::StructuredQueryType::AggregateBalance => {
+            let balances = crate::conversation::numeric_reasoning::compute_net_balances(store);
+            if balances.is_empty() {
+                props.insert(
+                    "answer".to_string(),
+                    json!("No financial transactions recorded."),
+                );
+                props.insert("source".to_string(), json!("none"));
+                props.insert("confidence".to_string(), json!(0.0));
+            } else {
+                // Sort by absolute balance descending to find who owes/is owed the most
+                let mut sorted: Vec<((String, String), f64)> = balances.into_iter().collect();
+                sorted.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+
+                let formatted = crate::conversation::numeric_reasoning::format_balances(
+                    &sorted.iter().cloned().collect(),
+                );
+
+                // Build a structured entries list for the response
+                let entries: Vec<serde_json::Value> = sorted
+                    .iter()
+                    .filter(|(_, amount)| (amount * 100.0).round().abs() > 0.0)
+                    .map(|((name, currency), amount)| {
+                        json!({
+                            "entity": name,
+                            "currency": currency,
+                            "net_balance": (amount * 100.0).round() / 100.0,
+                            "status": if *amount > 0.0 { "creditor" } else { "debtor" },
+                        })
+                    })
+                    .collect();
+
+                props.insert("balances".to_string(), json!(entries));
+                props.insert("source".to_string(), json!("structured_ledger_aggregate"));
+                props.insert("confidence".to_string(), json!(1.0));
+                props.insert("answer".to_string(), json!(formatted));
+            }
+        },
         intent::StructuredQueryType::TreeChildren => {
+            // Tree children are a dynamic projection over graph edges (no stored tree).
             if let Some(entity) = resolved_entities.first() {
-                let key = crate::structured_memory::tree_key(entity.node_id);
                 let label = &entity.mention.text;
-                if let Some(children) = store.tree_children(&key, label) {
+                let children =
+                    crate::conversation::graph_projection::tree_children_from_graph(graph, label);
+                if !children.is_empty() {
                     props.insert("children".to_string(), json!(children));
                     props.insert("parent".to_string(), json!(label));
-                    props.insert("source".to_string(), json!("structured_tree"));
-                    props.insert("structured_key_used".to_string(), json!(key));
+                    props.insert("source".to_string(), json!("graph_projection"));
                     props.insert("confidence".to_string(), json!(0.9));
                     props.insert(
                         "answer".to_string(),
@@ -663,10 +722,7 @@ fn execute_structured_memory_query(
                 } else {
                     props.insert(
                         "answer".to_string(),
-                        json!(format!(
-                            "No children found for '{}' in tree '{}'",
-                            label, key
-                        )),
+                        json!(format!("No connections found for '{}'", label)),
                     );
                     props.insert("source".to_string(), json!("none"));
                     props.insert("confidence".to_string(), json!(0.0));
@@ -880,7 +936,7 @@ fn execute_aggregate(
                 .and_then(|f| crate::structures::node_type_discriminant_from_name(f));
             let mut best_value: Option<f64> = None;
             let mut best_node: Option<u64> = None;
-            for (&node_id, node) in &graph.nodes {
+            for (node_id, node) in graph.nodes.iter() {
                 if let Some(disc) = type_disc {
                     if node.node_type.discriminant() != disc {
                         continue;
@@ -1000,7 +1056,6 @@ fn invert_result(result: QueryResult, graph: &Graph) -> QueryResult {
                 .nodes
                 .keys()
                 .filter(|id| !matched_set.contains(id))
-                .copied()
                 .take(1000)
                 .collect();
             QueryResult::Nodes(inverted)
@@ -1012,7 +1067,7 @@ fn invert_result(result: QueryResult, graph: &Graph) -> QueryResult {
                 .keys()
                 .filter(|id| !matched_set.contains(id))
                 .take(1000)
-                .map(|&id| (id, 0.0))
+                .map(|id| (id, 0.0))
                 .collect();
             QueryResult::Rankings(inverted)
         },
@@ -1222,13 +1277,28 @@ mod tests {
         }
     }
 
-    // Enhancement 3: Aggregation
+    // Enhancement 3: Aggregation (uses explicit intent override since the
+    // standalone pipeline no longer does rule-based classification)
     #[test]
     fn test_aggregation_node_count() {
         let graph = build_test_graph();
         let traversal = GraphTraversal::new();
         let pipeline = NlqPipeline::new();
-        let result = pipeline.execute("How many nodes are there?", &graph, &traversal);
+        let pagination = NlqPagination::default();
+        let override_intent = intent::ClassifiedIntent {
+            intent: intent::QueryIntent::Aggregate {
+                metric: intent::AggregateMetric::NodeCount,
+            },
+            negated: false,
+        };
+        let result = pipeline.execute_with_hint(
+            "How many nodes are there?",
+            &graph,
+            &traversal,
+            &pagination,
+            None,
+            Some(override_intent),
+        );
         assert!(result.is_ok());
         let resp = result.unwrap();
         assert!(resp.answer.contains("2") || resp.answer.contains("nodes"));

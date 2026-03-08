@@ -199,7 +199,8 @@ fn built_in_aliases() -> Vec<(&'static str, MetadataRole)> {
         ("node", MetadataRole::Entity),
         // NewState
         ("new_state", MetadataRole::NewState),
-        ("entity_state", MetadataRole::NewState),
+        // NOTE: "entity_state" is a boolean flag ("true"/"false"), NOT the actual state value.
+        // Do NOT alias it to NewState — the actual value is in "new_state".
         ("state", MetadataRole::NewState),
         ("status", MetadataRole::NewState),
         ("new_status", MetadataRole::NewState),
@@ -520,7 +521,11 @@ pub fn metadata_value_preview(v: &MetadataValue) -> String {
     match v {
         MetadataValue::String(s) => {
             if s.len() > 80 {
-                format!("{}...", &s[..80])
+                let mut end = 80;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &s[..end])
             } else {
                 s.clone()
             }
@@ -531,7 +536,11 @@ pub fn metadata_value_preview(v: &MetadataValue) -> String {
         MetadataValue::Json(v) => {
             let s = v.to_string();
             if s.len() > 80 {
-                format!("{}...", &s[..80])
+                let mut end = 80;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &s[..end])
             } else {
                 s
             }

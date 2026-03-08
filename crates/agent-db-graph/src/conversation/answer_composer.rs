@@ -4,7 +4,6 @@
 //! returning serializable context entries alongside the computed answer.
 
 use super::nlq_ext::ConversationQueryType;
-use super::numeric_reasoning;
 use super::types::NameRegistry;
 use crate::structured_memory::{MemoryTemplate, StructuredMemoryStore};
 use serde::Serialize;
@@ -322,19 +321,20 @@ fn gather_preference(
     entries
 }
 
-/// Gather relationship path data.
+/// Gather relationship path data via graph projection.
 fn gather_relationship(
-    from: &str,
-    to: &str,
+    _from: &str,
+    _to: &str,
     relation: Option<&str>,
-    store: &StructuredMemoryStore,
+    _store: &StructuredMemoryStore,
 ) -> Vec<MemoryContextEntry> {
     let rel_type = relation.unwrap_or("colleague");
-    let path = numeric_reasoning::find_relationship_path(store, from, to, rel_type);
-
+    // Graph-based path finding is done at query time via graph_projection.
+    // This function returns an empty path since it has no graph reference;
+    // callers with graph access should use graph_projection directly.
     vec![MemoryContextEntry::Relationship {
         relation_type: rel_type.to_string(),
-        path,
+        path: None,
     }]
 }
 
@@ -676,26 +676,18 @@ mod tests {
 
     #[test]
     fn test_gather_context_relationship() {
-        let mut store = StructuredMemoryStore::new();
-        let registry = make_registry();
+        let store = StructuredMemoryStore::new();
+        let _registry = make_registry();
 
-        store.upsert(
-            "tree:relations:colleague",
-            MemoryTemplate::Tree {
-                root: "colleague".into(),
-                children: HashMap::new(),
-                provenance: MemoryProvenance::EpisodePipeline,
-            },
-        );
-        let _ = store.tree_add_child("tree:relations:colleague", "Alice", "Bob");
-        let _ = store.tree_add_child("tree:relations:colleague", "Bob", "Alice");
-
+        // Relationship path finding is now a graph projection (no stored tree).
+        // gather_relationship returns path: None without a graph reference;
+        // actual path resolution happens at query time via graph_projection.
         let query = ConversationQueryType::RelationshipPath {
             from: "Alice".into(),
             to: "Bob".into(),
             relation: Some("colleague".into()),
         };
-        let ctx = gather_memory_context(&query, &store, &registry);
+        let ctx = gather_memory_context(&query, &store, &_registry);
 
         assert_eq!(ctx.len(), 1);
         if let MemoryContextEntry::Relationship {
@@ -704,10 +696,8 @@ mod tests {
         } = &ctx[0]
         {
             assert_eq!(relation_type, "colleague");
-            assert!(path.is_some());
-            let p = path.as_ref().unwrap();
-            assert_eq!(p[0], "Alice");
-            assert_eq!(p[1], "Bob");
+            // Path is None since graph projection needs a Graph reference
+            assert!(path.is_none());
         } else {
             panic!("Expected Relationship entry");
         }

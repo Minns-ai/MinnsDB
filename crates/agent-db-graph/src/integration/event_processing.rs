@@ -392,7 +392,7 @@ impl GraphEngine {
                                 .fetch_add(1, AtomicOrdering::Relaxed);
                         }
 
-                        if self.config.auto_memory_formation {
+                        if self.config.auto_memory_formation && should_extract_semantic {
                             self.process_episode_for_memory(episode).await?;
                         }
 

@@ -28,6 +28,11 @@ impl<'a> GraphAtSnapshot<'a> {
         self.cutoff
     }
 
+    /// Access the underlying graph (for GraphView trait implementation).
+    pub fn graph(&self) -> &'a Graph {
+        self.graph
+    }
+
     pub fn get_node(&self, node_id: NodeId) -> Option<&'a GraphNode> {
         self.graph
             .get_node(node_id)
@@ -97,7 +102,7 @@ impl<'a> GraphAtSnapshot<'a> {
             .temporal_index
             .range(..=self.cutoff)
             .flat_map(|(_, ids)| ids.iter())
-            .filter(|&&nid| self.graph.nodes.contains_key(&nid))
+            .filter(|&&nid| self.graph.nodes.contains_key(nid))
             .count()
     }
 
@@ -111,7 +116,7 @@ impl<'a> GraphAtSnapshot<'a> {
             .temporal_index
             .range(start..=clamped_end)
             .flat_map(|(_, ids)| ids.iter())
-            .filter_map(|&nid| self.graph.nodes.get(&nid))
+            .filter_map(|&nid| self.graph.nodes.get(nid))
             .collect()
     }
 }
@@ -143,6 +148,11 @@ impl<'a> RollingWindow<'a> {
         self.end
     }
 
+    /// Access the underlying graph (for GraphView trait implementation).
+    pub fn graph(&self) -> &'a Graph {
+        self.graph
+    }
+
     fn is_visible_node(&self, node: &GraphNode) -> bool {
         node.created_at >= self.start && node.created_at <= self.end
     }
@@ -166,7 +176,7 @@ impl<'a> RollingWindow<'a> {
             .temporal_index
             .range(self.start..=self.end)
             .flat_map(|(_, ids)| ids.iter())
-            .filter_map(|&nid| self.graph.nodes.get(&nid))
+            .filter_map(|&nid| self.graph.nodes.get(nid))
             .collect()
     }
 
@@ -184,7 +194,7 @@ impl<'a> RollingWindow<'a> {
             .temporal_index
             .range(self.start..=self.end)
             .flat_map(|(_, ids)| ids.iter())
-            .filter(|&&nid| self.graph.nodes.contains_key(&nid))
+            .filter(|&&nid| self.graph.nodes.contains_key(nid))
             .count()
     }
 
@@ -260,6 +270,7 @@ mod tests {
             updated_at: created_at,
             properties: HashMap::new(),
             degree: 0,
+            embedding: Vec::new(),
         }
     }
 
@@ -280,6 +291,8 @@ mod tests {
             observation_count: 1,
             confidence: 0.9,
             properties: HashMap::new(),
+            confidence_history: crate::tcell::TCell::Empty,
+            weight_history: crate::tcell::TCell::Empty,
         }
     }
 

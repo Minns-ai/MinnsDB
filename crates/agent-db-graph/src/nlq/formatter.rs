@@ -43,10 +43,15 @@ pub fn format_result(
             )
         },
         QueryResult::Properties(props) => {
-            format!(
-                "Properties: {}",
-                serde_json::to_string_pretty(props).unwrap_or_default()
-            )
+            // If the handler set a human-readable "answer" field, use it directly
+            if let Some(answer) = props.get("answer").and_then(|v| v.as_str()) {
+                answer.to_string()
+            } else {
+                format!(
+                    "Properties: {}",
+                    serde_json::to_string_pretty(props).unwrap_or_default()
+                )
+            }
         },
     }
 }

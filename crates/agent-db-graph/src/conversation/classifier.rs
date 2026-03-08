@@ -224,6 +224,10 @@ fn score_state_change(_original: &str, lower: &str) -> f32 {
         || lower.contains("every evening")
         || lower.contains("every day")
         || lower.contains("every week")
+        || lower.contains("saturday morning")
+        || lower.contains("sunday morning")
+        || lower.contains("saturday ")
+        || lower.contains("sunday ")
     {
         score = score.max(0.7);
     }
@@ -245,9 +249,12 @@ fn score_state_change(_original: &str, lower: &str) -> f32 {
         score = score.max(0.65);
     }
 
-    // "enjoy" + location-ish context
-    if (lower.contains("i enjoy") || lower.contains("i love"))
-        && (lower.contains("watching") || lower.contains("walking") || lower.contains("from "))
+    // "enjoy/love" + location-ish context
+    if (lower.contains("i enjoy") || lower.contains("i love") || lower.contains("enjoy "))
+        && (lower.contains("watching")
+            || lower.contains("walking")
+            || lower.contains("from ")
+            || lower.contains(" at "))
     {
         score = score.max(0.55);
     }

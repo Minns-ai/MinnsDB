@@ -912,7 +912,7 @@ pub fn parse_state_change(content: &str) -> Vec<StateChangeData> {
         }
     }
 
-    // Routine: "every morning/evening/day/week"
+    // Routine: "every morning/evening/day/week" — extract the activity, not full message
     if lower.contains("every morning")
         || lower.contains("every evening")
         || lower.contains("every day")
@@ -927,10 +927,12 @@ pub fn parse_state_change(content: &str) -> Vec<StateChangeData> {
         } else {
             "weekly"
         };
+        // Extract the core routine description (strip "I have/do/go..." prefix)
+        let routine_value = extract_routine_core(content);
         changes.push(StateChangeData {
             entity: "user".to_string(),
             attribute: format!("routine:{}", slot),
-            new_value: content.to_string(),
+            new_value: routine_value,
             old_value: None,
         });
     }
@@ -949,44 +951,248 @@ pub fn parse_state_change(content: &str) -> Vec<StateChangeData> {
         }
     }
 
-    // "I enjoy/love <activity> from/at <place>"
+    // "I enjoy/love <activity> from/at <place>" — extract activity + place
     if (lower.contains("i enjoy") || lower.contains("i love"))
         && (lower.contains("from ") || lower.contains("at "))
     {
-        changes.push(StateChangeData {
-            entity: "user".to_string(),
-            attribute: "activity".to_string(),
-            new_value: content.to_string(),
-            old_value: None,
-        });
+        let core = extract_activity_core(content, &lower);
+        if !core.is_empty() {
+            changes.push(StateChangeData {
+                entity: "user".to_string(),
+                attribute: "preference".to_string(),
+                new_value: core,
+                old_value: None,
+            });
+        }
     }
 
-    // "enjoy coffee at X"
+    // "enjoy coffee at X" — extract "coffee at X"
     if lower.contains("enjoy coffee at") || lower.contains("enjoy tea at") {
-        changes.push(StateChangeData {
-            entity: "user".to_string(),
-            attribute: "activity".to_string(),
-            new_value: content.to_string(),
-            old_value: None,
-        });
+        let core = extract_activity_core(content, &lower);
+        if !core.is_empty() {
+            changes.push(StateChangeData {
+                entity: "user".to_string(),
+                attribute: "preference".to_string(),
+                new_value: core,
+                old_value: None,
+            });
+        }
     }
 
-    // "Saturday morning walks to X"
+    // "Saturday/Sunday morning walks to X" — extract the weekend activity
     if lower.contains("saturday") || lower.contains("sunday") {
         let day = if lower.contains("saturday") {
             "saturday"
         } else {
             "sunday"
         };
+        let routine_value = extract_routine_core(content);
         changes.push(StateChangeData {
             entity: "user".to_string(),
             attribute: format!("routine:{}", day),
-            new_value: content.to_string(),
+            new_value: routine_value,
             old_value: None,
         });
     }
 
     changes
+}
+
+/// Extract the core routine from a sentence like:
+/// "I have a pastel de nata at the corner bakery every morning." → "pastel de nata at the corner bakery"
+/// "I walk through Fælledparken every morning." → "walk through Fælledparken"
+/// "Saturday morning walks to the flea market at Frederiksberg." → "walks to the flea market at Frederiksberg"
+fn extract_routine_core(content: &str) -> String {
+    let lower = content.to_lowercase();
+
+    // Strip leading "I " / "I've " / "I'm " / "My " etc.
+    let stripped = content
+        .trim()
+        .trim_start_matches("I ")
+        .trim_start_matches("I've ")
+        .trim_start_matches("I'm ")
+        .trim_start_matches("My ")
+        .trim_start_matches("We ");
+
+    // Strip trailing temporal qualifiers: "every morning", "every evening", etc.
+    let temporal = [
+        "every morning",
+        "every evening",
+        "every day",
+        "every week",
+        "every weekend",
+        "each morning",
+        "each evening",
+        "each day",
+        "most mornings",
+        "most evenings",
+    ];
+    let mut result = stripped.to_string();
+    let result_lower = result.to_lowercase();
+    for t in &temporal {
+        if let Some(pos) = result_lower.find(t) {
+            // Keep only the part before the temporal, unless the temporal is at the start
+            if pos > 0 {
+                result = result[..pos]
+                    .trim()
+                    .trim_end_matches('.')
+                    .trim_end_matches(',')
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
+
+    // Strip "have a " / "have " / "do a " / "get a " / "grab a " prefixes
+    let verb_prefixes = [
+        "have a ", "have an ", "have ", "do a ", "do ", "get a ", "get ", "grab a ", "grab ",
+        "take a ", "take ",
+    ];
+    let result_lower2 = result.to_lowercase();
+    for vp in &verb_prefixes {
+        if result_lower2.starts_with(vp) {
+            result = result[vp.len()..].to_string();
+            break;
+        }
+    }
+
+    // Strip trailing sentence fragments after ". " (second sentence)
+    if let Some(pos) = result.find(". ") {
+        result = result[..pos].to_string();
+    }
+
+    // Strip anticipatory phrases: "can't wait for", "looking forward to", etc.
+    let anticipatory = [
+        "can't wait for ",
+        "can't wait to ",
+        "cannot wait for ",
+        "cannot wait to ",
+        "looking forward to ",
+        "excited about ",
+        "excited for ",
+        "planning to ",
+        "want to ",
+        "going to ",
+    ];
+    let result_lower_a = result.to_lowercase();
+    for ap in &anticipatory {
+        if let Some(pos) = result_lower_a.find(ap) {
+            result = result[pos + ap.len()..].to_string();
+            break;
+        }
+    }
+
+    // Also handle "on Saturday/Sunday" prefix for weekend patterns
+    let day_prefixes = [
+        "saturday morning ",
+        "sunday morning ",
+        "saturday ",
+        "sunday ",
+    ];
+    let result_lower3 = result.to_lowercase();
+    for dp in &day_prefixes {
+        if result_lower3.starts_with(dp) {
+            result = result[dp.len()..].to_string();
+            break;
+        }
+    }
+
+    // Clean up
+    result = result
+        .trim()
+        .trim_end_matches('.')
+        .trim_end_matches(',')
+        .trim_end_matches('!')
+        .trim()
+        .to_string();
+
+    // If extraction produced nothing useful, fall back to a cleaned version
+    if result.is_empty() || result.len() < 3 {
+        // Try extracting the noun phrase after common verb patterns
+        let verbs = [
+            "walk through ",
+            "walk to ",
+            "walks to ",
+            "jog through ",
+            "run through ",
+        ];
+        for v in &verbs {
+            if let Some(pos) = lower.find(v) {
+                let after = &content[pos..];
+                // Take until temporal or end
+                let end = after
+                    .to_lowercase()
+                    .find("every ")
+                    .or_else(|| after.to_lowercase().find("each "))
+                    .unwrap_or(after.len());
+                return after[..end]
+                    .trim()
+                    .trim_end_matches('.')
+                    .trim_end_matches(',')
+                    .trim()
+                    .to_string();
+            }
+        }
+        return content.trim().to_string();
+    }
+
+    result
+}
+
+/// Extract the core activity/preference from a sentence like:
+/// "It's vibrant! I also enjoy coffee at Bluestone Lane near my office." → "coffee at Bluestone Lane"
+/// "I enjoy the views from Dumbo." → "views from Dumbo"
+/// "I love the craft cocktails at Tørst." → "craft cocktails at Tørst"
+fn extract_activity_core(content: &str, lower: &str) -> String {
+    // Find the verb: "enjoy", "love", "like"
+    let verbs = ["i enjoy ", "i love ", "i like ", "enjoy ", "love ", "like "];
+    for verb in &verbs {
+        if let Some(pos) = lower.find(verb) {
+            let after = &content[pos + verb.len()..];
+
+            // Strip leading articles: "the ", "a ", "an "
+            let cleaned = after
+                .trim_start_matches("the ")
+                .trim_start_matches("The ")
+                .trim_start_matches("a ")
+                .trim_start_matches("an ")
+                .trim_start_matches("also ");
+
+            // Take until sentence end, dash, or second clause
+            let terminators = [". ", "! ", " - ", ", and ", ", but ", " and I "];
+            let mut end = cleaned.len();
+            for t in &terminators {
+                if let Some(p) = cleaned.find(t) {
+                    end = end.min(p);
+                }
+            }
+
+            let core = cleaned[..end]
+                .trim()
+                .trim_end_matches('.')
+                .trim_end_matches(',')
+                .trim_end_matches('!')
+                .trim();
+
+            if !core.is_empty() {
+                return core.to_string();
+            }
+        }
+    }
+
+    // Fallback: try "at/from/in <ProperNoun>" extraction
+    let place_preps = ["at ", "from ", "in "];
+    for prep in &place_preps {
+        if let Some(pos) = lower.find(prep) {
+            let after = &content[pos..];
+            let phrase = extract_proper_noun_phrase(&after[prep.len()..]);
+            if !phrase.is_empty() {
+                return format!("{}{}", prep, phrase);
+            }
+        }
+    }
+
+    String::new()
 }
 
 /// Extract a location string after a pattern like "live in" or "moving to".
@@ -1561,5 +1767,139 @@ mod tests {
         assert!(pref.is_some());
         let p = pref.unwrap();
         assert_eq!(p.category, "art");
+    }
+
+    // ===== Extraction helpers =====
+
+    #[test]
+    fn extract_routine_pastel_de_nata() {
+        let result =
+            extract_routine_core("I have a pastel de nata at the corner bakery every morning.");
+        assert!(
+            result.contains("pastel de nata"),
+            "Should extract 'pastel de nata', got: {}",
+            result
+        );
+        assert!(
+            result.contains("corner bakery"),
+            "Should include place, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("every morning"),
+            "Should strip temporal, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn extract_routine_walk_through() {
+        let result = extract_routine_core("I walk through Fælledparken every morning.");
+        assert!(
+            result.contains("Fælledparken"),
+            "Should extract place name, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("every morning"),
+            "Should strip temporal, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn extract_activity_coffee_at() {
+        let lower = "i enjoy coffee at bluestone lane near my office.".to_string();
+        let result =
+            extract_activity_core("I enjoy coffee at Bluestone Lane near my office.", &lower);
+        assert!(
+            result.contains("coffee at Bluestone Lane"),
+            "Should extract 'coffee at Bluestone Lane', got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn extract_activity_vibrant_sentence() {
+        let content = "It's vibrant! I also enjoy coffee at Bluestone Lane near my office.";
+        let lower = content.to_lowercase();
+        let result = extract_activity_core(content, &lower);
+        assert!(
+            result.contains("coffee at Bluestone Lane"),
+            "Should extract core from second sentence, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn parse_state_routine_extracts_core() {
+        let changes =
+            parse_state_change("I have a pastel de nata at the corner bakery every morning.");
+        let routine = changes.iter().find(|c| c.attribute.starts_with("routine:"));
+        assert!(routine.is_some(), "Should detect routine");
+        let r = routine.unwrap();
+        assert!(
+            r.new_value.contains("pastel de nata"),
+            "Routine value should contain core fact, got: {}",
+            r.new_value
+        );
+        assert!(
+            !r.new_value.contains("every morning"),
+            "Routine value should not contain temporal, got: {}",
+            r.new_value
+        );
+    }
+
+    #[test]
+    fn parse_state_near_landmark() {
+        let changes = parse_state_change("I found an apartment near the Tidal Basin.");
+        let landmark = changes.iter().find(|c| c.attribute == "landmark");
+        assert!(landmark.is_some(), "Should detect landmark");
+        let l = landmark.unwrap();
+        assert!(
+            l.new_value.contains("Tidal Basin"),
+            "Landmark should contain 'Tidal Basin', got: {}",
+            l.new_value
+        );
+    }
+
+    #[test]
+    fn extract_routine_saturday_battery_park() {
+        let changes = parse_state_change(
+            "I can't wait for Saturday morning walks to Battery Park to see the Statue of Liberty.",
+        );
+        let routine = changes
+            .iter()
+            .find(|c| c.attribute.starts_with("routine:saturday"));
+        assert!(routine.is_some(), "Should detect Saturday routine");
+        let r = routine.unwrap();
+        assert!(
+            r.new_value.contains("Battery Park"),
+            "Should contain 'Battery Park', got: {}",
+            r.new_value
+        );
+        assert!(
+            r.new_value.contains("Statue of Liberty"),
+            "Should contain 'Statue of Liberty', got: {}",
+            r.new_value
+        );
+        assert!(
+            !r.new_value.contains("can't wait"),
+            "Should strip anticipatory phrase, got: {}",
+            r.new_value
+        );
+    }
+
+    #[test]
+    fn parse_state_activity_as_preference() {
+        let changes = parse_state_change("I enjoy coffee at Bluestone Lane near my office.");
+        let pref = changes.iter().find(|c| c.attribute == "preference");
+        assert!(pref.is_some(), "Should detect preference");
+        let p = pref.unwrap();
+        assert!(
+            p.new_value.contains("coffee at Bluestone Lane"),
+            "Preference value should contain core activity, got: {}",
+            p.new_value
+        );
     }
 }

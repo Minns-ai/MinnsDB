@@ -1495,6 +1495,7 @@ mod tests {
             updated_at: 1000 + id,
             properties: std::collections::HashMap::new(),
             degree: 0,
+            embedding: Vec::new(),
         }
     }
 
@@ -1515,6 +1516,8 @@ mod tests {
             observation_count: 1,
             confidence: 0.9,
             properties: std::collections::HashMap::new(),
+            confidence_history: crate::tcell::TCell::Empty,
+            weight_history: crate::tcell::TCell::Empty,
         }
     }
 

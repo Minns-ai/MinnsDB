@@ -1051,7 +1051,12 @@ impl GraphInference {
         if value.len() <= max_len {
             value.to_string()
         } else {
-            format!("{}...", &value[..max_len])
+            // Find a valid char boundary at or before max_len
+            let mut end = max_len;
+            while end > 0 && !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &value[..end])
         }
     }
 

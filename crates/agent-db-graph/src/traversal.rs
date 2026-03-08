@@ -24,6 +24,25 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrde
 use std::sync::Arc;
 
 // ============================================================================
+// Safety bounds — prevent OOM and stack overflow on large/dense graphs
+// ============================================================================
+
+/// Maximum number of nodes collected from a single BFS/DFS/subgraph traversal.
+const MAX_TRAVERSAL_NODES: usize = 50_000;
+
+/// Maximum number of edges collected from subgraph extraction.
+const MAX_TRAVERSAL_EDGES: usize = 100_000;
+
+/// Maximum iteration count for bidirectional Dijkstra before forced termination.
+const MAX_DIJKSTRA_ITERATIONS: usize = 200_000;
+
+/// Maximum PageRank iterations (even if caller passes higher).
+const MAX_PAGERANK_ITERATIONS: usize = 200;
+
+/// Maximum number of nodes for PageRank (skip on huge graphs).
+const MAX_PAGERANK_NODES: usize = 500_000;
+
+// ============================================================================
 // Edge cost derivation from edge types
 // ============================================================================
 
@@ -884,13 +903,28 @@ impl GraphTraversal {
 
         let mut best_cost = f32::INFINITY;
         let mut meeting_node: Option<NodeId> = None;
+        let mut iterations: usize = 0;
 
         loop {
+            iterations += 1;
+            if iterations > MAX_DIJKSTRA_ITERATIONS {
+                tracing::warn!(
+                    "Bidirectional Dijkstra hit iteration cap ({}), terminating early",
+                    MAX_DIJKSTRA_ITERATIONS
+                );
+                break;
+            }
+
             let fwd_min = fwd_heap.peek().map(|e| e.cost).unwrap_or(f32::INFINITY);
             let bwd_min = bwd_heap.peek().map(|e| e.cost).unwrap_or(f32::INFINITY);
 
             // Termination: both frontiers can't improve on the best known path
             if fwd_min + bwd_min >= best_cost {
+                break;
+            }
+
+            // Safety: if both heaps are empty, no path exists
+            if fwd_heap.is_empty() && bwd_heap.is_empty() {
                 break;
             }
 
@@ -956,11 +990,6 @@ impl GraphTraversal {
                         }
                     }
                 }
-            }
-
-            // Safety: if both heaps are empty, no path exists
-            if fwd_heap.is_empty() && bwd_heap.is_empty() {
-                break;
             }
         }
 
@@ -1315,87 +1344,115 @@ impl GraphTraversal {
         start: NodeId,
         max_distance: u32,
     ) -> GraphResult<QueryResult> {
-        // Delegates to the lazy BFS iterator and collects all results.
+        // Delegates to the lazy BFS iterator. Bounded to prevent OOM on large components.
         let nodes: Vec<NodeId> = BfsIter::new(graph, start, max_distance)
+            .take(MAX_TRAVERSAL_NODES)
             .map(|(node_id, _depth)| node_id)
             .collect();
         Ok(QueryResult::Nodes(nodes))
     }
 
-    /// Find strongly connected components using Tarjan's algorithm
+    /// Find strongly connected components using Tarjan's algorithm.
+    ///
+    /// Uses an **iterative** implementation to avoid stack overflow on deep graphs.
     fn find_strongly_connected_components(&self, graph: &Graph) -> GraphResult<QueryResult> {
-        let mut index = 0;
-        let mut stack = Vec::new();
+        let mut index: usize = 0;
+        let mut scc_stack: Vec<NodeId> = Vec::new();
         let mut indices: FxHashMap<NodeId, usize> = FxHashMap::default();
         let mut lowlinks: FxHashMap<NodeId, usize> = FxHashMap::default();
         let mut on_stack: HashSet<NodeId> = HashSet::new();
-        let mut components = Vec::new();
+        let mut components: Vec<Vec<NodeId>> = Vec::new();
 
-        // Iterate all known node types
         let all_nodes: Vec<NodeId> = graph.node_ids();
 
-        for &node_id in &all_nodes {
-            if !indices.contains_key(&node_id) {
-                self.strongconnect(
-                    graph,
-                    node_id,
-                    &mut index,
-                    &mut stack,
-                    &mut indices,
-                    &mut lowlinks,
-                    &mut on_stack,
-                    &mut components,
-                );
+        // Iterative Tarjan's using an explicit call stack.
+        // Each frame stores: (node_id, neighbor_iterator_position, is_root_call)
+        for &root in &all_nodes {
+            if indices.contains_key(&root) {
+                continue;
+            }
+
+            // call_stack entries: (node_id, Vec<neighbors>, next_neighbor_index)
+            let mut call_stack: Vec<(NodeId, Vec<NodeId>, usize)> = Vec::new();
+
+            // Initialize root
+            indices.insert(root, index);
+            lowlinks.insert(root, index);
+            index += 1;
+            scc_stack.push(root);
+            on_stack.insert(root);
+
+            let neighbors: Vec<NodeId> = graph.get_neighbors(root);
+            call_stack.push((root, neighbors, 0));
+
+            while let Some(frame) = call_stack.last_mut() {
+                let node_id = frame.0;
+                let ni_val = frame.2;
+
+                if ni_val < frame.1.len() {
+                    let neighbor = frame.1[ni_val];
+                    frame.2 += 1;
+
+                    match indices.entry(neighbor) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            // "Recurse" — push new frame
+                            e.insert(index);
+                            lowlinks.insert(neighbor, index);
+                            index += 1;
+                            scc_stack.push(neighbor);
+                            on_stack.insert(neighbor);
+
+                            let next_neighbors = graph.get_neighbors(neighbor);
+                            call_stack.push((neighbor, next_neighbors, 0));
+                        },
+                        std::collections::hash_map::Entry::Occupied(e) => {
+                            if on_stack.contains(&neighbor) {
+                                let ni_idx = *e.get();
+                                if let Some(&nl) = lowlinks.get(&node_id) {
+                                    lowlinks.insert(node_id, nl.min(ni_idx));
+                                }
+                            }
+                        },
+                    }
+                } else {
+                    // Done with all neighbors — "return" from this frame
+                    let finished_node = node_id;
+                    let finished_lowlink = lowlinks.get(&finished_node).copied().unwrap_or(0);
+                    let finished_index = indices.get(&finished_node).copied().unwrap_or(0);
+
+                    // Pop this frame
+                    call_stack.pop();
+
+                    // Update parent's lowlink (equivalent to post-recursion update)
+                    if let Some(parent_frame) = call_stack.last() {
+                        let parent_id = parent_frame.0;
+                        if let Some(&parent_ll) = lowlinks.get(&parent_id) {
+                            lowlinks.insert(parent_id, parent_ll.min(finished_lowlink));
+                        }
+                    }
+
+                    // Check if this node is the root of an SCC
+                    if finished_lowlink == finished_index {
+                        let mut component = Vec::new();
+                        loop {
+                            let Some(w) = scc_stack.pop() else {
+                                break;
+                            };
+                            on_stack.remove(&w);
+                            component.push(w);
+                            if w == finished_node {
+                                break;
+                            }
+                        }
+                        if !component.is_empty() {
+                            components.push(component);
+                        }
+                    }
+                }
             }
         }
 
         Ok(QueryResult::Communities(components))
-    }
-
-    /// Helper for Tarjan's strongly connected components algorithm
-    #[allow(clippy::too_many_arguments)]
-    fn strongconnect(
-        &self,
-        graph: &Graph,
-        node_id: NodeId,
-        index: &mut usize,
-        stack: &mut Vec<NodeId>,
-        indices: &mut FxHashMap<NodeId, usize>,
-        lowlinks: &mut FxHashMap<NodeId, usize>,
-        on_stack: &mut HashSet<NodeId>,
-        components: &mut Vec<Vec<NodeId>>,
-    ) {
-        indices.insert(node_id, *index);
-        lowlinks.insert(node_id, *index);
-        *index += 1;
-        stack.push(node_id);
-        on_stack.insert(node_id);
-
-        for neighbor in graph.get_neighbors(node_id) {
-            if !indices.contains_key(&neighbor) {
-                self.strongconnect(
-                    graph, neighbor, index, stack, indices, lowlinks, on_stack, components,
-                );
-                let neighbor_lowlink = lowlinks[&neighbor];
-                lowlinks.insert(node_id, lowlinks[&node_id].min(neighbor_lowlink));
-            } else if on_stack.contains(&neighbor) {
-                let neighbor_index = indices[&neighbor];
-                lowlinks.insert(node_id, lowlinks[&node_id].min(neighbor_index));
-            }
-        }
-
-        if lowlinks[&node_id] == indices[&node_id] {
-            let mut component = Vec::new();
-            loop {
-                let w = stack.pop().unwrap();
-                on_stack.remove(&w);
-                component.push(w);
-                if w == node_id {
-                    break;
-                }
-            }
-            components.push(component);
-        }
     }
 
     /// Find nodes by property value
@@ -1414,6 +1471,7 @@ impl GraphTraversal {
                     .and_then(|n| n.properties.get(key))
                     .is_some_and(|v| v == value)
             })
+            .take(MAX_TRAVERSAL_NODES)
             .collect();
 
         Ok(QueryResult::Nodes(matching_nodes))
@@ -1432,6 +1490,7 @@ impl GraphTraversal {
             .filter(|edge| {
                 edge.weight >= min_weight && edge_type_name(&edge.edge_type) == target_edge_type
             })
+            .take(MAX_TRAVERSAL_EDGES)
             .map(|edge| edge.id)
             .collect();
 
@@ -1462,12 +1521,13 @@ impl GraphTraversal {
                 nodes
             };
 
-            // Collect edges between the subgraph nodes
+            // Collect edges between the subgraph nodes (bounded to prevent OOM)
             let node_set: HashSet<NodeId> = filtered_nodes.iter().copied().collect();
             let edges: Vec<EdgeId> = graph
                 .edges
                 .values()
                 .filter(|e| node_set.contains(&e.source) && node_set.contains(&e.target))
+                .take(MAX_TRAVERSAL_EDGES)
                 .map(|e| e.id)
                 .collect();
 
@@ -1496,6 +1556,18 @@ impl GraphTraversal {
             return Ok(QueryResult::Rankings(Vec::new()));
         }
 
+        // Safety: refuse to run PageRank on very large graphs to prevent OOM
+        if all_nodes.len() > MAX_PAGERANK_NODES {
+            tracing::warn!(
+                "PageRank skipped: {} nodes exceeds limit {}",
+                all_nodes.len(),
+                MAX_PAGERANK_NODES
+            );
+            return Ok(QueryResult::Rankings(Vec::new()));
+        }
+
+        let capped_iterations = iterations.min(MAX_PAGERANK_ITERATIONS);
+
         let mut pagerank: FxHashMap<NodeId, f32> =
             FxHashMap::with_capacity_and_hasher(all_nodes.len(), Default::default());
         let mut new_pagerank: FxHashMap<NodeId, f32> =
@@ -1508,7 +1580,7 @@ impl GraphTraversal {
         }
 
         // Iterate PageRank calculation
-        for _ in 0..iterations {
+        for _ in 0..capped_iterations {
             new_pagerank.clear();
 
             for &node_id in &all_nodes {
@@ -1517,7 +1589,10 @@ impl GraphTraversal {
                 for incoming_neighbor in graph.get_incoming_neighbors(node_id) {
                     let neighbor_out_degree = graph.get_neighbors(incoming_neighbor).len() as f32;
                     if neighbor_out_degree > 0.0 {
-                        rank += damping_factor * pagerank[&incoming_neighbor] / neighbor_out_degree;
+                        // Safe lookup: use get() instead of [] to avoid panic
+                        if let Some(&neighbor_rank) = pagerank.get(&incoming_neighbor) {
+                            rank += damping_factor * neighbor_rank / neighbor_out_degree;
+                        }
                     }
                 }
 
@@ -1596,6 +1671,7 @@ impl GraphTraversal {
         max_depth: u32,
     ) -> GraphResult<QueryResult> {
         let nodes: Vec<NodeId> = DfsIter::new(graph, start, max_depth)
+            .take(MAX_TRAVERSAL_NODES)
             .map(|(node_id, _depth)| node_id)
             .collect();
         Ok(QueryResult::Nodes(nodes))
@@ -2522,6 +2598,8 @@ fn execute_paths(
     stack.push((spec.start, vec![spec.start], 0));
 
     let mut nodes_visited: u32 = 0;
+    // Bound the stack size to prevent OOM from exponential path explosion
+    const MAX_STACK_SIZE: usize = 100_000;
 
     while let Some((current, path, depth)) = stack.pop() {
         if paths.len() >= max_paths {
@@ -2547,6 +2625,11 @@ fn execute_paths(
         let mut expanded = false;
 
         for edge in edges {
+            // Check bounds BEFORE cloning the path
+            if paths.len() >= max_paths || stack.len() >= MAX_STACK_SIZE {
+                break;
+            }
+
             let neighbor = edge_neighbor(edge, current, spec.direction);
 
             // Simple path: no repeated nodes
@@ -2791,6 +2874,7 @@ mod tests {
             updated_at: created_at,
             properties: HashMap::new(),
             degree: 0,
+            embedding: Vec::new(),
         }
     }
 
@@ -2811,6 +2895,8 @@ mod tests {
             observation_count: 1,
             confidence: 0.9,
             properties: HashMap::new(),
+            confidence_history: crate::tcell::TCell::Empty,
+            weight_history: crate::tcell::TCell::Empty,
         }
     }
 

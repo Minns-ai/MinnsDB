@@ -32,6 +32,7 @@ impl ClaimExtractionQueue {
         claim_store: Arc<ClaimStore>,
         workers: usize,
         config: ClaimExtractionConfig,
+        unified_llm: Arc<dyn crate::llm_client::LlmClient>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(DEFAULT_EXTRACTION_QUEUE_CAPACITY);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
@@ -45,6 +46,7 @@ impl ClaimExtractionQueue {
             let embedding_client = embedding_client.clone();
             let claim_store = claim_store.clone();
             let config = config.clone();
+            let unified_llm = unified_llm.clone();
 
             tokio::spawn(async move {
                 info!("Claim extraction worker {} started", worker_id);
@@ -64,6 +66,7 @@ impl ClaimExtractionQueue {
                                 &*embedding_client,
                                 &claim_store,
                                 &config,
+                                &*unified_llm,
                             )
                             .await;
 
@@ -96,6 +99,7 @@ impl ClaimExtractionQueue {
         embedding_client: &dyn EmbeddingClient,
         claim_store: &ClaimStore,
         config: &ClaimExtractionConfig,
+        unified_llm: &dyn crate::llm_client::LlmClient,
     ) -> Result<()> {
         let request = job.request;
         let start_time = std::time::Instant::now();
@@ -305,7 +309,7 @@ impl ClaimExtractionQueue {
                     &best_sent.text,
                 )];
 
-                // ── Dedup / Contradiction check ──────────────────────────
+                // ── Dedup / Contradiction check (LLM-based) ────────────────
                 let claim_text_for_dedup = llm_claim.claim_text.clone();
                 if config.enable_dedup && !claim_embedding.is_empty() {
                     use crate::maintenance::{check_claim_dedup, ClaimDedupDecision};
@@ -315,7 +319,8 @@ impl ClaimExtractionQueue {
                         &claim_text_for_dedup,
                         &claim_embedding,
                         &config.maintenance_config,
-                    );
+                        unified_llm,
+                    ).await;
 
                     match decision {
                         ClaimDedupDecision::Duplicate {
@@ -341,11 +346,12 @@ impl ClaimExtractionQueue {
                                 "Claim contradiction: superseding claim {} (sim={:.3}): old=\"...\" new=\"{}\"",
                                 existing_id, contra_sim, claim_text_for_dedup
                             );
-                            // Mark old claim as Superseded
-                            let _ = claim_store.update_status(
-                                existing_id,
-                                ClaimStatus::Superseded,
-                            );
+                            // Mark old claim as Superseded with temporal validity end
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let _ = claim_store.supersede(existing_id, now);
 
                             // Fall through to store the new (superseding) claim below,
                             // with metadata linking back to the old one.
@@ -658,7 +664,13 @@ mod tests {
         let store = Arc::new(ClaimStore::new(&store_path).unwrap());
         let config = ClaimExtractionConfig::default();
 
-        let _queue = ClaimExtractionQueue::new(client, embedding_client, store, 1, config);
+        let unified_llm: Arc<dyn crate::llm_client::LlmClient> =
+            Arc::new(crate::llm_client::OpenAiLlmClient::new(
+                std::env::var("LLM_API_KEY").expect("LLM_API_KEY required"),
+                "gpt-4o-mini".to_string(),
+            ));
+        let _queue =
+            ClaimExtractionQueue::new(client, embedding_client, store, 1, config, unified_llm);
     }
 
     #[test]

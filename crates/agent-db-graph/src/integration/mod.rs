@@ -265,6 +265,9 @@ pub struct GraphEngineConfig {
     /// Model name for the NLQ hint classifier
     pub nlq_hint_model: String,
 
+    /// Model name for answer synthesis (defaults to gpt-4.1, higher quality for final answers)
+    pub synthesis_model: String,
+
     // ========== Metadata Normalization ==========
     /// Custom alias mappings for metadata key normalization
     pub metadata_alias_config: crate::metadata_normalize::AliasConfig,
@@ -319,6 +322,10 @@ pub struct GraphEngineConfig {
     pub enable_drift_search: bool,
     /// Configuration for DRIFT search pipeline.
     pub drift_config: crate::nlq::drift::DriftConfig,
+
+    // ========== Active Retrieval Testing (ART) ==========
+    /// Configuration for ART (validates embedding retrievability after compaction).
+    pub art_config: crate::active_retrieval_test::ArtConfig,
 
     // ========== Strategy Quality Gates ==========
     /// Minimum playbook steps required before triggering LLM refinement. Default: 2.
@@ -495,24 +502,23 @@ pub struct GraphEngine {
     /// NER extraction queue (optional, when semantic memory is enabled)
     pub(crate) ner_queue: Option<Arc<agent_db_ner::NerExtractionQueue>>,
 
-    /// NER feature storage (optional, when semantic memory is enabled)
-    pub(crate) ner_store: Option<Arc<agent_db_ner::NerFeatureStore>>,
-
     /// Claim extraction queue (optional, when semantic memory is enabled)
     pub(crate) claim_queue: Option<Arc<crate::claims::ClaimExtractionQueue>>,
 
     /// Claim storage (optional, when semantic memory is enabled)
     pub(crate) claim_store: Option<Arc<crate::claims::ClaimStore>>,
 
-    /// LLM client for claim extraction (optional, when semantic memory is enabled)
-    #[allow(dead_code)]
-    pub(crate) llm_client: Option<Arc<dyn crate::claims::LlmClient>>,
-
     /// Embedding queue for semantic search (optional, when semantic memory is enabled)
     pub(crate) embedding_queue: Option<Arc<crate::claims::EmbeddingQueue>>,
 
     /// Embedding client (optional, when semantic memory is enabled)
     pub(crate) embedding_client: Option<Arc<dyn crate::claims::EmbeddingClient>>,
+
+    /// Embedding-based predicate canonicalizer (optional, when embedding client is available)
+    pub(crate) predicate_canonicalizer: Option<Arc<crate::domain_schema::PredicateCanonicalizer>>,
+
+    /// Dynamic domain registry for learnable categories
+    pub(crate) domain_registry: Arc<crate::domain_schema::DomainRegistry>,
 
     // ========== 10x/100x: Consolidation + Refinement ==========
     /// Consolidation engine for memory hierarchy
@@ -553,6 +559,9 @@ pub struct GraphEngine {
 
     /// Unified LLM client for NLQ hint classification, conversation, and other LLM tasks
     pub(crate) unified_llm_client: Option<Arc<dyn crate::llm_client::LlmClient>>,
+
+    /// Separate LLM client for answer synthesis (uses higher-quality model)
+    pub(crate) synthesis_llm_client: Option<Arc<dyn crate::llm_client::LlmClient>>,
 
     // ========== Metadata Normalization ==========
     /// Metadata key normalizer (alias matching, always active)
@@ -751,6 +760,7 @@ impl Default for GraphEngineConfig {
             nlq_hint_api_key: None,
             nlq_hint_provider: "openai".to_string(),
             nlq_hint_model: "gpt-4o-mini".to_string(),
+            synthesis_model: "gpt-4.1".to_string(),
             // Metadata normalization (alias matching always on, LLM fallback disabled by default)
             metadata_alias_config: crate::metadata_normalize::AliasConfig::default(),
             enable_metadata_normalization: false,
@@ -776,6 +786,8 @@ impl Default for GraphEngineConfig {
             // DRIFT search (enabled by default, requires unified_llm_client)
             enable_drift_search: true,
             drift_config: crate::nlq::drift::DriftConfig::default(),
+            // Active Retrieval Testing (disabled by default)
+            art_config: crate::active_retrieval_test::ArtConfig::default(),
             // Strategy quality gates
             min_playbook_steps_for_refinement: 2,
             // Context enrichment (enabled by default, fail-open when no community data)

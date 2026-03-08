@@ -232,11 +232,11 @@ impl EntityResolver {
         let mut best_match: Option<(NodeId, f32)> = None;
 
         // Sort node IDs for deterministic iteration order
-        let mut node_ids: Vec<NodeId> = graph.nodes.keys().copied().collect();
+        let mut node_ids: Vec<NodeId> = graph.nodes.keys().collect();
         node_ids.sort_unstable();
 
         for &node_id in node_ids.iter().take(5000) {
-            if let Some(node) = graph.nodes.get(&node_id) {
+            if let Some(node) = graph.nodes.get(node_id) {
                 let label = node.label().to_lowercase();
                 let score = ngram_similarity(&query, &label, 2);
                 if score > 0.4 && best_match.is_none_or(|(_, s)| score > s) {
@@ -259,11 +259,11 @@ impl EntityResolver {
         let mut best_match: Option<(NodeId, f32)> = None;
 
         // Sort node IDs for deterministic iteration order
-        let mut node_ids: Vec<NodeId> = graph.nodes.keys().copied().collect();
+        let mut node_ids: Vec<NodeId> = graph.nodes.keys().collect();
         node_ids.sort_unstable();
 
         for &node_id in node_ids.iter().take(5000) {
-            if let Some(node) = graph.nodes.get(&node_id) {
+            if let Some(node) = graph.nodes.get(node_id) {
                 let label = node.label().to_lowercase();
                 let score = fuzzy_score(&query_lower, &label);
                 if score > 0.6 && best_match.is_none_or(|(_, s)| score > s) {
@@ -691,6 +691,81 @@ fn is_common_word(word: &str) -> bool {
             | "within"
             | "hops"
     )
+}
+
+// ---------------------------------------------------------------------------
+// LLM-powered entity extraction
+// ---------------------------------------------------------------------------
+
+/// Result of LLM-powered entity extraction.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct LlmEntityExtraction {
+    /// Resolved entity names (matched or related to known entities).
+    #[serde(default)]
+    pub entities: Vec<String>,
+    /// Topic categories being asked about (e.g., "breakfast", "food", "location").
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Relational references that need graph traversal (e.g., "neighbor", "boss").
+    #[serde(default)]
+    pub implicit_refs: Vec<String>,
+}
+
+/// Use the LLM to extract entities, categories, and implicit references from a question.
+///
+/// This is the fallback when rule-based extraction returns poor results.
+/// Feed the question plus a sample of known graph vocabulary to the LLM.
+pub async fn extract_entities_with_llm(
+    llm: &dyn crate::llm_client::LlmClient,
+    question: &str,
+    known_entities: &[String],
+    known_categories: &[String],
+) -> Option<LlmEntityExtraction> {
+    let entities_sample: Vec<&str> = known_entities.iter().take(50).map(|s| s.as_str()).collect();
+    let categories_sample: Vec<&str> = known_categories
+        .iter()
+        .take(30)
+        .map(|s| s.as_str())
+        .collect();
+
+    let prompt = format!(
+        r#"Given a question and the known entities/categories from a knowledge graph, extract:
+1. "entities": entity names from the question that match or relate to known entities
+2. "categories": topic categories being asked about (e.g., "breakfast", "food", "location")
+3. "implicit_refs": relational references that need graph traversal (e.g., "my neighbor" → "neighbor", "my boss" → "boss")
+
+Always include "user" if the question uses first-person pronouns (I, my, me, we).
+
+Known entities: {:?}
+Known categories: {:?}
+Question: "{}"
+
+Output ONLY valid JSON: {{"entities": [...], "categories": [...], "implicit_refs": [...]}}"#,
+        entities_sample, categories_sample, question
+    );
+
+    let request = crate::llm_client::LlmRequest {
+        system_prompt: "You are a precise entity extraction system. Output only valid JSON."
+            .to_string(),
+        user_prompt: prompt,
+        temperature: 0.0,
+        max_tokens: 200,
+        json_mode: true,
+    };
+
+    match llm.complete(request).await {
+        Ok(response) => match serde_json::from_str::<LlmEntityExtraction>(&response.content) {
+            Ok(extraction) => Some(extraction),
+            Err(e) => {
+                tracing::debug!("Failed to parse LLM entity extraction: {}", e);
+                None
+            },
+        },
+        Err(e) => {
+            tracing::debug!("LLM entity extraction failed: {}", e);
+            None
+        },
+    }
 }
 
 #[cfg(test)]

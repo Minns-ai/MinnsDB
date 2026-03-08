@@ -465,7 +465,7 @@ impl Graph {
 
     /// Get all node IDs
     pub fn get_all_node_ids(&self) -> Vec<NodeId> {
-        self.nodes.keys().copied().collect()
+        self.nodes.keys().collect()
     }
 
     /// Get all edges

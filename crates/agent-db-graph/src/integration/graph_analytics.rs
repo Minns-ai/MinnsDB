@@ -51,7 +51,7 @@ impl GraphEngine {
 
     /// Run community detection and update memory clusters.
     /// Respects `config.community_algorithm` to choose between Louvain and Label Propagation.
-    pub(super) async fn run_community_detection(&self) -> GraphResult<()> {
+    pub async fn run_community_detection(&self) -> GraphResult<()> {
         tracing::info!("Acquiring inference write lock for community detection");
         let mut inference = self.inference.write().await;
         let graph = inference.graph_mut();

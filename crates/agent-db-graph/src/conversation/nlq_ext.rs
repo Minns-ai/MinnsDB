@@ -4,9 +4,11 @@
 //! PreferenceQuery, and RelationshipPath. These operate on structured
 //! memory populated by the conversation bridge.
 
+use super::graph_projection;
 use super::numeric_reasoning;
 use super::types::NameRegistry;
 use crate::structured_memory::{MemoryTemplate, StructuredMemoryStore};
+use crate::structures::Graph;
 
 // ---------------------------------------------------------------------------
 // Query intent types (conversation-specific)
@@ -49,295 +51,68 @@ pub enum ConversationQueryType {
 }
 
 // ---------------------------------------------------------------------------
-// Intent classification for conversation queries
-// ---------------------------------------------------------------------------
-
-/// Try to classify a question as a conversation-specific query.
-///
-/// Returns `None` if the question doesn't match any conversation-specific pattern.
-pub fn classify_conversation_query(question: &str) -> Option<ConversationQueryType> {
-    let lower = question.to_lowercase();
-
-    // Numeric queries
-    if is_numeric_query(&lower) {
-        let op = if lower.contains("settle")
-            || lower.contains("minimum transfer")
-            || lower.contains("simplif")
-            || lower.contains("how to pay")
-        {
-            NumericOp::TransferMinimize
-        } else if lower.contains("total") || lower.contains("sum") || lower.contains("how much") {
-            NumericOp::Sum
-        } else {
-            NumericOp::NetBalance
-        };
-        return Some(ConversationQueryType::Numeric { op });
-    }
-
-    // Relationship path queries
-    if is_relationship_query(&lower) {
-        let (from, to) = extract_pair_names(question);
-        if !from.is_empty() && !to.is_empty() {
-            return Some(ConversationQueryType::RelationshipPath {
-                from,
-                to,
-                relation: Some("colleague".to_string()),
-            });
-        }
-    }
-
-    // State queries
-    if is_state_query(&lower) {
-        let entity = extract_entity_from_question(question);
-        return Some(ConversationQueryType::State {
-            entity,
-            attribute: None,
-        });
-    }
-
-    // Entity summary
-    if is_entity_summary_query(&lower) {
-        let entity = extract_entity_from_question(question).unwrap_or_else(|| "user".to_string());
-        return Some(ConversationQueryType::EntitySummary { entity });
-    }
-
-    // Preference queries
-    if is_preference_query(&lower) {
-        let entity = extract_entity_from_question(question);
-        let category = extract_category_from_question(&lower);
-        return Some(ConversationQueryType::Preference { entity, category });
-    }
-
-    tracing::debug!(
-        question,
-        "classify_conversation_query: no conversation-specific pattern matched"
-    );
-    None
-}
-
-fn is_numeric_query(lower: &str) -> bool {
-    let patterns = [
-        "owes",
-        "owe",
-        "balance",
-        "settle",
-        "total spent",
-        "how much did",
-        "how much does",
-        "how much was",
-        "minimum transfer",
-        "simplif",
-        "debt",
-        "who pays",
-        "who needs to pay",
-    ];
-    patterns.iter().any(|p| lower.contains(p))
-}
-
-fn is_relationship_query(lower: &str) -> bool {
-    let patterns = [
-        "related to each other",
-        "related through",
-        "connected through",
-        "colleagues relation",
-        "path between",
-        "are .* and .* related",
-        "know each other",
-    ];
-    patterns.iter().any(|p| {
-        if p.contains(".*") {
-            // Simple glob: just check both parts exist
-            let parts: Vec<&str> = p.split(".*").collect();
-            parts.iter().all(|part| lower.contains(part))
-        } else {
-            lower.contains(p)
-        }
-    })
-}
-
-fn is_state_query(lower: &str) -> bool {
-    let patterns = [
-        "where is",
-        "where do",
-        "where does",
-        "where am i",
-        "current status",
-        "current state",
-        "state of",
-        "location of",
-        "what should i do",
-        "what do you have every",
-        "what do i have every",
-    ];
-    patterns.iter().any(|p| lower.contains(p))
-}
-
-fn is_entity_summary_query(lower: &str) -> bool {
-    let patterns = [
-        "who is",
-        "tell me about",
-        "what do you know about",
-        "describe",
-        "summary of",
-    ];
-    patterns.iter().any(|p| lower.contains(p))
-}
-
-fn is_preference_query(lower: &str) -> bool {
-    let patterns = [
-        "recommend",
-        "suggest",
-        "favorite",
-        "favourite",
-        "what do i like",
-        "what does",
-        "do i like",
-        "preference",
-        "which .* do i like",
-        "rank",
-        "rating",
-    ];
-    patterns.iter().any(|p| {
-        if p.contains(".*") {
-            let parts: Vec<&str> = p.split(".*").collect();
-            parts.iter().all(|part| lower.contains(part))
-        } else {
-            lower.contains(p)
-        }
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Name extraction from questions
-// ---------------------------------------------------------------------------
-
-/// Extract a pair of names from a relationship question.
-fn extract_pair_names(question: &str) -> (String, String) {
-    let lower = question.to_lowercase();
-
-    // Pattern: "Are X and Y related..."
-    if lower.starts_with("are ") {
-        if let Some(and_pos) = lower.find(" and ") {
-            let from_str = &question[4..and_pos].trim();
-            // Find end of second name (before "related", "connected", etc.)
-            let after_and = &question[and_pos + 5..];
-            let end_markers = [" related", " connected", " colleagues", " at work"];
-            let mut end = after_and.len();
-            for marker in &end_markers {
-                if let Some(p) = after_and.to_lowercase().find(marker) {
-                    end = end.min(p);
-                }
-            }
-            let to_str = after_and[..end].trim();
-            return (from_str.to_string(), to_str.to_string());
-        }
-    }
-
-    // Pattern: "path between X and Y"
-    if let Some(between_pos) = lower.find("between ") {
-        let after = &question[between_pos + 8..];
-        if let Some(and_pos) = after.to_lowercase().find(" and ") {
-            let from_str = after[..and_pos].trim();
-            let to_str = after[and_pos + 5..]
-                .trim()
-                .trim_end_matches('?')
-                .trim_end_matches('.');
-            return (from_str.to_string(), to_str.to_string());
-        }
-    }
-
-    (String::new(), String::new())
-}
-
-/// Extract a single entity name from a question.
-fn extract_entity_from_question(question: &str) -> Option<String> {
-    let lower = question.to_lowercase();
-
-    // "who is X" / "tell me about X" / "where is X"
-    let prefixes = [
-        "who is ",
-        "tell me about ",
-        "what do you know about ",
-        "where is ",
-        "where does ",
-        "describe ",
-        "summary of ",
-    ];
-
-    for prefix in &prefixes {
-        if let Some(pos) = lower.find(prefix) {
-            let after = &question[pos + prefix.len()..];
-            let name = after
-                .trim()
-                .trim_end_matches('?')
-                .trim_end_matches('.')
-                .trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-
-    None
-}
-
-/// Extract a category from a preference question.
-fn extract_category_from_question(lower: &str) -> Option<String> {
-    let categories = [
-        "art",
-        "music",
-        "movie",
-        "film",
-        "book",
-        "food",
-        "sport",
-        "series",
-        "game",
-        "boardgame",
-    ];
-    for cat in &categories {
-        if lower.contains(cat) {
-            return Some(cat.to_string());
-        }
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
 // Query execution
 // ---------------------------------------------------------------------------
 
-/// Execute a conversation-specific query against the structured memory store.
+/// Execute a conversation-specific query against the structured memory store,
+/// with optional graph projection (tries graph first, falls back to store).
 pub fn execute_conversation_query(
     query: &ConversationQueryType,
     store: &StructuredMemoryStore,
     name_registry: &NameRegistry,
     question: &str,
 ) -> String {
+    execute_conversation_query_with_graph(query, store, name_registry, question, None)
+}
+
+/// Execute a conversation-specific query, trying graph projections first when
+/// a graph reference is provided.
+pub fn execute_conversation_query_with_graph(
+    query: &ConversationQueryType,
+    store: &StructuredMemoryStore,
+    name_registry: &NameRegistry,
+    question: &str,
+    graph: Option<&Graph>,
+) -> String {
     match query {
-        ConversationQueryType::Numeric { op } => execute_numeric(op, store),
+        ConversationQueryType::Numeric { op } => execute_numeric(op, store, graph),
         ConversationQueryType::State { entity, attribute } => execute_state(
             entity.as_deref(),
             attribute.as_deref(),
             store,
             name_registry,
             question,
+            graph,
         ),
         ConversationQueryType::EntitySummary { entity } => {
-            execute_entity_summary(entity, store, name_registry)
+            execute_entity_summary(entity, store, name_registry, graph)
         },
-        ConversationQueryType::Preference { entity, category } => {
-            execute_preference(entity.as_deref(), category.as_deref(), store, name_registry)
-        },
+        ConversationQueryType::Preference { entity, category } => execute_preference(
+            entity.as_deref(),
+            category.as_deref(),
+            store,
+            name_registry,
+            graph,
+        ),
         ConversationQueryType::RelationshipPath { from, to, relation } => {
             let rel = relation.as_deref().unwrap_or("colleague");
-            execute_relationship_path(from, to, rel, store)
+            execute_relationship_path(from, to, rel, store, graph)
         },
     }
 }
 
-fn execute_numeric(op: &NumericOp, store: &StructuredMemoryStore) -> String {
-    let balances = numeric_reasoning::compute_net_balances(store);
+fn execute_numeric(op: &NumericOp, store: &StructuredMemoryStore, graph: Option<&Graph>) -> String {
+    // Try graph projection first, fall back to store
+    let balances = if let Some(g) = graph {
+        let gb = graph_projection::compute_net_balances_from_graph(g);
+        if gb.is_empty() {
+            numeric_reasoning::compute_net_balances(store)
+        } else {
+            gb
+        }
+    } else {
+        numeric_reasoning::compute_net_balances(store)
+    };
 
     match op {
         NumericOp::NetBalance => {
@@ -370,127 +145,162 @@ fn execute_state(
     store: &StructuredMemoryStore,
     name_registry: &NameRegistry,
     question: &str,
+    graph: Option<&Graph>,
 ) -> String {
     let entity_name = entity.unwrap_or("user");
-    let entity_id = match name_registry.id_for_name(entity_name) {
-        Some(id) => id,
-        None => {
-            // Try "user" as fallback
-            match name_registry.id_for_name("user") {
-                Some(id) => id,
-                None => {
-                    tracing::debug!(
-                        entity = entity_name,
-                        "No state information found for entity"
-                    );
-                    return format!("No state information found for '{}'.", entity_name);
-                },
-            }
-        },
-    };
+    // Try registry lookup; if missing, use None so graph projection can still work.
+    let entity_id = name_registry
+        .id_for_name(entity_name)
+        .or_else(|| name_registry.id_for_name("user"));
 
     let lower_q = question.to_lowercase();
 
-    // Extract temporal cues from question
+    // Extract temporal cues and question keywords for relevance matching
     let temporal_cues = extract_temporal_cues(&lower_q);
+    let question_words: Vec<&str> = lower_q
+        .split_whitespace()
+        .filter(|w| w.len() > 3 && !is_stop_word(w))
+        .collect();
 
-    // If question targets a specific routine/temporal slot, try to answer directly
-    if !temporal_cues.is_empty() {
-        let facts_key = format!("prefs:{}:facts", entity_id);
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&facts_key) {
-            for cue in &temporal_cues {
-                // Look for matching routine
-                for item in ranked_items {
-                    let item_lower = item.name.to_lowercase();
-                    if item_lower.contains(cue) {
-                        return item.name.clone();
+    // Get current location: graph projection is the single source of truth.
+    // Falls back to store only if no graph is provided and registry has the entity.
+    let current_location = graph
+        .and_then(|g| graph_projection::state_current_from_graph(g, entity_name, "location"))
+        .or_else(|| {
+            // Fallback: try store only when graph projection returned nothing
+            entity_id.and_then(|eid| numeric_reasoning::state_current(store, eid, "location"))
+        });
+    let current_loc_lower = current_location.as_ref().map(|s| s.to_lowercase());
+
+    // Collect facts from graph via successor-state projection
+    let graph_entity_facts: Vec<(String, f32)> = if let Some(g) = graph {
+        let projected = graph_projection::project_entity_state(g, entity_name, u64::MAX, None);
+        if !projected.repair_hints.is_empty() {
+            tracing::warn!(
+                "project_entity_state: {} repair hints for '{}'",
+                projected.repair_hints.len(),
+                entity_name
+            );
+        }
+        projected
+            .slots
+            .values()
+            .map(|slot| {
+                let fact_text = format!("{}: {}", slot.association_type, slot.target_name);
+                let item_lower = fact_text.to_lowercase();
+                let mut score: f32 = 1.0; // Base score for graph facts
+
+                // Boost for temporal cue match
+                if temporal_cues.iter().any(|c| item_lower.contains(c)) {
+                    score += 2.0;
+                }
+                for w in &question_words {
+                    if item_lower.contains(w) {
+                        score += 1.0;
                     }
                 }
-            }
-        }
-    }
+                if let Some(ref loc) = current_loc_lower {
+                    if loc.split(',').any(|part| {
+                        let p = part.trim();
+                        !p.is_empty() && item_lower.contains(p)
+                    }) {
+                        score += 3.0;
+                    }
+                }
+                (fact_text, score)
+            })
+            .collect()
+    } else {
+        vec![]
+    };
 
-    // If question asks about a specific activity at a place, check activities
-    if lower_q.contains("bakery") || lower_q.contains("cafe") || lower_q.contains("restaurant") {
-        let facts_key = format!("prefs:{}:facts", entity_id);
+    // Also collect from store (supplementary, only if registry has the entity)
+    let store_facts: Vec<(String, f32)> = if let Some(eid) = entity_id {
+        let facts_key = format!("prefs:{}:facts", eid);
         if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&facts_key) {
-            for item in ranked_items {
-                let item_lower = item.name.to_lowercase();
-                // Match place name in question against stored facts
-                if lower_q.contains("bakery") && item_lower.contains("bakery") {
-                    return item.name.clone();
-                }
-                if lower_q.contains("cafe") && item_lower.contains("cafe") {
-                    return item.name.clone();
-                }
-            }
+            ranked_items
+                .iter()
+                .map(|item| {
+                    let item_lower = item.name.to_lowercase();
+                    let mut score: f32 = 0.0;
+
+                    if temporal_cues.iter().any(|c| item_lower.contains(c)) {
+                        score += 2.0;
+                    }
+                    for w in &question_words {
+                        if item_lower.contains(w) {
+                            score += 1.0;
+                        }
+                    }
+                    if let Some(ref loc) = current_loc_lower {
+                        if loc.split(',').any(|part| {
+                            let p = part.trim();
+                            !p.is_empty() && item_lower.contains(p)
+                        }) {
+                            score += 3.0;
+                        }
+                    }
+
+                    (item.name.clone(), score)
+                })
+                .collect()
+        } else {
+            vec![]
         }
-    }
+    } else {
+        vec![]
+    };
 
-    // If question asks "what should I do" with temporal hint, compose answer
-    if lower_q.contains("what should i do") || lower_q.contains("what do") {
-        let mut suggestions = Vec::new();
+    // Merge graph facts (priority) with store facts
+    let mut scored_facts = graph_entity_facts;
+    scored_facts.extend(store_facts);
 
-        // Check routines matching temporal cues
-        let facts_key = format!("prefs:{}:facts", entity_id);
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&facts_key) {
-            for item in ranked_items {
-                let item_lower = item.name.to_lowercase();
-                let matches_cue = temporal_cues.iter().any(|c| item_lower.contains(c))
-                    || temporal_cues.is_empty();
-                if matches_cue {
-                    suggestions.push(item.name.clone());
-                }
-            }
-        }
+    // Sort by relevance score descending
+    let mut sorted_facts = scored_facts;
+    sorted_facts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Add current location context
-        if let Some(loc) = numeric_reasoning::state_current(store, entity_id, "location") {
-            if suggestions.is_empty() {
-                suggestions.push(format!("You are currently in {}.", loc));
-            }
-        }
-
-        // Add nearby landmarks
-        let landmarks_key = format!("prefs:{}:landmarks", entity_id);
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&landmarks_key)
-        {
-            for item in ranked_items.iter().take(2) {
-                suggestions.push(format!("Near: {}", item.name));
-            }
-        }
-
-        if !suggestions.is_empty() {
-            return suggestions.join("\n");
-        }
-    }
-
-    // Default: dump all state info
+    // Build response: location context + top relevant facts + landmarks
     let mut parts = Vec::new();
 
     // Current location
-    if let Some(loc) = numeric_reasoning::state_current(store, entity_id, "location") {
+    if let Some(ref loc) = current_location {
         parts.push(format!("Current location: {}", loc));
     }
 
-    // Current status
-    if let Some(status) = numeric_reasoning::state_current(store, entity_id, "status") {
+    // Current status: graph projection is the single source of truth.
+    let current_status = graph
+        .and_then(|g| graph_projection::state_current_from_graph(g, entity_name, "status"))
+        .or_else(|| entity_id.and_then(|eid| numeric_reasoning::state_current(store, eid, "status")));
+    if let Some(status) = current_status {
         parts.push(format!("Current status: {}", status));
     }
 
-    // Facts (routines, activities)
-    let facts_key = format!("prefs:{}:facts", entity_id);
-    if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&facts_key) {
-        for item in ranked_items.iter().take(5) {
-            parts.push(item.name.clone());
+    // Top relevant facts (prefer scored items over raw dump)
+    let top_facts: Vec<_> = sorted_facts
+        .iter()
+        .filter(|(_, s)| *s > 0.0)
+        .take(5)
+        .collect();
+    if !top_facts.is_empty() {
+        for (fact, _) in &top_facts {
+            parts.push(fact.clone());
+        }
+    } else {
+        // No scored matches — show all facts (up to 5)
+        for (fact, _) in sorted_facts.iter().take(5) {
+            parts.push(fact.clone());
         }
     }
 
-    // Landmarks
-    let landmarks_key = format!("prefs:{}:landmarks", entity_id);
-    if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&landmarks_key) {
-        for item in ranked_items.iter().take(3) {
-            parts.push(format!("Near: {}", item.name));
+    // Landmarks (only if registry has the entity)
+    if let Some(eid) = entity_id {
+        let landmarks_key = format!("prefs:{}:landmarks", eid);
+        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) =
+            store.get(&landmarks_key)
+        {
+            for item in ranked_items.iter().take(3) {
+                parts.push(format!("Near: {}", item.name));
+            }
         }
     }
 
@@ -527,67 +337,115 @@ fn extract_temporal_cues(lower: &str) -> Vec<String> {
     cues
 }
 
+fn is_stop_word(word: &str) -> bool {
+    matches!(
+        word,
+        "what"
+            | "where"
+            | "when"
+            | "which"
+            | "does"
+            | "should"
+            | "have"
+            | "this"
+            | "that"
+            | "your"
+            | "based"
+            | "live"
+            | "usually"
+            | "currently"
+            | "from"
+            | "with"
+            | "about"
+            | "tell"
+            | "like"
+            | "know"
+    )
+}
+
 fn execute_entity_summary(
     entity: &str,
     store: &StructuredMemoryStore,
     name_registry: &NameRegistry,
+    graph: Option<&Graph>,
 ) -> String {
-    let entity_id = match name_registry.id_for_name(entity) {
-        Some(id) => id,
-        None => match name_registry.id_for_name("user") {
-            Some(id) => id,
-            None => {
-                tracing::debug!(entity, "No information found for entity");
-                return format!("No information found for '{}'.", entity);
-            },
-        },
-    };
+    // Try registry lookup; if missing, use None so graph projection can still work.
+    let entity_id = name_registry
+        .id_for_name(entity)
+        .or_else(|| name_registry.id_for_name("user"));
 
     let mut sections = Vec::new();
 
-    // 1. Current states (max 2)
+    // 1. Current states (max 2) — try graph first, fall back to store
     for attr in &["location", "status"] {
-        if let Some(val) = numeric_reasoning::state_current(store, entity_id, attr) {
-            sections.push(format!("Current {}: {}", attr, val));
+        let val = graph
+            .and_then(|g| graph_projection::state_current_from_graph(g, entity, attr))
+            .or_else(|| {
+                entity_id.and_then(|eid| numeric_reasoning::state_current(store, eid, attr))
+            });
+        if let Some(v) = val {
+            sections.push(format!("Current {}: {}", attr, v));
         }
     }
 
-    // 2. Facts/routines (max 3)
-    let facts_key = format!("prefs:{}:facts", entity_id);
-    if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&facts_key) {
-        for item in ranked_items.iter().take(3) {
-            sections.push(item.name.clone());
+    // Include graph-projected entity facts via successor-state projection
+    if let Some(g) = graph {
+        let projected = graph_projection::project_entity_state(g, entity, u64::MAX, None);
+        if !projected.repair_hints.is_empty() {
+            tracing::warn!(
+                "project_entity_state: {} repair hints for '{}'",
+                projected.repair_hints.len(),
+                entity
+            );
+        }
+        for slot in projected.slots.values().take(3) {
+            if !slot.association_type.starts_with("state:") {
+                sections.push(format!("{}: {}", slot.association_type, slot.target_name));
+            }
         }
     }
 
-    // 3. Landmarks (max 3)
-    let landmarks_key = format!("prefs:{}:landmarks", entity_id);
-    if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&landmarks_key) {
-        for item in ranked_items.iter().take(3) {
-            sections.push(format!("Near: {}", item.name));
+    // Store-based supplementary data (only if registry has the entity)
+    if let Some(eid) = entity_id {
+        // 2. Facts/routines (max 3)
+        let facts_key = format!("prefs:{}:facts", eid);
+        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&facts_key) {
+            for item in ranked_items.iter().take(3) {
+                sections.push(item.name.clone());
+            }
         }
-    }
 
-    // 4. Preferences (max 3 per category, max 2 categories)
-    let pref_keys = store.list_keys(&format!("prefs:{}:", entity_id));
-    let mut cat_count = 0;
-    for key in pref_keys {
-        if key.ends_with(":facts") || key.ends_with(":landmarks") {
-            continue;
+        // 3. Landmarks (max 3)
+        let landmarks_key = format!("prefs:{}:landmarks", eid);
+        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) =
+            store.get(&landmarks_key)
+        {
+            for item in ranked_items.iter().take(3) {
+                sections.push(format!("Near: {}", item.name));
+            }
         }
-        if cat_count >= 2 {
-            break;
-        }
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
-            let items: Vec<String> = ranked_items
-                .iter()
-                .take(3)
-                .map(|i| i.name.clone())
-                .collect();
-            if !items.is_empty() {
-                let category = key.rsplit(':').next().unwrap_or("items");
-                sections.push(format!("Likes ({}): {}", category, items.join(", ")));
-                cat_count += 1;
+
+        // 4. Preferences (max 3 per category, max 2 categories)
+        let pref_keys = store.list_keys(&format!("prefs:{}:", eid));
+        let mut cat_count = 0;
+        for key in pref_keys {
+            if key.ends_with(":facts") || key.ends_with(":landmarks") {
+                continue;
+            }
+            if cat_count >= 2 {
+                break;
+            }
+            if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
+                let items: Vec<String> = ranked_items
+                    .iter()
+                    .take(3)
+                    .map(|i| i.name.clone())
+                    .collect();
+                if !items.is_empty() {
+                    let category = key.rsplit(':').next().unwrap_or("items");
+                    sections.push(format!("Likes ({}): {}", category, items.join(", ")));
+                    cat_count += 1;
+                }
             }
         }
     }
@@ -604,18 +462,31 @@ fn execute_preference(
     category: Option<&str>,
     store: &StructuredMemoryStore,
     name_registry: &NameRegistry,
+    graph: Option<&Graph>,
 ) -> String {
     let entity_name = entity.unwrap_or("user");
-    let entity_id = match name_registry.id_for_name(entity_name) {
-        Some(id) => id,
-        None => match name_registry.id_for_name("user") {
-            Some(id) => id,
-            None => return "No preferences found.".to_string(),
-        },
-    };
+    // Try registry lookup; if missing, use None so graph projection can still work.
+    let entity_id = name_registry
+        .id_for_name(entity_name)
+        .or_else(|| name_registry.id_for_name("user"));
 
     if let Some(cat) = category {
-        let prefs = numeric_reasoning::rank_preferences(store, entity_id, cat);
+        // Try graph projection first, using PPR for larger graphs
+        let prefs = if let Some(g) = graph {
+            let gp = graph_projection::rank_preferences_with_ppr(g, entity_name, cat);
+            if gp.is_empty() {
+                // Fallback to store only if registry has the entity
+                entity_id
+                    .map(|eid| numeric_reasoning::rank_preferences(store, eid, cat))
+                    .unwrap_or_default()
+            } else {
+                gp
+            }
+        } else {
+            entity_id
+                .map(|eid| numeric_reasoning::rank_preferences(store, eid, cat))
+                .unwrap_or_default()
+        };
         if prefs.is_empty() {
             return format!("No {} preferences found.", cat);
         }
@@ -625,18 +496,20 @@ fn execute_preference(
             .collect();
         format!("{} preferences: {}", cat, items.join(", "))
     } else {
-        // All preferences
-        let pref_keys = store.list_keys(&format!("prefs:{}:", entity_id));
+        // All preferences (store-based, only if registry has the entity)
         let mut all = Vec::new();
-        for key in pref_keys {
-            if key.ends_with(":facts") || key.ends_with(":landmarks") {
-                continue;
-            }
-            if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
-                let cat = key.rsplit(':').next().unwrap_or("general");
-                let items: Vec<String> = ranked_items.iter().map(|i| i.name.clone()).collect();
-                if !items.is_empty() {
-                    all.push(format!("{}: {}", cat, items.join(", ")));
+        if let Some(eid) = entity_id {
+            let pref_keys = store.list_keys(&format!("prefs:{}:", eid));
+            for key in pref_keys {
+                if key.ends_with(":facts") || key.ends_with(":landmarks") {
+                    continue;
+                }
+                if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
+                    let cat = key.rsplit(':').next().unwrap_or("general");
+                    let items: Vec<String> = ranked_items.iter().map(|i| i.name.clone()).collect();
+                    if !items.is_empty() {
+                        all.push(format!("{}: {}", cat, items.join(", ")));
+                    }
                 }
             }
         }
@@ -652,91 +525,29 @@ fn execute_relationship_path(
     from: &str,
     to: &str,
     relation_type: &str,
-    store: &StructuredMemoryStore,
+    _store: &StructuredMemoryStore,
+    graph: Option<&Graph>,
 ) -> String {
-    match numeric_reasoning::find_relationship_path(store, from, to, relation_type) {
-        Some(path) => {
+    if let Some(g) = graph {
+        // Try exact relation type first
+        if let Some(path) =
+            graph_projection::find_relationship_path_from_graph(g, from, to, relation_type)
+        {
             let chain = numeric_reasoning::format_path(&path, relation_type);
-            format!(
+            return format!(
                 "Yes, {} and {} are connected through {} relations.\nPath: {}",
                 from, to, relation_type, chain
-            )
-        },
-        None => format!(
-            "No {} connection found between {} and {}.",
-            relation_type, from, to
-        ),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classify_owes_query() {
-        let q = classify_conversation_query("Who owes whom?");
-        assert!(q.is_some());
-        assert!(matches!(
-            q.unwrap(),
-            ConversationQueryType::Numeric {
-                op: NumericOp::NetBalance
-            }
-        ));
-    }
-
-    #[test]
-    fn classify_settle_query() {
-        let q = classify_conversation_query("How to settle the debts?");
-        assert!(q.is_some());
-        assert!(matches!(
-            q.unwrap(),
-            ConversationQueryType::Numeric {
-                op: NumericOp::TransferMinimize
-            }
-        ));
-    }
-
-    #[test]
-    fn classify_relationship_query() {
-        let q = classify_conversation_query(
-            "Are Brenda Nguyen and Johnny Fisher related to each other at work through colleagues relations?",
-        );
-        assert!(q.is_some());
-        if let Some(ConversationQueryType::RelationshipPath { from, to, .. }) = q {
-            assert_eq!(from, "Brenda Nguyen");
-            assert_eq!(to, "Johnny Fisher");
-        } else {
-            panic!("Expected RelationshipPath");
+            );
+        }
+        // Fallback: try any relationship-like edge
+        if let Some(path) = graph_projection::find_any_relationship_path_from_graph(g, from, to) {
+            let chain = numeric_reasoning::format_path(&path, relation_type);
+            return format!("Yes, {} and {} are connected.\nPath: {}", from, to, chain);
         }
     }
 
-    #[test]
-    fn classify_state_query() {
-        let q = classify_conversation_query("What should I do this Saturday morning?");
-        assert!(q.is_some());
-        assert!(matches!(q.unwrap(), ConversationQueryType::State { .. }));
-    }
-
-    #[test]
-    fn classify_preference_query() {
-        let q = classify_conversation_query("What art do I like?");
-        assert!(q.is_some());
-        assert!(matches!(
-            q.unwrap(),
-            ConversationQueryType::Preference { .. }
-        ));
-    }
-
-    #[test]
-    fn extract_pair_names_from_question() {
-        let (from, to) =
-            extract_pair_names("Are Brenda Nguyen and Johnny Fisher related to each other?");
-        assert_eq!(from, "Brenda Nguyen");
-        assert_eq!(to, "Johnny Fisher");
-    }
+    format!(
+        "No {} connection found between {} and {}.",
+        relation_type, from, to
+    )
 }

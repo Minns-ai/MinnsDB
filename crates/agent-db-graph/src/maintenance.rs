@@ -153,14 +153,21 @@ pub enum ClaimDedupDecision {
     Contradiction { existing_id: u64, similarity: f32 },
 }
 
-/// Run dedup check against existing claims via the vector index.
+/// Run dedup and conflict check against existing claims via semantic search + LLM.
+///
+/// Uses the same conflict detection approach for both claims and graph edges:
+/// 1. Semantic search for similar existing claims
+/// 2. If similarity >= dedup threshold → Duplicate (merge)
+/// 3. If similarity >= contradiction threshold → ask LLM if it's a contradiction
+/// 4. LLM decides conflict → Contradiction (supersede old claim)
 ///
 /// Returns the decision: store, merge, or supersede.
-pub fn check_claim_dedup(
+pub async fn check_claim_dedup(
     claim_store: &crate::claims::store::ClaimStore,
     new_claim_text: &str,
     new_embedding: &[f32],
     config: &MaintenanceConfig,
+    llm: &dyn crate::llm_client::LlmClient,
 ) -> ClaimDedupDecision {
     if new_embedding.is_empty() {
         return ClaimDedupDecision::NewClaim;
@@ -183,14 +190,6 @@ pub fn check_claim_dedup(
         _ => return ClaimDedupDecision::NewClaim,
     };
 
-    // Check for contradiction (negation flip)
-    if is_contradiction(new_claim_text, &existing_text) {
-        return ClaimDedupDecision::Contradiction {
-            existing_id,
-            similarity,
-        };
-    }
-
     // If above the stricter dedup threshold → duplicate
     if similarity >= config.claim_dedup_threshold {
         return ClaimDedupDecision::Duplicate {
@@ -199,8 +198,53 @@ pub fn check_claim_dedup(
         };
     }
 
-    // Similar but not duplicate and not contradiction — treat as new
+    // Above contradiction threshold but below dedup → ask LLM if it's a conflict
+    let is_conflict = llm_conflict_check(llm, new_claim_text, &existing_text).await;
+    if is_conflict {
+        return ClaimDedupDecision::Contradiction {
+            existing_id,
+            similarity,
+        };
+    }
+
     ClaimDedupDecision::NewClaim
+}
+
+/// Ask the LLM whether a new fact contradicts/supersedes an existing fact.
+///
+/// This is the unified conflict detection function used by both claims and
+/// graph edges. Returns true if the new fact invalidates the old one.
+pub async fn llm_conflict_check(
+    llm: &dyn crate::llm_client::LlmClient,
+    new_fact: &str,
+    existing_fact: &str,
+) -> bool {
+    let prompt = format!(
+        "Does the NEW fact contradict or supersede the EXISTING fact? \
+        Answer only \"yes\" or \"no\".\n\n\
+        EXISTING: {}\nNEW: {}\n\n\
+        \"yes\" means: the new fact makes the existing fact outdated or false \
+        (e.g. \"lives in NYC\" supersedes \"lives in Lisbon\").\n\
+        \"no\" means: both facts can be true simultaneously \
+        (e.g. \"works with Alice\" and \"works with Bob\" are both valid).",
+        existing_fact, new_fact
+    );
+
+    let request = crate::llm_client::LlmRequest {
+        system_prompt: "You detect factual contradictions. Answer only yes or no.".to_string(),
+        user_prompt: prompt,
+        temperature: 0.0,
+        max_tokens: 5,
+        json_mode: false,
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(8), llm.complete(request)).await {
+        Ok(Ok(response)) => {
+            let answer = response.content.trim().to_lowercase();
+            answer.starts_with("yes")
+        },
+        _ => false, // On error/timeout, don't invalidate
+    }
 }
 
 // ── Soft-delete edge purging ────────────────────────────────────────────────
@@ -239,20 +283,20 @@ pub fn purge_old_invalidated_edges(
     let count = to_purge.len();
 
     for edge_id in to_purge {
-        if let Some(edge) = graph.edges.remove(&edge_id) {
+        if let Some(edge) = graph.edges.remove(edge_id) {
             // Remove from adjacency lists
-            if let Some(out_list) = graph.adjacency_out.get_mut(&edge.source) {
+            if let Some(out_list) = graph.adjacency_out.get_mut(edge.source) {
                 out_list.retain(|eid| *eid != edge_id);
             }
-            if let Some(in_list) = graph.adjacency_in.get_mut(&edge.target) {
+            if let Some(in_list) = graph.adjacency_in.get_mut(edge.target) {
                 in_list.retain(|eid| *eid != edge_id);
             }
             // Update degree
-            if let Some(source) = graph.nodes.get_mut(&edge.source) {
+            if let Some(source) = graph.nodes.get_mut(edge.source) {
                 source.degree = source.degree.saturating_sub(1);
                 graph.total_degree = graph.total_degree.saturating_sub(1);
             }
-            if let Some(target) = graph.nodes.get_mut(&edge.target) {
+            if let Some(target) = graph.nodes.get_mut(edge.target) {
                 target.degree = target.degree.saturating_sub(1);
                 graph.total_degree = graph.total_degree.saturating_sub(1);
             }
@@ -274,6 +318,44 @@ pub fn purge_old_invalidated_edges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mock LLM that always answers "yes" (conflict) for testing.
+    struct MockConflictLlm;
+
+    #[async_trait::async_trait]
+    impl crate::llm_client::LlmClient for MockConflictLlm {
+        async fn complete(
+            &self,
+            _request: crate::llm_client::LlmRequest,
+        ) -> anyhow::Result<crate::llm_client::LlmResponse> {
+            Ok(crate::llm_client::LlmResponse {
+                content: "yes".to_string(),
+                tokens_used: 1,
+            })
+        }
+        fn model_name(&self) -> &str {
+            "mock-conflict"
+        }
+    }
+
+    /// Mock LLM that always answers "no" (no conflict) for testing.
+    struct MockNoConflictLlm;
+
+    #[async_trait::async_trait]
+    impl crate::llm_client::LlmClient for MockNoConflictLlm {
+        async fn complete(
+            &self,
+            _request: crate::llm_client::LlmRequest,
+        ) -> anyhow::Result<crate::llm_client::LlmResponse> {
+            Ok(crate::llm_client::LlmResponse {
+                content: "no".to_string(),
+                tokens_used: 1,
+            })
+        }
+        fn model_name(&self) -> &str {
+            "mock-no-conflict"
+        }
+    }
 
     #[test]
     fn test_contradiction_detection() {
@@ -298,21 +380,23 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_dedup_decision_new_when_empty_embedding() {
+    #[tokio::test]
+    async fn test_dedup_decision_new_when_empty_embedding() {
         let config = MaintenanceConfig::default();
         let dir = tempfile::tempdir().unwrap();
         let store = crate::claims::store::ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+        let llm = MockNoConflictLlm;
 
-        let decision = check_claim_dedup(&store, "some text", &[], &config);
+        let decision = check_claim_dedup(&store, "some text", &[], &config, &llm).await;
         assert!(matches!(decision, ClaimDedupDecision::NewClaim));
     }
 
-    #[test]
-    fn test_dedup_detects_duplicate() {
+    #[tokio::test]
+    async fn test_dedup_detects_duplicate() {
         let config = MaintenanceConfig::default();
         let dir = tempfile::tempdir().unwrap();
         let store = crate::claims::store::ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+        let llm = MockNoConflictLlm;
 
         // Store an existing claim
         let existing = crate::claims::types::DerivedClaim::new(
@@ -335,15 +419,18 @@ mod tests {
             "I like Adidas sneakers",
             &[0.99, 0.01, 0.0],
             &config,
-        );
+            &llm,
+        )
+        .await;
         assert!(matches!(decision, ClaimDedupDecision::Duplicate { .. }));
     }
 
-    #[test]
-    fn test_dedup_detects_contradiction() {
+    #[tokio::test]
+    async fn test_dedup_detects_contradiction() {
         let config = MaintenanceConfig::default();
         let dir = tempfile::tempdir().unwrap();
         let store = crate::claims::store::ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+        let llm = MockConflictLlm; // answers "yes" to conflict check
 
         // Store an existing claim
         let existing = crate::claims::types::DerivedClaim::new(
@@ -360,13 +447,16 @@ mod tests {
         );
         store.store(&existing).unwrap();
 
-        // Query with negated claim but similar embedding
+        // Query with embedding that gives cosine similarity ~0.88 vs [1,0,0]
+        // (above contradiction threshold 0.85, below dedup threshold 0.92)
         let decision = check_claim_dedup(
             &store,
             "I do not like Adidas shoes",
-            &[0.98, 0.02, 0.0],
+            &[0.88, 0.475, 0.0],
             &config,
-        );
+            &llm,
+        )
+        .await;
         assert!(matches!(decision, ClaimDedupDecision::Contradiction { .. }));
     }
 }

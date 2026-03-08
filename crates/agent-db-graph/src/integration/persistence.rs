@@ -1,6 +1,6 @@
 use super::*;
+use crate::slot_vec::SlotVec;
 use crate::structures::AdjList;
-use rustc_hash::FxHashMap;
 
 impl GraphEngine {
     /// Persist current graph state to redb storage.
@@ -34,8 +34,7 @@ impl GraphEngine {
                 .scan_prefix_raw(table_names::GRAPH_NODES, b"n")
                 .unwrap_or_default();
             let disk_node_count = disk_node_keys.len();
-            let memory_node_ids: std::collections::HashSet<NodeId> =
-                graph.nodes.keys().copied().collect();
+            let memory_node_ids: std::collections::HashSet<NodeId> = graph.nodes.keys().collect();
             let mut stale_node_ops: Vec<BatchOperation> = Vec::new();
             for (key, _) in disk_node_keys {
                 if key.len() >= 9 {
@@ -55,8 +54,7 @@ impl GraphEngine {
                 .scan_prefix_raw(table_names::GRAPH_EDGES, b"e")
                 .unwrap_or_default();
             let disk_edge_count = disk_edge_keys.len();
-            let memory_edge_ids: std::collections::HashSet<EdgeId> =
-                graph.edges.keys().copied().collect();
+            let memory_edge_ids: std::collections::HashSet<EdgeId> = graph.edges.keys().collect();
             let mut stale_edge_ops: Vec<BatchOperation> = Vec::new();
             for (key, _) in disk_edge_keys {
                 if key.len() >= 9 {
@@ -108,7 +106,7 @@ impl GraphEngine {
         // Serialize each node: key = "n" + node_id (big-endian)
         // Uses versioned MessagePack for schema-evolution safety (handles added/removed fields,
         // serde_json::Value in properties, and new enum variants across upgrades)
-        for (id, node) in &graph.nodes {
+        for (id, node) in graph.nodes.iter() {
             let mut key = Vec::with_capacity(9);
             key.push(b'n');
             key.extend_from_slice(&id.to_be_bytes());
@@ -123,7 +121,7 @@ impl GraphEngine {
         }
 
         // Serialize each edge: key = "e" + edge_id (big-endian)
-        for (id, edge) in &graph.edges {
+        for (id, edge) in graph.edges.iter() {
             let mut key = Vec::with_capacity(9);
             key.push(b'e');
             key.extend_from_slice(&id.to_be_bytes());
@@ -141,9 +139,11 @@ impl GraphEngine {
         // This keeps the batch atomic and avoids needing extra tables.
         #[derive(serde::Serialize, serde::Deserialize)]
         struct GraphMeta {
-            adjacency_out: FxHashMap<NodeId, AdjList>,
-            adjacency_in: FxHashMap<NodeId, AdjList>,
+            adjacency_out: SlotVec<AdjList>,
+            adjacency_in: SlotVec<AdjList>,
+            #[serde(default)]
             next_node_id: NodeId,
+            #[serde(default)]
             next_edge_id: EdgeId,
             stats: GraphStats,
         }
@@ -151,8 +151,8 @@ impl GraphEngine {
         let meta = GraphMeta {
             adjacency_out: graph.adjacency_out.clone(),
             adjacency_in: graph.adjacency_in.clone(),
-            next_node_id: graph.next_node_id,
-            next_edge_id: graph.next_edge_id,
+            next_node_id: graph.nodes.next_id(),
+            next_edge_id: graph.edges.next_id(),
             stats: graph.stats.clone(),
         };
         let meta_value = agent_db_storage::serialize_versioned(&meta).map_err(|e| {
@@ -255,7 +255,7 @@ impl GraphEngine {
 
         // Serialize only dirty nodes
         for &node_id in &graph.dirty_nodes {
-            if let Some(node) = graph.nodes.get(&node_id) {
+            if let Some(node) = graph.nodes.get(node_id) {
                 let mut key = Vec::with_capacity(9);
                 key.push(b'n');
                 key.extend_from_slice(&node_id.to_be_bytes());
@@ -275,7 +275,7 @@ impl GraphEngine {
 
         // Serialize only dirty edges
         for &edge_id in &graph.dirty_edges {
-            if let Some(edge) = graph.edges.get(&edge_id) {
+            if let Some(edge) = graph.edges.get(edge_id) {
                 let mut key = Vec::with_capacity(9);
                 key.push(b'e');
                 key.extend_from_slice(&edge_id.to_be_bytes());
@@ -297,9 +297,11 @@ impl GraphEngine {
         if graph.adjacency_dirty {
             #[derive(serde::Serialize, serde::Deserialize)]
             struct GraphMeta {
-                adjacency_out: FxHashMap<NodeId, AdjList>,
-                adjacency_in: FxHashMap<NodeId, AdjList>,
+                adjacency_out: SlotVec<AdjList>,
+                adjacency_in: SlotVec<AdjList>,
+                #[serde(default)]
                 next_node_id: NodeId,
+                #[serde(default)]
                 next_edge_id: EdgeId,
                 stats: GraphStats,
             }
@@ -307,8 +309,8 @@ impl GraphEngine {
             let meta = GraphMeta {
                 adjacency_out: graph.adjacency_out.clone(),
                 adjacency_in: graph.adjacency_in.clone(),
-                next_node_id: graph.next_node_id,
-                next_edge_id: graph.next_edge_id,
+                next_node_id: graph.nodes.next_id(),
+                next_edge_id: graph.edges.next_id(),
                 stats: graph.stats.clone(),
             };
             let meta_value = agent_db_storage::serialize_versioned(&meta).map_err(|e| {
@@ -364,9 +366,11 @@ impl GraphEngine {
         // Load metadata first — if it doesn't exist, there's nothing to restore
         #[derive(serde::Serialize, serde::Deserialize)]
         struct GraphMeta {
-            adjacency_out: FxHashMap<NodeId, AdjList>,
-            adjacency_in: FxHashMap<NodeId, AdjList>,
+            adjacency_out: SlotVec<AdjList>,
+            adjacency_in: SlotVec<AdjList>,
+            #[serde(default)]
             next_node_id: NodeId,
+            #[serde(default)]
             next_edge_id: EdgeId,
             stats: GraphStats,
         }
@@ -474,8 +478,8 @@ impl GraphEngine {
         graph.edges.clear();
         graph.adjacency_out = meta.adjacency_out;
         graph.adjacency_in = meta.adjacency_in;
-        graph.next_node_id = meta.next_node_id;
-        graph.next_edge_id = meta.next_edge_id;
+        // next_node_id / next_edge_id are now managed by SlotVec internally;
+        // insert_at() during restore will advance next_id automatically.
         graph.stats = meta.stats;
 
         // Clear all secondary indexes before rebuilding
@@ -639,13 +643,13 @@ impl GraphEngine {
                 }
             }
 
-            graph.nodes.insert(node_id, node);
+            graph.nodes.insert_at(node_id, node);
         }
 
         // Insert edges (only those whose source and target are in kept nodes)
         for edge in raw_edges {
             if kept_node_ids.contains(&edge.source) && kept_node_ids.contains(&edge.target) {
-                graph.edges.insert(edge.id, edge);
+                graph.edges.insert_at(edge.id, edge);
             }
         }
 
@@ -654,12 +658,12 @@ impl GraphEngine {
             let mut orphan_count = 0usize;
             for edge_ids in graph.adjacency_out.values_mut() {
                 let before = edge_ids.len();
-                edge_ids.retain(|eid| graph.edges.contains_key(eid));
+                edge_ids.retain(|eid| graph.edges.contains_key(*eid));
                 orphan_count += before - edge_ids.len();
             }
             for edge_ids in graph.adjacency_in.values_mut() {
                 let before = edge_ids.len();
-                edge_ids.retain(|eid| graph.edges.contains_key(eid));
+                edge_ids.retain(|eid| graph.edges.contains_key(*eid));
                 orphan_count += before - edge_ids.len();
             }
             if orphan_count > 0 {
@@ -670,8 +674,47 @@ impl GraphEngine {
             }
         }
 
+        // Re-index BM25 for nodes that have edges with searchable metadata.
+        // This appends edge label text (e.g., "preference food", "relationship neighbor")
+        // to the node's BM25 document so edge types are discoverable via search.
+        {
+            let mut reindexed = 0usize;
+            let node_ids: Vec<NodeId> = graph.nodes.keys().collect();
+            for nid in node_ids {
+                let has_edge_text = graph
+                    .adjacency_out
+                    .get(nid)
+                    .map(|edges| {
+                        edges.iter().any(|&eid| {
+                            graph.edges.get(eid).map_or(false, |e| {
+                                !crate::structures::edge_text_for_bm25(e).is_empty()
+                            })
+                        })
+                    })
+                    .unwrap_or(false)
+                    || graph
+                        .adjacency_in
+                        .get(nid)
+                        .map(|edges| {
+                            edges.iter().any(|&eid| {
+                                graph.edges.get(eid).map_or(false, |e| {
+                                    !crate::structures::edge_text_for_bm25(e).is_empty()
+                                })
+                            })
+                        })
+                        .unwrap_or(false);
+                if has_edge_text {
+                    graph.reindex_node_with_edges(nid);
+                    reindexed += 1;
+                }
+            }
+            if reindexed > 0 {
+                tracing::info!("BM25 edge-text reindex: {} nodes updated", reindexed);
+            }
+        }
+
         // Collect all restored node IDs for property index rebuild (BUG 7 fix).
-        let all_node_ids: Vec<NodeId> = graph.nodes.keys().copied().collect();
+        let all_node_ids: Vec<NodeId> = graph.nodes.keys().collect();
 
         tracing::info!(
             "Graph restored from redb: {} nodes, {} edges",

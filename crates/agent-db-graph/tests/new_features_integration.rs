@@ -9,13 +9,12 @@ use agent_db_events::{
     EventType, ResourceState, TemporalContext,
 };
 use agent_db_graph::{
-    EpisodeDetector, EpisodeDetectorConfig, EpisodeMetrics, EpisodeOutcome, Graph, GraphInference,
+    EpisodeDetector, EpisodeDetectorConfig, EpisodeMetrics, EpisodeOutcome, GraphInference,
     MemoryFormation, MemoryFormationConfig, MemoryType, StrategyExtractionConfig,
     StrategyExtractor,
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 fn create_test_context() -> EventContext {
     EventContext {
@@ -111,9 +110,8 @@ fn create_cognitive_event(
 async fn test_episode_detection() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🧪 Testing Episode Detection...");
 
-    let graph = Arc::new(Graph::new());
     let config = EpisodeDetectorConfig::default();
-    let mut detector = EpisodeDetector::new(graph.clone(), config);
+    let mut detector = EpisodeDetector::new(config);
 
     let context = create_test_context();
     let base_time = current_timestamp();
@@ -156,9 +154,8 @@ async fn test_memory_formation() -> Result<(), Box<dyn std::error::Error>> {
     let config = MemoryFormationConfig::default();
     let mut memory_formation = MemoryFormation::new(config);
 
-    let graph = Arc::new(Graph::new());
     let detector_config = EpisodeDetectorConfig::default();
-    let mut detector = EpisodeDetector::new(graph, detector_config);
+    let mut detector = EpisodeDetector::new(detector_config);
 
     let context = create_test_context();
     let base_time = current_timestamp();
@@ -221,9 +218,8 @@ async fn test_strategy_extraction() -> Result<(), Box<dyn std::error::Error>> {
     let config = StrategyExtractionConfig::default();
     let mut extractor = StrategyExtractor::new(config);
 
-    let graph = Arc::new(Graph::new());
     let detector_config = EpisodeDetectorConfig::default();
-    let mut detector = EpisodeDetector::new(graph, detector_config);
+    let mut detector = EpisodeDetector::new(detector_config);
 
     let context = create_test_context();
     let base_time = current_timestamp();
@@ -291,9 +287,8 @@ async fn test_reinforcement_learning() -> Result<(), Box<dyn std::error::Error>>
 
     let mut inference = GraphInference::new();
 
-    let graph = Arc::new(Graph::new());
     let detector_config = EpisodeDetectorConfig::default();
-    let mut detector = EpisodeDetector::new(graph, detector_config);
+    let mut detector = EpisodeDetector::new(detector_config);
 
     let context = create_test_context();
     let base_time = current_timestamp();
@@ -349,9 +344,7 @@ async fn test_complete_self_evolution_pipeline() -> Result<(), Box<dyn std::erro
     println!("   Event → Episode → Memory → Strategy → Reinforcement");
 
     // Initialize all components
-    let graph = Arc::new(Graph::new());
-    let mut episode_detector =
-        EpisodeDetector::new(graph.clone(), EpisodeDetectorConfig::default());
+    let mut episode_detector = EpisodeDetector::new(EpisodeDetectorConfig::default());
     let mut memory_formation = MemoryFormation::new(MemoryFormationConfig::default());
     let mut strategy_extractor = StrategyExtractor::new(StrategyExtractionConfig::default());
     let mut inference = GraphInference::new();

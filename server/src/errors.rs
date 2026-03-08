@@ -21,6 +21,8 @@ pub enum ApiError {
     NotImplemented(String),
     /// 503 Service Unavailable — returned when write lanes or read gate are exhausted.
     ServiceUnavailable(String),
+    /// 504 Gateway Timeout — returned when LLM synthesis times out.
+    GatewayTimeout(String),
 }
 
 impl IntoResponse for ApiError {
@@ -45,6 +47,11 @@ impl IntoResponse for ApiError {
             ApiError::ServiceUnavailable(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Service Unavailable".to_string(),
+                Some(msg),
+            ),
+            ApiError::GatewayTimeout(msg) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                "Gateway Timeout".to_string(),
                 Some(msg),
             ),
         };
