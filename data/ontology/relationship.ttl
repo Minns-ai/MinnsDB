@@ -1,0 +1,114 @@
+## ── Relationship Ontology ──────────────────────────────────────────
+##
+## Based on FOAF (Friend of a Friend) Ontology v2.0
+## (https://sparontologies.github.io/foaf/current/foaf.html)
+##
+## FOAF defines:
+##   foaf:Person        — a person
+##   foaf:Organization  — an organization
+##   foaf:Group         — a group of agents
+##   foaf:knows         — a person known to this person
+##   foaf:member        — member of a group
+##
+## Also references Schema.org:
+##   schema:knows       — equivalent to foaf:knows
+##   schema:relatedTo   — the most general relationship
+##   schema:spouse      — symmetric marriage relationship
+##   schema:parent      — parent relationship (inverse: schema:children)
+##   schema:sibling     — symmetric sibling relationship
+##
+## All social relationship properties are symmetric by default.
+## The colleague sub-property is critical for multi-hop traversal.
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+@prefix schema: <https://schema.org/> .
+
+# ── Primary: relationship (general interpersonal connections) ──
+eg:relationship a owl:ObjectProperty ;
+    rdfs:label "Relationship" ;
+    rdfs:comment "connections between people" ;
+    rdfs:domain eg:Person, eg:NamedEntity ;
+    rdfs:range  eg:Person, eg:NamedEntity ;
+    a owl:SymmetricProperty ;
+    rdfs:seeAlso foaf:knows, schema:knows .
+
+# ── Sub-property: colleague (workplace connections) ────────────
+eg:colleague a owl:ObjectProperty ;
+    rdfs:label "Colleague" ;
+    rdfs:comment "workplace connections, works with" ;
+    rdfs:subPropertyOf eg:relationship ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Person ;
+    a owl:SymmetricProperty .
+
+# ── Sub-property: friend ───────────────────────────────────────
+eg:friend a owl:ObjectProperty ;
+    rdfs:label "Friend" ;
+    rdfs:comment "friendship, close social bond" ;
+    rdfs:subPropertyOf eg:relationship ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Person ;
+    a owl:SymmetricProperty ;
+    rdfs:seeAlso foaf:knows .
+
+# ── Sub-property: family ──────────────────────────────────────
+eg:family a owl:ObjectProperty ;
+    rdfs:label "Family" ;
+    rdfs:comment "family member, relative" ;
+    rdfs:subPropertyOf eg:relationship ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Person ;
+    a owl:SymmetricProperty ;
+    rdfs:seeAlso schema:relatedTo .
+
+# ── Sub-property: spouse ──────────────────────────────────────
+eg:spouse a owl:ObjectProperty ;
+    rdfs:label "Spouse" ;
+    rdfs:comment "married partner, husband, wife" ;
+    rdfs:subPropertyOf eg:family ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Person ;
+    a owl:SymmetricProperty ;
+    a owl:FunctionalProperty ;
+    rdfs:seeAlso schema:spouse .
+
+# ── Sub-property: parent (asymmetric — inverse is child) ──────
+eg:parent a owl:ObjectProperty ;
+    rdfs:label "Parent" ;
+    rdfs:comment "parent of (mother, father)" ;
+    rdfs:subPropertyOf eg:family ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Person ;
+    owl:inverseOf eg:child ;
+    rdfs:seeAlso schema:parent .
+
+eg:child a owl:ObjectProperty ;
+    rdfs:label "Child" ;
+    rdfs:comment "child of (son, daughter)" ;
+    rdfs:subPropertyOf eg:family ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Person ;
+    owl:inverseOf eg:parent ;
+    rdfs:seeAlso schema:children .
+
+# ── Sub-property: sibling ─────────────────────────────────────
+eg:sibling a owl:ObjectProperty ;
+    rdfs:label "Sibling" ;
+    rdfs:comment "brother, sister" ;
+    rdfs:subPropertyOf eg:family ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Person ;
+    a owl:SymmetricProperty ;
+    rdfs:seeAlso schema:sibling .
+
+# ── membership (person belongs to organization/group) ─────────
+eg:member_of a owl:ObjectProperty ;
+    rdfs:label "Member Of" ;
+    rdfs:comment "belongs to a group or organization" ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Organization ;
+    rdfs:seeAlso foaf:member, schema:memberOf .

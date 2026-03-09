@@ -140,22 +140,16 @@ pub fn synthesize_memory_summary(episode: &Episode, events: &[Event]) -> String 
             } => {
                 // Include conversation messages in memory synthesis
                 let truncated = truncate_str(content, 120);
-                match category.as_str() {
-                    "transaction" => {
-                        actions.push(format!("{}: {}", speaker, truncated));
-                    },
-                    "state_change" => {
-                        context_texts.push(format!("{}: {}", speaker, truncated));
-                    },
-                    "relationship" => {
-                        context_texts.push(format!("{}: {}", speaker, truncated));
-                    },
-                    "preference" => {
-                        context_texts.push(format!("{}: {}", speaker, truncated));
-                    },
-                    _ => {
-                        communications.push(format!("{}: {}", speaker, truncated));
-                    },
+                // Categorize conversation events generically by their category type.
+                // "transaction" → actions, structured categories → context, others → comms.
+                if category == "transaction" {
+                    actions.push(format!("{}: {}", speaker, truncated));
+                } else if category != "general" && category != "unknown" {
+                    // Any named category (state_change, relationship, preference, etc.)
+                    // goes to context
+                    context_texts.push(format!("{}: {}", speaker, truncated));
+                } else {
+                    communications.push(format!("{}: {}", speaker, truncated));
                 }
             },
             EventType::CodeReview {
@@ -411,30 +405,19 @@ pub fn synthesize_takeaway(episode: &Episode, events: &[Event]) -> String {
             .collect();
 
         if !conv_events.is_empty() {
-            // Summarize conversation: count categories, pick most relevant
-            let tx_count = conv_events
-                .iter()
-                .filter(|(_, _, c)| *c == "transaction")
-                .count();
-            let rel_count = conv_events
-                .iter()
-                .filter(|(_, _, c)| *c == "relationship")
-                .count();
-            let pref_count = conv_events
-                .iter()
-                .filter(|(_, _, c)| *c == "preference")
-                .count();
+            // Summarize conversation: count categories generically, no hardcoded names
+            let mut cat_counts: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for (_, _, c) in &conv_events {
+                *cat_counts.entry(c.as_ref()).or_insert(0) += 1;
+            }
 
-            let mut summary_parts = Vec::new();
-            if tx_count > 0 {
-                summary_parts.push(format!("{} transactions", tx_count));
-            }
-            if rel_count > 0 {
-                summary_parts.push(format!("{} relationships", rel_count));
-            }
-            if pref_count > 0 {
-                summary_parts.push(format!("{} preferences", pref_count));
-            }
+            let mut summary_parts: Vec<String> = cat_counts
+                .iter()
+                .filter(|(cat, count)| **count > 0 && **cat != "general" && **cat != "unknown")
+                .map(|(cat, count)| format!("{} {}s", count, cat))
+                .collect();
+            summary_parts.sort(); // deterministic output
 
             if !summary_parts.is_empty() {
                 return format!(

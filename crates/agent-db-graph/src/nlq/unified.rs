@@ -100,16 +100,24 @@ pub fn format_unified_results(
 
             let attr = assoc.split(':').nth(1).unwrap_or(assoc).to_lowercase();
 
-            // Format state facts as natural language
+            // Format state facts as natural language (generic, no hardcoded categories)
+            let cat = assoc.split(':').next().unwrap_or(assoc);
             let text = if assoc.starts_with("state:") {
+                // Legacy "state:*" format
                 format!("Current {}: {}", attr, value)
-            } else if assoc.starts_with("preference:") {
-                format!("{} prefers: {}", entity_name, value)
-            } else if assoc.starts_with("relationship:") {
-                let rel = assoc.strip_prefix("relationship:").unwrap_or(assoc);
-                format!("{} {} {}", entity_name, rel, slot.target_name)
+            } else if slot.target_name != value && !slot.target_name.is_empty() {
+                // Relationship-like: "{entity} {predicate} {target}"
+                format!("{} {} {}", entity_name, attr, slot.target_name)
             } else {
-                format!("{}: {}", assoc, value)
+                // Generic: "Category: value"
+                let cat_display = {
+                    let mut c = cat.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(first) => first.to_uppercase().to_string() + c.as_str(),
+                    }
+                };
+                format!("{}: {}", cat_display, value)
             };
             let key = text.to_lowercase();
             if seen_texts.insert(key) {

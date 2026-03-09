@@ -1,0 +1,87 @@
+## ── Location Ontology ──────────────────────────────────────────────
+##
+## Based on GeoNames Ontology v3.3 (https://www.geonames.org/ontology/)
+## and Schema.org Place hierarchy (https://schema.org/Place).
+##
+## GeoNames defines:
+##   gn:Feature           — any geographical feature
+##   gn:parentFeature     — owl:TransitiveProperty (administrative hierarchy)
+##   gn:neighbour         — owl:SymmetricProperty  (shares a border)
+##   gn:locatedIn         — object is a gn:Feature
+##   gn:nearby            — proximity (not transitive)
+##   gn:parentCountry     — rdfs:subPropertyOf gn:parentFeature
+##
+## Schema.org defines:
+##   schema:Place          — entities with a fixed physical location
+##   schema:containedInPlace — transitive containment
+##   schema:containsPlace   — inverse of containedInPlace
+##
+## This file maps those concepts into EventGraphDB's eg: namespace.
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix gn:     <https://www.geonames.org/ontology#> .
+@prefix schema: <https://schema.org/> .
+
+# ── Primary: location (where someone lives / moved to) ─────────
+eg:location a owl:ObjectProperty ;
+    rdfs:label "Location" ;
+    rdfs:comment "where someone lives, moved to, resides" ;
+    rdfs:domain eg:Person, eg:NamedEntity ;
+    rdfs:range  eg:Location ;
+    a owl:FunctionalProperty ;
+    eg:canonicalPredicate "lives_in" ;
+    eg:cascadeDependents  eg:routine ;
+    rdfs:seeAlso gn:locatedIn, schema:homeLocation .
+
+# ── Sub-property: birthplace (single-valued, immutable) ────────
+eg:birthplace a owl:ObjectProperty ;
+    rdfs:label "Birthplace" ;
+    rdfs:comment "where someone was born" ;
+    rdfs:subPropertyOf eg:location ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Location ;
+    a owl:FunctionalProperty ;
+    eg:canonicalPredicate "born_in" ;
+    rdfs:seeAlso schema:birthPlace .
+
+# ── Sub-property: workplace_location ───────────────────────────
+eg:workplace_location a owl:ObjectProperty ;
+    rdfs:label "Workplace Location" ;
+    rdfs:comment "where someone works (city/office)" ;
+    rdfs:subPropertyOf eg:location ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Location ;
+    a owl:FunctionalProperty ;
+    eg:canonicalPredicate "works_in" .
+
+# ── containedIn: transitive geographic containment ─────────────
+## Maps to gn:parentFeature (transitive) and schema:containedInPlace.
+eg:containedIn a owl:ObjectProperty ;
+    rdfs:label "Contained In" ;
+    rdfs:comment "geographic containment (city in state, state in country)" ;
+    rdfs:domain eg:Location ;
+    rdfs:range  eg:Location ;
+    a owl:TransitiveProperty ;
+    rdfs:seeAlso gn:parentFeature, schema:containedInPlace .
+
+# ── neighbour: symmetric geographic adjacency ──────────────────
+## Maps to gn:neighbour (owl:SymmetricProperty).
+eg:neighbour a owl:ObjectProperty ;
+    rdfs:label "Neighbour" ;
+    rdfs:comment "shares a geographic border" ;
+    rdfs:domain eg:Location ;
+    rdfs:range  eg:Location ;
+    a owl:SymmetricProperty ;
+    rdfs:seeAlso gn:neighbour .
+
+# ── nearby: geographic proximity ───────────────────────────────
+eg:nearby a owl:ObjectProperty ;
+    rdfs:label "Nearby" ;
+    rdfs:comment "geographically close to" ;
+    rdfs:domain eg:Location ;
+    rdfs:range  eg:Location ;
+    a owl:SymmetricProperty ;
+    rdfs:seeAlso gn:nearby .

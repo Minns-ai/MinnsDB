@@ -985,7 +985,8 @@ impl GraphEngine {
         let event_id = event.id;
         let agent_id = event.agent_id;
         let session_id = event.session_id;
-        let domain_registry = self.domain_registry.clone();
+        let _domain_registry = self.domain_registry.clone();
+        let ontology_ref = self.ontology.clone();
 
         // Spawn background task
         tokio::spawn(async move {
@@ -1038,11 +1039,11 @@ impl GraphEngine {
                                     graph,
                                     subj,
                                     u64::MAX,
-                                    Some(&domain_registry),
+                                    Some(ontology_ref.as_ref()),
                                 );
                             for slot in projected.slots.values() {
-                                // Anchor single-valued state slots (location, work, etc.)
-                                if domain_registry.is_single_valued(
+                                // Anchor single-valued state slots (ontology-driven)
+                                if ontology_ref.is_single_valued(
                                     slot.association_type.split(':').next().unwrap_or(""),
                                 ) {
                                     let key = format!("state_anchor:{}", slot.association_type);

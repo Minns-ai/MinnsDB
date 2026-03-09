@@ -1,0 +1,49 @@
+## ── Work / Employment Ontology ─────────────────────────────────────
+##
+## Based on Schema.org (https://schema.org/):
+##   schema:worksFor        — employer relationship
+##   schema:jobTitle        — role/title
+##   schema:Organization    — employing entity
+##   schema:EmployeeRole    — role with start/end dates
+##
+## Also references FOAF:
+##   foaf:workplaceHomepage — web page of employer
+##   foaf:currentProject    — project currently working on
+##
+## Work is single-valued (FunctionalProperty): changing jobs supersedes
+## the previous employer. Also symmetric so the reverse edge is created.
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+
+# ── Primary: work (current employer / job) ─────────────────────
+eg:work a owl:ObjectProperty ;
+    rdfs:label "Work" ;
+    rdfs:comment "job, employer, role" ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Organization, eg:NamedEntity ;
+    a owl:FunctionalProperty ;
+    a owl:SymmetricProperty ;
+    eg:canonicalPredicate "works_at" ;
+    rdfs:seeAlso schema:worksFor .
+
+# ── Sub-property: role (job title within organization) ─────────
+eg:role a owl:ObjectProperty ;
+    rdfs:label "Role" ;
+    rdfs:comment "job title, position" ;
+    rdfs:subPropertyOf eg:work ;
+    rdfs:domain eg:Person ;
+    a owl:FunctionalProperty ;
+    rdfs:seeAlso schema:jobTitle .
+
+# ── Sub-property: project (current project) ───────────────────
+eg:project a owl:ObjectProperty ;
+    rdfs:label "Project" ;
+    rdfs:comment "project currently working on" ;
+    rdfs:subPropertyOf eg:work ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso foaf:currentProject .

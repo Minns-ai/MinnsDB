@@ -208,12 +208,13 @@ fn apply_state_anchor_filter(
     results: &mut Vec<(u64, f32)>,
     graph: &crate::structures::Graph,
     claim_store: &crate::claims::ClaimStore,
+    ontology: &crate::ontology::OntologyRegistry,
 ) {
     use crate::conversation::graph_projection;
     use crate::structures::NodeType;
 
     // Project current state for "user" entity (the primary entity in personal knowledge graphs)
-    let projected = graph_projection::project_entity_state(graph, "user", u64::MAX, None);
+    let projected = graph_projection::project_entity_state(graph, "user", u64::MAX, Some(ontology));
     if projected.slots.is_empty() {
         return; // No state to filter against
     }
@@ -223,7 +224,7 @@ fn apply_state_anchor_filter(
         std::collections::HashMap::new();
     for slot in projected.slots.values() {
         let category = slot.association_type.split(':').next().unwrap_or("");
-        if crate::domain_schema::is_single_valued(category) {
+        if ontology.is_single_valued(category) {
             let val = slot.value.as_deref().unwrap_or(&slot.target_name);
             current_state.insert(
                 format!("state_anchor:{}", slot.association_type),
@@ -401,19 +402,17 @@ fn extract_entity_names_from_question(
                             association_type, ..
                         } = &edge.edge_type
                         {
-                            if association_type.starts_with("relationship:") {
-                                let rel_suffix =
-                                    association_type.strip_prefix("relationship:").unwrap_or("");
-                                if rel_suffix.to_lowercase().contains(rel_word) {
-                                    if let Some(name) =
-                                        crate::conversation::graph_projection::concept_name_of(
-                                            graph,
-                                            edge.target,
-                                        )
-                                    {
-                                        if !found.contains(&name) {
-                                            found.push(name);
-                                        }
+                            // Check if edge predicate (after ':') matches the relational word
+                            let rel_suffix = association_type.split(':').nth(1).unwrap_or("");
+                            if rel_suffix.to_lowercase().contains(rel_word) {
+                                if let Some(name) =
+                                    crate::conversation::graph_projection::concept_name_of(
+                                        graph,
+                                        edge.target,
+                                    )
+                                {
+                                    if !found.contains(&name) {
+                                        found.push(name);
                                     }
                                 }
                             }
@@ -1054,6 +1053,76 @@ impl GraphEngine {
         summaries.insert(summary.case_id.clone(), summary);
     }
 
+    /// Flush the message buffer for a case_id, running compaction on the
+    /// buffered batch with the rolling summary as prior context.
+    /// Returns `Some(CompactionResult)` if compaction ran, `None` if the
+    /// buffer was empty or compaction is disabled.
+    pub async fn flush_message_buffer(
+        self: &std::sync::Arc<Self>,
+        case_id: &str,
+    ) -> Option<crate::conversation::compaction::CompactionResult> {
+        if !self.config.enable_conversation_compaction {
+            return None;
+        }
+
+        // Drain the buffer from conversation state
+        let (messages, session_id) = {
+            let mut states = self.conversation_states.lock().await;
+            let state = states.get_mut(case_id)?;
+            if state.message_buffer.is_empty() {
+                return None;
+            }
+            let msgs = std::mem::take(&mut state.message_buffer);
+            let sid = state.buffer_session_id.take().unwrap_or_default();
+            state.buffer_first_timestamp = None;
+            (msgs, sid)
+        };
+
+        tracing::info!(
+            "Flushing message buffer for case_id={}: {} messages",
+            case_id,
+            messages.len(),
+        );
+
+        // Build a ConversationIngest from the buffered messages
+        let ingest_data = crate::conversation::ConversationIngest {
+            case_id: Some(case_id.to_string()),
+            sessions: vec![crate::conversation::ConversationSession {
+                session_id,
+                topic: None,
+                messages,
+                contains_fact: None,
+                fact_id: None,
+                fact_quote: None,
+                answers: vec![],
+            }],
+            queries: vec![],
+        };
+
+        // Fetch rolling summary for prior context
+        let prior_summary = self.conversation_summary(case_id).await;
+        let prior_text = prior_summary.as_ref().map(|s| s.summary.as_str());
+
+        // Run compaction with context
+        let cr = crate::conversation::compaction::run_compaction_with_context(
+            self,
+            &ingest_data,
+            case_id,
+            prior_text,
+        )
+        .await;
+
+        tracing::info!(
+            "Buffer flush compaction case_id={}: facts={} goals={} playbooks={}",
+            case_id,
+            cr.facts_extracted,
+            cr.goals_extracted,
+            cr.playbooks_extracted,
+        );
+
+        Some(cr)
+    }
+
     /// Get a snapshot of all community summaries.
     pub async fn community_summaries(
         &self,
@@ -1379,7 +1448,7 @@ impl GraphEngine {
             if let Some(ref store) = self.claim_store {
                 let inference = self.inference.read().await;
                 let graph = inference.graph();
-                apply_state_anchor_filter(&mut fused, graph, store);
+                apply_state_anchor_filter(&mut fused, graph, store, &self.ontology);
             }
         }
 
@@ -1449,7 +1518,7 @@ impl GraphEngine {
                 let facts =
                     crate::conversation::graph_projection::collect_entity_facts(graph, entity);
                 for fact in &facts {
-                    if fact.association_type.starts_with("preference:") {
+                    if fact.sentiment != 0.5 {
                         analysis.push_str(&format!(
                             "- {} {} (sentiment: {:.1}, current: {})\n",
                             entity, fact.target_name, fact.sentiment, fact.is_current

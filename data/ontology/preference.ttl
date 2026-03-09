@@ -1,0 +1,48 @@
+## ── Preference Ontology ────────────────────────────────────────────
+##
+## Based on Schema.org (https://schema.org/):
+##   schema:interactionStatistic — user preferences/interactions
+##   schema:Thing                — anything that can be preferred
+##
+## Also references FOAF:
+##   foaf:interest              — topic of interest
+##   foaf:topic_interest        — topic the person is interested in
+##
+## Preferences are multi-valued: a person can have many preferences
+## simultaneously (favorite food, color, music genre, etc.).
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+
+# ── Primary: preference (likes, dislikes, favorites) ───────────
+eg:preference a owl:ObjectProperty ;
+    rdfs:label "Preference" ;
+    rdfs:comment "likes, dislikes, favorites, personal tastes" ;
+    rdfs:domain eg:Person, eg:NamedEntity ;
+    rdfs:seeAlso foaf:interest, foaf:topic_interest .
+
+# ── Sub-property: favorite (strong positive preference) ────────
+eg:favorite a owl:ObjectProperty ;
+    rdfs:label "Favorite" ;
+    rdfs:comment "favorite thing in a category" ;
+    rdfs:subPropertyOf eg:preference ;
+    rdfs:domain eg:Person .
+
+# ── Sub-property: dislike (negative preference) ────────────────
+eg:dislike a owl:ObjectProperty ;
+    rdfs:label "Dislike" ;
+    rdfs:comment "thing the person dislikes or avoids" ;
+    rdfs:subPropertyOf eg:preference ;
+    rdfs:domain eg:Person .
+
+# ── Sub-property: hobby (recreational interest) ───────────────
+eg:hobby a owl:ObjectProperty ;
+    rdfs:label "Hobby" ;
+    rdfs:comment "recreational activity, pastime" ;
+    rdfs:subPropertyOf eg:preference ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso foaf:interest .

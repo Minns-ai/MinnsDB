@@ -280,6 +280,12 @@ pub struct ConversationState {
     pub name_registry: NameRegistry,
     /// Idempotency tracker: (case_id, session_id, message_index).
     pub processed_messages: HashSet<(String, String, usize)>,
+    /// Buffered messages awaiting compaction (single-message flow).
+    pub message_buffer: Vec<ConversationMessage>,
+    /// Timestamp (nanos since epoch) when the first message entered the buffer.
+    pub buffer_first_timestamp: Option<u64>,
+    /// Session ID associated with the buffered messages.
+    pub buffer_session_id: Option<String>,
 }
 
 impl ConversationState {
@@ -289,6 +295,9 @@ impl ConversationState {
             default_currency: "USD".to_string(),
             name_registry: NameRegistry::new(),
             processed_messages: HashSet::new(),
+            message_buffer: Vec::new(),
+            buffer_first_timestamp: None,
+            buffer_session_id: None,
         }
     }
 }

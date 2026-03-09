@@ -1590,61 +1590,6 @@ pub fn infer_preference_category(item: &str, session_topic: Option<&str>) -> Str
 }
 
 // ---------------------------------------------------------------------------
-// Top-level classify+parse entry point
-// ---------------------------------------------------------------------------
-
-/// Classify and parse a single message, returning the parsed envelope.
-///
-/// Pipeline:
-/// 1. Run keyword-based classification
-/// 2. Attempt keyword-based extraction
-pub fn classify_and_parse(
-    ctx: &ConversationContext,
-    state: &ConversationState,
-    content: &str,
-    role: &str,
-    session_topic: Option<&str>,
-) -> ParsedMessage {
-    let result = super::classifier::classify(ctx, state, content, role);
-
-    let parsed = match result.category {
-        MessageCategory::Transaction => parse_transaction(content, &state.known_participants)
-            .map(ParsedPayload::Transaction)
-            .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string())),
-        MessageCategory::StateChange => parse_state_change(content)
-            .into_iter()
-            .next()
-            .map(ParsedPayload::StateChange)
-            .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string())),
-        MessageCategory::Relationship => parse_relationship(content)
-            .map(ParsedPayload::Relationship)
-            .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string())),
-        MessageCategory::Preference => parse_preference(content, session_topic)
-            .map(ParsedPayload::Preference)
-            .unwrap_or_else(|| ParsedPayload::Chitchat(content.to_string())),
-        MessageCategory::Chitchat => ParsedPayload::Chitchat(content.to_string()),
-    };
-
-    // If parse failed, downgrade category to Chitchat
-    let final_category = if matches!(parsed, ParsedPayload::Chitchat(_))
-        && result.category != MessageCategory::Chitchat
-    {
-        MessageCategory::Chitchat
-    } else {
-        result.category
-    };
-
-    ParsedMessage {
-        category: final_category,
-        original_content: content.to_string(),
-        session_id: ctx.session_id.clone(),
-        message_index: ctx.message_index,
-        confidence: result.confidence,
-        parsed,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

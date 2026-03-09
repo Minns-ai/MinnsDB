@@ -162,13 +162,39 @@ fn execute_state(
         .filter(|w| w.len() > 3 && !is_stop_word(w))
         .collect();
 
-    // Get current location: graph projection is the single source of truth.
+    // Get current location from projected state (ontology-driven, no hardcoded category).
     // Falls back to store only if no graph is provided and registry has the entity.
     let current_location = graph
-        .and_then(|g| graph_projection::state_current_from_graph(g, entity_name, "location"))
+        .and_then(|g| {
+            // Use project_entity_state to find any single-valued state that looks like a location
+            let projected = graph_projection::project_entity_state(g, entity_name, u64::MAX, None);
+            // Find first slot whose category triggers cascade (typically location)
+            for slot in projected.slots.values() {
+                let cat = slot.association_type.split(':').next().unwrap_or("");
+                // Accept any single-valued state slot as "location-like" context
+                if !cat.is_empty() && !slot.target_name.is_empty() {
+                    return Some(slot.target_name.clone());
+                }
+            }
+            None
+        })
         .or_else(|| {
-            // Fallback: try store only when graph projection returned nothing
-            entity_id.and_then(|eid| numeric_reasoning::state_current(store, eid, "location"))
+            // Fallback: try store with any state key
+            entity_id
+                .and_then(|eid| {
+                    let state_keys = store.list_keys(&format!("state:{}:", eid));
+                    for key in &state_keys {
+                        if let Some(crate::structured_memory::MemoryTemplate::StateMachine {
+                            current_state,
+                            ..
+                        }) = store.get(key)
+                        {
+                            return Some(current_state);
+                        }
+                    }
+                    None
+                })
+                .cloned()
         });
     let current_loc_lower = current_location.as_ref().map(|s| s.to_lowercase());
 
@@ -215,12 +241,13 @@ fn execute_state(
     };
 
     // Also collect from store (supplementary, only if registry has the entity)
+    // Enumerate all preference categories generically — no hardcoded category names.
     let store_facts: Vec<(String, f32)> = if let Some(eid) = entity_id {
-        let facts_key = format!("prefs:{}:facts", eid);
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&facts_key) {
-            ranked_items
-                .iter()
-                .map(|item| {
+        let pref_keys = store.list_keys(&format!("prefs:{}:", eid));
+        let mut collected = Vec::new();
+        for key in pref_keys.iter().take(5) {
+            if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
+                for item in ranked_items.iter() {
                     let item_lower = item.name.to_lowercase();
                     let mut score: f32 = 0.0;
 
@@ -241,12 +268,11 @@ fn execute_state(
                         }
                     }
 
-                    (item.name.clone(), score)
-                })
-                .collect()
-        } else {
-            vec![]
+                    collected.push((item.name.clone(), score));
+                }
+            }
         }
+        collected
     } else {
         vec![]
     };
@@ -259,7 +285,7 @@ fn execute_state(
     let mut sorted_facts = scored_facts;
     sorted_facts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Build response: location context + top relevant facts + landmarks
+    // Build response: location context + top relevant facts + supplementary prefs
     let mut parts = Vec::new();
 
     // Current location
@@ -267,12 +293,22 @@ fn execute_state(
         parts.push(format!("Current location: {}", loc));
     }
 
-    // Current status: graph projection is the single source of truth.
-    let current_status = graph
-        .and_then(|g| graph_projection::state_current_from_graph(g, entity_name, "status"))
-        .or_else(|| entity_id.and_then(|eid| numeric_reasoning::state_current(store, eid, "status")));
-    if let Some(status) = current_status {
-        parts.push(format!("Current status: {}", status));
+    // Additional single-valued state facts from graph projection.
+    // Discovered dynamically — no hardcoded category names.
+    if let Some(g) = graph {
+        let projected = graph_projection::project_entity_state(g, entity_name, u64::MAX, None);
+        for slot in projected.slots.values().take(3) {
+            let cat = slot.association_type.split(':').next().unwrap_or("");
+            // Skip the primary location (already shown above) and append-type slots
+            if current_location.is_some()
+                && slot.target_name == current_location.as_deref().unwrap_or("")
+            {
+                continue;
+            }
+            if !cat.is_empty() && !slot.target_name.is_empty() {
+                parts.push(format!("Current {}: {}", cat, slot.target_name));
+            }
+        }
     }
 
     // Top relevant facts (prefer scored items over raw dump)
@@ -292,14 +328,20 @@ fn execute_state(
         }
     }
 
-    // Landmarks (only if registry has the entity)
+    // Supplementary preference categories from store (generic — no hardcoded categories)
     if let Some(eid) = entity_id {
-        let landmarks_key = format!("prefs:{}:landmarks", eid);
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) =
-            store.get(&landmarks_key)
-        {
-            for item in ranked_items.iter().take(3) {
-                parts.push(format!("Near: {}", item.name));
+        let pref_keys = store.list_keys(&format!("prefs:{}:", eid));
+        for key in pref_keys.iter().take(3) {
+            if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
+                let category = key.rsplit(':').next().unwrap_or("items");
+                let items: Vec<&str> = ranked_items
+                    .iter()
+                    .take(3)
+                    .map(|i| i.name.as_str())
+                    .collect();
+                if !items.is_empty() {
+                    parts.push(format!("{}: {}", category, items.join(", ")));
+                }
             }
         }
     }
@@ -376,19 +418,7 @@ fn execute_entity_summary(
 
     let mut sections = Vec::new();
 
-    // 1. Current states (max 2) — try graph first, fall back to store
-    for attr in &["location", "status"] {
-        let val = graph
-            .and_then(|g| graph_projection::state_current_from_graph(g, entity, attr))
-            .or_else(|| {
-                entity_id.and_then(|eid| numeric_reasoning::state_current(store, eid, attr))
-            });
-        if let Some(v) = val {
-            sections.push(format!("Current {}: {}", attr, v));
-        }
-    }
-
-    // Include graph-projected entity facts via successor-state projection
+    // 1. Current states — discover all active state categories from graph
     if let Some(g) = graph {
         let projected = graph_projection::project_entity_state(g, entity, u64::MAX, None);
         if !projected.repair_hints.is_empty() {
@@ -398,41 +428,34 @@ fn execute_entity_summary(
                 entity
             );
         }
-        for slot in projected.slots.values().take(3) {
-            if !slot.association_type.starts_with("state:") {
-                sections.push(format!("{}: {}", slot.association_type, slot.target_name));
+        for slot in projected.slots.values().take(5) {
+            sections.push(format!("{}: {}", slot.association_type, slot.target_name));
+        }
+    }
+
+    // Fallback: if graph had no state slots, try store-based state machines
+    if sections.is_empty() {
+        if let Some(eid) = entity_id {
+            let state_keys = store.list_keys(&format!("state:{}:", eid));
+            for key in state_keys.iter().take(3) {
+                if let Some(crate::structured_memory::MemoryTemplate::StateMachine {
+                    current_state,
+                    ..
+                }) = store.get(key)
+                {
+                    let attr = key.rsplit(':').next().unwrap_or("state");
+                    sections.push(format!("Current {}: {}", attr, current_state));
+                }
             }
         }
     }
 
-    // Store-based supplementary data (only if registry has the entity)
+    // 2. Supplementary preference categories from store (generic — no hardcoded categories)
     if let Some(eid) = entity_id {
-        // 2. Facts/routines (max 3)
-        let facts_key = format!("prefs:{}:facts", eid);
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(&facts_key) {
-            for item in ranked_items.iter().take(3) {
-                sections.push(item.name.clone());
-            }
-        }
-
-        // 3. Landmarks (max 3)
-        let landmarks_key = format!("prefs:{}:landmarks", eid);
-        if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) =
-            store.get(&landmarks_key)
-        {
-            for item in ranked_items.iter().take(3) {
-                sections.push(format!("Near: {}", item.name));
-            }
-        }
-
-        // 4. Preferences (max 3 per category, max 2 categories)
         let pref_keys = store.list_keys(&format!("prefs:{}:", eid));
         let mut cat_count = 0;
-        for key in pref_keys {
-            if key.ends_with(":facts") || key.ends_with(":landmarks") {
-                continue;
-            }
-            if cat_count >= 2 {
+        for key in &pref_keys {
+            if cat_count >= 3 {
                 break;
             }
             if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
@@ -443,7 +466,7 @@ fn execute_entity_summary(
                     .collect();
                 if !items.is_empty() {
                     let category = key.rsplit(':').next().unwrap_or("items");
-                    sections.push(format!("Likes ({}): {}", category, items.join(", ")));
+                    sections.push(format!("{}: {}", category, items.join(", ")));
                     cat_count += 1;
                 }
             }
@@ -501,9 +524,6 @@ fn execute_preference(
         if let Some(eid) = entity_id {
             let pref_keys = store.list_keys(&format!("prefs:{}:", eid));
             for key in pref_keys {
-                if key.ends_with(":facts") || key.ends_with(":landmarks") {
-                    continue;
-                }
                 if let Some(MemoryTemplate::PreferenceList { ranked_items, .. }) = store.get(key) {
                     let cat = key.rsplit(':').next().unwrap_or("general");
                     let items: Vec<String> = ranked_items.iter().map(|i| i.name.clone()).collect();

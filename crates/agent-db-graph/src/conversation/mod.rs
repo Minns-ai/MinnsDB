@@ -6,7 +6,6 @@
 //! # Modules
 //!
 //! - [`types`] — Core data types for conversation ingestion
-//! - [`classifier`] — Rule-based message classifier
 //! - [`parsers`] — Category-specific parsers (transaction, state, relationship, preference)
 //! - [`bridge`] — Direct structured memory population (bypasses event pipeline)
 //! - [`numeric_reasoning`] — Generic numeric operations over structured memory
@@ -14,7 +13,6 @@
 
 pub mod answer_composer;
 pub mod bridge;
-pub mod classifier;
 pub mod compaction;
 pub mod graph_projection;
 pub mod llm_classifier;
@@ -32,8 +30,8 @@ pub use bridge::{
     ingest_with_llm_incremental,
 };
 pub use compaction::{
-    run_compaction, update_rolling_summary, CompactionResult, ConversationRollingSummary,
-    GoalPlaybook,
+    run_compaction, run_compaction_with_context, update_rolling_summary, CompactionResult,
+    ConversationRollingSummary, GoalPlaybook,
 };
 pub use nlq_ext::{
     execute_conversation_query, execute_conversation_query_with_graph, ConversationQueryType,

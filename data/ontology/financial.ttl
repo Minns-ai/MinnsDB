@@ -1,0 +1,87 @@
+## ── Financial / Accounting Ontology ────────────────────────────────
+##
+## Based on:
+##   UK Payments Ontology (https://reference.data.gov.uk/def/payment#)
+##     — Payment, payer, payee, netAmount, expenditureCategory
+##   FIBO (Financial Industry Business Ontology, https://spec.edmcouncil.org/fibo/)
+##     — 700+ classes for financial instruments, parties, transactions
+##   Schema.org MonetaryAmount (https://schema.org/MonetaryAmount)
+##
+## UK Payments Ontology defines:
+##   payment:Payment          — a financial payment record
+##   payment:payer            — the organization/person making payment
+##   payment:payee            — the supplier/person receiving payment
+##   payment:netAmount        — monetary value of an expenditure line
+##   payment:expenditureCategory — SKOS concept for purpose classification
+##
+## All financial properties are append-only: each transaction is a
+## permanent record, never superseded.  Conflict detection is skipped
+## because concurrent payments are not contradictions.
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:      <http://eventgraphdb.local/ontology#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix payment: <https://reference.data.gov.uk/def/payment#> .
+@prefix schema:  <https://schema.org/> .
+@prefix fibo:    <https://spec.edmcouncil.org/fibo/ontology/FND/Accounting/> .
+
+# ── Primary: financial (general ledger of payments/debts) ──────
+eg:financial a owl:ObjectProperty ;
+    rdfs:label "Financial" ;
+    rdfs:comment "payments, debts, expenses, reimbursements" ;
+    eg:canonicalPredicate "payment" ;
+    eg:appendOnly "true" ;
+    eg:skipConflictDetection "true" ;
+    rdfs:seeAlso payment:Payment, fibo:AccountingEquity .
+
+# ── Sub-property: transaction (explicit money transfer) ────────
+eg:transaction a owl:ObjectProperty ;
+    rdfs:label "Transaction" ;
+    rdfs:comment "explicit monetary transfer between parties" ;
+    rdfs:subPropertyOf eg:financial ;
+    rdfs:domain eg:Person, eg:Organization ;
+    rdfs:range  eg:Person, eg:Organization ;
+    eg:appendOnly "true" ;
+    eg:skipConflictDetection "true" ;
+    rdfs:seeAlso payment:Payment .
+
+# ── Sub-property: expense (cost incurred) ──────────────────────
+eg:expense a owl:ObjectProperty ;
+    rdfs:label "Expense" ;
+    rdfs:comment "cost incurred, bill, purchase" ;
+    rdfs:subPropertyOf eg:financial ;
+    rdfs:domain eg:Person, eg:Organization ;
+    eg:appendOnly "true" ;
+    eg:skipConflictDetection "true" ;
+    rdfs:seeAlso payment:ExpenditureLine .
+
+# ── Sub-property: debt (outstanding obligation) ────────────────
+eg:debt a owl:ObjectProperty ;
+    rdfs:label "Debt" ;
+    rdfs:comment "money owed from one party to another" ;
+    rdfs:subPropertyOf eg:financial ;
+    rdfs:domain eg:Person, eg:Organization ;
+    rdfs:range  eg:Person, eg:Organization ;
+    eg:appendOnly "true" ;
+    eg:skipConflictDetection "true" .
+
+# ── Sub-property: income (money received) ──────────────────────
+eg:income a owl:ObjectProperty ;
+    rdfs:label "Income" ;
+    rdfs:comment "salary, wages, revenue received" ;
+    rdfs:subPropertyOf eg:financial ;
+    rdfs:domain eg:Person, eg:Organization ;
+    eg:appendOnly "true" ;
+    eg:skipConflictDetection "true" ;
+    rdfs:seeAlso schema:MonetaryAmount .
+
+# ── Sub-property: reimbursement (repayment of expense) ─────────
+eg:reimbursement a owl:ObjectProperty ;
+    rdfs:label "Reimbursement" ;
+    rdfs:comment "repayment or refund of a previous expense" ;
+    rdfs:subPropertyOf eg:financial ;
+    rdfs:domain eg:Person, eg:Organization ;
+    rdfs:range  eg:Person, eg:Organization ;
+    eg:appendOnly "true" ;
+    eg:skipConflictDetection "true" .

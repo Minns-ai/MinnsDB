@@ -383,6 +383,46 @@ impl GraphEngine {
                     }
                 }
 
+                // 11. Message buffer timeout flush
+                // Check for any conversation buffers that have exceeded the
+                // configured timeout and flush them (runs compaction with
+                // rolling summary context).
+                {
+                    let timeout_nanos =
+                        engine.config.compaction_buffer_timeout_secs as u128 * 1_000_000_000;
+                    let now_nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+
+                    // Collect case_ids that need flushing (avoid holding lock during flush)
+                    let stale_cases: Vec<String> = {
+                        let states = engine.conversation_states.lock().await;
+                        states
+                            .iter()
+                            .filter(|(_, s)| {
+                                if let Some(ts) = s.buffer_first_timestamp {
+                                    !s.message_buffer.is_empty()
+                                        && (now_nanos - ts as u128) >= timeout_nanos
+                                } else {
+                                    false
+                                }
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect()
+                    };
+
+                    for case_id in &stale_cases {
+                        if let Some(cr) = engine.flush_message_buffer(case_id).await {
+                            tracing::info!(
+                                "Maintenance: buffer timeout flush case_id={} facts={}",
+                                case_id,
+                                cr.facts_extracted,
+                            );
+                        }
+                    }
+                }
+
                 tracing::debug!("Maintenance pass complete");
             }
         });

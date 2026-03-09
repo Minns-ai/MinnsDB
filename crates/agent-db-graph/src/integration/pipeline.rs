@@ -710,26 +710,28 @@ impl GraphEngine {
         timestamp: u64,
     ) {
         let category = fact.category.as_deref().unwrap_or("other");
-        let is_financial = matches!(category, "financial" | "transaction" | "expense");
+        let is_financial = self.ontology.is_append_only(category);
 
         // 2. Edge type: canonicalize predicate BEFORE taking the write lock.
         // Try embedding-based canonicalizer first, fall back to sync version.
         let assoc_type = if is_financial {
-            "financial:payment".to_string()
+            let cp = self.ontology.canonical_predicate(category);
+            let pred = if cp.is_empty() { "payment" } else { &cp };
+            self.ontology.build_edge_type(category, pred)
         } else {
             let canonical = if let Some(ref pc) = self.predicate_canonicalizer {
                 pc.canonicalize(category, &fact.predicate).await
             } else {
-                self.domain_registry
+                self.ontology
                     .canonicalize_predicate(category, &fact.predicate)
                     .into_owned()
             };
-            let base = format!("{}:{}", category, canonical);
+            let base = self.ontology.build_edge_type(category, &canonical);
             // Fallback: when Multi-valued category has generic predicate, derive sub-key from object
-            if !self.domain_registry.is_single_valued(category) && canonical == category {
+            if !self.ontology.is_single_valued(category) && canonical == category {
                 let sub_key = derive_sub_key(&fact.object);
                 if !sub_key.is_empty() {
-                    format!("{}:{}", category, sub_key)
+                    self.ontology.build_edge_type(category, &sub_key)
                 } else {
                     base
                 }
@@ -748,11 +750,7 @@ impl GraphEngine {
                 None => return,
             };
 
-        let target_ctype = if category == "location" {
-            ConceptType::Location
-        } else {
-            ConceptType::NamedEntity
-        };
+        let target_ctype = self.ontology.default_target_concept_type(category);
 
         // 3. Resolve the target value as a concept node
         let target_nid = match resolve_or_create_entity(graph, &fact.object, target_ctype) {
@@ -783,10 +781,12 @@ impl GraphEngine {
                     if let Some(&nid) = graph.concept_index.get(name) {
                         let has_financial = graph.get_edges_from(nid).iter().any(|e| {
                             matches!(&e.edge_type, crate::structures::EdgeType::Association { association_type, .. }
-                                if association_type == "financial:payment")
+                                if crate::ontology::OntologyRegistry::parse_edge_category(association_type)
+                                    .map(|c| self.ontology.is_append_only(c)).unwrap_or(false))
                         }) || graph.get_edges_to(nid).iter().any(|e| {
                             matches!(&e.edge_type, crate::structures::EdgeType::Association { association_type, .. }
-                                if association_type == "financial:payment")
+                                if crate::ontology::OntologyRegistry::parse_edge_category(association_type)
+                                    .map(|c| self.ontology.is_append_only(c)).unwrap_or(false))
                         });
                         if has_financial {
                             let norm = normalize_entity_name(name);
@@ -809,7 +809,7 @@ impl GraphEngine {
                     entity_nid,
                     target_nid,
                     crate::structures::EdgeType::Association {
-                        association_type: "financial:payment".to_string(),
+                        association_type: self.ontology.build_edge_type("financial", "payment"),
                         evidence_count: 1,
                         statistical_significance: 0.9,
                     },
@@ -846,7 +846,7 @@ impl GraphEngine {
                         entity_nid,
                         ben_nid,
                         crate::structures::EdgeType::Association {
-                            association_type: "financial:payment".to_string(),
+                            association_type: self.ontology.build_edge_type("financial", "payment"),
                             evidence_count: 1,
                             statistical_significance: 0.9,
                         },
@@ -894,7 +894,7 @@ impl GraphEngine {
             // Single-valued categories (location, work, education): ALWAYS supersede
             // existing active edges — don't rely on LLM setting is_update.
             // Multi-valued: only supersede when is_update is explicitly true.
-            let single_valued = self.domain_registry.is_single_valued(category);
+            let single_valued = self.ontology.is_single_valued(category);
             if single_valued || fact.is_update.unwrap_or(false) {
                 let category_prefix = format!("{}:", category);
                 let edges_to_supersede: Vec<crate::structures::EdgeId> = graph
@@ -1065,7 +1065,7 @@ impl GraphEngine {
             );
 
             // Auto-register unknown categories in the domain registry
-            if self.domain_registry.resolve(category).is_none() && category != "other" {
+            if self.ontology.resolve(category).is_none() && category != "other" {
                 let cardinality = fact
                     .cardinality_hint
                     .as_deref()
@@ -1076,7 +1076,7 @@ impl GraphEngine {
                     })
                     .unwrap_or(crate::domain_schema::Cardinality::Multi);
                 if self
-                    .domain_registry
+                    .ontology
                     .register_category(category, cardinality, "", false)
                 {
                     tracing::info!(
@@ -1084,9 +1084,9 @@ impl GraphEngine {
                         category,
                         cardinality
                     );
-                    // Persist as concept node
+                    // Persist as concept node (backward compat)
                     if let Some(slot) = self
-                        .domain_registry
+                        .ontology
                         .learned_slots()
                         .iter()
                         .find(|s| s.category == category)
@@ -1095,12 +1095,11 @@ impl GraphEngine {
                     }
                 }
             } else {
-                self.domain_registry.record_usage(category);
+                self.ontology.record_usage(category);
             }
 
-            // For bidirectional relationships (work, colleague, relationship categories),
-            // also create the reverse edge
-            if matches!(category, "relationship" | "work" | "colleague") {
+            // For symmetric properties, also create the reverse edge
+            if self.ontology.is_symmetric(category) {
                 let rev_exists = graph.get_edges_from(target_nid).iter().any(|e| {
                     if let crate::structures::EdgeType::Association {
                         association_type, ..
@@ -1145,9 +1144,9 @@ impl GraphEngine {
         fact: &crate::conversation::compaction::ExtractedFact,
         timestamp: u64,
     ) {
-        // Skip financial facts — they're always append-only
+        // Skip append-only/skip-conflict-detection properties
         let category = fact.category.as_deref().unwrap_or("other");
-        if matches!(category, "financial" | "transaction" | "expense") {
+        if self.ontology.skip_conflict_detection(category) {
             return;
         }
 
@@ -1531,7 +1530,7 @@ impl GraphEngine {
                                     },
                                     _ => None,
                                 })
-                                .unwrap_or_else(|| "location".to_string());
+                                .unwrap_or_else(|| "other".to_string());
                             let category = metadata_str(&event.metadata, "category");
                             tracing::info!(
                                 "STATE_TRACKING CANDIDATE entity='{}' attr='{}' new_state='{}' category={:?} node_id={}",
@@ -1884,7 +1883,9 @@ impl GraphEngine {
                     let attribute = &sc.attribute;
                     // Edge type uses category when available, attribute as fallback
                     let supersession_key = sc.category.as_deref().unwrap_or(attribute);
-                    let assoc_type = format!("state:{}", supersession_key);
+                    let cp = self.ontology.canonical_predicate(supersession_key);
+                    let predicate = if cp.is_empty() { supersession_key } else { &cp };
+                    let assoc_type = self.ontology.build_edge_type(supersession_key, predicate);
 
                     tracing::info!(
                         "PHASE_B state[{}/{}] entity='{}' nid={} attr='{}' category={:?} supersession_key='{}' new_state='{}' ts={}",
@@ -1900,11 +1901,7 @@ impl GraphEngine {
                     );
 
                     // Ensure concept node for the new state value
-                    let state_ctype = if supersession_key == "location" {
-                        ConceptType::Location
-                    } else {
-                        ConceptType::NamedEntity
-                    };
+                    let state_ctype = self.ontology.default_target_concept_type(supersession_key);
                     let state_nid = match ensure_concept(graph, &sc.new_state, state_ctype) {
                         Some(nid) => nid,
                         None => continue,
@@ -1913,7 +1910,7 @@ impl GraphEngine {
                     // Check for idempotency: if there's already an active edge
                     // with the same type pointing to the same target, skip it.
                     // This prevents edge bloat when the same episode is reprocessed.
-                    let is_location_change = supersession_key == "location";
+                    let is_cascade_trigger = self.ontology.triggers_cascade(supersession_key);
                     let mut already_exists = false;
                     let mut edges_to_supersede: Vec<EdgeId> = Vec::new();
                     for edge in graph.get_edges_from(entity_nid).iter() {
@@ -1930,21 +1927,20 @@ impl GraphEngine {
                                         // Different target — must supersede
                                         edges_to_supersede.push(edge.id);
                                     }
-                                } else if is_location_change {
-                                    // Schema-driven location cascade: supersede edges whose
-                                    // category is marked location_dependent in domain_schema.
-                                    let edge_category = if let Some(rest) =
+                                } else if is_cascade_trigger {
+                                    // Ontology-driven cascade: supersede edges whose
+                                    // category is cascade-dependent.
+                                    let edge_category: String = if let Some(rest) =
                                         association_type.strip_prefix("state:")
                                     {
-                                        crate::domain_schema::decode_legacy_state_assoc(
-                                            association_type,
-                                        )
-                                        .map(|(cat, _)| cat)
-                                        .unwrap_or(rest)
+                                        self.ontology
+                                            .decode_legacy_state_assoc(association_type)
+                                            .map(|(cat, _)| cat)
+                                            .unwrap_or_else(|| rest.to_string())
                                     } else {
-                                        association_type.split(':').next().unwrap_or("")
+                                        association_type.split(':').next().unwrap_or("").to_string()
                                     };
-                                    if self.domain_registry.is_location_dependent(edge_category) {
+                                    if self.ontology.is_cascade_dependent(&edge_category) {
                                         edges_to_supersede.push(edge.id);
                                     }
                                 }
@@ -2031,7 +2027,7 @@ impl GraphEngine {
                         lc.from_id,
                         lc.to_id,
                         EdgeType::Association {
-                            association_type: "financial:payment".to_string(),
+                            association_type: self.ontology.build_edge_type("financial", "payment"),
                             evidence_count: 1,
                             statistical_significance: 0.9,
                         },
@@ -2069,7 +2065,9 @@ impl GraphEngine {
                         None => continue,
                     };
 
-                    let assoc_type = format!("relationship:{}", rc.relation_type);
+                    let assoc_type = self
+                        .ontology
+                        .build_edge_type("relationship", &rc.relation_type);
                     let props = serde_json::json!({
                         "relation_type": rc.relation_type,
                     });
@@ -2112,7 +2110,7 @@ impl GraphEngine {
                         None => continue,
                     };
 
-                    let assoc_type = format!("preference:{}", pc.category);
+                    let assoc_type = self.ontology.build_edge_type("preference", &pc.category);
                     let props = serde_json::json!({
                         "category": pc.category,
                         "sentiment": pc.sentiment,

@@ -36,6 +36,9 @@ parking_lot = "0.12"
 rustc-hash = "2.1"
 ordered-float = { version = "4.2", features = ["serde"] }
 rust-stemmers = "1.2"
+rio_turtle = "0.8"
+rio_api = "0.8"
+oxiri = "0.2"
 
 [features]
 default = []

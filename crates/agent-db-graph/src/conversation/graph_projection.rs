@@ -141,8 +141,10 @@ pub fn build_entity_timeline_summary(graph: &Graph, entity_name: &str) -> Option
                 association_type.split(':').next().unwrap_or("").to_string()
             };
 
-            if category.is_empty() || category == "financial" {
-                continue; // Skip financial (append-only, not state)
+            // Skip append-only categories (e.g., financial) — they're not state
+            let has_amount = edge.properties.contains_key("amount");
+            if category.is_empty() || has_amount {
+                continue;
             }
 
             let target_name = concept_name_of(graph, edge.target).unwrap_or_default();
@@ -211,19 +213,23 @@ pub fn build_entity_timeline_summary(graph: &Graph, entity_name: &str) -> Option
     Some(lines.join("\n"))
 }
 
-/// Compute net balances from `"financial:payment"` Association edges in the graph.
+/// Compute net balances from financial Association edges in the graph.
+///
+/// Identifies financial edges by the presence of an `"amount"` property
+/// (ontology-driven — no hardcoded edge type names).
 ///
 /// Returns a map of `(payer_name, beneficiary_name) -> net_amount`.
 pub fn compute_net_balances_from_graph(graph: &Graph) -> HashMap<(String, String), f64> {
     let mut balances: HashMap<(String, String), f64> = HashMap::new();
 
-    // Iterate all edges looking for financial:payment associations
+    // Iterate all edges looking for associations with an "amount" property
     for (_eid, edge) in graph.edges.iter() {
-        if let EdgeType::Association {
-            association_type, ..
-        } = &edge.edge_type
-        {
-            if association_type == "financial:payment" {
+        if let EdgeType::Association { .. } = &edge.edge_type {
+            if let Some(amount) = edge
+                .properties
+                .get("amount")
+                .and_then(|v: &serde_json::Value| v.as_f64())
+            {
                 let from_name = match concept_name_of(graph, edge.source) {
                     Some(n) => n,
                     None => continue,
@@ -232,11 +238,6 @@ pub fn compute_net_balances_from_graph(graph: &Graph) -> HashMap<(String, String
                     Some(n) => n,
                     None => continue,
                 };
-                let amount = edge
-                    .properties
-                    .get("amount")
-                    .and_then(|v: &serde_json::Value| v.as_f64())
-                    .unwrap_or(0.0);
 
                 *balances.entry((from_name, to_name)).or_insert(0.0) += amount;
             }
@@ -419,8 +420,19 @@ pub fn collect_entity_facts(graph: &Graph, entity_name: &str) -> Vec<EntityFact>
 /// Project the direct children (neighbours) of an entity via relationship edges.
 ///
 /// This is the graph-projection equivalent of `StructuredMemoryStore::tree_children`.
-/// Walks outgoing `relationship:*` edges from the entity and returns neighbour names.
+/// Walks outgoing symmetric-property edges from the entity and returns neighbour names.
+/// Uses ontology to identify symmetric properties; falls back to "relationship" sub-property
+/// expansion when ontology is available.
 pub fn tree_children_from_graph(graph: &Graph, entity_name: &str) -> Vec<String> {
+    tree_children_from_graph_with_ontology(graph, entity_name, None)
+}
+
+/// Ontology-aware version of `tree_children_from_graph`.
+pub fn tree_children_from_graph_with_ontology(
+    graph: &Graph,
+    entity_name: &str,
+    ontology: Option<&crate::ontology::OntologyRegistry>,
+) -> Vec<String> {
     let node_id = match graph.concept_index.get(entity_name) {
         Some(&nid) => nid,
         None => return Vec::new(),
@@ -432,10 +444,14 @@ pub fn tree_children_from_graph(graph: &Graph, entity_name: &str) -> Vec<String>
             association_type, ..
         } = &edge.edge_type
         {
-            if association_type.starts_with("relationship:")
-                || association_type.starts_with("work:")
-                || association_type.starts_with("colleague:")
-            {
+            let cat = association_type.split(':').next().unwrap_or("");
+            // Check if edge category is a symmetric property (ontology-driven).
+            // Without ontology, include all Association edges as potential relationships.
+            let include = match ontology {
+                Some(onto) => onto.is_symmetric(cat),
+                None => association_type.contains(':'),
+            };
+            if include {
                 if let Some(name) = concept_name_of(graph, edge.target) {
                     if !children.contains(&name) {
                         children.push(name);
@@ -448,14 +464,24 @@ pub fn tree_children_from_graph(graph: &Graph, entity_name: &str) -> Vec<String>
     children
 }
 
-/// BFS to find a path between two entities following ANY relationship-like edges.
+/// BFS to find a path between two entities following ANY symmetric-property edges.
 ///
 /// Unlike `find_relationship_path_from_graph` which requires an exact relation_type,
-/// this walks all `relationship:*`, `work:*`, and `colleague:*` edges.
+/// this walks all symmetric-property edges (ontology-driven).
 pub fn find_any_relationship_path_from_graph(
     graph: &Graph,
     from: &str,
     to: &str,
+) -> Option<Vec<String>> {
+    find_any_relationship_path_with_ontology(graph, from, to, None)
+}
+
+/// Ontology-aware version of `find_any_relationship_path_from_graph`.
+pub fn find_any_relationship_path_with_ontology(
+    graph: &Graph,
+    from: &str,
+    to: &str,
+    ontology: Option<&crate::ontology::OntologyRegistry>,
 ) -> Option<Vec<String>> {
     let &from_id = graph.concept_index.get(from)?;
     let &to_id = graph.concept_index.get(to)?;
@@ -475,9 +501,13 @@ pub fn find_any_relationship_path_from_graph(
                 association_type, ..
             } = &edge.edge_type
             {
-                let is_relationship = association_type.starts_with("relationship:")
-                    || association_type.starts_with("work:")
-                    || association_type.starts_with("colleague:");
+                let cat = association_type.split(':').next().unwrap_or("");
+                // Check if edge category is a symmetric property (ontology-driven).
+                // Without ontology, include all Association edges as potential paths.
+                let is_relationship = match ontology {
+                    Some(onto) => onto.is_symmetric(cat),
+                    None => association_type.contains(':'),
+                };
 
                 if is_relationship && !visited.contains_key(&edge.target) {
                     visited.insert(edge.target, current);
@@ -517,21 +547,17 @@ pub(crate) fn concept_name_of(graph: &Graph, node_id: NodeId) -> Option<String> 
 }
 
 /// A structured multi-hop view of an entity's current state.
+///
+/// Facts are categorized generically by their association type prefix (e.g.
+/// "location", "routine", "relationship", "preference:food").  No domain-specific
+/// hardcoding — every edge category discovered in the graph gets its own bucket.
 #[derive(Debug, Clone, Default)]
 pub struct EntityStateView {
     pub entity_name: String,
-    /// location:* edges
-    pub locations: Vec<EntityFact>,
-    /// routine:* edges
-    pub routines: Vec<EntityFact>,
-    /// relationship:* / work:* / colleague:* edges
-    pub relationships: Vec<EntityFact>,
-    /// preference:* grouped by sub-category
-    pub preferences: HashMap<String, Vec<EntityFact>>,
+    /// Facts grouped by category prefix (e.g. "location", "routine", "relationship", "preference:food")
+    pub categories: HashMap<String, Vec<EntityFact>>,
     /// financial:payment net balances: (payer, beneficiary) -> net amount
     pub balances: HashMap<(String, String), f64>,
-    /// Everything else
-    pub other_facts: Vec<EntityFact>,
 }
 
 /// Walk entity state from graph edges — multi-hop structured projection.
@@ -552,25 +578,18 @@ pub fn walk_entity_state(graph: &Graph, entity_name: &str) -> EntityStateView {
             continue;
         }
 
+        // Derive category key from the association type prefix
         let assoc = &fact.association_type;
-        if assoc.starts_with("location:") || assoc == "state:location" {
-            view.locations.push(fact);
-        } else if assoc.starts_with("routine:") {
-            view.routines.push(fact);
-        } else if assoc.starts_with("relationship:")
-            || assoc.starts_with("work:")
-            || assoc.starts_with("colleague:")
-        {
-            view.relationships.push(fact);
-        } else if assoc.starts_with("preference:") {
-            let sub = assoc.strip_prefix("preference:").unwrap_or("other");
-            view.preferences
-                .entry(sub.to_string())
-                .or_default()
-                .push(fact);
+        let category = if let Some(pos) = assoc.find(':') {
+            &assoc[..pos]
         } else {
-            view.other_facts.push(fact);
-        }
+            assoc.as_str()
+        };
+
+        view.categories
+            .entry(category.to_string())
+            .or_default()
+            .push(fact);
     }
 
     // Add financial balances involving this entity
@@ -583,11 +602,27 @@ pub fn walk_entity_state(graph: &Graph, entity_name: &str) -> EntityStateView {
         }
     }
 
-    // Second hop: for each relationship target, get their current location
-    for rel in &mut view.relationships {
-        if let Some(loc) = state_current_from_graph(graph, &rel.target_name, "location") {
-            if rel.value.is_none() {
-                rel.value = Some(format!("(location: {})", loc));
+    // Second hop: for all category targets, enrich with their current state.
+    // Try all single-valued state categories from the entity's projected state
+    // to find useful context (e.g., location).
+    let all_cats: Vec<String> = view.categories.keys().cloned().collect();
+    for cat in &all_cats {
+        if let Some(rels) = view.categories.get_mut(cat.as_str()) {
+            for rel in rels.iter_mut() {
+                if rel.value.is_some() {
+                    continue;
+                }
+                // Enrich with the first single-valued state of the target
+                let target_projected =
+                    project_entity_state(graph, &rel.target_name, u64::MAX, None);
+                for slot in target_projected.slots.values() {
+                    let slot_cat = slot.association_type.split(':').next().unwrap_or("");
+                    // Pick the first slot that looks like a state value
+                    if !slot.target_name.is_empty() && !slot_cat.is_empty() {
+                        rel.value = Some(format!("({}: {})", slot_cat, slot.target_name));
+                        break;
+                    }
+                }
             }
         }
     }
@@ -597,51 +632,45 @@ pub fn walk_entity_state(graph: &Graph, entity_name: &str) -> EntityStateView {
 
 impl EntityStateView {
     /// Format a human-readable summary suitable for LLM synthesis context.
+    ///
+    /// Iterates categories generically — no hardcoded domain knowledge. Each
+    /// category is rendered as `"Category: item1, item2"` with optional value
+    /// annotations (e.g. relationship location enrichment).
     pub fn format_summary(&self) -> String {
         let mut parts = Vec::new();
 
-        if !self.locations.is_empty() {
-            let locs: Vec<&str> = self
-                .locations
-                .iter()
-                .map(|f| f.target_name.as_str())
-                .collect();
-            parts.push(format!("Location: {}", locs.join(", ")));
-        }
+        // Sort categories for deterministic output
+        let mut cats: Vec<_> = self.categories.keys().collect();
+        cats.sort();
 
-        if !self.routines.is_empty() {
-            let routines: Vec<String> = self
-                .routines
+        for cat in cats {
+            let facts = &self.categories[cat];
+            if facts.is_empty() {
+                continue;
+            }
+            let items: Vec<String> = facts
                 .iter()
                 .map(|f| {
                     let label = f
                         .association_type
-                        .strip_prefix("routine:")
-                        .unwrap_or(&f.association_type);
-                    format!("{}: {}", label, f.target_name)
-                })
-                .collect();
-            parts.push(format!("Routines: {}", routines.join("; ")));
-        }
-
-        if !self.relationships.is_empty() {
-            let rels: Vec<String> = self
-                .relationships
-                .iter()
-                .map(|f| {
-                    let label = f.association_type.split(':').nth(1).unwrap_or("related");
+                        .split(':')
+                        .nth(1)
+                        .unwrap_or(&f.target_name);
                     match &f.value {
-                        Some(v) => format!("{} {} {}", label, f.target_name, v),
+                        Some(v) => format!("{}: {} {}", label, f.target_name, v),
                         None => format!("{}: {}", label, f.target_name),
                     }
                 })
                 .collect();
-            parts.push(format!("Relationships: {}", rels.join("; ")));
-        }
-
-        for (cat, prefs) in &self.preferences {
-            let items: Vec<&str> = prefs.iter().map(|f| f.target_name.as_str()).collect();
-            parts.push(format!("Preferences ({}): {}", cat, items.join(", ")));
+            // Capitalize category name for readability
+            let cat_display = {
+                let mut c = cat.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().to_string() + c.as_str(),
+                }
+            };
+            parts.push(format!("{}: {}", cat_display, items.join("; ")));
         }
 
         if !self.balances.is_empty() {
@@ -651,15 +680,6 @@ impl EntityStateView {
                 .map(|((p, b), amt)| format!("{} → {}: {:.2}", p, b, amt))
                 .collect();
             parts.push(format!("Balances: {}", bals.join("; ")));
-        }
-
-        if !self.other_facts.is_empty() {
-            let others: Vec<String> = self
-                .other_facts
-                .iter()
-                .map(|f| format!("{}: {}", f.association_type, f.target_name))
-                .collect();
-            parts.push(format!("Other: {}", others.join("; ")));
         }
 
         if parts.is_empty() {
@@ -729,9 +749,9 @@ pub fn project_entity_state(
     graph: &Graph,
     entity_name: &str,
     as_of: u64,
-    registry: Option<&crate::domain_schema::DomainRegistry>,
+    ontology: Option<&crate::ontology::OntologyRegistry>,
 ) -> ProjectedState {
-    use crate::domain_schema::{self, Cardinality};
+    use crate::domain_schema::Cardinality;
 
     let mut state = ProjectedState {
         entity_name: entity_name.to_string(),
@@ -788,48 +808,48 @@ pub fn project_entity_state(
     for rec in records {
         let (category, predicate) = if let Some(rest) = rec.association_type.strip_prefix("state:")
         {
-            // Legacy "state:location" → ("location", "lives_in") via decode
+            // Legacy "state:location" → ("location", "lives_in") via ontology decode
             if let Some((cat, cpred)) =
-                domain_schema::decode_legacy_state_assoc(&rec.association_type)
+                ontology.and_then(|o| o.decode_legacy_state_assoc(&rec.association_type))
             {
-                (cat.to_string(), cpred.to_string())
+                (cat, cpred)
             } else {
                 (rest.to_string(), String::new())
             }
         } else if let Some(idx) = rec.association_type.find(':') {
             let cat = &rec.association_type[..idx];
             let pred = &rec.association_type[idx + 1..];
-            let canonical = if let Some(reg) = registry {
-                reg.canonicalize_predicate(cat, pred).into_owned()
+            let canonical = if let Some(onto) = ontology {
+                onto.canonicalize_predicate(cat, pred).into_owned()
             } else {
-                domain_schema::canonicalize_predicate(cat, pred).into_owned()
+                pred.to_string()
             };
             (cat.to_string(), canonical)
         } else {
             continue;
         };
 
-        let cardinality = if let Some(reg) = registry {
-            reg.resolve(&category)
-                .map(|s| s.cardinality())
-                .unwrap_or(Cardinality::Multi)
+        let cardinality = if let Some(onto) = ontology {
+            if onto.is_append_only(&category) {
+                Cardinality::Append
+            } else if onto.is_single_valued(&category) {
+                Cardinality::Single
+            } else {
+                Cardinality::Multi
+            }
         } else {
-            domain_schema::resolve_slot(&category, &predicate)
-                .map(|s| s.cardinality)
-                .unwrap_or(Cardinality::Multi)
+            Cardinality::Multi
         };
 
         let (domain_key, canonical_assoc) = match cardinality {
             Cardinality::Single => {
                 // Group by category alone — only one active value
-                let resolved_cpred = if let Some(reg) = registry {
-                    reg.resolve(&category)
-                        .map(|s| s.canonical_predicate().to_string())
+                let resolved_cpred = if let Some(onto) = ontology {
+                    onto.resolve(&category)
+                        .map(|d| d.canonical_predicate.clone())
                         .unwrap_or_default()
                 } else {
-                    domain_schema::resolve_slot(&category, &predicate)
-                        .map(|s| s.canonical_predicate.to_string())
-                        .unwrap_or_default()
+                    String::new()
                 };
                 let cpred = if resolved_cpred.is_empty() {
                     &predicate
@@ -1083,6 +1103,15 @@ mod tests {
     use super::*;
     use crate::structures::{ConceptType, EdgeType, Graph, GraphEdge, GraphNode, NodeType};
 
+    fn test_ontology() -> crate::ontology::OntologyRegistry {
+        let path = std::path::PathBuf::from("../../data/ontology");
+        crate::ontology::OntologyRegistry::load_from_directory(&path).unwrap_or_else(|_| {
+            let alt = std::path::PathBuf::from("data/ontology");
+            crate::ontology::OntologyRegistry::load_from_directory(&alt)
+                .unwrap_or_else(|_| crate::ontology::OntologyRegistry::new())
+        })
+    }
+
     fn make_test_graph() -> Graph {
         let mut graph = Graph::new();
 
@@ -1219,11 +1248,34 @@ mod tests {
         let view = walk_entity_state(&graph, "User");
 
         assert_eq!(view.entity_name, "User");
-        assert_eq!(view.locations.len(), 1);
-        assert_eq!(view.locations[0].target_name, "Tokyo");
-        assert_eq!(view.routines.len(), 2);
-        assert_eq!(view.relationships.len(), 1);
-        assert_eq!(view.relationships[0].target_name, "Anna");
+
+        // The fixture creates edges with prefixes "location:", "routine:", "relationship:".
+        // Verify the generic categorization puts each prefix into its own bucket
+        // and preserves the correct number of items and target names.
+        assert_eq!(
+            view.categories.len(),
+            3,
+            "should have 3 distinct category prefixes"
+        );
+
+        // Collect all target names across all categories
+        let all_targets: Vec<&str> = view
+            .categories
+            .values()
+            .flat_map(|facts| facts.iter().map(|f| f.target_name.as_str()))
+            .collect();
+        assert!(
+            all_targets.contains(&"Tokyo"),
+            "should contain location target"
+        );
+        assert!(
+            all_targets.contains(&"Anna"),
+            "should contain relationship target"
+        );
+
+        // Total current facts: 1 location + 2 routines + 1 relationship = 4
+        let total: usize = view.categories.values().map(|v| v.len()).sum();
+        assert_eq!(total, 4, "should have 4 total categorized facts");
     }
 
     #[test]
@@ -1232,17 +1284,24 @@ mod tests {
         let view = walk_entity_state(&graph, "User");
         let summary = view.format_summary();
 
-        assert!(summary.contains("Tokyo"));
-        assert!(summary.contains("Anna"));
-        assert!(summary.contains("Routines"));
+        // Verify targets appear in the summary (not category names)
+        assert!(summary.contains("Tokyo"), "summary should mention Tokyo");
+        assert!(summary.contains("Anna"), "summary should mention Anna");
+        // Verify it's structured with "Entity:" header
+        assert!(
+            summary.starts_with("Entity: User"),
+            "summary should start with entity header"
+        );
     }
 
     #[test]
     fn test_walk_entity_state_empty_entity() {
         let graph = make_test_graph();
         let view = walk_entity_state(&graph, "NonExistent");
-        assert!(view.locations.is_empty());
-        assert!(view.routines.is_empty());
+        assert!(
+            view.categories.is_empty(),
+            "unknown entity should have no categories"
+        );
         let summary = view.format_summary();
         assert!(summary.contains("No current facts"));
     }
@@ -1354,7 +1413,8 @@ mod tests {
     #[test]
     fn test_projection_single_valued_last_wins() {
         let graph = make_projection_graph();
-        let state = project_entity_state(&graph, "User", u64::MAX, None);
+        let onto = test_ontology();
+        let state = project_entity_state(&graph, "User", u64::MAX, Some(&onto));
 
         let loc = state.slots.get("location").expect("location slot missing");
         assert_eq!(loc.target_name, "NYC");
@@ -1364,7 +1424,8 @@ mod tests {
     #[test]
     fn test_projection_repair_hint_missing_valid_until() {
         let graph = make_projection_graph();
-        let state = project_entity_state(&graph, "User", u64::MAX, None);
+        let onto = test_ontology();
+        let state = project_entity_state(&graph, "User", u64::MAX, Some(&onto));
 
         // The older Tokyo edge lacks valid_until → should generate a repair hint
         let tokyo_hint = state
@@ -1394,7 +1455,8 @@ mod tests {
             }
         }
 
-        let state = project_entity_state(&graph, "User", u64::MAX, None);
+        let onto = test_ontology();
+        let state = project_entity_state(&graph, "User", u64::MAX, Some(&onto));
         let winner_hint = state
             .repair_hints
             .iter()
@@ -1408,7 +1470,8 @@ mod tests {
     #[test]
     fn test_projection_multi_valued_independent() {
         let graph = make_projection_graph();
-        let state = project_entity_state(&graph, "User", u64::MAX, None);
+        let onto = test_ontology();
+        let state = project_entity_state(&graph, "User", u64::MAX, Some(&onto));
 
         // Both routine sub-keys should be current
         let morning = state.slots.get("routine:morning");
@@ -1422,7 +1485,8 @@ mod tests {
     #[test]
     fn test_projection_state_at_time_t() {
         let graph = make_projection_graph();
-        let state = project_entity_state(&graph, "User", 150, None);
+        let onto = test_ontology();
+        let state = project_entity_state(&graph, "User", 150, Some(&onto));
 
         // At t=150, only Tokyo edge (t=100) is visible
         let loc = state
@@ -1465,7 +1529,8 @@ mod tests {
         e.valid_from = Some(50);
         graph.add_edge(e);
 
-        let state = project_entity_state(&graph, "User", u64::MAX, None);
+        let onto = test_ontology();
+        let state = project_entity_state(&graph, "User", u64::MAX, Some(&onto));
         let loc = state
             .slots
             .get("location")

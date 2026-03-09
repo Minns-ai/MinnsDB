@@ -83,10 +83,13 @@ dependencies = [
  "instant-distance",
  "lru",
  "ordered-float 4.6.0",
+ "oxiri",
  "parking_lot",
  "rayon",
  "redb",
  "reqwest",
+ "rio_api",
+ "rio_turtle",
  "rmp-serde",
  "rust-stemmers",
  "rustc-hash",
@@ -1420,6 +1423,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxilangtag"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23f3f87617a86af77fa3691e6350483e7154c2ead9f1261b75130e21ca0f8acb"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "oxiri"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54b4ed3a7192fa19f5f48f99871f2755047fabefd7f222f12a1df1773796a102"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1671,6 +1689,23 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "winreg",
+]
+
+[[package]]
+name = "rio_api"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61d0c76ddf8b00cbb4d2c5932d067d49245c2f1f651809bde3cf265033ddb1af"
+
+[[package]]
+name = "rio_turtle"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f351b77353c7c896f0cd5ced2a25a7e95b5360cb68d1d7c16682ee096d7f40"
+dependencies = [
+ "oxilangtag",
+ "oxiri",
+ "rio_api",
 ]
 
 [[package]]

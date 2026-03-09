@@ -622,7 +622,18 @@ impl GraphEngine {
             None
         };
 
-        let domain_registry = Arc::new(crate::domain_schema::DomainRegistry::new());
+        // Load OWL/RDFS ontology from TTL files (data/ontology/ by default)
+        let ontology_path = std::path::PathBuf::from("data/ontology");
+        let ontology = Arc::new(
+            crate::ontology::OntologyRegistry::load_from_directory(&ontology_path).unwrap_or_else(
+                |e| {
+                    tracing::warn!("Failed to load ontology: {}, starting empty", e);
+                    crate::ontology::OntologyRegistry::new()
+                },
+            ),
+        );
+
+        let domain_registry = Arc::new(crate::domain_schema::DomainRegistry::new(ontology.clone()));
 
         let engine = Self {
             inference,
@@ -657,9 +668,11 @@ impl GraphEngine {
             predicate_canonicalizer: embedding_client.as_ref().map(|ec| {
                 Arc::new(crate::domain_schema::PredicateCanonicalizer::new(
                     ec.clone(),
+                    ontology.clone(),
                 ))
             }),
             domain_registry: domain_registry.clone(),
+            ontology: ontology.clone(),
             embedding_client,
             // 10x/100x: Consolidation + Refinement — built BEFORE config is moved
             consolidation_engine: consolidation_engine_arc,
@@ -706,6 +719,7 @@ impl GraphEngine {
             let learned = crate::domain_schema::restore_learned_slots_from_graph(inf.graph());
             if !learned.is_empty() {
                 tracing::info!("Restored {} learned domain slots from graph", learned.len());
+                engine.ontology.load_learned(learned.clone());
                 engine.domain_registry.load_learned(learned);
             }
         }

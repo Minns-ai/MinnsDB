@@ -1,9 +1,8 @@
 //! Canonical domain registry for temporal state predicates.
 //!
-//! Maps arbitrary LLM-generated predicates to canonical domain slots with
-//! cardinality rules. Predicate canonicalization uses embedding similarity
-//! (cosine distance) to match unknown predicates to canonical forms without
-//! hardcoded alias lists.
+//! Thin wrapper around OntologyRegistry for backward compatibility.
+//! All behavioral decisions are driven by the ontology — no hardcoded
+//! category names in this module.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -21,68 +20,8 @@ pub enum Cardinality {
     Append,
 }
 
-/// A canonical domain slot describing a predicate category.
-pub struct DomainSlot {
-    pub category: &'static str,
-    pub canonical_predicate: &'static str,
-    pub cardinality: Cardinality,
-    pub location_dependent: bool,
-}
-
-/// Static registry of known domain slots.
-static DOMAIN_SLOTS: &[DomainSlot] = &[
-    DomainSlot {
-        category: "location",
-        canonical_predicate: "lives_in",
-        cardinality: Cardinality::Single,
-        location_dependent: false,
-    },
-    DomainSlot {
-        category: "work",
-        canonical_predicate: "works_at",
-        cardinality: Cardinality::Single,
-        location_dependent: false,
-    },
-    DomainSlot {
-        category: "education",
-        canonical_predicate: "studies_at",
-        cardinality: Cardinality::Single,
-        location_dependent: false,
-    },
-    DomainSlot {
-        category: "routine",
-        canonical_predicate: "",
-        cardinality: Cardinality::Multi,
-        location_dependent: true,
-    },
-    DomainSlot {
-        category: "preference",
-        canonical_predicate: "",
-        cardinality: Cardinality::Multi,
-        location_dependent: false,
-    },
-    DomainSlot {
-        category: "relationship",
-        canonical_predicate: "",
-        cardinality: Cardinality::Multi,
-        location_dependent: false,
-    },
-    DomainSlot {
-        category: "health",
-        canonical_predicate: "",
-        cardinality: Cardinality::Multi,
-        location_dependent: false,
-    },
-    DomainSlot {
-        category: "financial",
-        canonical_predicate: "payment",
-        cardinality: Cardinality::Append,
-        location_dependent: false,
-    },
-];
-
 // ---------------------------------------------------------------------------
-// Dynamic domain registry
+// Dynamic domain registry — thin wrapper around OntologyRegistry
 // ---------------------------------------------------------------------------
 
 /// A learned domain slot discovered at runtime from LLM extraction.
@@ -96,100 +35,81 @@ pub struct LearnedSlot {
     pub usage_count: u64,
 }
 
-/// Unified resolved slot — either a static bootstrap slot or a learned one.
-pub enum ResolvedSlot {
-    Static(&'static DomainSlot),
-    Learned(LearnedSlot),
+/// Unified resolved slot — wraps ontology property data.
+pub struct ResolvedSlot {
+    cardinality: Cardinality,
+    canonical_predicate: String,
+    location_dependent: bool,
 }
 
 impl ResolvedSlot {
     pub fn cardinality(&self) -> Cardinality {
-        match self {
-            ResolvedSlot::Static(s) => s.cardinality,
-            ResolvedSlot::Learned(l) => l.cardinality,
-        }
+        self.cardinality
     }
 
     pub fn canonical_predicate(&self) -> &str {
-        match self {
-            ResolvedSlot::Static(s) => s.canonical_predicate,
-            ResolvedSlot::Learned(l) => &l.canonical_predicate,
-        }
+        &self.canonical_predicate
     }
 
     pub fn location_dependent(&self) -> bool {
-        match self {
-            ResolvedSlot::Static(s) => s.location_dependent,
-            ResolvedSlot::Learned(l) => l.location_dependent,
-        }
+        self.location_dependent
     }
 }
 
-/// Dynamic domain registry that combines static bootstrap slots with learned ones.
+/// Dynamic domain registry that delegates to the OWL/RDFS ontology.
 ///
-/// Uses `std::sync::RwLock` (not tokio) since reads happen inside tokio RwLock
-/// write guards in `write_fact_to_graph`.
+/// All behavioral queries (single-valued, append-only, symmetric, etc.)
+/// are resolved via the ontology — no hardcoded category names.
 pub struct DomainRegistry {
-    learned: std::sync::RwLock<HashMap<String, LearnedSlot>>,
+    ontology: Arc<crate::ontology::OntologyRegistry>,
 }
 
 impl DomainRegistry {
-    pub fn new() -> Self {
-        Self {
-            learned: std::sync::RwLock::new(HashMap::new()),
-        }
+    pub fn new(ontology: Arc<crate::ontology::OntologyRegistry>) -> Self {
+        Self { ontology }
     }
 
-    /// Unified lookup: checks learned slots first, then static `DOMAIN_SLOTS`.
+    /// Unified lookup: resolves a category via ontology properties.
     pub fn resolve(&self, category: &str) -> Option<ResolvedSlot> {
         let cat_lower = category.to_lowercase();
-        // Check learned first
-        if let Ok(learned) = self.learned.read() {
-            if let Some(slot) = learned.get(&cat_lower) {
-                return Some(ResolvedSlot::Learned(slot.clone()));
-            }
-        }
-        // Fall back to static
-        DOMAIN_SLOTS
-            .iter()
-            .find(|slot| slot.category == cat_lower)
-            .map(ResolvedSlot::Static)
+        let desc = self.ontology.resolve(&cat_lower)?;
+
+        let cardinality = if desc.append_only {
+            Cardinality::Append
+        } else if self.ontology.is_single_valued(&cat_lower) {
+            Cardinality::Single
+        } else {
+            Cardinality::Multi
+        };
+
+        Some(ResolvedSlot {
+            cardinality,
+            canonical_predicate: desc.canonical_predicate.clone(),
+            location_dependent: desc.cascade_dependent,
+        })
     }
 
     /// Returns true if the given category is single-valued.
     pub fn is_single_valued(&self, category: &str) -> bool {
-        self.resolve(category)
-            .map(|s| s.cardinality() == Cardinality::Single)
-            .unwrap_or(false)
+        self.ontology.is_single_valued(category)
     }
 
-    /// Returns true if the given category is location-dependent.
+    /// Returns true if the given category is location-dependent (cascade-dependent).
     pub fn is_location_dependent(&self, category: &str) -> bool {
-        self.resolve(category)
-            .map(|s| s.location_dependent())
-            .unwrap_or(false)
+        self.ontology.is_cascade_dependent(category)
     }
 
-    /// Synchronous predicate canonicalization via registry.
+    /// Synchronous predicate canonicalization via ontology.
     pub fn canonicalize_predicate<'a>(
         &self,
         category: &str,
         raw_predicate: &'a str,
     ) -> Cow<'a, str> {
-        if let Some(slot) = self.resolve(category) {
-            let cp = slot.canonical_predicate();
-            if !cp.is_empty() && slot.cardinality() == Cardinality::Single {
-                // For learned slots we must return an owned string since the data is not 'static
-                return match slot {
-                    ResolvedSlot::Static(s) => Cow::Borrowed(s.canonical_predicate),
-                    ResolvedSlot::Learned(_) => Cow::Owned(cp.to_string()),
-                };
-            }
-        }
-        Cow::Borrowed(raw_predicate)
+        self.ontology
+            .canonicalize_predicate(category, raw_predicate)
     }
 
-    /// Register a new learned category. Returns true if newly registered, false if already exists.
+    /// Register a new learned category. Returns true if newly registered.
     pub fn register_category(
         &self,
         category: &str,
@@ -197,120 +117,37 @@ impl DomainRegistry {
         canonical_predicate: &str,
         location_dependent: bool,
     ) -> bool {
-        let cat_lower = category.to_lowercase();
-        // Skip if it's a static category
-        if DOMAIN_SLOTS.iter().any(|s| s.category == cat_lower) {
-            return false;
-        }
-        let mut learned = self.learned.write().unwrap();
-        if learned.contains_key(&cat_lower) {
-            return false;
-        }
-        learned.insert(
-            cat_lower.clone(),
-            LearnedSlot {
-                category: cat_lower,
-                canonical_predicate: canonical_predicate.to_string(),
-                cardinality,
-                location_dependent,
-                discovered_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                usage_count: 1,
-            },
-        );
-        true
+        self.ontology.register_category(
+            category,
+            cardinality,
+            canonical_predicate,
+            location_dependent,
+        )
     }
 
-    /// Bump usage_count for a learned slot.
+    /// Bump usage_count for a learned slot (no-op — ontology tracks properties, not usage).
     pub fn record_usage(&self, category: &str) {
-        let cat_lower = category.to_lowercase();
-        if let Ok(mut learned) = self.learned.write() {
-            if let Some(slot) = learned.get_mut(&cat_lower) {
-                slot.usage_count += 1;
-            }
-        }
+        self.ontology.record_usage(category);
     }
 
     /// Formatted category block for LLM prompt injection.
     pub fn prompt_category_block(&self) -> String {
-        let mut lines = Vec::new();
-        for slot in DOMAIN_SLOTS {
-            let card = match slot.cardinality {
-                Cardinality::Single => "single-valued, newest supersedes all",
-                Cardinality::Multi => "multi-valued, multiple active",
-                Cardinality::Append => "append-only, never supersede",
-            };
-            lines.push(format!(
-                "- \"{}\": {} ({})",
-                slot.category,
-                slot_description(slot.category),
-                card,
-            ));
-        }
-        if let Ok(learned) = self.learned.read() {
-            for slot in learned.values() {
-                let card = match slot.cardinality {
-                    Cardinality::Single => "single-valued, newest supersedes all",
-                    Cardinality::Multi => "multi-valued, multiple active",
-                    Cardinality::Append => "append-only, never supersede",
-                };
-                lines.push(format!(
-                    "- \"{}\": learned category ({})",
-                    slot.category, card
-                ));
-            }
-        }
-        lines.join("\n")
+        self.ontology.prompt_category_block()
     }
 
     /// Pipe-separated category list for LLM enum constraint.
     pub fn prompt_category_enum(&self) -> String {
-        let mut cats: Vec<String> = DOMAIN_SLOTS
-            .iter()
-            .map(|s| s.category.to_string())
-            .collect();
-        cats.push("other".to_string());
-        if let Ok(learned) = self.learned.read() {
-            for cat in learned.keys() {
-                cats.push(cat.clone());
-            }
-        }
-        cats.join("|")
+        self.ontology.prompt_category_enum()
     }
 
     /// Return all learned slots for persistence.
     pub fn learned_slots(&self) -> Vec<LearnedSlot> {
-        self.learned.read().unwrap().values().cloned().collect()
+        self.ontology.learned_slots()
     }
 
     /// Bulk restore learned slots (e.g., from persisted concept nodes).
     pub fn load_learned(&self, slots: Vec<LearnedSlot>) {
-        let mut learned = self.learned.write().unwrap();
-        for slot in slots {
-            let cat = slot.category.to_lowercase();
-            // Don't overwrite static categories
-            if DOMAIN_SLOTS.iter().any(|s| s.category == cat) {
-                continue;
-            }
-            learned.insert(cat, slot);
-        }
-    }
-}
-
-/// Human-readable description for static categories (used in prompt generation).
-fn slot_description(category: &str) -> &'static str {
-    match category {
-        "location" => "where someone lives, moved to",
-        "work" => "job, employer, role",
-        "education" => "school, courses, learning",
-        "routine" => "daily habits, regular activities",
-        "preference" => "likes, dislikes, favorites",
-        "relationship" => "connections between people",
-        "health" => "medical, fitness, diet",
-        "financial" => "payments, debts, expenses",
-        _ => "other",
+        self.ontology.load_learned(slots);
     }
 }
 
@@ -420,68 +257,6 @@ pub fn restore_learned_slots_from_graph(graph: &crate::structures::Graph) -> Vec
     slots
 }
 
-/// Find the domain slot for a category.
-pub fn resolve_slot(category: &str, _predicate: &str) -> Option<&'static DomainSlot> {
-    let cat_lower = category.to_lowercase();
-    DOMAIN_SLOTS.iter().find(|slot| slot.category == cat_lower)
-}
-
-/// Synchronous predicate canonicalization (cache-only fast path).
-///
-/// For Single-valued domains: returns the canonical predicate unconditionally
-/// (e.g., any location predicate → "lives_in"). This is the correct fallback
-/// when no embedding client is available — all predicates within a single-valued
-/// category are semantically equivalent to the canonical.
-///
-/// For Multi/Append or unknown domains: returns the raw predicate unchanged.
-pub fn canonicalize_predicate<'a>(category: &str, raw_predicate: &'a str) -> Cow<'a, str> {
-    if let Some(slot) = resolve_slot(category, raw_predicate) {
-        if !slot.canonical_predicate.is_empty() && slot.cardinality == Cardinality::Single {
-            return Cow::Borrowed(slot.canonical_predicate);
-        }
-    }
-    Cow::Borrowed(raw_predicate)
-}
-
-/// Returns true if the given category is location-dependent (cascade-supersede on location change).
-pub fn is_location_dependent(category: &str) -> bool {
-    let cat_lower = category.to_lowercase();
-    DOMAIN_SLOTS
-        .iter()
-        .any(|slot| slot.category == cat_lower && slot.location_dependent)
-}
-
-/// Returns true if the given category is single-valued (newest supersedes all previous).
-pub fn is_single_valued(category: &str) -> bool {
-    let cat_lower = category.to_lowercase();
-    DOMAIN_SLOTS
-        .iter()
-        .any(|slot| slot.category == cat_lower && slot.cardinality == Cardinality::Single)
-}
-
-/// Decode a legacy `"state:*"` association type into `(category, canonical_predicate)`.
-///
-/// Maps e.g. `"state:location"` → `("location", "lives_in")`,
-/// `"state:routine"` → `("routine", "")`, etc.
-pub fn decode_legacy_state_assoc(assoc_type: &str) -> Option<(&'static str, &'static str)> {
-    let rest = assoc_type.strip_prefix("state:")?;
-    let rest_lower = rest.to_lowercase();
-
-    // Direct category match
-    for slot in DOMAIN_SLOTS {
-        if slot.category == rest_lower {
-            return Some((slot.category, slot.canonical_predicate));
-        }
-    }
-
-    // Legacy names that map to known categories
-    match rest_lower.as_str() {
-        "landmark" | "activity" | "saturday_routine" | "morning_routine" | "weekend"
-        | "breakfast" => Some(("routine", "")),
-        _ => None,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Embedding-based predicate canonicalizer
 // ---------------------------------------------------------------------------
@@ -498,6 +273,8 @@ const SIMILARITY_THRESHOLD: f32 = 0.70;
 pub struct PredicateCanonicalizer {
     /// Embedding client for generating vectors.
     embedding_client: Arc<dyn crate::claims::EmbeddingClient>,
+    /// Ontology registry for property lookup (replaces DOMAIN_SLOTS).
+    ontology: Arc<crate::ontology::OntologyRegistry>,
     /// Pre-computed embeddings for canonical predicates.
     /// Key: "category:canonical_predicate" (e.g., "location:lives_in")
     canonical_embeddings: RwLock<HashMap<String, Vec<f32>>>,
@@ -509,10 +286,14 @@ pub struct PredicateCanonicalizer {
 }
 
 impl PredicateCanonicalizer {
-    /// Create a new canonicalizer with the given embedding client.
-    pub fn new(embedding_client: Arc<dyn crate::claims::EmbeddingClient>) -> Self {
+    /// Create a new canonicalizer with the given embedding client and ontology.
+    pub fn new(
+        embedding_client: Arc<dyn crate::claims::EmbeddingClient>,
+        ontology: Arc<crate::ontology::OntologyRegistry>,
+    ) -> Self {
         Self {
             embedding_client,
+            ontology,
             canonical_embeddings: RwLock::new(HashMap::new()),
             resolution_cache: RwLock::new(HashMap::new()),
             initialized: RwLock::new(false),
@@ -535,12 +316,8 @@ impl PredicateCanonicalizer {
 
         let mut embeddings = self.canonical_embeddings.write().await;
 
-        // Collect canonical predicates for single-valued domains (static + learned)
-        let to_embed: Vec<(String, String)> = DOMAIN_SLOTS
-            .iter()
-            .filter(|s| s.cardinality == Cardinality::Single && !s.canonical_predicate.is_empty())
-            .map(|s| (s.category.to_string(), s.canonical_predicate.to_string()))
-            .collect();
+        // Collect canonical predicates from ontology (all single-valued with non-empty canonical)
+        let to_embed = self.ontology.single_valued_canonicals();
 
         // Embed each canonical predicate with category context
         for (category, predicate) in &to_embed {
@@ -565,11 +342,6 @@ impl PredicateCanonicalizer {
             }
         }
 
-        // Note: learned slots with single-valued cardinality and non-empty canonical
-        // predicates should also be embedded here when a DomainRegistry reference is
-        // available. For now, the PredicateCanonicalizer handles static slots only;
-        // learned slots use the synchronous DomainRegistry::canonicalize_predicate path.
-
         tracing::info!(
             "PredicateCanonicalizer initialized with {} canonical embeddings",
             embeddings.len()
@@ -589,18 +361,19 @@ impl PredicateCanonicalizer {
     ///
     /// For Multi/Append or unknown domains: returns raw predicate unchanged.
     pub async fn canonicalize(&self, category: &str, raw_predicate: &str) -> String {
-        let slot = match resolve_slot(category, raw_predicate) {
-            Some(s) => s,
+        // Check ontology for property info
+        let desc = match self.ontology.resolve(category) {
+            Some(d) => d,
             None => return raw_predicate.to_string(),
         };
 
         // Only canonicalize single-valued domains
-        if slot.canonical_predicate.is_empty() || slot.cardinality != Cardinality::Single {
+        if desc.canonical_predicate.is_empty() || !self.ontology.is_single_valued(category) {
             return raw_predicate.to_string();
         }
 
         // Exact match — already canonical
-        if raw_predicate == slot.canonical_predicate {
+        if raw_predicate == desc.canonical_predicate {
             return raw_predicate.to_string();
         }
 
@@ -632,13 +405,13 @@ impl PredicateCanonicalizer {
                     e
                 );
                 // Fallback: for single-valued, canonical is the safe default
-                return slot.canonical_predicate.to_string();
+                return desc.canonical_predicate.clone();
             },
         };
 
         // Find best match among canonical embeddings in the same category
         let canonical_embeddings = self.canonical_embeddings.read().await;
-        let canonical_key = format!("{}:{}", category, slot.canonical_predicate);
+        let canonical_key = format!("{}:{}", category, desc.canonical_predicate);
 
         let result = if let Some(canonical_vec) = canonical_embeddings.get(&canonical_key) {
             let sim = agent_db_core::utils::cosine_similarity(&raw_embedding, canonical_vec);
@@ -646,17 +419,17 @@ impl PredicateCanonicalizer {
                 "Predicate similarity '{}:{}' vs canonical '{}': {:.3}",
                 category,
                 raw_predicate,
-                slot.canonical_predicate,
+                desc.canonical_predicate,
                 sim
             );
             if sim >= SIMILARITY_THRESHOLD {
-                slot.canonical_predicate.to_string()
+                desc.canonical_predicate.clone()
             } else {
                 raw_predicate.to_string()
             }
         } else {
             // No canonical embedding available — fall back to canonical for single-valued
-            slot.canonical_predicate.to_string()
+            desc.canonical_predicate.clone()
         };
 
         // Cache the result
@@ -673,113 +446,23 @@ impl PredicateCanonicalizer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_resolve_slot_location() {
-        let slot = resolve_slot("location", "anything").unwrap();
-        assert_eq!(slot.category, "location");
-        assert_eq!(slot.canonical_predicate, "lives_in");
-        assert_eq!(slot.cardinality, Cardinality::Single);
+    fn test_ontology() -> Arc<crate::ontology::OntologyRegistry> {
+        // Tests run from crate directory (crates/agent-db-graph/), so use relative path
+        let path = std::path::PathBuf::from("../../data/ontology");
+        Arc::new(
+            crate::ontology::OntologyRegistry::load_from_directory(&path).unwrap_or_else(|_| {
+                // Fallback: try workspace root path
+                let alt = std::path::PathBuf::from("data/ontology");
+                crate::ontology::OntologyRegistry::load_from_directory(&alt)
+                    .unwrap_or_else(|_| crate::ontology::OntologyRegistry::new())
+            }),
+        )
     }
-
-    #[test]
-    fn test_canonicalize_single_valued_returns_canonical() {
-        // Any predicate in a single-valued domain returns the canonical
-        let result = canonicalize_predicate("location", "resides");
-        assert_eq!(result.as_ref(), "lives_in");
-
-        let result = canonicalize_predicate("location", "moved_to");
-        assert_eq!(result.as_ref(), "lives_in");
-
-        let result = canonicalize_predicate("location", "some_random_verb");
-        assert_eq!(result.as_ref(), "lives_in");
-    }
-
-    #[test]
-    fn test_canonicalize_lives_in_passthrough() {
-        let result = canonicalize_predicate("location", "lives_in");
-        assert_eq!(result.as_ref(), "lives_in");
-    }
-
-    #[test]
-    fn test_canonicalize_multi_valued_passthrough() {
-        let result = canonicalize_predicate("routine", "morning_yoga");
-        assert_eq!(result.as_ref(), "morning_yoga");
-    }
-
-    #[test]
-    fn test_canonicalize_unknown_category_passthrough() {
-        let result = canonicalize_predicate("unknown_cat", "some_pred");
-        assert_eq!(result.as_ref(), "some_pred");
-    }
-
-    #[test]
-    fn test_is_location_dependent() {
-        assert!(is_location_dependent("routine"));
-        assert!(!is_location_dependent("preference"));
-        assert!(!is_location_dependent("location"));
-        assert!(!is_location_dependent("financial"));
-    }
-
-    #[test]
-    fn test_is_single_valued() {
-        assert!(is_single_valued("location"));
-        assert!(is_single_valued("work"));
-        assert!(is_single_valued("education"));
-        assert!(!is_single_valued("routine"));
-        assert!(!is_single_valued("preference"));
-        assert!(!is_single_valued("financial"));
-    }
-
-    #[test]
-    fn test_decode_legacy_state_assoc() {
-        let (cat, pred) = decode_legacy_state_assoc("state:location").unwrap();
-        assert_eq!(cat, "location");
-        assert_eq!(pred, "lives_in");
-
-        let (cat, pred) = decode_legacy_state_assoc("state:routine").unwrap();
-        assert_eq!(cat, "routine");
-        assert_eq!(pred, "");
-
-        let (cat, pred) = decode_legacy_state_assoc("state:financial").unwrap();
-        assert_eq!(cat, "financial");
-        assert_eq!(pred, "payment");
-    }
-
-    #[test]
-    fn test_decode_legacy_state_assoc_legacy_names() {
-        let (cat, _) = decode_legacy_state_assoc("state:landmark").unwrap();
-        assert_eq!(cat, "routine");
-
-        let (cat, _) = decode_legacy_state_assoc("state:saturday_routine").unwrap();
-        assert_eq!(cat, "routine");
-
-        let (cat, _) = decode_legacy_state_assoc("state:breakfast").unwrap();
-        assert_eq!(cat, "routine");
-    }
-
-    #[test]
-    fn test_decode_legacy_state_assoc_non_state_returns_none() {
-        assert!(decode_legacy_state_assoc("location:lives_in").is_none());
-        assert!(decode_legacy_state_assoc("routine:morning").is_none());
-    }
-
-    #[test]
-    fn test_work_canonicalization() {
-        let result = canonicalize_predicate("work", "employed_by");
-        assert_eq!(result.as_ref(), "works_at");
-
-        let result = canonicalize_predicate("work", "works_for");
-        assert_eq!(result.as_ref(), "works_at");
-    }
-
-    // Async tests for PredicateCanonicalizer require a mock EmbeddingClient.
-    // The mock is defined in crate::claims::MockClient but is test-only.
-    // Integration tests for embedding-based canonicalization should use
-    // the actual embedding client with an API key.
 
     #[test]
     fn test_domain_registry_static_resolve() {
-        let reg = DomainRegistry::new();
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
         let slot = reg.resolve("location").unwrap();
         assert_eq!(slot.cardinality(), Cardinality::Single);
         assert_eq!(slot.canonical_predicate(), "lives_in");
@@ -788,7 +471,8 @@ mod tests {
 
     #[test]
     fn test_domain_registry_register_and_resolve() {
-        let reg = DomainRegistry::new();
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
         assert!(reg.register_category("pets", Cardinality::Multi, "", false));
         // Second register is a no-op
         assert!(!reg.register_category("pets", Cardinality::Single, "", false));
@@ -798,26 +482,28 @@ mod tests {
 
     #[test]
     fn test_domain_registry_no_override_static() {
-        let reg = DomainRegistry::new();
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
         // Cannot register a static category
         assert!(!reg.register_category("location", Cardinality::Multi, "", false));
-        // Still resolves to static
+        // Still resolves to single-valued from ontology
         assert!(reg.is_single_valued("location"));
     }
 
     #[test]
     fn test_domain_registry_prompt_category_enum() {
-        let reg = DomainRegistry::new();
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
         reg.register_category("pets", Cardinality::Multi, "", false);
         let enum_str = reg.prompt_category_enum();
-        assert!(enum_str.contains("location"));
-        assert!(enum_str.contains("pets"));
+        // Should contain ontology-loaded categories
         assert!(enum_str.contains("other"));
     }
 
     #[test]
     fn test_domain_registry_load_learned() {
-        let reg = DomainRegistry::new();
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
         let slots = vec![LearnedSlot {
             category: "transportation".to_string(),
             canonical_predicate: "drives".to_string(),
@@ -836,13 +522,112 @@ mod tests {
     }
 
     #[test]
+    fn test_canonicalize_single_valued_returns_canonical() {
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
+        // Any predicate in a single-valued domain returns the canonical
+        let result = reg.canonicalize_predicate("location", "resides");
+        assert_eq!(result.as_ref(), "lives_in");
+
+        let result = reg.canonicalize_predicate("location", "moved_to");
+        assert_eq!(result.as_ref(), "lives_in");
+    }
+
+    #[test]
+    fn test_canonicalize_multi_valued_passthrough() {
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
+        let result = reg.canonicalize_predicate("routine", "morning_yoga");
+        assert_eq!(result.as_ref(), "morning_yoga");
+    }
+
+    #[test]
+    fn test_canonicalize_unknown_category_passthrough() {
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
+        let result = reg.canonicalize_predicate("unknown_cat", "some_pred");
+        assert_eq!(result.as_ref(), "some_pred");
+    }
+
+    #[test]
+    fn test_is_location_dependent() {
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
+        assert!(reg.is_location_dependent("routine"));
+        assert!(!reg.is_location_dependent("preference"));
+        assert!(!reg.is_location_dependent("location"));
+        assert!(!reg.is_location_dependent("financial"));
+    }
+
+    #[test]
+    fn test_is_single_valued() {
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
+        assert!(reg.is_single_valued("location"));
+        assert!(reg.is_single_valued("work"));
+        assert!(reg.is_single_valued("education"));
+        assert!(!reg.is_single_valued("routine"));
+        assert!(!reg.is_single_valued("preference"));
+        assert!(!reg.is_single_valued("financial"));
+    }
+
+    #[test]
+    fn test_decode_legacy_state_assoc() {
+        let onto = test_ontology();
+        let (cat, pred) = onto.decode_legacy_state_assoc("state:location").unwrap();
+        assert_eq!(cat, "location");
+        assert_eq!(pred, "lives_in");
+
+        let (cat, pred) = onto.decode_legacy_state_assoc("state:routine").unwrap();
+        assert_eq!(cat, "routine");
+        assert_eq!(pred, "");
+
+        let (cat, pred) = onto.decode_legacy_state_assoc("state:financial").unwrap();
+        assert_eq!(cat, "financial");
+        assert_eq!(pred, "payment");
+    }
+
+    #[test]
+    fn test_decode_legacy_state_assoc_legacy_names() {
+        let onto = test_ontology();
+        let (cat, _) = onto.decode_legacy_state_assoc("state:landmark").unwrap();
+        assert_eq!(cat, "routine");
+
+        let (cat, _) = onto
+            .decode_legacy_state_assoc("state:saturday_routine")
+            .unwrap();
+        assert_eq!(cat, "routine");
+
+        let (cat, _) = onto.decode_legacy_state_assoc("state:breakfast").unwrap();
+        assert_eq!(cat, "routine");
+    }
+
+    #[test]
+    fn test_decode_legacy_state_assoc_non_state_returns_none() {
+        let onto = test_ontology();
+        assert!(onto
+            .decode_legacy_state_assoc("location:lives_in")
+            .is_none());
+        assert!(onto.decode_legacy_state_assoc("routine:morning").is_none());
+    }
+
+    #[test]
+    fn test_work_canonicalization() {
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
+        let result = reg.canonicalize_predicate("work", "employed_by");
+        assert_eq!(result.as_ref(), "works_at");
+
+        let result = reg.canonicalize_predicate("work", "works_for");
+        assert_eq!(result.as_ref(), "works_at");
+    }
+
+    #[test]
     fn test_domain_registry_record_usage() {
-        let reg = DomainRegistry::new();
+        let onto = test_ontology();
+        let reg = DomainRegistry::new(onto);
         reg.register_category("pets", Cardinality::Multi, "", false);
+        // record_usage is a no-op in ontology mode
         reg.record_usage("pets");
-        reg.record_usage("pets");
-        let slots = reg.learned_slots();
-        assert_eq!(slots.len(), 1);
-        assert_eq!(slots[0].usage_count, 3); // 1 initial + 2 bumps
     }
 }

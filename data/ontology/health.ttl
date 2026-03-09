@@ -1,0 +1,58 @@
+## ── Health Ontology ────────────────────────────────────────────────
+##
+## Based on Schema.org MedicalEntity hierarchy (https://schema.org/):
+##   schema:MedicalCondition  — a medical condition
+##   schema:Drug              — medication
+##   schema:Diet              — a dietary plan
+##   schema:ExercisePlan      — fitness regimen
+##   schema:MedicalOrganization — hospital, clinic
+##
+## Also references SNOMED CT concepts where applicable.
+##
+## Health properties are multi-valued: a person can have multiple
+## conditions, medications, and fitness activities simultaneously.
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+
+# ── Primary: health (medical, fitness, diet) ───────────────────
+eg:health a owl:ObjectProperty ;
+    rdfs:label "Health" ;
+    rdfs:comment "medical conditions, fitness, diet, wellness" ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso schema:MedicalCondition .
+
+# ── Sub-property: condition (medical diagnosis) ────────────────
+eg:condition a owl:ObjectProperty ;
+    rdfs:label "Condition" ;
+    rdfs:comment "medical condition, diagnosis, allergy" ;
+    rdfs:subPropertyOf eg:health ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso schema:MedicalCondition .
+
+# ── Sub-property: medication (drugs being taken) ──────────────
+eg:medication a owl:ObjectProperty ;
+    rdfs:label "Medication" ;
+    rdfs:comment "medication, drug, supplement" ;
+    rdfs:subPropertyOf eg:health ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso schema:Drug .
+
+# ── Sub-property: diet (dietary plan or restriction) ──────────
+eg:diet a owl:ObjectProperty ;
+    rdfs:label "Diet" ;
+    rdfs:comment "dietary plan, food restriction, nutrition" ;
+    rdfs:subPropertyOf eg:health ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso schema:Diet .
+
+# ── Sub-property: fitness (exercise activity) ─────────────────
+eg:fitness a owl:ObjectProperty ;
+    rdfs:label "Fitness" ;
+    rdfs:comment "exercise, workout, sport, physical activity" ;
+    rdfs:subPropertyOf eg:health ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso schema:ExercisePlan .

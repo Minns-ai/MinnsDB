@@ -1,0 +1,80 @@
+## ── RDFS Class Hierarchy ──────────────────────────────────────────
+##
+## Based on Schema.org type hierarchy (https://schema.org/docs/full.html)
+## and FOAF Agent hierarchy (http://xmlns.com/foaf/0.1/).
+##
+## Schema.org defines:
+##   schema:Thing            — most general type
+##   schema:Person           — a person (alive, dead, fictional)
+##   schema:Organization     — company, educational body, club, etc.
+##   schema:Place            — entities with a fixed physical location
+##   schema:Product          — anything offered for sale
+##   schema:Event            — occurrence at a time and place
+##
+## FOAF defines:
+##   foaf:Agent              — person, group, or software
+##   foaf:Person             — a person (rdfs:subClassOf foaf:Agent)
+##   foaf:Organization       — an organization (rdfs:subClassOf foaf:Agent)
+##
+## This hierarchy maps these standard classes into the eg: namespace
+## used by EventGraphDB's ConceptType system.
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+
+eg:Thing a rdfs:Class ;
+    rdfs:seeAlso schema:Thing .
+
+eg:NamedEntity a rdfs:Class ;
+    rdfs:subClassOf eg:Thing .
+
+eg:Person a rdfs:Class ;
+    rdfs:subClassOf eg:NamedEntity ;
+    rdfs:seeAlso schema:Person, foaf:Person .
+
+eg:Organization a rdfs:Class ;
+    rdfs:subClassOf eg:NamedEntity ;
+    rdfs:seeAlso schema:Organization, foaf:Organization .
+
+eg:Location a rdfs:Class ;
+    rdfs:subClassOf eg:NamedEntity ;
+    rdfs:seeAlso schema:Place .
+
+eg:Product a rdfs:Class ;
+    rdfs:subClassOf eg:NamedEntity ;
+    rdfs:seeAlso schema:Product .
+
+eg:Event a rdfs:Class ;
+    rdfs:subClassOf eg:NamedEntity ;
+    rdfs:seeAlso schema:Event .
+
+eg:DateTime a rdfs:Class ;
+    rdfs:subClassOf eg:NamedEntity .
+
+eg:Pattern a rdfs:Class ;
+    rdfs:subClassOf eg:Thing .
+
+eg:BehaviorPattern a rdfs:Class ;
+    rdfs:subClassOf eg:Pattern .
+
+eg:CausalPattern a rdfs:Class ;
+    rdfs:subClassOf eg:Pattern .
+
+eg:TemporalPattern a rdfs:Class ;
+    rdfs:subClassOf eg:Pattern .
+
+eg:CodeEntity a rdfs:Class ;
+    rdfs:subClassOf eg:Thing ;
+    rdfs:seeAlso schema:SoftwareSourceCode .
+
+eg:Function a rdfs:Class ;
+    rdfs:subClassOf eg:CodeEntity .
+
+eg:Class a rdfs:Class ;
+    rdfs:subClassOf eg:CodeEntity .
+
+eg:Module a rdfs:Class ;
+    rdfs:subClassOf eg:CodeEntity .

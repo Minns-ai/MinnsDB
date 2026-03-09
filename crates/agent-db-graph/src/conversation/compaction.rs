@@ -950,7 +950,7 @@ async fn extract_turn_facts_cascade(
                         is_update: Option<bool>,
                         #[serde(default)]
                         cardinality_hint: Option<String>,
-                        #[serde(default)]
+                        #[serde(default, deserialize_with = "deserialize_f32_option_lenient")]
                         sentiment: Option<f32>,
                     }
 
@@ -1196,7 +1196,7 @@ async fn extract_turn_facts(llm: &dyn LlmClient, transcript: &str) -> Option<Vec
         is_update: Option<bool>,
         #[serde(default)]
         cardinality_hint: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_f32_option_lenient")]
         sentiment: Option<f32>,
     }
 
@@ -1957,10 +1957,24 @@ fn procedural_memory_id(case_id: &str) -> u64 {
 /// procedural memory.
 ///
 /// Fail-open: returns an empty `CompactionResult` on any failure.
+/// Run compaction without prior context (used by batch ingest).
 pub async fn run_compaction(
     engine: &crate::integration::GraphEngine,
     data: &ConversationIngest,
     case_id: &str,
+) -> CompactionResult {
+    run_compaction_with_context(engine, data, case_id, None).await
+}
+
+/// Run compaction with optional prior context from a rolling summary.
+/// When `prior_summary` is provided, it seeds the rolling facts so the LLM
+/// can resolve coreferences (pronouns, "the restaurant", etc.) across buffered
+/// single-message batches.
+pub async fn run_compaction_with_context(
+    engine: &crate::integration::GraphEngine,
+    data: &ConversationIngest,
+    case_id: &str,
+    prior_summary: Option<&str>,
 ) -> CompactionResult {
     let mut result = CompactionResult::default();
 
@@ -1994,7 +2008,10 @@ pub async fn run_compaction(
     // Batch adjacent turns in pairs (2 user+assistant exchanges per LLM call)
     // to reduce API calls while maintaining temporal ordering between batches.
     let turns = split_into_turns(data);
-    let mut rolling_facts: Vec<String> = Vec::new();
+    let mut rolling_facts: Vec<String> = match prior_summary {
+        Some(s) if !s.is_empty() => vec![format!("[Prior conversation context]\n{}", s)],
+        _ => Vec::new(),
+    };
     let mut known_entities: HashSet<String> = HashSet::new();
     let mut all_extracted_facts: Vec<ExtractedFact> = Vec::new();
 
@@ -2089,7 +2106,11 @@ pub async fn run_compaction(
         if !ner_financial_facts.is_empty() {
             let existing_financial: HashSet<(String, String)> = facts_combined
                 .iter()
-                .filter(|f| f.category.as_deref() == Some("financial"))
+                .filter(|f| {
+                    f.category
+                        .as_deref()
+                        .map_or(false, |c| engine.ontology.is_append_only(c))
+                })
                 .map(|f| (f.subject.to_lowercase(), f.object.to_lowercase()))
                 .collect();
 
@@ -2123,7 +2144,7 @@ pub async fn run_compaction(
             let mut sv_offset = 0u64;
             for fact in facts.iter() {
                 let cat = fact.category.as_deref().unwrap_or("");
-                if engine.domain_registry.is_single_valued(cat) {
+                if engine.ontology.is_single_valued(cat) {
                     let fact_ts = turn_base + sv_offset * 1_000;
                     engine.write_fact_to_graph(fact, fact_ts).await;
                     sv_offset += 1;
@@ -2145,7 +2166,7 @@ pub async fn run_compaction(
                         Some(c) => c.as_str(),
                         None => continue,
                     };
-                    if engine.domain_registry.is_single_valued(cat) {
+                    if engine.ontology.is_single_valued(cat) {
                         continue;
                     }
                     // For multi-valued facts: check if the subject has a current location.
@@ -2157,11 +2178,23 @@ pub async fn run_compaction(
                         graph,
                         subject_normalized,
                         u64::MAX,
-                        Some(&engine.domain_registry),
+                        Some(engine.ontology.as_ref()),
                     );
-                    if let Some(loc_slot) = projected.slots.get("location") {
+                    // Find the first single-valued cascade-triggering slot (e.g., location)
+                    // to stamp as depends_on context. Ontology-driven — no hardcoded category.
+                    let cascade_slot = projected.slots.values().find(|s| {
+                        let cat = s.association_type.split(':').next().unwrap_or("");
+                        engine.ontology.triggers_cascade(cat)
+                    });
+                    if let Some(loc_slot) = cascade_slot {
                         let loc_val = loc_slot.value.as_deref().unwrap_or(&loc_slot.target_name);
-                        fact.depends_on = Some(format!("{} lives in {}", fact.subject, loc_val));
+                        let _cat = loc_slot
+                            .association_type
+                            .split(':')
+                            .next()
+                            .unwrap_or("state");
+                        let pred = loc_slot.association_type.split(':').nth(1).unwrap_or("in");
+                        fact.depends_on = Some(format!("{} {} {}", fact.subject, pred, loc_val));
                         tracing::debug!(
                             "COMPACTION: auto-stamped depends_on='{}' on fact '{}'",
                             fact.depends_on.as_ref().unwrap(),
@@ -2175,7 +2208,7 @@ pub async fn run_compaction(
             let mut mv_offset = sv_offset;
             for fact in facts.iter() {
                 let cat = fact.category.as_deref().unwrap_or("");
-                if !engine.domain_registry.is_single_valued(cat) {
+                if !engine.ontology.is_single_valued(cat) {
                     let fact_ts = turn_base + mv_offset * 1_000;
                     engine.write_fact_to_graph(fact, fact_ts).await;
                     mv_offset += 1;
@@ -2885,13 +2918,13 @@ async fn embed_nodes_and_create_claims(
                     inf.graph(),
                     subj_normalized.trim(),
                     u64::MAX,
-                    Some(&engine.domain_registry),
+                    Some(engine.ontology.as_ref()),
                 );
                 drop(inf);
                 let mut anchor_meta: HashMap<String, String> = HashMap::new();
                 for slot in projected.slots.values() {
                     let cat = slot.association_type.split(':').next().unwrap_or("");
-                    if engine.domain_registry.is_single_valued(cat) {
+                    if engine.ontology.is_single_valued(cat) {
                         let key = format!("state_anchor:{}", slot.association_type);
                         let val = slot.value.as_deref().unwrap_or(&slot.target_name);
                         anchor_meta.insert(key, val.to_string());

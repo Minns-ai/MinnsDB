@@ -159,7 +159,9 @@ pub fn create_router(state: AppState) -> Router {
             "/api/structured-memory/tree/:key/add-child",
             post(handlers::tree_add_child),
         )
-        // Conversation Ingestion
+        // Single message endpoint
+        .route("/api/messages", post(handlers::accept_message))
+        // Conversation Ingestion (batch)
         .route(
             "/api/conversations/ingest",
             post(handlers::ingest_conversation),

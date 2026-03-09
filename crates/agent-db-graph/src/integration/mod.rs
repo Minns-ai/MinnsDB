@@ -287,6 +287,14 @@ pub struct GraphEngineConfig {
     /// Default: 10.
     pub rolling_summary_recent_messages: usize,
 
+    /// Number of messages to buffer before triggering compaction (single-message flow).
+    /// Default: 6 (~3 user-assistant turns).
+    pub compaction_buffer_size: usize,
+
+    /// Maximum seconds to hold buffered messages before forcing a compaction flush.
+    /// Default: 30.
+    pub compaction_buffer_timeout_secs: u64,
+
     /// Timeout in milliseconds for LLM metadata normalization
     pub metadata_normalization_timeout_ms: u64,
 
@@ -519,6 +527,9 @@ pub struct GraphEngine {
 
     /// Dynamic domain registry for learnable categories
     pub(crate) domain_registry: Arc<crate::domain_schema::DomainRegistry>,
+
+    /// OWL/RDFS ontology registry (replaces hardcoded domain checks)
+    pub(crate) ontology: Arc<crate::ontology::OntologyRegistry>,
 
     // ========== 10x/100x: Consolidation + Refinement ==========
     /// Consolidation engine for memory hierarchy
@@ -771,6 +782,9 @@ impl Default for GraphEngineConfig {
             // Rolling conversation summary (enabled by default)
             enable_rolling_summary: true,
             rolling_summary_recent_messages: 10,
+            // Message buffer for single-message compaction
+            compaction_buffer_size: 6,
+            compaction_buffer_timeout_secs: 30,
             // Custom extraction configuration (empty by default)
             custom_extraction_instructions: None,
             extraction_includes: vec![],

@@ -133,6 +133,9 @@ pub mod metadata_normalize;
 // Canonical domain registry for temporal state predicates
 pub mod domain_schema;
 
+// OWL/RDFS-aligned ontology layer (replaces hardcoded domain checks)
+pub mod ontology;
+
 // Community summaries for graph communities
 pub mod community_summary;
 

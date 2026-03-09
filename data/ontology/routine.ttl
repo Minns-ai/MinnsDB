@@ -1,0 +1,42 @@
+## ── Routine Ontology ──────────────────────────────────────────────
+##
+## Based on Schema.org Schedule (https://schema.org/Schedule)
+## and general time-pattern concepts.
+##
+## Schema.org defines:
+##   schema:Schedule    — a schedule of events/actions
+##   schema:dayOfWeek   — day when a recurring event happens
+##   schema:startTime   — time an event/action starts
+##
+## Routines are cascade-dependent on location: when someone moves,
+## their daily routines (commute, gym, café) are invalidated.
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+
+# ── Primary: routine (daily habits, regular activities) ────────
+eg:routine a owl:ObjectProperty ;
+    rdfs:label "Routine" ;
+    rdfs:comment "daily habits, regular activities, schedules" ;
+    rdfs:domain eg:Person ;
+    eg:cascadeDependent "true" ;
+    rdfs:seeAlso schema:Schedule .
+
+# ── Sub-property: commute (regular travel pattern) ────────────
+eg:commute a owl:ObjectProperty ;
+    rdfs:label "Commute" ;
+    rdfs:comment "regular commute, daily travel" ;
+    rdfs:subPropertyOf eg:routine ;
+    rdfs:domain eg:Person ;
+    eg:cascadeDependent "true" .
+
+# ── Sub-property: schedule (recurring time-based activity) ────
+eg:schedule a owl:ObjectProperty ;
+    rdfs:label "Schedule" ;
+    rdfs:comment "recurring scheduled activity (weekly meeting, class)" ;
+    rdfs:subPropertyOf eg:routine ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso schema:Schedule .

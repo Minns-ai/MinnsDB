@@ -1,0 +1,44 @@
+## ── Education Ontology ─────────────────────────────────────────────
+##
+## Based on Schema.org (https://schema.org/):
+##   schema:alumni          — alumnus of an educational organization
+##   schema:EducationalOrganization — school, university
+##   schema:Course          — a course of study
+##
+## Also references FOAF:
+##   foaf:schoolHomepage    — web page of school
+##
+## Education is single-valued (FunctionalProperty): enrolling in a new
+## institution supersedes the previous one.
+## ──────────────────────────────────────────────────────────────────
+
+@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+
+# ── Primary: education (current school / institution) ──────────
+eg:education a owl:ObjectProperty ;
+    rdfs:label "Education" ;
+    rdfs:comment "school, courses, learning, university" ;
+    rdfs:domain eg:Person ;
+    rdfs:range  eg:Organization, eg:NamedEntity ;
+    a owl:FunctionalProperty ;
+    eg:canonicalPredicate "studies_at" ;
+    rdfs:seeAlso schema:alumni .
+
+# ── Sub-property: degree (qualification obtained) ──────────────
+eg:degree a owl:ObjectProperty ;
+    rdfs:label "Degree" ;
+    rdfs:comment "academic degree, qualification, certification" ;
+    rdfs:subPropertyOf eg:education ;
+    rdfs:domain eg:Person .
+
+# ── Sub-property: course (subject being studied) ──────────────
+eg:course a owl:ObjectProperty ;
+    rdfs:label "Course" ;
+    rdfs:comment "course, subject, major being studied" ;
+    rdfs:subPropertyOf eg:education ;
+    rdfs:domain eg:Person ;
+    rdfs:seeAlso schema:Course .

@@ -181,7 +181,7 @@ fn gather_numeric(store: &StructuredMemoryStore) -> Vec<MemoryContextEntry> {
     entries
 }
 
-/// Gather state machines and related facts/landmarks for a target entity.
+/// Gather state machines and related preference data for a target entity.
 fn gather_state(
     entity: Option<&str>,
     store: &StructuredMemoryStore,
@@ -198,11 +198,16 @@ fn gather_state(
     // State machines for the entity
     gather_state_machines(store, entity_id, entity_name, &mut entries);
 
-    // Facts preference list
-    gather_pref_list(store, entity_id, entity_name, "facts", &mut entries);
-
-    // Landmarks preference list
-    gather_pref_list(store, entity_id, entity_name, "landmarks", &mut entries);
+    // All preference categories for this entity (generic — no hardcoded category names)
+    for key in store.list_keys(&format!("prefs:{}:", entity_id)) {
+        gather_pref_list(
+            store,
+            entity_id,
+            entity_name,
+            key.rsplit(':').next().unwrap_or("general"),
+            &mut entries,
+        );
+    }
 
     entries
 }
@@ -423,8 +428,6 @@ mod tests {
     use crate::structured_memory::{
         LedgerDirection, LedgerEntry, MemoryProvenance, MemoryTemplate, PreferenceItem,
     };
-    use std::collections::HashMap;
-
     fn make_registry() -> NameRegistry {
         let mut r = NameRegistry::new();
         r.get_or_create("Alice"); // id=1
