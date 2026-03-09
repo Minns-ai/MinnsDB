@@ -54,7 +54,6 @@ pub enum TemporalFrame {
     Timeless,
 }
 
-
 /// Response parsed from the LLM's JSON output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmHintResponse {

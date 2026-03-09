@@ -1308,7 +1308,9 @@ pub(crate) fn edge_text_for_bm25(edge: &GraphEdge) -> String {
                 parts.push(cat.to_string());
             }
         },
-        EdgeType::About { predicate: Some(p), .. } => {
+        EdgeType::About {
+            predicate: Some(p), ..
+        } => {
             parts.push(p.clone());
         },
         _ => {}, // Other edge types don't need BM25 indexing

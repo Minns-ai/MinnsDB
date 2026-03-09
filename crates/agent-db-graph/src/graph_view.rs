@@ -451,7 +451,6 @@ mod tests {
     use super::*;
     use crate::structures::{EdgeType, GraphEdge, GraphNode, NodeType};
 
-
     fn make_test_graph() -> Graph {
         let mut g = Graph::new();
         let n1 = GraphNode::new(NodeType::Agent {

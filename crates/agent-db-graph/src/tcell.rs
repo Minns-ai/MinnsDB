@@ -33,7 +33,6 @@ pub enum TCell<V> {
     Large(BTreeMap<EventTime, V>),
 }
 
-
 impl<V: Clone> TCell<V> {
     pub fn new() -> Self {
         TCell::Empty
