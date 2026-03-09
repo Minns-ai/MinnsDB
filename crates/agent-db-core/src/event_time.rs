@@ -111,7 +111,6 @@ impl EventTime {
     }
 }
 
-
 impl PartialOrd for EventTime {
     fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
         Some(self.cmp(other))
