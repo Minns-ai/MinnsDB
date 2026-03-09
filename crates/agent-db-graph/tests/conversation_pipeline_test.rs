@@ -94,7 +94,9 @@ async fn test_conversation_pipeline_processes_events() {
     let options = IngestOptions::default();
     let (events, state, result) = agent_db_graph::conversation::ingest_to_events(&data, &options);
 
-    assert!(result.transactions_found >= 2);
+    // ingest_to_events creates raw Conversation events; transaction extraction
+    // happens later during LLM compaction, so transactions_found stays 0 here.
+    assert_eq!(result.messages_processed, 2);
 
     // Pre-create participants
     let participants: Vec<String> = state.known_participants.iter().cloned().collect();
@@ -102,6 +104,13 @@ async fn test_conversation_pipeline_processes_events() {
         .ensure_conversation_participants(&participants)
         .await
         .unwrap();
+
+    // Should have 2 message events + 1 sentinel
+    assert!(
+        events.len() >= 3,
+        "Expected at least 3 events (2 messages + sentinel), got {}",
+        events.len()
+    );
 
     // Process all events
     let mut processed = 0usize;
@@ -115,7 +124,7 @@ async fn test_conversation_pipeline_processes_events() {
     // All events should have been processed
     assert!(
         processed >= 3,
-        "Expected at least 3 processed events (2 tx + sentinel), got {}",
+        "Expected at least 3 processed events (2 messages + sentinel), got {}",
         processed
     );
 
@@ -152,22 +161,23 @@ async fn test_conversation_pipeline_stores_events_with_metadata() {
         let _ = engine.process_event_with_options(event, Some(false)).await;
     }
 
-    // Retrieve events and check metadata
+    // ingest_to_events creates raw Conversation events with empty metadata;
+    // transaction metadata is populated later during LLM compaction.
+    // Verify events were stored with conversation metadata.
     let stored = engine.get_recent_events(100).await;
-    let tx_events: Vec<_> = stored
-        .iter()
-        .filter(|e| e.metadata.contains_key("transaction"))
-        .collect();
-
     assert!(
-        !tx_events.is_empty(),
-        "Expected at least one transaction event in store"
+        !stored.is_empty(),
+        "Expected at least one stored event"
     );
-    for tx in &tx_events {
-        assert!(tx.metadata.contains_key("from"));
-        assert!(tx.metadata.contains_key("to"));
-        assert!(tx.metadata.contains_key("amount"));
-    }
+    // All conversation events should have session_id set
+    let conv_events: Vec<_> = stored
+        .iter()
+        .filter(|e| e.session_id != 0)
+        .collect();
+    assert!(
+        !conv_events.is_empty(),
+        "Expected conversation events with session_id"
+    );
 }
 
 #[tokio::test]
@@ -211,11 +221,11 @@ async fn test_conversation_pipeline_multi_session() {
     let options = IngestOptions::default();
     let (events, state, result) = agent_db_graph::conversation::ingest_to_events(&data, &options);
 
-    // Should have events from both sessions + 2 sentinels
-    assert!(result.transactions_found >= 2);
+    // Should have events from both sessions (1 message + 1 sentinel each = 4)
+    assert_eq!(result.messages_processed, 2);
     assert!(
         events.len() >= 4,
-        "Expected at least 4 events (2 tx + 2 sentinels), got {}",
+        "Expected at least 4 events (2 messages + 2 sentinels), got {}",
         events.len()
     );
 
