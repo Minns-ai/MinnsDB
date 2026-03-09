@@ -274,12 +274,7 @@ impl<'a, T> Iterator for SlotVecValuesMut<'a, T> {
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        for slot in self.slots.by_ref() {
-            if let Some(value) = slot {
-                return Some(value);
-            }
-        }
-        None
+        self.slots.by_ref().flatten().next()
     }
 }
 

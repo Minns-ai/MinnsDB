@@ -686,7 +686,7 @@ impl GraphEngine {
                     .get(nid)
                     .map(|edges| {
                         edges.iter().any(|&eid| {
-                            graph.edges.get(eid).map_or(false, |e| {
+                            graph.edges.get(eid).is_some_and(|e| {
                                 !crate::structures::edge_text_for_bm25(e).is_empty()
                             })
                         })
@@ -697,7 +697,7 @@ impl GraphEngine {
                         .get(nid)
                         .map(|edges| {
                             edges.iter().any(|&eid| {
-                                graph.edges.get(eid).map_or(false, |e| {
+                                graph.edges.get(eid).is_some_and(|e| {
                                     !crate::structures::edge_text_for_bm25(e).is_empty()
                                 })
                             })

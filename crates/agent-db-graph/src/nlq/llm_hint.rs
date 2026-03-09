@@ -40,10 +40,11 @@ pub enum IntentHint {
 }
 
 /// Temporal frame: how the query relates to time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TemporalFrame {
     /// "where do I live now" — filter to current state
+    #[default]
     Current,
     /// "where did I used to live" — include historical state
     Historical,
@@ -53,11 +54,6 @@ pub enum TemporalFrame {
     Timeless,
 }
 
-impl Default for TemporalFrame {
-    fn default() -> Self {
-        Self::Current
-    }
-}
 
 /// Response parsed from the LLM's JSON output.
 #[derive(Debug, Clone, Serialize, Deserialize)]

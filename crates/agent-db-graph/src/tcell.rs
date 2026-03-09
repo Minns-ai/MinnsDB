@@ -19,9 +19,10 @@ const SMALL_THRESHOLD: usize = 64;
 /// - `TCell<f32>` for confidence, weight, significance
 /// - `TCell<u32>` for observation_count, frequency
 /// - `TCell<serde_json::Value>` for untyped properties
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum TCell<V> {
     /// No values recorded.
+    #[default]
     Empty,
     /// Exactly one value at one time. Most common case for properties
     /// that rarely change.
@@ -32,11 +33,6 @@ pub enum TCell<V> {
     Large(BTreeMap<EventTime, V>),
 }
 
-impl<V> Default for TCell<V> {
-    fn default() -> Self {
-        TCell::Empty
-    }
-}
 
 impl<V: Clone> TCell<V> {
     pub fn new() -> Self {

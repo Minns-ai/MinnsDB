@@ -2109,7 +2109,7 @@ pub async fn run_compaction_with_context(
                 .filter(|f| {
                     f.category
                         .as_deref()
-                        .map_or(false, |c| engine.ontology.is_append_only(c))
+                        .is_some_and(|c| engine.ontology.is_append_only(c))
                 })
                 .map(|f| (f.subject.to_lowercase(), f.object.to_lowercase()))
                 .collect();
@@ -2799,7 +2799,7 @@ async fn embed_nodes_and_create_claims(
                             &edge.properties,
                             edge.valid_until.is_none(),
                         );
-                        edges.push((eid as u64, rich_text));
+                        edges.push((eid, rich_text));
                     }
                 }
             }

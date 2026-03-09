@@ -258,7 +258,7 @@ fn strip_markdown_fences(text: &str) -> &str {
     if let Some(rest) = text.strip_prefix("```") {
         let rest = rest.strip_prefix("json").unwrap_or(rest);
         let rest = rest.strip_prefix("JSON").unwrap_or(rest);
-        let rest = rest.trim_start_matches(|c: char| c == ' ' || c == '\t');
+        let rest = rest.trim_start_matches([' ', '\t']);
         let rest = rest.strip_prefix('\n').unwrap_or(rest);
         let rest = rest.trim_end();
         rest.strip_suffix("```").unwrap_or(rest).trim()
@@ -272,8 +272,6 @@ fn strip_markdown_fences(text: &str) -> &str {
 fn extract_json_substring(text: &str) -> Option<&str> {
     let bytes = text.as_bytes();
     let mut start = None;
-    let open_char;
-    let close_char;
 
     // Find first { or [
     for (i, &b) in bytes.iter().enumerate() {
@@ -283,8 +281,8 @@ fn extract_json_substring(text: &str) -> Option<&str> {
         }
     }
     let start = start?;
-    open_char = bytes[start];
-    close_char = if open_char == b'{' { b'}' } else { b']' };
+    let open_char = bytes[start];
+    let close_char = if open_char == b'{' { b'}' } else { b']' };
 
     // Walk forward, tracking depth and skipping strings
     let mut depth = 0i32;

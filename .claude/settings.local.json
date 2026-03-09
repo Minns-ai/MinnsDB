@@ -56,7 +56,8 @@
       "Bash(PATH=\"$HOME/.cargo/bin:$PATH\" cargo build:*)",
       "Bash(/Users/jonathanfarrow/.cargo/bin/cargo check:*)",
       "Bash(RUSTFLAGS=\"-W dead_code -W unused-imports -W unused-variables -W unreachable-code\" $HOME/.cargo/bin/cargo build:*)",
-      "Bash(/tmp/temporal_tracking_analysis.md:*)"
+      "Bash(/tmp/temporal_tracking_analysis.md:*)",
+      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo clippy:*)"
     ]
   }
 }

@@ -125,6 +125,12 @@ pub struct ClassHierarchy {
     classes: HashMap<String, ClassDescriptor>,
 }
 
+impl Default for ClassHierarchy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClassHierarchy {
     pub fn new() -> Self {
         Self {
@@ -247,6 +253,12 @@ pub struct OntologyRegistry {
     class_hierarchy: ClassHierarchy,
     /// Reverse index: property ID → sub-properties (for query expansion)
     sub_property_index: std::sync::RwLock<HashMap<String, Vec<String>>>,
+}
+
+impl Default for OntologyRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OntologyRegistry {

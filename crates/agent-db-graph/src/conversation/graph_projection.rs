@@ -123,8 +123,8 @@ pub fn build_entity_timeline_summary(graph: &Graph, entity_name: &str) -> Option
     };
 
     // Collect all stateful association edges grouped by category
-    let mut category_edges: HashMap<String, Vec<(String, Option<String>, Option<u64>, bool)>> =
-        HashMap::new();
+    type CategoryEdge = (String, Option<String>, Option<u64>, bool);
+    let mut category_edges: HashMap<String, Vec<CategoryEdge>> = HashMap::new();
 
     for edge in graph.get_edges_from(node_id) {
         if let EdgeType::Association {
