@@ -97,8 +97,8 @@ pub async fn root() -> &'static str {
      GET /api/centrality - Node centrality scores\n\n\
      Natural Language & Conversation:\n\
      POST /api/nlq - Natural language graph query\n\
-     POST /api/conversations/ingest - Ingest conversation sessions\n\
-     POST /api/conversations/query - Query with conversation context\n\n\
+     POST /api/conversations/ingest - Ingest conversation sessions (batch)\n\
+     POST /api/messages - Accept a single conversation message\n\n\
      GET /docs - API documentation"
 }
 

@@ -18,7 +18,7 @@ static GLOBAL_SEQ: AtomicU32 = AtomicU32::new(0);
 /// nanosecond are ordered by their sequence number.
 ///
 /// Size: 12 bytes (u64 + u32), fits in a register pair.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub struct EventTime {
     /// Nanoseconds since Unix epoch (same as current Timestamp)
     pub nanos: u64,
@@ -111,12 +111,6 @@ impl EventTime {
     }
 }
 
-impl PartialEq for EventTime {
-    fn eq(&self, other: &Self) -> bool {
-        self.nanos == other.nanos && self.seq == other.seq
-    }
-}
-impl Eq for EventTime {}
 
 impl PartialOrd for EventTime {
     fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {

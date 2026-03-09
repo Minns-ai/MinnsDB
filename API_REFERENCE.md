@@ -1392,113 +1392,6 @@ Ingest one or more conversation sessions. Each message is converted to a Convers
 
 **NER financial extraction** (parallel with LLM cascade): When NER is enabled, the specialized accounting model extracts PAYER/AMOUNT/PAYEE triplets from financial messages and creates `financial:payment` edges. These are deduped against LLM-extracted financial facts.
 
-### POST /api/conversations/query
-
-Query the graph for answers to natural language questions. Uses the unified NLQ pipeline with LLM intent classification, graph projection, claims/BM25/embedding fusion, and LLM answer synthesis.
-
-Every response is enriched with `related_memories` and `related_strategies` from the episodic memory and strategy stores (via BM25 multi-signal retrieval). This gives downstream LLMs full context across graph state, episodic memories, and learned strategies in a single call.
-
-**Request:**
-```json
-{
-  "question": "Who owes whom?",
-  "session_id": "optional-nlq-session-id"
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `question` | string | yes | Natural language question |
-| `session_id` | string | no | Session ID for NLQ conversational context (follow-up resolution) |
-
-**Response (200) — conversation-specific query:**
-```json
-{
-  "answer": "Settlement: Alice -> Bob : 172.50 EUR, Charlie -> Bob : 60.00 EUR",
-  "query_type": "numeric",
-  "memory_context": [
-    {
-      "type": "Ledger",
-      "key": "ledger:1:2",
-      "entity_a": "Alice",
-      "entity_b": "Bob",
-      "balance": 172.5,
-      "entries": [
-        { "timestamp": 0, "amount": 179.0, "description": "museum", "direction": "Credit" }
-      ]
-    }
-  ],
-  "related_memories": [
-    {
-      "id": 42,
-      "summary": "Group expense tracking during European trip",
-      "takeaway": "Split expenses need explicit tracking to avoid disputes",
-      "tier": "Episodic"
-    }
-  ],
-  "related_strategies": [
-    {
-      "id": 7,
-      "name": "expense-reconciliation",
-      "summary": "Track shared expenses with running balances",
-      "when_to_use": "When multiple parties share costs over time"
-    }
-  ]
-}
-```
-
-**Response (200) — NLQ fallback:**
-```json
-{
-  "answer": "Neighbors of Alice: Bob (Association)",
-  "query_type": "nlq",
-  "related_memories": [],
-  "related_strategies": []
-}
-```
-
-**Response fields:**
-
-| Field | Type | Present | Description |
-|-------|------|---------|-------------|
-| `answer` | string | always | Human-readable answer text |
-| `query_type` | string | always | One of: `"numeric"`, `"state"`, `"entity_summary"`, `"preference"`, `"relationship"`, `"nlq"` |
-| `memory_context` | array | conversation queries only | Structured memory backing the answer (ledgers, states, preferences, relationships) |
-| `related_memories` | array | always | Top 5 episodic/semantic/schema memories matching the question (BM25 retrieval) |
-| `related_strategies` | array | always | Top 3 strategies matching the question (BM25 retrieval) |
-
-**`memory_context` entry types:**
-
-| Type | Fields | Description |
-|------|--------|-------------|
-| `Ledger` | `key`, `entity_a`, `entity_b`, `balance`, `entries[]` | Double-entry ledger with running balance |
-| `State` | `key`, `entity`, `current_value`, `history_len`, `recent_transitions[]` | State machine with last 5 transitions |
-| `Preference` | `key`, `entity`, `category`, `items[]` | Ranked preference list |
-| `Relationship` | `relation_type`, `path` | BFS path between entities (null if no path) |
-
-**`related_memories` entry fields:** `id` (u64), `summary` (string), `takeaway` (string), `tier` ("Episodic" | "Semantic" | "Schema")
-
-**`related_strategies` entry fields:** `id` (u64), `name` (string), `summary` (string), `when_to_use` (string)
-
-**Conversation query types:**
-
-| `query_type` | Triggers on | Example question | Answer source |
-|--------------|-------------|------------------|---------------|
-| `"numeric"` | owes, balance, settle, debt, total | `"Who owes whom?"`, `"How to settle?"` | Ledger net balances + transfer minimization |
-| `"state"` | where is, current state, location | `"Where is the user?"`, `"What should I do Saturday?"` | StateMachine current values + facts |
-| `"entity_summary"` | who is, tell me about, describe | `"Who is Alice?"` | All stored data for entity |
-| `"preference"` | recommend, favorite, what do I like | `"What art do I like?"` | PreferenceList rankings |
-| `"relationship"` | related, connected, path between | `"Are Alice and Bob related through colleagues?"` | Tree BFS path finding |
-| `"nlq"` | *(fallback)* | Any other question | General graph NLQ pipeline |
-
-**Numeric operations:**
-
-| Question pattern | Operation | Output format |
-|------------------|-----------|---------------|
-| `"who owes"`, `"balance"` | Net balance per entity | `"Alice: +60.00 EUR\nBob: -60.00 EUR"` |
-| `"settle"`, `"simplify"`, `"minimum transfer"` | Greedy debt simplification | `"Settlement: Alice -> Bob : 172.50 EUR"` |
-| `"total"`, `"sum"`, `"how much"` | Sum across all ledgers | `"Total across all ledgers: 450.00"` |
-
 ---
 
 ## Planning & World Model
@@ -2105,7 +1998,7 @@ Use this path when your agent needs the full learning loop: events → episodes 
 Conversations go through the full event pipeline with LLM compaction for fact extraction. Events, episodes, memories, and graph edges are all created.
 
 12. **Conversation ingestion:** Use `POST /api/conversations/ingest` to ingest multi-session conversations. Requires an LLM client. Use the same `case_id` across calls for incremental ingestion with stable entity resolution and automatic deduplication.
-13. **Multi-source queries:** Use `POST /api/conversations/query` or `POST /api/nlq` to query the graph. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment.
+13. **Multi-source queries:** Use `POST /api/nlq` to query the graph. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment.
 14. **Incremental pattern:** Send messages as they arrive with the same `case_id`. The server preserves conversation state and deduplicates already-processed messages automatically. No client-side state management needed.
 
 ### Configuration

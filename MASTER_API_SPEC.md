@@ -1286,16 +1286,19 @@ Ingest conversation sessions into structured memory. Idempotent per `(case_id, s
 | Name-paid | `"Alice paid $50 for lunch"` |
 | Tipped | `"Charlie tipped $10 at the restaurant"` |
 
-### `POST /api/conversations/query`
+### `POST /api/messages`
 
-Query structured memory populated by ingestion. Tries conversation-specific classification first; falls back to the general NLQ pipeline.
+Accept a single conversation message and process it through the event pipeline with deferred compaction. Messages are buffered per `case_id` and compacted automatically when the buffer reaches threshold size or age.
 
 **Request Body:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `question` | `String` | Yes | Natural language question |
-| `session_id` | `String` | No | NLQ session for conversational context |
+| `role` | `String` | Yes | Message role (`"user"` or `"assistant"`) |
+| `content` | `String` | Yes | Message text |
+| `session_id` | `String` | No | Session identifier (auto-generated if omitted) |
+| `case_id` | `String` | No | Case identifier for entity resolution continuity |
+| `include_assistant_facts` | `bool` | No | Whether to process assistant messages for facts (default: false) |
 
 **Request Example:**
 ```json
