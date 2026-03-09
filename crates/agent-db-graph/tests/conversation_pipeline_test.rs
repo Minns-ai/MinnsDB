@@ -165,15 +165,9 @@ async fn test_conversation_pipeline_stores_events_with_metadata() {
     // transaction metadata is populated later during LLM compaction.
     // Verify events were stored with conversation metadata.
     let stored = engine.get_recent_events(100).await;
-    assert!(
-        !stored.is_empty(),
-        "Expected at least one stored event"
-    );
+    assert!(!stored.is_empty(), "Expected at least one stored event");
     // All conversation events should have session_id set
-    let conv_events: Vec<_> = stored
-        .iter()
-        .filter(|e| e.session_id != 0)
-        .collect();
+    let conv_events: Vec<_> = stored.iter().filter(|e| e.session_id != 0).collect();
     assert!(
         !conv_events.is_empty(),
         "Expected conversation events with session_id"
