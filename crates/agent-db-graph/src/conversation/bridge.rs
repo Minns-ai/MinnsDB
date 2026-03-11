@@ -353,6 +353,26 @@ fn extract_person_names_only(text: &str) -> Vec<String> {
 // bridge_relationship, bridge_preference) have been removed.
 // All fact extraction is now handled by LLM compaction.
 
+/// Convert a `serde_json::Value` to `MetadataValue`.
+/// Returns `None` for null/array/object (non-scalar) values.
+fn json_value_to_metadata(v: &serde_json::Value) -> Option<agent_db_events::core::MetadataValue> {
+    use agent_db_events::core::MetadataValue;
+    match v {
+        serde_json::Value::String(s) => Some(MetadataValue::String(s.clone())),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(MetadataValue::Integer(i))
+            } else {
+                n.as_f64().map(MetadataValue::Float)
+            }
+        },
+        serde_json::Value::Bool(b) => Some(MetadataValue::String(
+            if *b { "true" } else { "false" }.to_string(),
+        )),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event pipeline bridge — produces real Event structs
 // ---------------------------------------------------------------------------
@@ -409,6 +429,13 @@ pub fn ingest_to_events(
 
     let mut global_msg_idx: usize = 0;
 
+    // Build request-level metadata (converted from serde_json::Value to MetadataValue)
+    let request_metadata: HashMap<String, MetadataValue> = data
+        .metadata
+        .iter()
+        .filter_map(|(k, v)| json_value_to_metadata(v).map(|mv| (k.clone(), mv)))
+        .collect();
+
     // Second pass: classify, parse, and create events
     for session in &data.sessions {
         // Derive session_id hash
@@ -442,6 +469,15 @@ pub fn ingest_to_events(
                 .trim()
                 .to_string();
 
+            // Merge request-level metadata with per-message metadata.
+            // Per-message metadata takes precedence over request-level.
+            let mut event_metadata = request_metadata.clone();
+            for (k, v) in &msg.metadata {
+                if let Some(mv) = json_value_to_metadata(v) {
+                    event_metadata.insert(k.clone(), mv);
+                }
+            }
+
             let evt = agent_db_events::Event {
                 id: agent_db_core::types::generate_event_id(),
                 timestamp,
@@ -455,7 +491,7 @@ pub fn ingest_to_events(
                 },
                 causality_chain: Vec::new(),
                 context: EventContext::default(),
-                metadata: HashMap::new(),
+                metadata: event_metadata,
                 context_size_bytes: 0,
                 segment_pointer: None,
                 is_code: false,
@@ -577,6 +613,7 @@ mod tests {
                     .map(|(role, content)| ConversationMessage {
                         role: role.to_string(),
                         content: content.to_string(),
+                        metadata: Default::default(),
                     })
                     .collect(),
                 contains_fact: None,
@@ -585,6 +622,8 @@ mod tests {
                 answers: vec![],
             }],
             queries: vec![],
+            group_id: Default::default(),
+            metadata: Default::default(),
         }
     }
 
@@ -649,6 +688,7 @@ mod tests {
                     .map(|(role, content)| ConversationMessage {
                         role: role.to_string(),
                         content: content.to_string(),
+                        metadata: Default::default(),
                     })
                     .collect(),
                 contains_fact: None,
@@ -657,6 +697,8 @@ mod tests {
                 answers: vec![],
             }],
             queries: vec![],
+            group_id: Default::default(),
+            metadata: Default::default(),
         }
     }
 

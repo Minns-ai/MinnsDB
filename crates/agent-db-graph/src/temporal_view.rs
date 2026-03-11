@@ -271,6 +271,7 @@ mod tests {
             properties: HashMap::new(),
             degree: 0,
             embedding: Vec::new(),
+            group_id: String::new(),
         }
     }
 
@@ -293,6 +294,7 @@ mod tests {
             properties: HashMap::new(),
             confidence_history: crate::tcell::TCell::Empty,
             weight_history: crate::tcell::TCell::Empty,
+            group_id: String::new(),
         }
     }
 

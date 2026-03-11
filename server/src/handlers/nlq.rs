@@ -26,11 +26,13 @@ pub async fn nlq_query(
 
     let response = state
         .engine
-        .natural_language_query_with_options(
+        .natural_language_query_scoped(
             &request.question,
             &pagination,
             request.session_id.as_deref(),
             request.include_context,
+            &request.group_id,
+            &request.metadata,
         )
         .await
         .map_err(|e| {

@@ -369,6 +369,33 @@ impl OntologyRegistry {
             .unwrap_or_default()
     }
 
+    /// Resolve a property to its top-level parent.
+    /// E.g., "birthplace" → "location", "colleague" → "relationship".
+    /// Returns the property itself if it has no parent.
+    pub fn resolve_to_parent(&self, property_id: &str) -> String {
+        let parent = {
+            let props = self.properties.read().unwrap();
+            props
+                .get(property_id)
+                .and_then(|p| p.sub_property_of.clone())
+        };
+        match parent {
+            Some(p) => self.resolve_to_parent(&p),
+            None => property_id.to_string(),
+        }
+    }
+
+    /// Get the supersession group for a property.
+    /// Properties supersede within their own exact property scope.
+    /// E.g., "location" supersedes "location", "workplace_location" supersedes
+    /// "workplace_location", but they don't cross-supersede even though
+    /// workplace_location is a sub-property of location.
+    /// Returns all property IDs that should be checked for supersession.
+    pub fn supersession_group(&self, property_id: &str) -> Vec<String> {
+        // A property only supersedes edges of the same exact property
+        vec![property_id.to_string()]
+    }
+
     // ── Edge type utilities ──
 
     /// Build an edge type string from property ID and predicate.
@@ -461,10 +488,17 @@ impl OntologyRegistry {
     // ── LLM prompt generation ──
 
     /// Formatted category block for LLM prompt injection.
+    /// Only includes top-level properties. Sub-properties are listed inline
+    /// so the LLM knows about them but uses the parent category.
     pub fn prompt_category_block(&self) -> String {
         let props = self.properties.read().unwrap();
+        let sub_idx = self.sub_property_index.read().unwrap();
         let mut lines = Vec::new();
         for prop in props.values() {
+            // Skip sub-properties — they're listed under their parent
+            if prop.sub_property_of.is_some() {
+                continue;
+            }
             let card = if prop.append_only {
                 "append-only, never supersede"
             } else if prop.has_characteristic(PropertyCharacteristic::Functional)
@@ -479,16 +513,42 @@ impl OntologyRegistry {
             } else {
                 &prop.comment
             };
-            lines.push(format!("- \"{}\": {} ({})", prop.id, desc, card));
+            let mut line = format!("- \"{}\": {} ({})", prop.id, desc, card);
+            // Append sub-properties inline
+            if let Some(subs) = sub_idx.get(&prop.id) {
+                let sub_labels: Vec<String> = subs
+                    .iter()
+                    .filter_map(|s| props.get(s))
+                    .map(|sp| {
+                        let sd = if sp.comment.is_empty() {
+                            &sp.label
+                        } else {
+                            &sp.comment
+                        };
+                        format!("{} ({})", sp.id, sd)
+                    })
+                    .collect();
+                if !sub_labels.is_empty() {
+                    line.push_str(&format!(" [includes: {}]", sub_labels.join(", ")));
+                }
+            }
+            lines.push(line);
         }
-        lines.sort(); // deterministic output
+        lines.sort();
         lines.join("\n")
     }
 
     /// Pipe-separated category list for LLM enum constraint.
+    /// Only includes top-level properties (no sub-properties) to keep the
+    /// LLM's choices clean and predictable. Sub-properties are resolved
+    /// internally via `resolve_to_parent()`.
     pub fn prompt_category_enum(&self) -> String {
         let props = self.properties.read().unwrap();
-        let mut cats: Vec<String> = props.keys().cloned().collect();
+        let mut cats: Vec<String> = props
+            .values()
+            .filter(|p| p.sub_property_of.is_none())
+            .map(|p| p.id.clone())
+            .collect();
         cats.sort();
         cats.push("other".to_string());
         cats.join("|")

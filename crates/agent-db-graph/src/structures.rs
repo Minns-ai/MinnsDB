@@ -295,6 +295,11 @@ pub struct GraphNode {
     /// Last update timestamp
     pub updated_at: Timestamp,
 
+    /// Partition key for multi-tenant isolation (à la temporal graph reference `group_id`).
+    /// All queries scope to this value when set. Empty string means global/unscoped.
+    #[serde(default)]
+    pub group_id: String,
+
     /// Node properties for additional metadata
     pub properties: HashMap<String, serde_json::Value>,
 
@@ -606,6 +611,11 @@ pub struct GraphEdge {
 
     /// Confidence in this relationship (0.0 to 1.0)
     pub confidence: f32,
+
+    /// Partition key for multi-tenant isolation (à la temporal graph reference `group_id`).
+    /// Matches the source node's `group_id`. Empty string means global/unscoped.
+    #[serde(default)]
+    pub group_id: String,
 
     /// Additional edge properties
     pub properties: HashMap<String, serde_json::Value>,
@@ -949,6 +959,7 @@ impl GraphNode {
             node_type,
             created_at: timestamp,
             updated_at: timestamp,
+            group_id: String::new(),
             properties: HashMap::new(),
             degree: 0,
             embedding: Vec::new(),
@@ -1040,6 +1051,7 @@ impl GraphEdge {
             valid_until: None,
             observation_count: 1,
             confidence: 0.5, // Start with medium confidence
+            group_id: String::new(),
             properties: HashMap::new(),
             confidence_history: crate::tcell::TCell::Empty,
             weight_history: crate::tcell::TCell::Empty,
@@ -3153,6 +3165,7 @@ mod tests {
             properties: HashMap::new(), // No is_valid property
             confidence_history: crate::tcell::TCell::Empty,
             weight_history: crate::tcell::TCell::Empty,
+            group_id: String::new(),
         };
         assert!(
             edge.is_valid(),
@@ -3181,6 +3194,7 @@ mod tests {
             properties: HashMap::new(),
             confidence_history: crate::tcell::TCell::Empty,
             weight_history: crate::tcell::TCell::Empty,
+            group_id: String::new(),
         }
     }
 

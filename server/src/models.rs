@@ -699,6 +699,10 @@ where
 #[derive(Debug, Deserialize)]
 pub struct NlqRequest {
     pub question: String,
+    /// Partition key for multi-tenant scoping.
+    /// When set, only nodes/edges with this group_id are searched.
+    #[serde(default)]
+    pub group_id: String,
     /// Optional pagination limit.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -711,6 +715,10 @@ pub struct NlqRequest {
     /// If true, include related memories and strategies in the response.
     #[serde(default)]
     pub include_context: bool,
+    /// Arbitrary metadata for filtering/scoping queries.
+    /// E.g., `{"user_id": "19039485485"}` to scope results to a specific user.
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

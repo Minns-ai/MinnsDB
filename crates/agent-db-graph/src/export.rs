@@ -545,6 +545,7 @@ mod tests {
             properties: std::collections::HashMap::new(),
             degree: 0,
             embedding: Vec::new(),
+            group_id: String::new(),
         };
         let mut key = Vec::with_capacity(9);
         key.push(b'n');
@@ -629,6 +630,7 @@ mod tests {
             properties: std::collections::HashMap::new(),
             degree: 0,
             embedding: Vec::new(),
+            group_id: String::new(),
         })
         .unwrap();
         let mut key = vec![b'n'];

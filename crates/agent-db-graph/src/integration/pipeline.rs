@@ -65,6 +65,7 @@ fn resolve_or_create_entity(
     graph: &mut Graph,
     raw_name: &str,
     concept_type: ConceptType,
+    group_id: &str,
 ) -> Option<NodeId> {
     let normalized = normalize_entity_name(raw_name);
 
@@ -93,11 +94,12 @@ fn resolve_or_create_entity(
     }
 
     // 3. No match — create new node with normalized name
-    let node = GraphNode::new(NodeType::Concept {
+    let mut node = GraphNode::new(NodeType::Concept {
         concept_name: normalized.clone(),
         concept_type,
         confidence: 0.7,
     });
+    node.group_id = group_id.to_string();
     match graph.add_node(node) {
         Ok(nid) => {
             let interned = graph.interner.intern(&normalized);
@@ -709,6 +711,7 @@ impl GraphEngine {
         fact: &crate::conversation::compaction::ExtractedFact,
         timestamp: u64,
     ) {
+        let group_id = &fact.group_id;
         let category = fact.category.as_deref().unwrap_or("other");
         let is_financial = self.ontology.is_append_only(category);
 
@@ -744,16 +747,21 @@ impl GraphEngine {
         let graph = inference.graph_mut();
 
         // 1. Resolve entity node
-        let entity_nid =
-            match resolve_or_create_entity(graph, &fact.subject, ConceptType::NamedEntity) {
-                Some(nid) => nid,
-                None => return,
-            };
+        let entity_nid = match resolve_or_create_entity(
+            graph,
+            &fact.subject,
+            ConceptType::NamedEntity,
+            group_id,
+        ) {
+            Some(nid) => nid,
+            None => return,
+        };
 
         let target_ctype = self.ontology.default_target_concept_type(category);
 
         // 3. Resolve the target value as a concept node
-        let target_nid = match resolve_or_create_entity(graph, &fact.object, target_ctype) {
+        let target_nid = match resolve_or_create_entity(graph, &fact.object, target_ctype, group_id)
+        {
             Some(nid) => nid,
             None => return,
         };
@@ -816,12 +824,18 @@ impl GraphEngine {
                     0.9,
                 );
                 edge.valid_from = Some(timestamp);
+                edge.group_id = group_id.clone();
                 edge.properties
                     .insert("amount".to_string(), serde_json::json!(total_amount));
                 edge.properties.insert(
                     "statement".to_string(),
                     serde_json::Value::String(fact.statement.clone()),
                 );
+                for (k, v) in &fact.ingest_metadata {
+                    edge.properties
+                        .entry(k.clone())
+                        .or_insert_with(|| v.clone());
+                }
                 let new_eid = graph.add_edge(edge);
                 tracing::info!(
                     "write_fact_to_graph financial eid={:?} '{}' -> '{}' amount={:.2}",
@@ -838,6 +852,7 @@ impl GraphEngine {
                         graph,
                         beneficiary_name,
                         ConceptType::NamedEntity,
+                        group_id,
                     ) {
                         Some(nid) => nid,
                         None => continue,
@@ -853,12 +868,18 @@ impl GraphEngine {
                         0.9,
                     );
                     edge.valid_from = Some(timestamp);
+                    edge.group_id = group_id.clone();
                     edge.properties
                         .insert("amount".to_string(), serde_json::json!(per_person));
                     edge.properties.insert(
                         "statement".to_string(),
                         serde_json::Value::String(fact.statement.clone()),
                     );
+                    for (k, v) in &fact.ingest_metadata {
+                        edge.properties
+                            .entry(k.clone())
+                            .or_insert_with(|| v.clone());
+                    }
                     let new_eid = graph.add_edge(edge);
                     tracing::info!("write_fact_to_graph financial eid={:?} '{}' -> '{}' amount={:.2} (total={:.2}/{})",
                         new_eid, fact.subject, beneficiary_name, per_person, total_amount, num_people as u64);
@@ -890,13 +911,20 @@ impl GraphEngine {
                 return;
             }
 
-            // ── Supersede active edges, scoped by cardinality ──
-            // Single-valued categories (location, work, education): ALWAYS supersede
-            // existing active edges — don't rely on LLM setting is_update.
+            // ── Supersede active edges, scoped by exact property ──
+            // Single-valued properties: supersede edges of the SAME property
+            // (not all edges sharing a parent category prefix).
+            // E.g., location:lives_in supersedes location:lives_in, but NOT
+            // workplace_location:works_in — those are separate properties.
             // Multi-valued: only supersede when is_update is explicitly true.
             let single_valued = self.ontology.is_single_valued(category);
             if single_valued || fact.is_update.unwrap_or(false) {
-                let category_prefix = format!("{}:", category);
+                let supersession_prefixes: Vec<String> = self
+                    .ontology
+                    .supersession_group(category)
+                    .iter()
+                    .map(|c| format!("{}:", c))
+                    .collect();
                 let edges_to_supersede: Vec<crate::structures::EdgeId> = graph
                     .get_edges_from(entity_nid)
                     .iter()
@@ -909,8 +937,11 @@ impl GraphEngine {
                                 return false;
                             }
                             if single_valued {
-                                // Single-valued: supersede all active edges in the category
-                                association_type.starts_with(&category_prefix)
+                                // Single-valued: supersede edges matching any prefix
+                                // in the supersession group
+                                supersession_prefixes
+                                    .iter()
+                                    .any(|p| association_type.starts_with(p.as_str()))
                             } else {
                                 // Multi-valued: only supersede edges with exact same assoc_type
                                 association_type == &assoc_type
@@ -1024,6 +1055,7 @@ impl GraphEngine {
                 0.9,
             );
             edge.valid_from = Some(timestamp);
+            edge.group_id = group_id.clone();
             edge.properties.insert(
                 "statement".to_string(),
                 serde_json::Value::String(fact.statement.clone()),
@@ -1054,6 +1086,12 @@ impl GraphEngine {
             if let Some(sent) = fact.sentiment {
                 edge.properties
                     .insert("sentiment".to_string(), serde_json::json!(sent));
+            }
+            // Propagate ingest-level metadata to edge properties
+            for (k, v) in &fact.ingest_metadata {
+                edge.properties
+                    .entry(k.clone())
+                    .or_insert_with(|| v.clone());
             }
             let new_eid = graph.add_edge(edge);
             tracing::info!(
@@ -1151,6 +1189,12 @@ impl GraphEngine {
         }
 
         let entity_name = normalize_entity_name(&fact.subject);
+        tracing::debug!(
+            "detect_edge_conflicts category='{}' entity='{}' stmt='{}'",
+            category,
+            entity_name,
+            fact.statement.get(..60).unwrap_or(&fact.statement)
+        );
 
         // 1. Collect existing active edges from this entity with statement text
         let candidates: Vec<(crate::structures::EdgeId, String)> = {
@@ -1159,7 +1203,13 @@ impl GraphEngine {
 
             let entity_nid = match graph.concept_index.get(&*entity_name) {
                 Some(&nid) => nid,
-                None => return,
+                None => {
+                    tracing::debug!(
+                        "detect_edge_conflicts: entity '{}' not in concept_index",
+                        entity_name
+                    );
+                    return;
+                },
             };
 
             graph
@@ -1184,8 +1234,18 @@ impl GraphEngine {
         };
 
         if candidates.is_empty() {
+            tracing::debug!(
+                "detect_edge_conflicts: no candidates for entity '{}'",
+                entity_name
+            );
             return;
         }
+        tracing::info!(
+            "detect_edge_conflicts: {} candidates for '{}' category='{}'",
+            candidates.len(),
+            entity_name,
+            category
+        );
 
         // 2. Find semantically similar existing facts using simple heuristic first:
         //    same category prefix = potential conflict candidate
@@ -1250,17 +1310,26 @@ impl GraphEngine {
             .join("\n");
 
         let prompt = format!(
-            "Given a NEW fact and EXISTING facts about the same entity, identify which existing facts are contradicted or superseded by the new fact.\n\n\
-            EXISTING FACTS:\n{}\n\n\
-            NEW FACT: {}\n\n\
-            Return a JSON array of the numbers of facts that are CONTRADICTED or SUPERSEDED by the new fact.\n\
-            If the new fact does NOT contradict any existing fact (e.g. both can be true simultaneously), return an empty array [].\n\
-            Examples:\n\
-            - \"User lives in Lisbon\" superseded by \"User moved to NYC\" → [1]\n\
-            - \"User works with Alice\" NOT superseded by \"User works with Bob\" → []\n\
-            - \"User likes coffee\" superseded by \"User no longer drinks coffee\" → [1]\n\
-            Output ONLY the JSON array, nothing else.",
-            existing_facts, new_statement
+            "Given a NEW fact and EXISTING facts about the same person, identify which existing facts are \
+            CONTRADICTED, SUPERSEDED, or NO LONGER TRUE because of the new fact.\n\n\
+            EXISTING FACTS:\n{existing}\n\n\
+            NEW FACT: {new_fact}\n\n\
+            A fact is superseded when:\n\
+            - It describes the SAME attribute/role/activity but with a different value \
+              (e.g., new location replaces old location)\n\
+            - It describes a routine, habit, or activity tied to a previous location/context \
+              that has changed (e.g., \"visits Tsukiji Market\" is superseded when the person \
+              moves away from Tokyo)\n\
+            - It directly contradicts the new fact (e.g., \"likes X\" vs \"dislikes X\")\n\
+            - The new fact makes the old fact no longer applicable \
+              (e.g., \"Saturday brunch at local cafe\" superseded by \"Saturday sunrise yoga at beach\")\n\n\
+            A fact is NOT superseded when:\n\
+            - Both can be true simultaneously (e.g., \"works with Alice\" and \"works with Bob\")\n\
+            - They describe different attributes (e.g., \"likes coffee\" and \"lives in NYC\")\n\
+            - The old fact is a permanent trait unaffected by the change\n\n\
+            Return a JSON array of the numbers of superseded facts. Empty array [] if none.\n\
+            Output ONLY the JSON array.",
+            existing = existing_facts, new_fact = new_statement
         );
 
         let request = crate::llm_client::LlmRequest {
@@ -1390,7 +1459,7 @@ impl GraphEngine {
             // Uses fuzzy entity resolution to match "coffee shop" = "Coffee Shop" etc.
             let ensure_node =
                 |graph: &mut Graph, name: &str, ctype: ConceptType| -> Option<NodeId> {
-                    resolve_or_create_entity(graph, name, ctype)
+                    resolve_or_create_entity(graph, name, ctype, "")
                 };
 
             let graph = inference.graph_mut();
@@ -1832,7 +1901,7 @@ impl GraphEngine {
                 // Uses fuzzy entity resolution to avoid duplicate nodes.
                 let ensure_concept =
                     |graph: &mut Graph, name: &str, ctype: ConceptType| -> Option<NodeId> {
-                        resolve_or_create_entity(graph, name, ctype)
+                        resolve_or_create_entity(graph, name, ctype, "")
                     };
 
                 // ---- State changes → graph edges ----

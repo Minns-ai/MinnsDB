@@ -39,6 +39,15 @@ pub struct ConversationIngestRequest {
     /// Whether to process assistant messages for facts.
     #[serde(default)]
     pub include_assistant_facts: bool,
+    /// Partition key for multi-tenant isolation.
+    /// All nodes/edges created from this ingest are tagged with this group_id.
+    #[serde(default)]
+    pub group_id: String,
+    /// Arbitrary metadata for the ingest request.
+    /// E.g., `{"user_id": "19039485485", "locale": "en-US"}`.
+    /// Propagated to graph nodes/edges for filtering and scoped queries.
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// A single conversation session within an ingest request.
@@ -69,6 +78,9 @@ pub struct MessageInput {
     pub role: String,
     /// Message text.
     pub content: String,
+    /// Per-message metadata. E.g., `{"user_id": "19039485485"}`.
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +126,7 @@ pub async fn ingest_conversation(
                     .map(|m| agent_db_graph::ConversationMessage {
                         role: m.role,
                         content: m.content,
+                        metadata: m.metadata,
                     })
                     .collect(),
                 contains_fact: s.contains_fact,
@@ -123,6 +136,8 @@ pub async fn ingest_conversation(
             })
             .collect(),
         queries: vec![],
+        group_id: request.group_id,
+        metadata: request.metadata,
     };
 
     let options = agent_db_graph::IngestOptions {
@@ -372,6 +387,7 @@ pub async fn accept_message(
     let message = agent_db_graph::ConversationMessage {
         role: request.role.clone(),
         content: request.content.clone(),
+        metadata: Default::default(),
     };
 
     // Wrap the single message for event pipeline processing
@@ -387,6 +403,8 @@ pub async fn accept_message(
             answers: vec![],
         }],
         queries: vec![],
+        group_id: Default::default(),
+        metadata: Default::default(),
     };
 
     let options = agent_db_graph::IngestOptions {

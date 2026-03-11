@@ -21,6 +21,7 @@ fn make_test_ingest(case_id: &str, messages: Vec<(&str, &str)>) -> ConversationI
                 .map(|(role, content)| ConversationMessage {
                     role: role.to_string(),
                     content: content.to_string(),
+                    metadata: Default::default(),
                 })
                 .collect(),
             contains_fact: None,
@@ -29,6 +30,8 @@ fn make_test_ingest(case_id: &str, messages: Vec<(&str, &str)>) -> ConversationI
             answers: vec![],
         }],
         queries: vec![],
+        group_id: Default::default(),
+        metadata: Default::default(),
     }
 }
 
@@ -190,6 +193,7 @@ async fn test_conversation_pipeline_multi_session() {
                 messages: vec![ConversationMessage {
                     role: "user".to_string(),
                     content: "Alice: Paid €50 for lunch - split with Bob".to_string(),
+                    metadata: Default::default(),
                 }],
                 contains_fact: None,
                 fact_id: None,
@@ -202,6 +206,7 @@ async fn test_conversation_pipeline_multi_session() {
                 messages: vec![ConversationMessage {
                     role: "user".to_string(),
                     content: "Carol: Paid €80 for dinner - split with Alice".to_string(),
+                    metadata: Default::default(),
                 }],
                 contains_fact: None,
                 fact_id: None,
@@ -210,6 +215,8 @@ async fn test_conversation_pipeline_multi_session() {
             },
         ],
         queries: vec![],
+        group_id: Default::default(),
+        metadata: Default::default(),
     };
 
     let options = IngestOptions::default();

@@ -777,6 +777,14 @@ pub fn project_entity_state(
             if vf > as_of {
                 continue; // Future edge, skip for state-at-T
             }
+            // Skip edges that have been explicitly superseded (valid_until set).
+            // These are no longer part of current state — they were replaced by
+            // a newer fact (e.g., old location, old routine after moving).
+            if let Some(vu) = edge.valid_until {
+                if vu <= as_of {
+                    continue;
+                }
+            }
             let target_name = concept_name_of(graph, edge.target).unwrap_or_default();
             let value = edge
                 .properties

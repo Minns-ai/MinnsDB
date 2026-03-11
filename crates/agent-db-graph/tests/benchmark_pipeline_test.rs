@@ -54,6 +54,8 @@ fn trim_data(data: &ConversationIngest, max_msgs: usize) -> ConversationIngest {
             })
             .collect(),
         queries: data.queries.clone(),
+        group_id: data.group_id.clone(),
+        metadata: data.metadata.clone(),
     }
 }
 

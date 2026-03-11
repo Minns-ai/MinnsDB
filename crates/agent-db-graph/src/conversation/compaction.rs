@@ -199,6 +199,14 @@ pub struct ExtractedFact {
     /// Only set when category is "preference".
     #[serde(default)]
     pub sentiment: Option<f32>,
+    /// Partition key for multi-tenant isolation.
+    /// Not populated by LLM — injected after extraction from the ingest request.
+    #[serde(default, skip_serializing)]
+    pub group_id: String,
+    /// Request-level metadata propagated from the ingest request.
+    /// Not populated by LLM — injected after extraction to flow through to graph edges.
+    #[serde(default, skip_serializing)]
+    pub ingest_metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// A user goal/intention detected in the conversation.
@@ -332,6 +340,8 @@ async fn extract_financial_facts_llm(llm: &dyn LlmClient, text: &str) -> Vec<Ext
                 is_update: Some(false),
                 cardinality_hint: None,
                 sentiment: None,
+                group_id: Default::default(),
+                ingest_metadata: Default::default(),
             }
         })
         .collect();
@@ -731,6 +741,8 @@ fn relationship_to_basic_fact(rel: &CascadeRelationship) -> ExtractedFact {
         is_update: rel.is_state_change,
         cardinality_hint: None,
         sentiment: None,
+        group_id: Default::default(),
+        ingest_metadata: Default::default(),
     }
 }
 
@@ -984,6 +996,8 @@ async fn extract_turn_facts_cascade(
                                     is_update: f.is_update,
                                     cardinality_hint: f.cardinality_hint,
                                     sentiment: f.sentiment,
+                                    group_id: Default::default(),
+                                    ingest_metadata: Default::default(),
                                 })
                                 .collect();
                             tracing::info!(
@@ -1230,6 +1244,8 @@ async fn extract_turn_facts(llm: &dyn LlmClient, transcript: &str) -> Option<Vec
                     is_update: f.is_update,
                     cardinality_hint: f.cardinality_hint,
                     sentiment: f.sentiment,
+                    group_id: Default::default(),
+                    ingest_metadata: Default::default(),
                 })
                 .collect();
             Some(facts)
@@ -2126,6 +2142,16 @@ pub async fn run_compaction_with_context(
             let mut facts = facts_combined;
             let turn_base = base_ts + batch_start_idx as u64 * TURN_GAP;
 
+            // Inject group_id and request-level metadata into each fact so they flow to graph edges.
+            for fact in facts.iter_mut() {
+                if !data.group_id.is_empty() {
+                    fact.group_id = data.group_id.clone();
+                }
+                if !data.metadata.is_empty() {
+                    fact.ingest_metadata = data.metadata.clone();
+                }
+            }
+
             tracing::info!(
                 "COMPACTION {} extracted {} facts, writing directly to graph",
                 batch_label,
@@ -2147,6 +2173,7 @@ pub async fn run_compaction_with_context(
                 if engine.ontology.is_single_valued(cat) {
                     let fact_ts = turn_base + sv_offset * 1_000;
                     engine.write_fact_to_graph(fact, fact_ts).await;
+                    engine.detect_edge_conflicts(fact, fact_ts).await;
                     sv_offset += 1;
                 }
             }
@@ -2211,6 +2238,7 @@ pub async fn run_compaction_with_context(
                 if !engine.ontology.is_single_valued(cat) {
                     let fact_ts = turn_base + mv_offset * 1_000;
                     engine.write_fact_to_graph(fact, fact_ts).await;
+                    engine.detect_edge_conflicts(fact, fact_ts).await;
                     mv_offset += 1;
                 }
             }
@@ -2985,6 +3013,7 @@ mod tests {
                     .map(|(role, content)| ConversationMessage {
                         role: role.to_string(),
                         content: content.to_string(),
+                        metadata: Default::default(),
                     })
                     .collect(),
                 contains_fact: None,
@@ -2993,6 +3022,8 @@ mod tests {
                 answers: vec![],
             }],
             queries: vec![],
+            group_id: Default::default(),
+            metadata: Default::default(),
         }
     }
 
@@ -3008,18 +3039,22 @@ mod tests {
                         ConversationMessage {
                             role: "user".to_string(),
                             content: "Hi".to_string(),
+                            metadata: Default::default(),
                         },
                         ConversationMessage {
                             role: "assistant".to_string(),
                             content: "Hello!".to_string(),
+                            metadata: Default::default(),
                         },
                         ConversationMessage {
                             role: "user".to_string(),
                             content: "Where am I?".to_string(),
+                            metadata: Default::default(),
                         },
                         ConversationMessage {
                             role: "assistant".to_string(),
                             content: "Lisbon".to_string(),
+                            metadata: Default::default(),
                         },
                     ],
                     contains_fact: None,
@@ -3034,10 +3069,12 @@ mod tests {
                         ConversationMessage {
                             role: "user".to_string(),
                             content: "I moved".to_string(),
+                            metadata: Default::default(),
                         },
                         ConversationMessage {
                             role: "assistant".to_string(),
                             content: "Where?".to_string(),
+                            metadata: Default::default(),
                         },
                     ],
                     contains_fact: None,
@@ -3047,6 +3084,8 @@ mod tests {
                 },
             ],
             queries: vec![],
+            group_id: Default::default(),
+            metadata: Default::default(),
         };
 
         let turns = split_into_turns(&data);
@@ -3067,10 +3106,12 @@ mod tests {
                 ConversationMessage {
                     role: "user".to_string(),
                     content: "I moved to NYC".to_string(),
+                    metadata: Default::default(),
                 },
                 ConversationMessage {
                     role: "assistant".to_string(),
                     content: "Great!".to_string(),
+                    metadata: Default::default(),
                 },
             ],
             session_index: 0,
@@ -3210,6 +3251,8 @@ mod tests {
                     is_update: None,
                     cardinality_hint: None,
                     sentiment: None,
+                    group_id: Default::default(),
+                    ingest_metadata: Default::default(),
                 },
                 ExtractedFact {
                     statement: "Bob works at Google".to_string(),
@@ -3225,6 +3268,8 @@ mod tests {
                     is_update: None,
                     cardinality_hint: None,
                     sentiment: None,
+                    group_id: Default::default(),
+                    ingest_metadata: Default::default(),
                 },
                 ExtractedFact {
                     statement: "Alice and Bob are friends".to_string(),
@@ -3240,6 +3285,8 @@ mod tests {
                     is_update: None,
                     cardinality_hint: None,
                     sentiment: None,
+                    group_id: Default::default(),
+                    ingest_metadata: Default::default(),
                 },
             ],
             goals: vec![],
@@ -3386,6 +3433,8 @@ mod tests {
                     is_update: None,
                     cardinality_hint: None,
                     sentiment: None,
+                    group_id: Default::default(),
+                    ingest_metadata: Default::default(),
                 },
                 ExtractedFact {
                     statement: "F2".to_string(),
@@ -3401,6 +3450,8 @@ mod tests {
                     is_update: None,
                     cardinality_hint: None,
                     sentiment: None,
+                    group_id: Default::default(),
+                    ingest_metadata: Default::default(),
                 },
             ],
             goals: vec![ExtractedGoal {
@@ -3655,6 +3706,8 @@ mod tests {
                 is_update: None,
                 cardinality_hint: None,
                 sentiment: None,
+                ingest_metadata: Default::default(),
+                group_id: Default::default(),
             }],
             goals: vec![], // all goals filtered out
             procedural_summary: Some(ProceduralSummary {
@@ -3962,6 +4015,7 @@ mod tests {
         let messages = vec![crate::conversation::types::ConversationMessage {
             role: "user".to_string(),
             content: "I want to go to Japan".to_string(),
+            metadata: Default::default(),
         }];
 
         let result = update_rolling_summary(&SimpleLlm, None, &messages).await;

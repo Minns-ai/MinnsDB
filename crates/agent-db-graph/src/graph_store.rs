@@ -1496,6 +1496,7 @@ mod tests {
             properties: std::collections::HashMap::new(),
             degree: 0,
             embedding: Vec::new(),
+            group_id: String::new(),
         }
     }
 
@@ -1518,6 +1519,7 @@ mod tests {
             properties: std::collections::HashMap::new(),
             confidence_history: crate::tcell::TCell::Empty,
             weight_history: crate::tcell::TCell::Empty,
+            group_id: String::new(),
         }
     }
 

@@ -132,16 +132,18 @@ fn apply_temporal_validity_filter(
         superseded_targets.remove(ct);
     }
 
-    // Phase 2: Zero out nodes that are direct targets of superseded state edges
+    // Phase 2: Zero out nodes that are direct targets of superseded edges.
+    // Covers both old "state:*" edges and new "category:predicate" edges
+    // (e.g. location:lives_in, routine:visits).
     for (node_id, score) in results.iter_mut() {
         for edge in graph.get_edges_to(*node_id) {
             if let EdgeType::Association {
                 association_type, ..
             } = &edge.edge_type
             {
-                if association_type.starts_with("state:") {
+                if is_stateful(association_type) || association_type.starts_with("state:") {
                     if edge.valid_until.is_some() {
-                        *score = 0.0; // Hard remove — superseded state target
+                        *score = 0.0; // Hard remove — superseded target
                         break;
                     }
                     // Check if a newer edge exists (implicit supersession)
@@ -1097,6 +1099,8 @@ impl GraphEngine {
                 answers: vec![],
             }],
             queries: vec![],
+            group_id: Default::default(),
+            metadata: Default::default(),
         };
 
         // Fetch rolling summary for prior context
@@ -1208,6 +1212,53 @@ impl GraphEngine {
         session_id: Option<&str>,
         include_memories: bool,
     ) -> GraphResult<crate::nlq::NlqResponse> {
+        self.natural_language_query_with_metadata(
+            question,
+            pagination,
+            session_id,
+            include_memories,
+            &std::collections::HashMap::new(),
+        )
+        .await
+    }
+
+    /// Execute a natural language query with metadata-based filtering.
+    ///
+    /// When `metadata_filter` is non-empty, only graph edges whose properties
+    /// contain all specified key-value pairs are included in retrieval results.
+    pub async fn natural_language_query_with_metadata(
+        &self,
+        question: &str,
+        pagination: &crate::nlq::NlqPagination,
+        session_id: Option<&str>,
+        include_memories: bool,
+        metadata_filter: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> GraphResult<crate::nlq::NlqResponse> {
+        self.natural_language_query_scoped(
+            question,
+            pagination,
+            session_id,
+            include_memories,
+            "",
+            metadata_filter,
+        )
+        .await
+    }
+
+    /// Execute a natural language query scoped to a `group_id` and optional metadata.
+    ///
+    /// This is the most complete query entry point. `group_id` provides fast
+    /// multi-tenant isolation (empty string = unscoped). `metadata_filter`
+    /// provides additional property-level filtering.
+    pub async fn natural_language_query_scoped(
+        &self,
+        question: &str,
+        pagination: &crate::nlq::NlqPagination,
+        session_id: Option<&str>,
+        include_memories: bool,
+        group_id: &str,
+        metadata_filter: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> GraphResult<crate::nlq::NlqResponse> {
         // Resolve follow-up questions using conversational context
         let effective_question = if let Some(sid) = session_id {
             let contexts = self.nlq_contexts.lock().await;
@@ -1225,6 +1276,8 @@ impl GraphEngine {
             pagination,
             session_id,
             include_memories,
+            group_id,
+            metadata_filter,
         )
         .await
     }
@@ -1239,13 +1292,21 @@ impl GraphEngine {
         pagination: &crate::nlq::NlqPagination,
         session_id: Option<&str>,
         include_memories: bool,
+        group_id: &str,
+        metadata_filter: &std::collections::HashMap<String, serde_json::Value>,
     ) -> GraphResult<crate::nlq::NlqResponse> {
         let start = std::time::Instant::now();
         let mut explanation = vec!["Unified NLQ pipeline activated".to_string()];
         let mut ranked_lists: Vec<Vec<(u64, f32)>> = Vec::new();
 
+        // When metadata filtering is active, over-fetch so we have enough
+        // results after filtering. The multiplier ensures we don't lose all
+        // top results to non-matching metadata.
+        let has_scope_filter = !group_id.is_empty() || !metadata_filter.is_empty();
+        let fetch_multiplier = if has_scope_filter { 5 } else { 1 };
+
         // 1. BM25 search (always available)
-        let bm25 = self.search_bm25(question, 20).await;
+        let bm25 = self.search_bm25(question, 20 * fetch_multiplier).await;
         if !bm25.is_empty() {
             explanation.push(format!("BM25: {} results", bm25.len()));
             ranked_lists.push(bm25);
@@ -1274,7 +1335,10 @@ impl GraphEngine {
         if !query_embedding.is_empty() {
             let inference = self.inference.read().await;
             let graph = inference.graph();
-            let vector_hits = graph.node_vector_index.search(&query_embedding, 20, 0.3);
+            let vector_hits =
+                graph
+                    .node_vector_index
+                    .search(&query_embedding, 20 * fetch_multiplier, 0.3);
             if !vector_hits.is_empty() {
                 explanation.push(format!("Node vector: {} results", vector_hits.len()));
                 ranked_lists.push(vector_hits);
@@ -1282,14 +1346,31 @@ impl GraphEngine {
 
             // 1d. Edge/triplet vector search: find edges whose "subject predicate object"
             // text is semantically similar to the query. Resolve hits to source+target nodes.
-            let edge_hits = graph.edge_vector_index.search(&query_embedding, 10, 0.4);
+            let edge_hits =
+                graph
+                    .edge_vector_index
+                    .search(&query_embedding, 10 * fetch_multiplier, 0.4);
             if !edge_hits.is_empty() {
                 let mut triplet_node_hits: Vec<(u64, f32)> = Vec::new();
                 for &(edge_id, sim) in &edge_hits {
                     if let Some(edge) = graph.edges.get(edge_id) {
-                        // Both source and target nodes are relevant
-                        triplet_node_hits.push((edge.source, sim));
-                        triplet_node_hits.push((edge.target, sim * 0.8)); // target slightly lower
+                        // When scoped, skip edges that don't match group_id or metadata
+                        if has_scope_filter {
+                            if !group_id.is_empty() && edge.group_id != group_id {
+                                continue;
+                            }
+                            if !metadata_filter
+                                .iter()
+                                .all(|(k, v)| edge.properties.get(k) == Some(v))
+                            {
+                                continue;
+                            }
+                        }
+                        // Demote superseded edges — they'll be filtered for
+                        // Current-frame queries but kept for Historical ones
+                        let penalty = if edge.valid_until.is_some() { 0.1 } else { 1.0 };
+                        triplet_node_hits.push((edge.source, sim * penalty));
+                        triplet_node_hits.push((edge.target, sim * 0.8 * penalty));
                     }
                 }
                 if !triplet_node_hits.is_empty() {
@@ -1452,6 +1533,41 @@ impl GraphEngine {
             }
         }
 
+        // 5c-meta. Group ID + metadata filter: zero out nodes not reachable via
+        // edges matching the group_id and metadata key-value pairs.
+        let has_group_filter = !group_id.is_empty();
+        if has_group_filter || !metadata_filter.is_empty() {
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
+            for (node_id, score) in fused.iter_mut() {
+                if *score <= 0.0 {
+                    continue;
+                }
+                // A node passes if ANY incident edge matches group_id AND all metadata
+                let edges_in = graph.get_edges_to(*node_id);
+                let edges_out = graph.get_edges_from(*node_id);
+                let has_matching_edge = edges_in.iter().chain(edges_out.iter()).any(|edge| {
+                    let group_ok = !has_group_filter || edge.group_id == group_id;
+                    let meta_ok = metadata_filter
+                        .iter()
+                        .all(|(k, v)| edge.properties.get(k) == Some(v));
+                    group_ok && meta_ok
+                });
+                if !has_matching_edge {
+                    *score = 0.0;
+                }
+            }
+            if has_group_filter {
+                explanation.push(format!("Group filter: '{}'", group_id));
+            }
+            if !metadata_filter.is_empty() {
+                explanation.push(format!(
+                    "Metadata filter: {} keys applied",
+                    metadata_filter.len()
+                ));
+            }
+        }
+
         // 5c. LLM-driven dynamic projection from graph edges.
         // Maps LLM hints to ConversationQueryType and uses the unified query path.
         // Both locks are scoped tightly and released after projection completes.
@@ -1491,6 +1607,7 @@ impl GraphEngine {
                 question,
                 graph,
                 &memories,
+                Some(&self.ontology),
                 &superseded_targets,
             );
             match dynamic_projection {

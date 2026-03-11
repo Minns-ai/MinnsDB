@@ -15,6 +15,17 @@ pub struct ConversationIngest {
     /// Optional queries for benchmark evaluation.
     #[serde(default)]
     pub queries: Vec<BenchmarkQuery>,
+    /// Partition key for multi-tenant isolation (à la temporal graph reference `group_id`).
+    /// When set, all nodes and edges created from this ingest are tagged with
+    /// this group_id, and NLQ queries scope to it automatically.
+    /// Empty string or absent means global/unscoped.
+    #[serde(default)]
+    pub group_id: String,
+    /// Arbitrary metadata attached to the ingest request.
+    /// E.g., `{"user_id": "19039485485", "locale": "en-US"}`.
+    /// Propagated to graph nodes/edges for filtering and scoped queries.
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
 }
 
 /// A single conversation session with ordered messages.
@@ -41,6 +52,9 @@ pub struct ConversationSession {
 pub struct ConversationMessage {
     pub role: String,
     pub content: String,
+    /// Per-message metadata. E.g., `{"user_id": "19039485485", "timestamp": "..."}`.
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
 }
 
 /// A benchmark query with reference answer.

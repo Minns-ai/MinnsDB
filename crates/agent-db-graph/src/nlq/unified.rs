@@ -36,6 +36,7 @@ pub fn format_unified_results(
     _question: &str,
     graph: &Graph,
     memories: &[Memory],
+    ontology: Option<&crate::ontology::OntologyRegistry>,
     superseded_targets: &std::collections::HashSet<String>,
 ) -> String {
     // Extract meaningful content from fused results
@@ -80,7 +81,8 @@ pub fn format_unified_results(
             continue;
         }
         // Use successor-state projection for authoritative current state
-        let projected = graph_projection::project_entity_state(graph, entity_name, u64::MAX, None);
+        let projected =
+            graph_projection::project_entity_state(graph, entity_name, u64::MAX, ontology);
         for slot in projected.slots.values() {
             let assoc = &slot.association_type;
             let value = slot.value.as_deref().unwrap_or(&slot.target_name);
@@ -323,8 +325,14 @@ mod tests {
     #[test]
     fn test_format_empty() {
         let graph = Graph::new();
-        let result =
-            format_unified_results(&[], "test?", &graph, &[], &std::collections::HashSet::new());
+        let result = format_unified_results(
+            &[],
+            "test?",
+            &graph,
+            &[],
+            None,
+            &std::collections::HashSet::new(),
+        );
         assert_eq!(result, "No relevant information found.");
     }
 
@@ -345,6 +353,7 @@ mod tests {
             "tell me about Alice",
             &graph,
             &[],
+            None,
             &std::collections::HashSet::new(),
         );
         assert!(result.contains("Alice"));
@@ -369,6 +378,7 @@ mod tests {
             "what does Alice like?",
             &graph,
             &[],
+            None,
             &std::collections::HashSet::new(),
         );
         assert!(
@@ -396,6 +406,7 @@ mod tests {
             "anything?",
             &graph,
             &[],
+            None,
             &std::collections::HashSet::new(),
         );
         assert_eq!(result, "No relevant information found.");
@@ -410,6 +421,7 @@ mod tests {
             "preferences?",
             &graph,
             &[mem],
+            None,
             &std::collections::HashSet::new(),
         );
         assert!(result.contains("Related context:"));
@@ -436,6 +448,7 @@ mod tests {
             "preferences?",
             &graph,
             &[mem],
+            None,
             &std::collections::HashSet::new(),
         );
         // Should not show duplicate content
@@ -468,6 +481,7 @@ mod tests {
             "late delivery?",
             &graph,
             &[mem],
+            None,
             &std::collections::HashSet::new(),
         );
         assert!(
