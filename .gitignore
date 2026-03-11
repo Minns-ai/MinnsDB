@@ -37,7 +37,9 @@ perf.data*
 
 # Configuration overrides
 config.local.json
+.env
 .env.local
+.env.*
 
 # Performance profiling
 *.prof
