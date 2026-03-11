@@ -803,6 +803,47 @@ pub fn project_entity_state(
         }
     }
 
+    // 1b. Detect wrongly-superseded newest edges (skipped above but needing repair).
+    //     For each association category, find the edge with the highest valid_from
+    //     among ALL edges (including skipped). If that edge has valid_until set,
+    //     it was incorrectly superseded and needs a repair hint.
+    {
+        // Collect ALL association edges (no valid_until filter) to find per-category newest
+        let mut all_by_assoc: HashMap<String, Vec<(u64, u64, Option<u64>)>> = HashMap::new(); // assoc -> [(edge_id, vf, vu)]
+        for edge in graph.get_edges_from(node_id) {
+            if let EdgeType::Association { association_type, .. } = &edge.edge_type {
+                if !association_type.contains(':') {
+                    continue;
+                }
+                let vf = edge.valid_from.unwrap_or(0);
+                if vf > as_of {
+                    continue;
+                }
+                all_by_assoc
+                    .entry(association_type.clone())
+                    .or_default()
+                    .push((edge.id, vf, edge.valid_until));
+            }
+        }
+        for (_assoc_type, mut edges) in all_by_assoc {
+            edges.sort_by_key(|&(_, vf, _)| vf);
+            if let Some(&(eid, _vf, Some(_vu))) = edges.last() {
+                // Newest edge has valid_until set — it was skipped but needs repair
+                let already_collected = records.iter().any(|r| r.edge_id == eid);
+                if !already_collected {
+                    state.repair_hints.push(RepairHint {
+                        edge_id: eid,
+                        set_valid_until: None,
+                        reason: format!(
+                            "newest edge for '{}' has valid_until set but should be current",
+                            _assoc_type
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     // 2. Normalize each edge to a canonical domain key
     //    and determine cardinality
     struct NormalizedRecord {
