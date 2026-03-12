@@ -1,7 +1,7 @@
 //! Temporal decay scoring for retrieval signals.
 //!
-//! Includes both basic exponential decay and baseline system-inspired importance-modulated
-//! decay where frequently-accessed, highly-relevant memories decay slower.
+//! Includes both basic exponential decay and importance-modulated decay where
+//! frequently-accessed, highly-relevant memories decay slower.
 
 use agent_db_core::types::Timestamp;
 
@@ -25,7 +25,7 @@ pub fn temporal_decay_score(timestamp: Timestamp, now: Timestamp, half_life_hour
     (-lambda * age_hours).exp() as f32
 }
 
-/// Parameters for importance-modulated temporal decay (baseline system-inspired).
+/// Parameters for importance-modulated temporal decay.
 ///
 /// The decay rate adapts based on a memory's importance:
 /// `λ_eff = λ_base * exp(-mu * importance)`
@@ -81,7 +81,7 @@ pub fn compute_importance(params: &ImportanceDecayParams, config: &ImportanceDec
     importance.clamp(0.0, 1.0)
 }
 
-/// Importance-modulated temporal decay (baseline system-inspired).
+/// Importance-modulated temporal decay.
 ///
 /// The effective decay rate adapts to importance:
 /// `λ_eff = λ_base * exp(-μ * importance)`

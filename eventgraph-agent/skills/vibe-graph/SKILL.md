@@ -6,7 +6,7 @@ user_invocable: true
 
 # /vibe-graph — Design Workflow via Vibe Graphing
 
-Convert a natural language intent into an executable workflow stored as real graph nodes and edges in EventGraphDB. Uses a 3-stage compilation pipeline inspired by baseline system's Vibe Graphing.
+Convert a natural language intent into an executable workflow stored as real graph nodes and edges in EventGraphDB. Uses a 3-stage compilation pipeline (Role Assignment → Structure Design → Semantic Completion).
 
 **Claude does all reasoning. The CLI provides graph context. The server stores the result.**
 

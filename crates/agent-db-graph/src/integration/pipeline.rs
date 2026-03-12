@@ -705,7 +705,6 @@ impl GraphEngine {
     ///
     /// No hardcoded supersession — conflict detection is handled separately by
     /// `detect_edge_conflicts` which uses semantic search + LLM comparison
-    /// (temporal graph approach).
     pub async fn write_fact_to_graph(
         &self,
         fact: &crate::conversation::compaction::ExtractedFact,
@@ -1176,7 +1175,7 @@ impl GraphEngine {
     ///
     /// Uses semantic search on the entity's existing edges to find potentially
     /// conflicting facts, then asks the LLM if the new fact contradicts/supersedes
-    /// any of them (temporal graph approach). Conflicting edges get `valid_until` set.
+    /// any of them. Conflicting edges get `valid_until` set.
     pub async fn detect_edge_conflicts(
         &self,
         fact: &crate::conversation::compaction::ExtractedFact,

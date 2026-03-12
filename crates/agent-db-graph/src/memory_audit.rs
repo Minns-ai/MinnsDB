@@ -2,8 +2,7 @@
 //!
 //! Tracks every ADD, UPDATE, and DELETE operation on memories with
 //! old→new transitions, actor identification, and timestamps.
-//! Inspired by prior work's SQLite history table but adapted to our in-memory
-//! + redb persistence model.
+//! Adapted to our in-memory + redb persistence model.
 
 use crate::memory::MemoryId;
 use serde::{Deserialize, Serialize};

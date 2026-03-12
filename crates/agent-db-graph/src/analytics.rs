@@ -1,6 +1,6 @@
 //! Graph analytics with focus on agent learning metrics
 //!
-//! Unlike generic graph analytics (baseline system-style), this focuses on:
+//! Focuses on agent-specific analytics rather than generic graph analytics:
 //! - Learning performance metrics
 //! - Memory formation rates
 //! - Strategy success trends
