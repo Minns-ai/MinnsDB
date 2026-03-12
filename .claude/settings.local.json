@@ -58,7 +58,8 @@
       "Bash(RUSTFLAGS=\"-W dead_code -W unused-imports -W unused-variables -W unreachable-code\" $HOME/.cargo/bin/cargo build:*)",
       "Bash(/tmp/temporal_tracking_analysis.md:*)",
       "Bash(/Users/jonathanfarrow/.cargo/bin/cargo clippy:*)",
-      "Bash($HOME/.cargo/bin/cargo test:*)"
+      "Bash($HOME/.cargo/bin/cargo test:*)",
+      "WebFetch(domain:www.machinebrief.com)"
     ]
   }
 }
