@@ -2798,8 +2798,8 @@ async fn embed_nodes_and_create_claims(
     }
 
     // 2. Embed triplets (subject + predicate + object) for edge vector search.
-    // This enables triplet scoring where the query is compared
-    // against the full context of each edge, not just individual nodes.
+    // This enables triplet scoring where the query is compared against
+    // the full context of each edge, not just individual nodes.
     {
         let edges_to_embed: Vec<(u64, String)> = {
             let inference = engine.inference.read().await;

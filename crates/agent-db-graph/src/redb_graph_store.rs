@@ -1,7 +1,7 @@
 // Persistent graph storage using redb
 //
 // Implements GraphStore trait with redb backend, using:
-// - Hierarchical keys (inspired by Dgraph)
+// - Hierarchical keys
 // - Delta-encoded adjacency lists for compression
 // - Goal-bucket partitioning for semantic sharding
 // - LRU partition loading for memory efficiency
@@ -30,7 +30,7 @@ const TABLE_GRAPH_NODES: &str = "graph_nodes";
 const TABLE_GRAPH_ADJACENCY: &str = "graph_adjacency";
 const TABLE_GRAPH_EDGES: &str = "graph_edges";
 // ============================================================================
-// Key Design (Hierarchical, inspired by Dgraph)
+// Key Design (Hierarchical)
 // ============================================================================
 
 /// Key type prefixes
