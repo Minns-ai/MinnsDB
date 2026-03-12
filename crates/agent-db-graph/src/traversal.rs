@@ -3,7 +3,7 @@
 //! This module provides advanced graph traversal capabilities and query
 //! processing for the agentic database graph structure.
 //!
-//! Performance features (inspired by reference implementation reference):
+//! Performance features:
 //! - Actual edge weights used for Dijkstra (not hardcoded 1.0)
 //! - Working LRU query cache with TTL and invalidation
 //! - Full constraint checking in path search
