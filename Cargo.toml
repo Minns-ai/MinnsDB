@@ -11,6 +11,7 @@ members = [
     "ml/agent-db-planning",
     "examples",
     "server",
+    "crates/eventgraph-cli",
 ]
 
 [workspace.dependencies]

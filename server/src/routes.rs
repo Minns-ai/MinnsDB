@@ -159,6 +159,28 @@ pub fn create_router(state: AppState) -> Router {
             "/api/structured-memory/tree/:key/add-child",
             post(handlers::tree_add_child),
         )
+        // Workflows
+        .route(
+            "/api/workflows",
+            post(handlers::create_workflow).get(handlers::list_workflows),
+        )
+        .route(
+            "/api/workflows/:id",
+            get(handlers::get_workflow)
+                .put(handlers::update_workflow)
+                .delete(handlers::delete_workflow),
+        )
+        .route(
+            "/api/workflows/:id/steps/:step_id/transition",
+            post(handlers::workflow_step_transition),
+        )
+        .route(
+            "/api/workflows/:id/feedback",
+            post(handlers::workflow_feedback),
+        )
+        // Agent registry
+        .route("/api/agents/register", post(handlers::register_agent))
+        .route("/api/agents", get(handlers::list_agents))
         // Single message endpoint
         .route("/api/messages", post(handlers::accept_message))
         // Conversation Ingestion (batch)

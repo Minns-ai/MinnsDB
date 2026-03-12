@@ -1,0 +1,46 @@
+{
+  "name": "Code Review",
+  "description": "Comprehensive code review workflow: analyze changes, check patterns, review tests, provide feedback",
+  "steps": [
+    {
+      "id": "analyze_diff",
+      "role": "research",
+      "task": "Analyze the PR diff to understand what changed and why",
+      "depends_on": [],
+      "inputs": [],
+      "outputs": ["change_summary", "affected_files"]
+    },
+    {
+      "id": "check_patterns",
+      "role": "research",
+      "task": "Check if the changes follow established patterns and conventions",
+      "depends_on": ["analyze_diff"],
+      "inputs": ["affected_files"],
+      "outputs": ["pattern_compliance"]
+    },
+    {
+      "id": "review_tests",
+      "role": "test",
+      "task": "Verify test coverage for the changes and run existing tests",
+      "depends_on": ["analyze_diff"],
+      "inputs": ["affected_files"],
+      "outputs": ["test_results", "coverage_gaps"]
+    },
+    {
+      "id": "security_check",
+      "role": "research",
+      "task": "Check for security issues (injection, auth bypass, data exposure)",
+      "depends_on": ["analyze_diff"],
+      "inputs": ["change_summary", "affected_files"],
+      "outputs": ["security_findings"]
+    },
+    {
+      "id": "write_feedback",
+      "role": "code",
+      "task": "Compile review findings into actionable PR feedback",
+      "depends_on": ["check_patterns", "review_tests", "security_check"],
+      "inputs": ["change_summary", "pattern_compliance", "test_results", "coverage_gaps", "security_findings"],
+      "outputs": ["review_comments"]
+    }
+  ]
+}

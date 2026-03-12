@@ -1,6 +1,49 @@
 use super::*;
 
 impl GraphEngine {
+    /// Embed a list of nodes asynchronously (fire-and-forget).
+    ///
+    /// Takes a list of `(node_id, text_to_embed)` pairs.
+    /// Each node gets its embedding stored on the node and indexed
+    /// in the `node_vector_index` for semantic search.
+    ///
+    /// This uses the same embedding client and pattern as the pipeline.
+    /// Safe to call from both `&self` (pipeline) and `Arc<Self>` (server handlers).
+    pub fn embed_nodes_async(&self, nodes: Vec<(NodeId, String)>) {
+        if nodes.is_empty() {
+            return;
+        }
+        let ec = match &self.embedding_client {
+            Some(ec) => ec.clone(),
+            None => return,
+        };
+        let inference_ref = self.inference.clone();
+        tokio::spawn(async move {
+            for (nid, text) in nodes {
+                match ec
+                    .embed(crate::claims::EmbeddingRequest {
+                        text,
+                        context: None,
+                    })
+                    .await
+                {
+                    Ok(resp) if !resp.embedding.is_empty() => {
+                        let mut inf = inference_ref.write().await;
+                        let graph = inf.graph_mut();
+                        if let Some(node) = graph.get_node_mut(nid) {
+                            node.embedding = resp.embedding.clone();
+                        }
+                        graph.node_vector_index.insert(nid, resp.embedding);
+                    },
+                    Ok(_) => {},
+                    Err(e) => {
+                        tracing::debug!("Node embedding failed for nid={}: {}", nid, e);
+                    },
+                }
+            }
+        });
+    }
+
     /// Get graph structure for visualization
     pub async fn get_graph_structure(
         &self,

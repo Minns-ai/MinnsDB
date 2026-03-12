@@ -1,0 +1,54 @@
+{
+  "name": "Refactoring",
+  "description": "Safe refactoring workflow: analyze, plan, execute incrementally, verify at each step",
+  "steps": [
+    {
+      "id": "analyze_current",
+      "role": "research",
+      "task": "Analyze the current code structure, dependencies, and usage patterns",
+      "depends_on": [],
+      "inputs": [],
+      "outputs": ["current_analysis", "dependency_map"]
+    },
+    {
+      "id": "recall_decisions",
+      "role": "research",
+      "task": "Search knowledge graph for past decisions about this code and related components",
+      "depends_on": [],
+      "inputs": [],
+      "outputs": ["historical_decisions"]
+    },
+    {
+      "id": "baseline_tests",
+      "role": "test",
+      "task": "Run existing tests to establish a passing baseline before changes",
+      "depends_on": [],
+      "inputs": [],
+      "outputs": ["baseline_results"]
+    },
+    {
+      "id": "plan_refactoring",
+      "role": "research",
+      "task": "Create a step-by-step refactoring plan that minimizes risk",
+      "depends_on": ["analyze_current", "recall_decisions", "baseline_tests"],
+      "inputs": ["current_analysis", "dependency_map", "historical_decisions", "baseline_results"],
+      "outputs": ["refactoring_plan"]
+    },
+    {
+      "id": "execute_refactoring",
+      "role": "code",
+      "task": "Execute the refactoring plan incrementally, committing at each safe point",
+      "depends_on": ["plan_refactoring"],
+      "inputs": ["refactoring_plan"],
+      "outputs": ["refactored_code"]
+    },
+    {
+      "id": "verify_refactoring",
+      "role": "test",
+      "task": "Run all tests to verify the refactoring preserved behavior",
+      "depends_on": ["execute_refactoring"],
+      "inputs": ["refactored_code", "baseline_results"],
+      "outputs": ["verification_results"]
+    }
+  ]
+}

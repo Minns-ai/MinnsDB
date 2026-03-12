@@ -1,0 +1,54 @@
+{
+  "name": "Bug Investigation",
+  "description": "Systematic bug investigation: reproduce, locate root cause, propose fix, verify",
+  "steps": [
+    {
+      "id": "gather_context",
+      "role": "research",
+      "task": "Gather all available context: error messages, logs, reproduction steps, affected users",
+      "depends_on": [],
+      "inputs": [],
+      "outputs": ["bug_context"]
+    },
+    {
+      "id": "recall_history",
+      "role": "research",
+      "task": "Search knowledge graph for related past bugs, fixes, and relevant architecture decisions",
+      "depends_on": [],
+      "inputs": [],
+      "outputs": ["historical_context"]
+    },
+    {
+      "id": "reproduce",
+      "role": "test",
+      "task": "Attempt to reproduce the bug with a minimal test case",
+      "depends_on": ["gather_context"],
+      "inputs": ["bug_context"],
+      "outputs": ["reproduction_result", "failing_test"]
+    },
+    {
+      "id": "locate_root_cause",
+      "role": "research",
+      "task": "Trace the bug to its root cause using the reproduction and historical context",
+      "depends_on": ["reproduce", "recall_history"],
+      "inputs": ["reproduction_result", "historical_context", "bug_context"],
+      "outputs": ["root_cause", "affected_code"]
+    },
+    {
+      "id": "implement_fix",
+      "role": "code",
+      "task": "Implement the fix for the root cause",
+      "depends_on": ["locate_root_cause"],
+      "inputs": ["root_cause", "affected_code"],
+      "outputs": ["fix_implementation"]
+    },
+    {
+      "id": "verify_fix",
+      "role": "test",
+      "task": "Verify the fix resolves the bug and doesn't introduce regressions",
+      "depends_on": ["implement_fix"],
+      "inputs": ["fix_implementation", "failing_test"],
+      "outputs": ["verification_result"]
+    }
+  ]
+}

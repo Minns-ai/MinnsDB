@@ -388,6 +388,58 @@ pub fn search_code_entities_in_graph(
     results
 }
 
+/// Build rich embedding text for a code entity node.
+///
+/// Combines kind, name, signature, doc comment, and file path into a
+/// natural-language-ish string that will match semantic search queries like
+/// "how does the AST parser work?" or "authentication handler".
+pub fn build_code_embedding_text(node: &crate::structures::GraphNode) -> String {
+    let kind = node
+        .properties
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("code");
+    let name = node
+        .properties
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let qualified = node
+        .properties
+        .get("qualified_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let file = node
+        .properties
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let lang = node
+        .properties
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let sig = node.properties.get("signature").and_then(|v| v.as_str());
+    let doc = node.properties.get("doc_comment").and_then(|v| v.as_str());
+
+    let mut text = format!("{} {} {}", lang, kind.to_lowercase(), name);
+    if qualified != name && !qualified.is_empty() {
+        text.push_str(&format!(" ({})", qualified));
+    }
+    if let Some(sig) = sig {
+        text.push_str(&format!(": {}", sig));
+    }
+    if let Some(doc) = doc {
+        // Truncate very long doc comments
+        let doc_trimmed = if doc.len() > 500 { &doc[..500] } else { doc };
+        text.push_str(&format!(". {}", doc_trimmed));
+    }
+    if !file.is_empty() {
+        text.push_str(&format!(" in {}", file));
+    }
+    text
+}
+
 /// Result of a code entity search.
 #[derive(Debug, Clone)]
 pub struct CodeEntityMatch {

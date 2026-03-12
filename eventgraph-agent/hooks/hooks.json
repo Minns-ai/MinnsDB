@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "eventgraph learn --category session_summary --from-stdin",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "eventgraph recall --brief --file $TOOL_INPUT_FILE_PATH 'relevant context for this file'",
+            "timeout": 3000
+          }
+        ]
+      }
+    ]
+  }
+}

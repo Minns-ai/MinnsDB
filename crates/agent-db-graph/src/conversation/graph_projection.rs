@@ -811,7 +811,10 @@ pub fn project_entity_state(
         // Collect ALL association edges (no valid_until filter) to find per-category newest
         let mut all_by_assoc: HashMap<String, Vec<(u64, u64, Option<u64>)>> = HashMap::new(); // assoc -> [(edge_id, vf, vu)]
         for edge in graph.get_edges_from(node_id) {
-            if let EdgeType::Association { association_type, .. } = &edge.edge_type {
+            if let EdgeType::Association {
+                association_type, ..
+            } = &edge.edge_type
+            {
                 if !association_type.contains(':') {
                     continue;
                 }

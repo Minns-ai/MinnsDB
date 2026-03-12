@@ -142,7 +142,28 @@ impl GraphEngine {
                                             "AST ingestion for {}: {} entities, {} relationships, {} concept nodes created",
                                             file_path, entity_count, rel_count, num_code_nodes
                                         );
+
+                                            // Build embedding text for each code node
+                                            let nodes_to_embed: Vec<(crate::structures::NodeId, String)> = code_nodes
+                                                .iter()
+                                                .filter_map(|&nid| {
+                                                    let node = graph.get_node(nid)?;
+                                                    // Only embed nodes without embeddings
+                                                    if !node.embedding.is_empty() {
+                                                        return None;
+                                                    }
+                                                    Some((nid, crate::code_graph::build_code_embedding_text(node)))
+                                                })
+                                                .collect();
+
                                             result.nodes_created.extend(code_nodes);
+
+                                            // Drop write lock before async embedding
+                                            drop(inference);
+
+                                            if !nodes_to_embed.is_empty() {
+                                                self.embed_nodes_async(nodes_to_embed);
+                                            }
                                         },
                                         Err(e) => {
                                             tracing::warn!(

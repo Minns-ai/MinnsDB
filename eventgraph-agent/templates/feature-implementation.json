@@ -1,0 +1,54 @@
+{
+  "name": "Feature Implementation",
+  "description": "End-to-end feature implementation: research, design, implement, test, document",
+  "steps": [
+    {
+      "id": "research_requirements",
+      "role": "research",
+      "task": "Understand the feature requirements and identify affected components",
+      "depends_on": [],
+      "inputs": [],
+      "outputs": ["requirements", "affected_components"]
+    },
+    {
+      "id": "recall_patterns",
+      "role": "research",
+      "task": "Search knowledge graph for relevant patterns, past implementations, and architecture decisions",
+      "depends_on": [],
+      "inputs": [],
+      "outputs": ["relevant_patterns"]
+    },
+    {
+      "id": "design",
+      "role": "research",
+      "task": "Design the implementation approach based on requirements and existing patterns",
+      "depends_on": ["research_requirements", "recall_patterns"],
+      "inputs": ["requirements", "affected_components", "relevant_patterns"],
+      "outputs": ["implementation_plan"]
+    },
+    {
+      "id": "implement",
+      "role": "code",
+      "task": "Implement the feature according to the design",
+      "depends_on": ["design"],
+      "inputs": ["implementation_plan"],
+      "outputs": ["implementation"]
+    },
+    {
+      "id": "write_tests",
+      "role": "code",
+      "task": "Write tests for the new feature",
+      "depends_on": ["implement"],
+      "inputs": ["implementation", "requirements"],
+      "outputs": ["tests"]
+    },
+    {
+      "id": "run_tests",
+      "role": "test",
+      "task": "Run all tests to verify the implementation",
+      "depends_on": ["write_tests"],
+      "inputs": ["tests"],
+      "outputs": ["test_results"]
+    }
+  ]
+}
