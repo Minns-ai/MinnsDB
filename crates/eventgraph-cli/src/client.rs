@@ -129,6 +129,7 @@ impl EventGraphClient {
     // Events (simple)
     // ========================================================================
 
+    #[allow(dead_code)]
     pub async fn submit_simple_event(
         &self,
         request: SimpleEventRequest,

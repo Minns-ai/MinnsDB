@@ -78,6 +78,7 @@ pub fn config_path() -> PathBuf {
 }
 
 /// Check if a config file exists in CWD or above.
+#[allow(dead_code)]
 pub fn config_exists() -> bool {
     find_config_file().is_some()
 }
