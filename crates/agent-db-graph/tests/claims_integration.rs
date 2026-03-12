@@ -2,12 +2,20 @@
 //!
 //! Requires LLM_API_KEY to be set in the environment.
 //! Run with: cargo test -p agent-db-graph --test claims_integration -- --ignored
+//!
+//! These tests gracefully skip on API quota/rate-limit errors (429).
 
 use agent_db_events::core::{EventContext, EventType};
 use agent_db_events::Event;
 use agent_db_graph::claims::EmbeddingClient;
 use agent_db_graph::{GraphEngine, GraphEngineConfig};
 use tempfile::tempdir;
+
+/// Check if an error is an API quota or rate-limit issue (HTTP 429).
+fn is_quota_error(err: &dyn std::fmt::Debug) -> bool {
+    let msg = format!("{:?}", err);
+    msg.contains("429") || msg.contains("insufficient_quota") || msg.contains("Too Many Requests")
+}
 
 /// Build a Context event with rich, factual text that the LLM can extract claims from.
 fn build_context_event(text: &str) -> Event {
@@ -65,7 +73,14 @@ async fn test_real_claims_pipeline_end_to_end() {
         ..Default::default()
     };
 
-    let engine = GraphEngine::with_config(config).await.unwrap();
+    let engine = match GraphEngine::with_config(config).await {
+        Ok(e) => e,
+        Err(e) if is_quota_error(&e) => {
+            eprintln!("Skipping: API quota exceeded — {}", e);
+            return;
+        },
+        Err(e) => panic!("Unexpected engine init error: {}", e),
+    };
 
     // Rich, factual text that should produce multiple atomic claims
     let text = "\
@@ -177,16 +192,23 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
 
     let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
 
-    // Helper: generate embedding for text using real OpenAI embeddings
-    async fn embed(client: &OpenAiEmbeddingClient, text: &str) -> Vec<f32> {
-        client
+    // Helper: generate embedding for text using real OpenAI embeddings.
+    // Returns None on quota/rate-limit errors.
+    async fn embed(client: &OpenAiEmbeddingClient, text: &str) -> Option<Vec<f32>> {
+        match client
             .embed(EmbeddingRequest {
                 text: text.to_string(),
                 context: None,
             })
             .await
-            .unwrap()
-            .embedding
+        {
+            Ok(resp) => Some(resp.embedding),
+            Err(e) if is_quota_error(&e) => {
+                eprintln!("Skipping: API quota exceeded — {}", e);
+                None
+            },
+            Err(e) => panic!("Unexpected embedding error: {}", e),
+        }
     }
 
     // Store claims WITH real embeddings
@@ -197,7 +219,9 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     ];
 
     for &(id, text) in &texts {
-        let emb = embed(&client, text).await;
+        let Some(emb) = embed(&client, text).await else {
+            return; // Quota exhausted — skip test
+        };
         let claim = DerivedClaim::new(
             id,
             text.to_string(),
@@ -216,25 +240,33 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     let config = HybridSearchConfig::default(); // Hybrid mode
 
     // "alice" → claim 1 via BM25 keyword leg
-    let query_emb = embed(&client, "alice").await;
+    let Some(query_emb) = embed(&client, "alice").await else {
+        return;
+    };
     let results = HybridClaimSearch::search("alice", &query_emb, &store, 10, &config).unwrap();
     assert!(!results.is_empty(), "'alice' should return results");
     assert_eq!(results[0].0, 1, "claim 1 should be top result for 'alice'");
 
     // "user" → claim 2
-    let query_emb = embed(&client, "user").await;
+    let Some(query_emb) = embed(&client, "user").await else {
+        return;
+    };
     let results = HybridClaimSearch::search("user", &query_emb, &store, 10, &config).unwrap();
     assert!(!results.is_empty(), "'user' should return results");
     assert_eq!(results[0].0, 2, "claim 2 should be top result for 'user'");
 
     // "rust" → claim 3
-    let query_emb = embed(&client, "rust").await;
+    let Some(query_emb) = embed(&client, "rust").await else {
+        return;
+    };
     let results = HybridClaimSearch::search("rust", &query_emb, &store, 10, &config).unwrap();
     assert!(!results.is_empty(), "'rust' should return results");
     assert_eq!(results[0].0, 3, "claim 3 should be top result for 'rust'");
 
     // "refund order" → claim 2
-    let query_emb = embed(&client, "refund order").await;
+    let Some(query_emb) = embed(&client, "refund order").await else {
+        return;
+    };
     let results =
         HybridClaimSearch::search("refund order", &query_emb, &store, 10, &config).unwrap();
     assert!(!results.is_empty(), "'refund order' should return results");
@@ -242,7 +274,9 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
 
     // Semantic search: "IDE theme preferences" should find claim 1 about dark mode
     // even though those exact words don't appear in the claim
-    let query_emb = embed(&client, "IDE theme preferences").await;
+    let Some(query_emb) = embed(&client, "IDE theme preferences").await else {
+        return;
+    };
     let results =
         HybridClaimSearch::search("IDE theme preferences", &query_emb, &store, 10, &config)
             .unwrap();
@@ -276,13 +310,20 @@ async fn test_real_embedding_generation() {
         "text-embedding-3-small".to_string(),
     );
 
-    let response = client
+    let response = match client
         .embed(agent_db_graph::claims::EmbeddingRequest {
             text: "Google was founded by Larry Page and Sergey Brin".to_string(),
             context: None,
         })
         .await
-        .unwrap();
+    {
+        Ok(r) => r,
+        Err(e) if is_quota_error(&e) => {
+            eprintln!("Skipping: API quota exceeded — {}", e);
+            return;
+        },
+        Err(e) => panic!("Unexpected embedding error: {}", e),
+    };
 
     assert_eq!(response.embedding.len(), 1536); // text-embedding-3-small = 1536 dims
     assert!(response.tokens_used > 0, "Should report token usage");
