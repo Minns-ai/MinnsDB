@@ -1,4 +1,7 @@
 //! Shared types mirroring server models (client-side, Deserialize-focused).
+//!
+//! Response structs include all server fields for forward compatibility
+//! even if not all fields are read by every command today.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

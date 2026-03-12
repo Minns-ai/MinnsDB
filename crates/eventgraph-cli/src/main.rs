@@ -18,6 +18,7 @@
 mod client;
 mod commands;
 mod config;
+#[allow(dead_code)]
 mod types;
 
 use anyhow::Result;
@@ -140,7 +141,7 @@ async fn main() -> Result<()> {
             if strategies.is_empty() {
                 println!("No strategies found for: {}", query);
             } else {
-                println!("{} {} strategies found", "Strategies:", strategies.len());
+                println!("Strategies: {} strategies found", strategies.len());
                 for s in &strategies {
                     println!();
                     println!("  {} (score: {:.2})", s.name, s.score);
