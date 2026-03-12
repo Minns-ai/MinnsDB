@@ -30,7 +30,7 @@ pub struct MemoryRetrievalConfig {
     pub tier_boost_schema: f32,
     /// Tier boost multiplier for Semantic memories.
     pub tier_boost_semantic: f32,
-    /// Enable importance-modulated decay (baseline system-inspired).
+    /// Enable importance-modulated decay.
     /// When true, Signal 4 uses importance to slow decay for frequently-accessed,
     /// highly-relevant memories.
     pub enable_importance_decay: bool,

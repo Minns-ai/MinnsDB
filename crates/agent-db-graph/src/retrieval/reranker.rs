@@ -3,7 +3,7 @@
 //! After RRF fusion produces a ranked list, the reranker re-scores the top-K
 //! candidates using a more expensive signal (e.g., LLM judgment or cross-encoder).
 //! This two-stage approach (fast recall → precise rerank) is standard in
-//! information retrieval and inspired by prior work's reranker abstraction.
+//! information retrieval.
 
 use crate::llm_client::{parse_json_from_llm, LlmClient, LlmRequest};
 use crate::memory::Memory;

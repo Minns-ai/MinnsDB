@@ -15,7 +15,7 @@ pub struct ConversationIngest {
     /// Optional queries for benchmark evaluation.
     #[serde(default)]
     pub queries: Vec<BenchmarkQuery>,
-    /// Partition key for multi-tenant isolation (à la temporal graph reference `group_id`).
+    /// Partition key for multi-tenant isolation.
     /// When set, all nodes and edges created from this ingest are tagged with
     /// this group_id, and NLQ queries scope to it automatically.
     /// Empty string or absent means global/unscoped.

@@ -6,7 +6,6 @@
 //! 3. Asks the LLM to classify each new fact as ADD/UPDATE/DELETE/NONE
 //! 4. Executes the classified operations
 //!
-//! Inspired by prior work's memory update classification pipeline.
 
 use crate::llm_client::{parse_json_from_llm, LlmClient, LlmRequest};
 use crate::memory::{Memory, MemoryId};

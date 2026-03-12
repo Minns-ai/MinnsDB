@@ -418,7 +418,7 @@ impl EvidenceSpan {
 ///
 /// Different roles get different extraction prompts to prevent cross-role
 /// pollution (e.g., extracting agent instructions as user preferences).
-/// Inspired by prior work's USER_MEMORY_EXTRACTION_PROMPT vs AGENT_MEMORY_EXTRACTION_PROMPT.
+/// Different roles use different extraction prompts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceRole {
     /// Content from a human user — extract personal facts, preferences, intentions.

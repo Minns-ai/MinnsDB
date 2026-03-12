@@ -295,7 +295,7 @@ pub struct GraphNode {
     /// Last update timestamp
     pub updated_at: Timestamp,
 
-    /// Partition key for multi-tenant isolation (à la temporal graph reference `group_id`).
+    /// Partition key for multi-tenant isolation.
     /// All queries scope to this value when set. Empty string means global/unscoped.
     #[serde(default)]
     pub group_id: String,
@@ -562,7 +562,7 @@ impl NodeType {
 
 /// Graph edge representing relationships between nodes.
 ///
-/// Supports a **bi-temporal** model (inspired by temporal graph reference/reference):
+/// Supports a **bi-temporal** model:
 ///
 /// | Dimension       | Fields                    | Meaning |
 /// |-----------------|---------------------------|---------|
@@ -612,7 +612,7 @@ pub struct GraphEdge {
     /// Confidence in this relationship (0.0 to 1.0)
     pub confidence: f32,
 
-    /// Partition key for multi-tenant isolation (à la temporal graph reference `group_id`).
+    /// Partition key for multi-tenant isolation.
     /// Matches the source node's `group_id`. Empty string means global/unscoped.
     #[serde(default)]
     pub group_id: String,
