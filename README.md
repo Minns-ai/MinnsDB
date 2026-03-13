@@ -5,8 +5,8 @@
 <h1 align="center">MinnsDB</h1>
 
 <p align="center">
-  <strong>A graph database that learns from events.</strong><br>
-  Events go in. A knowledge graph grows. Episodes form. Strategies emerge.
+  <strong>A graph database that learns from conversations.</strong><br>
+  Send messages in. Ask questions in plain English. Get answers from the graph.
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@ cargo run --release -p minnsdb-server
 ```
 
 ```bash
-# Ingest a conversation
+# 1. Send in a conversation
 curl -X POST http://localhost:3000/api/conversations/ingest \
   -H 'Content-Type: application/json' \
   -d '{
@@ -32,19 +32,26 @@ curl -X POST http://localhost:3000/api/conversations/ingest \
       "session_id": "s1",
       "messages": [
         {"role": "user", "content": "I just moved from London to Berlin for a new job at Stripe"},
-        {"role": "assistant", "content": "Congrats on the move and the new role at Stripe!"}
+        {"role": "assistant", "content": "Congrats on the move and the new role at Stripe!"},
+        {"role": "user", "content": "Thanks! I prefer working remotely though"},
+        {"role": "assistant", "content": "Good to know. Remote work is great in Berlin."}
       ]
     }]
   }'
 
-# Query the graph
-curl -X POST http://localhost:3000/api/conversations/query \
+# 2. Ask questions in natural language
+curl -X POST http://localhost:3000/api/nlq \
   -H 'Content-Type: application/json' \
-  -d '{"query": "Where does the user live?"}'
-# → {"answer": "Berlin", "confidence": 0.95, "source": "graph_projection"}
+  -d '{"query": "Where does the user live?", "agent_id": 1}'
+# → {"answer": "Berlin", "confidence": 0.95, "intent": "State"}
+
+curl -X POST http://localhost:3000/api/nlq \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "What are their work preferences?", "agent_id": 1}'
+# → {"answer": "prefers remote work", "confidence": 0.9, "intent": "Preference"}
 ```
 
-That single ingest created graph nodes for `user`, `London`, `Berlin`, `Stripe` with typed edges (`location:lives_in`, `work:employed_at`), temporal validity (`London` edge superseded, `Berlin` active), and extracted claims indexed for hybrid search. The old `London` fact isn't deleted — it gets a `valid_until` timestamp and becomes history.
+Behind that single ingest, MinnsDB ran LLM compaction to extract facts (`lives_in: Berlin`, `employed_at: Stripe`, `prefers: remote work`), created typed graph edges with temporal validity (the old `London` edge gets a `valid_until` timestamp — never deleted, just superseded), and indexed everything for natural language queries. No schema definition needed.
 
 ---
 
@@ -57,44 +64,86 @@ That single ingest created graph nodes for `user`, `London`, `Berlin`, `Stripe` 
 | Handles contradictions | Last write wins | Last write wins | Last write wins | **Confidence scoring** — claims compete |
 | Understands time | No | Manual | No | **Built-in** — every edge has `valid_from`/`valid_until` |
 | Learns from outcomes | No | No | No | **Yes** — Q-learning on edge weights |
+| Accepts raw conversation | No | No | No | **Yes** — LLM compaction extracts facts automatically |
 | External deps | Vector service | JVM + Cypher | Redis/Postgres | **None** — single binary, embedded ReDB |
 
 ---
 
 ## How it works
 
-### Unified pipeline
-
-Two entry points, same pipeline. Structured events (`POST /api/events`) and raw conversation text (`POST /api/conversations/ingest`) both flow through:
+### Primary flow: Conversations in, answers out
 
 ```
-  Event or Conversation
-          │
-          ▼
-  ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
-  │    GRAPH       │     │   EPISODE      │     │    CLAIMS      │
-  │  CONSTRUCTION  │────▶│  DETECTION     │────▶│  EXTRACTION    │
-  │                │     │                │     │                │
-  │ NER entities   │     │ Temporal gaps  │     │ LLM-driven     │
-  │ Typed edges    │     │ Context switch │     │ Subject/pred/  │
-  │ OWL/RDFS       │     │ Salience score │     │ object triples │
-  │ enforcement    │     │                │     │ BM25 + vector  │
-  └───────────────┘     └───────────────┘     │ indexing       │
-                                               └───────┬───────┘
-                          ┌─────────────────────────────┤
-                          ▼                             ▼
-                 ┌───────────────┐            ┌───────────────┐
-                 │   MEMORY       │            │   STRATEGY     │
-                 │   FORMATION    │            │   EXTRACTION   │
-                 │   [WIP]        │            │   [WIP]        │
-                 │                │            │                │
-                 │ Episodic →     │            │ Pattern mining │
-                 │ Semantic →     │            │ Q-value RL on  │
-                 │ Schema tiers   │            │ edge weights   │
-                 │ Consolidation  │            │ Context-action │
-                 │ Half-life decay│            │ mappings       │
-                 └───────────────┘            └───────────────┘
+  POST /api/conversations/ingest          POST /api/nlq
+  POST /api/messages                      POST /api/conversations/query
+         │                                         │
+         ▼                                         ▼
+  ┌─────────────────┐                    ┌──────────────────┐
+  │  LLM COMPACTION  │                    │  NLQ PIPELINE     │
+  │                  │                    │                   │
+  │  Raw messages →  │                    │  Question →       │
+  │  Facts extracted │                    │  Intent classify  │
+  │  Goals detected  │                    │  Entity extract   │
+  │  Summaries built │                    │  Graph projection │
+  └────────┬─────────┘                    │  Answer synthesis │
+           ▼                              └──────────────────┘
+  ┌─────────────────┐                              ▲
+  │  GRAPH EDGES     │                              │
+  │                  │                    walks edges with
+  │  Typed edges     │                    temporal filtering
+  │  Temporal        │──────────────────────────────┘
+  │  validity        │
+  │  OWL/RDFS        │
+  │  enforcement     │
+  └────────┬─────────┘
+           ▼
+  ┌─────────────────┐     ┌───────────────┐     ┌───────────────┐
+  │ EPISODE          │     │  MEMORY        │     │  STRATEGY      │
+  │ DETECTION        │     │  FORMATION     │     │  EXTRACTION    │
+  │                  │     │  [WIP]         │     │  [WIP]         │
+  │ Temporal gaps    │     │ Consolidation  │     │ Pattern mining │
+  │ Context switch   │     │ Half-life decay│     │ Q-value RL     │
+  │ Salience scoring │     │ Schema tiers   │     │                │
+  └─────────┬────────┘     └───────────────┘     └───────────────┘
+            ▼
+  ┌─────────────────┐
+  │ CLAIMS            │
+  │ EXTRACTION        │
+  │                   │
+  │ Subject/pred/obj  │
+  │ BM25 + vector     │
+  │ indexing           │
+  └───────────────────┘
 ```
+
+### Conversation ingestion
+
+Two ways to send data in:
+
+**Batch ingest** (`POST /api/conversations/ingest`) — send full sessions with multiple messages. The LLM compaction pass extracts facts, goals, and procedural summaries, then creates typed graph edges automatically. Pre-creates participant entity nodes and runs the full pipeline.
+
+**Streaming messages** (`POST /api/messages`) — send individual messages as they arrive. Messages are buffered per conversation (default buffer size: 6, timeout: 30s). When the buffer fills or times out, compaction runs automatically with a rolling summary for context continuity.
+
+Both require an LLM API key (`LLM_API_KEY` or `OPENAI_API_KEY`).
+
+### Natural language queries
+
+The NLQ pipeline resolves questions against the graph in 7 steps:
+
+1. **Intent classification** — categorizes the question (State, Preference, EntitySummary, Numeric, RelationshipPath, FindNeighbors, FindPath, TemporalChain, Ranking, Aggregation, etc.)
+2. **Entity extraction** — 6 strategies: code identifiers, quoted strings, hash IDs, keyword-typed, capitalized words, dedup
+3. **Entity resolution** — exact index → BM25 → fuzzy → n-gram matching
+4. **Template matching** — maps intent + entities to a graph query template
+5. **Query building + validation** — instantiates query, validates node existence, auto-repairs
+6. **Graph projection** — walks edges with temporal filtering. For state queries: finds latest edge where `valid_until = None`
+7. **Answer formatting** — graph results → human-readable answer with confidence score
+
+Conversation-aware query types:
+- **State** — "Where does Alice live?" → walks `location:lives_in` edges, returns current
+- **Preference** — "What does Bob prefer?" → walks `preference:*` edges
+- **EntitySummary** — "Tell me about Alice" → aggregates all current edges for entity
+- **Numeric** — "What's the net balance?" → walks `financial:*` edges, computes sum
+- **RelationshipPath** — "How are Alice and Bob connected?" → shortest path through relationship edges
 
 ### Graph as source of truth
 
@@ -117,9 +166,9 @@ Property behaviors are defined in OWL/RDFS Turtle files (`data/ontology/*.ttl`),
 
 Sub-property expansion is automatic — querying `relationship` also matches `colleague`, `friend`, `sibling`, `spouse`.
 
-### Event types
+### Advanced: Direct event API
 
-The system handles 8 event types:
+For programmatic graph building beyond conversations, MinnsDB accepts 8 structured event types via `POST /api/events`:
 
 | Type | What it captures |
 |------|-----------------|
@@ -132,27 +181,29 @@ The system handles 8 event types:
 | `CodeReview` | PR review actions with file/line context |
 | `CodeFile` | Source file snapshots for AST parsing |
 
+Events flow through the same pipeline: Graph Construction → Episode Detection → Claims Extraction → Memory Formation → Strategy Extraction.
+
 ---
 
 ## What's stable, what's WIP
 
 | Component | Status | |
 |-----------|--------|-|
+| Conversation ingestion + LLM compaction | **Stable** | Multi-turn compaction, fact/goal/procedural extraction, rolling summaries, buffered streaming |
+| Natural language queries (NLQ) | **Stable** | 10+ intent types, 6 entity extraction strategies, graph projection with structured memory fallback |
 | Graph construction + typed edges + temporal validity | **Stable** | NER entity extraction, ontology enforcement, `valid_from`/`valid_until` on all edges |
 | Episode detection | **Stable** | Sliding window, temporal gap + context switch boundaries, salience scoring |
 | Claims extraction + hybrid search | **Stable** | LLM-driven subject/predicate/object facts, BM25 + vector search, confidence scoring |
 | Graph algorithms | **Stable** | Louvain communities, label propagation, personalized PageRank, betweenness/closeness centrality, temporal reachability, causal paths |
-| Code intelligence | **Stable** | Tree-sitter AST parsing for Rust, Python, TypeScript, JavaScript, Go. Extracts functions, structs, traits, enums, imports. Structural code graph with relationship edges |
-| Natural language queries | **Stable** | Graph projection with structured memory fallback, optional LLM hint |
-| Conversation ingestion + compaction | **Stable** | Multi-turn LLM compaction, fact extraction, entity resolution, rolling summaries |
+| Code intelligence | **Stable** | Tree-sitter AST parsing for Rust, Python, TypeScript, JavaScript, Go |
 | Structured memory | **Stable** | Ledgers, state machines, preference vectors, tree structures — all backed by graph edges |
 | Workflows | **Stable** | DAG-based workflow engine with step state tracking, feedback, diff-based updates |
 | Persistence + export/import | **Stable** | ReDB (20 tables), delta writes, streaming binary v2 export/import |
 | Write lanes + read gate | **Stable** | Sharded write pipeline with backpressure, semaphore-based read concurrency |
 | Memory formation | **WIP** | Episodic/semantic/schema tiers implemented. Consolidation heuristics and tier promotion under active development |
-| Strategy extraction | **WIP** | Pattern mining and context-action mappings implemented. RL on edge weights is experimental (Phase 1: Bayesian prior <5 outcomes, Phase 2: EMA Q-values) |
-| Energy-based world model | **WIP** | ~30K param EBM critic, contrastive learning. CPU-only (<100us/score). Enable with `ENABLE_WORLD_MODEL=true`. Experimental |
-| LLM planning | **WIP** | Generator + critic architecture. Strategy/action candidate generation with validation and repair. Experimental |
+| Strategy extraction | **WIP** | Pattern mining and context-action mappings implemented. RL on edge weights is experimental |
+| Energy-based world model | **WIP** | ~30K param EBM critic, contrastive learning. CPU-only (<100us/score). Enable with `ENABLE_WORLD_MODEL=true` |
+| LLM planning | **WIP** | Generator + critic architecture. Strategy/action candidate generation with validation and repair |
 
 ---
 
@@ -186,16 +237,12 @@ docker build --build-arg SERVICE_PROFILE=free -t minnsdb:free .
 
 ```rust
 use agent_db_graph::{GraphEngine, GraphEngineConfig};
-use agent_db_events::{Event, EventType, ActionOutcome};
 
 let engine = GraphEngine::new().await?;
 
+// Conversation ingestion is the primary interface — but you can also
+// work directly with the graph engine for programmatic use:
 let event = Event {
-    id: generate_event_id(),
-    timestamp: current_timestamp(),
-    agent_id: 1,
-    agent_type: "ai-debugger".to_string(),
-    session_id: 42,
     event_type: EventType::Action {
         action_name: "fix_null_error".to_string(),
         parameters: json!({"fix": "add_null_check"}),
@@ -204,16 +251,34 @@ let event = Event {
         },
         duration_ns: 1_500_000_000,
     },
-    context: your_context,
     ..Default::default()
 };
 
 engine.process_event(event).await?;
-
-let memories = engine.get_agent_memories(1, 10).await;
-let strategies = engine.get_agent_strategies(1, 10).await;
-let suggestions = engine.get_next_action_suggestions(context_hash, None, 5).await?;
 ```
+
+---
+
+## REST API
+
+**Base URL:** `http://localhost:3000`
+
+Full documentation: **[docs.minns.ai](https://docs.minns.ai)**
+
+60+ endpoints across these groups:
+
+| Group | Key Endpoints |
+|-------|--------------|
+| **Conversations** | `POST /api/conversations/ingest` — batch ingest sessions (requires LLM)<br>`POST /api/messages` — single message with buffering + auto-compaction |
+| **Queries** | `POST /api/nlq` — natural language query against graph<br>`POST /api/conversations/query` — conversation-style query<br>`POST /api/search` — unified keyword/semantic/hybrid search<br>`POST /api/claims/search` — semantic claim search<br>`POST /api/code/search` — structural code search |
+| **Events** | `POST /api/events` — full pipeline processing<br>`POST /api/events/simple` — simplified event<br>`POST /api/events/state-change` — typed state transitions<br>`POST /api/events/transaction` — typed financial transactions<br>`POST /api/events/code-file` — source file AST analysis<br>`POST /api/events/code-review` — code review events<br>`GET /api/events` — list recent events<br>`GET /api/episodes` — list completed episodes |
+| **Memory & Strategy** | `GET /api/memories/agent/:id` — agent memories<br>`POST /api/memories/context` — context similarity search<br>`GET /api/strategies/agent/:id` — learned strategies<br>`GET /api/suggestions` — next-action recommendations |
+| **Graph & Analytics** | `GET /api/graph` — graph structure<br>`GET /api/stats` — system statistics<br>`GET /api/analytics` — components, clustering, modularity<br>`GET /api/communities` — Louvain / label propagation<br>`GET /api/centrality` — PageRank, betweenness, closeness<br>`GET /api/causal-path` — causal paths between nodes<br>`GET /api/reachability` — temporal reachability |
+| **Structured Memory** | `POST /api/structured-memory` — upsert<br>`POST .../ledger/:key/append` — append ledger entry<br>`POST .../state/:key/transition` — state machine transition<br>`POST .../preference/:key/update` — preference vector update<br>`POST .../tree/:key/add-child` — tree structure |
+| **Workflows** | `POST /api/workflows` — create DAG workflow<br>`POST .../steps/:step_id/transition` — step state transition<br>`POST .../feedback` — workflow feedback |
+| **Agents** | `POST /api/agents/register` — register agent node<br>`GET /api/agents` — list agents by group |
+| **Planning** | `POST /api/planning/strategies` — generate candidates [WIP]<br>`POST /api/planning/plan` — full planning pipeline [WIP] |
+| **Admin** | `POST /api/admin/export` — streaming binary export<br>`POST /api/admin/import` — import (replace/merge)<br>`GET /api/health` — health + write lane + read gate metrics |
 
 ---
 
@@ -223,37 +288,25 @@ let suggestions = engine.get_next_action_suggestions(context_hash, None, 5).awai
 minnsdb/
 ├── crates/
 │   ├── agent-db-core/       # Type aliases: EventId, AgentId, Timestamp, NodeId, ContextHash
-│   │                        # Trait definitions: Database, Storage, GraphEngine, MemoryEngine
 │   ├── agent-db-events/     # Event struct, 8 EventType variants, EventContext, ActionOutcome
-│   │                        # Event buffer, validation, causality chain checking
 │   ├── agent-db-storage/    # ReDB backend (20 tables), WAL, versioned serialization
-│   │                        # Tables: graph nodes/edges, memories, strategies, claims,
-│   │                        #         transition stats, decision traces, world model state
 │   ├── agent-db-graph/      # GraphEngine — the main orchestrator
-│   │                        # Graph structures (SlotVec arena, typed edges, temporal validity)
+│   │                        # Conversation compaction, NLQ pipeline, graph projection
 │   │                        # Episode detection, memory formation, strategy extraction
-│   │                        # Claims (LLM extraction, BM25+vector search, embedding queue)
-│   │                        # Conversation compaction, NLQ, graph projection
+│   │                        # Claims (LLM extraction, BM25+vector search)
 │   │                        # Algorithms: Louvain, PageRank, centrality, reachability
 │   │                        # Code graph, workflow engine, structured memory
-│   │                        # Ontology (OWL/RDFS from TTL), graph pruning, property indexing
+│   │                        # Ontology (OWL/RDFS from TTL), graph pruning
 │   ├── agent-db-ast/        # Tree-sitter AST parsing: Rust, Python, TS, JS, Go
-│   │                        # Extracts functions, structs, traits, enums, imports
-│   │                        # Diff parsing for PR reviews
 │   └── agent-db-ner/        # HTTP client to external NER service
-│                             # Async extraction queue, ReDB-backed feature store
 ├── ml/
 │   ├── agent-db-world-model/  # Energy-based model critic (~30K params) [WIP]
-│   │                          # Contrastive learning, layer-wise scoring
-│   │                          # Top-down (planning → prediction) + bottom-up (reality → error)
 │   └── agent-db-planning/     # LLM-based generator [WIP]
-│                               # Strategy/action candidate generation
-│                               # Validation, repair, selection (accept/revise/reject)
 ├── server/                  # Axum HTTP server, 60+ endpoints
 │   ├── src/handlers/        # 18 handler modules
 ├── data/ontology/           # 9 OWL/RDFS Turtle files defining property behaviors
 ├── examples/                # 6 Rust examples (basic → end-to-end pipeline)
-└── tests/                   # Integration test suite (9 tests, 700 lines)
+└── tests/                   # Integration test suite
 ```
 
 ### Key internals
@@ -270,29 +323,6 @@ minnsdb/
 
 ---
 
-## REST API
-
-**Base URL:** `http://localhost:3000`
-
-Full documentation: **[docs.minns.ai](https://docs.minns.ai)**
-
-60+ endpoints across these groups:
-
-| Group | Key Endpoints |
-|-------|--------------|
-| **Events** | `POST /api/events` — full pipeline processing<br>`POST /api/events/simple` — simplified event<br>`POST /api/events/state-change` — typed state transitions<br>`POST /api/events/transaction` — typed financial transactions<br>`POST /api/events/code-file` — source file AST analysis<br>`POST /api/events/code-review` — code review events<br>`GET /api/events` — list recent events<br>`GET /api/episodes` — list completed episodes |
-| **Conversations** | `POST /api/conversations/ingest` — batch ingest sessions (requires LLM)<br>`POST /api/messages` — single message with buffering + auto-compaction |
-| **Queries** | `POST /api/nlq` — natural language query against graph<br>`POST /api/conversations/query` — conversation-style query<br>`POST /api/search` — unified keyword/semantic/hybrid search<br>`POST /api/claims/search` — semantic claim search<br>`POST /api/code/search` — structural code search |
-| **Memory & Strategy** | `GET /api/memories/agent/:id` — agent memories<br>`POST /api/memories/context` — context similarity search<br>`GET /api/strategies/agent/:id` — learned strategies<br>`GET /api/suggestions` — next-action recommendations |
-| **Graph & Analytics** | `GET /api/graph` — graph structure<br>`GET /api/stats` — system statistics<br>`GET /api/analytics` — components, clustering, modularity<br>`GET /api/communities` — Louvain / label propagation<br>`GET /api/centrality` — PageRank, betweenness, closeness<br>`GET /api/causal-path` — causal paths between nodes<br>`GET /api/reachability` — temporal reachability |
-| **Structured Memory** | `POST /api/structured-memory` — upsert<br>`POST .../ledger/:key/append` — append ledger entry<br>`POST .../state/:key/transition` — state machine transition<br>`POST .../preference/:key/update` — preference vector update<br>`POST .../tree/:key/add-child` — tree structure |
-| **Workflows** | `POST /api/workflows` — create DAG workflow<br>`POST .../steps/:step_id/transition` — step state transition<br>`POST .../feedback` — workflow feedback |
-| **Agents** | `POST /api/agents/register` — register agent node<br>`GET /api/agents` — list agents by group |
-| **Planning** | `POST /api/planning/strategies` — generate candidates [WIP]<br>`POST /api/planning/plan` — full planning pipeline [WIP] |
-| **Admin** | `POST /api/admin/export` — streaming binary export<br>`POST /api/admin/import` — import (replace/merge)<br>`GET /api/health` — health + write lane + read gate metrics |
-
----
-
 ## Configuration
 
 | Variable | Default | Description |
@@ -301,16 +331,16 @@ Full documentation: **[docs.minns.ai](https://docs.minns.ai)**
 | `SERVER_PORT` | `3000` | Bind port |
 | `RUST_LOG` | `info` | Log level |
 | `SERVICE_PROFILE` | `normal` | `normal` or `free` (controls cache sizes + limits) |
+| `LLM_API_KEY` | - | OpenAI-compatible key (required for conversation ingest + claims) |
+| `LLM_MODEL` | `gpt-4o-mini` | LLM model for claims extraction |
+| `NLQ_HINT_MODEL` | `gpt-4o-mini` | LLM model for NLQ hints |
+| `SYNTHESIS_MODEL` | `gpt-4.1` | LLM model for answer synthesis |
 | `WRITE_LANE_COUNT` | `num_cpus/2` | Write lane concurrency (clamped 2-8) |
 | `WRITE_LANE_CAPACITY` | `128` | Per-lane queue depth |
 | `READ_GATE_PERMITS` | `num_cpus*2` | Concurrent read permits |
 | `REDB_CACHE_SIZE_MB` | `256` | ReDB page cache (64 in free profile) |
 | `NER_SERVICE_URL` | `http://localhost:8081/ner` | External NER service (full URL) |
 | `NER_REQUEST_TIMEOUT_MS` | `5000` | NER timeout |
-| `LLM_API_KEY` | - | OpenAI-compatible key (required for conversation ingest + claims) |
-| `LLM_MODEL` | `gpt-4o-mini` | LLM model for claims extraction |
-| `NLQ_HINT_MODEL` | `gpt-4o-mini` | LLM model for NLQ hints |
-| `SYNTHESIS_MODEL` | `gpt-4.1` | LLM model for answer synthesis |
 | `PLANNING_LLM_API_KEY` | falls back to `LLM_API_KEY` | Separate key for planning |
 | `ENABLE_WORLD_MODEL` | `false` | Enable energy-based world model [WIP] |
 | `WORLD_MODEL_MODE` | `Disabled` | `Shadow` / `ScoringOnly` / `Full` |
