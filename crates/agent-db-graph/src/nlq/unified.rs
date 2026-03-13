@@ -31,6 +31,8 @@ fn is_operational_noise(text: &str) -> bool {
 /// memory summaries instead of showing raw IDs. Filters low-score noise.
 /// `superseded_targets` contains lowercase entity names that have been
 /// temporally superseded — claims mentioning them are filtered out.
+/// `superseded_edges` maps superseded target names to their edge categories,
+/// allowing more precise filtering (only filter if claim category matches).
 pub fn format_unified_results(
     fused: &[(u64, f32)],
     _question: &str,
@@ -104,12 +106,18 @@ pub fn format_unified_results(
 
             // Format state facts as natural language (generic, no hardcoded categories)
             let cat = assoc.split(':').next().unwrap_or(assoc);
+            // Add temporal context (valid_from) for recency awareness
+            let since_suffix = slot.valid_from.map(|vf| {
+                // Format as relative hint: show epoch nanos as a date-like marker
+                format!(" (since epoch {})", vf)
+            }).unwrap_or_default();
+
             let text = if assoc.starts_with("state:") {
                 // Legacy "state:*" format
-                format!("Current {}: {}", attr, value)
+                format!("Current {}: {}{}", attr, value, since_suffix)
             } else if slot.target_name != value && !slot.target_name.is_empty() {
                 // Relationship-like: "{entity} {predicate} {target}"
-                format!("{} {} {}", entity_name, attr, slot.target_name)
+                format!("{} {} {}{}", entity_name, attr, slot.target_name, since_suffix)
             } else {
                 // Generic: "Category: value"
                 let cat_display = {
@@ -119,7 +127,7 @@ pub fn format_unified_results(
                         Some(first) => first.to_uppercase().to_string() + c.as_str(),
                     }
                 };
-                format!("{}: {}", cat_display, value)
+                format!("{}: {}{}", cat_display, value, since_suffix)
             };
             let key = text.to_lowercase();
             if seen_texts.insert(key) {
@@ -149,13 +157,63 @@ pub fn format_unified_results(
         };
 
         let item = match &node.node_type {
-            NodeType::Claim { claim_text, .. } => {
-                // Skip claims that reference superseded entities (temporal filter)
+            NodeType::Claim {
+                claim_text,
+                claim_id: _,
+                ..
+            } => {
+                // Skip claims that reference superseded entities (temporal filter).
+                // Use edge category to reduce false positives: only filter if
+                // the claim's category matches a superseded edge's category,
+                // OR if the claim has no category (conservative — filter it).
                 if !superseded_targets.is_empty() {
                     let text_lower = claim_text.to_lowercase();
-                    let is_stale = superseded_targets
+                    // Collect categories of superseded edges targeting this claim's entities
+                    let superseded_categories: HashSet<String> = graph
+                        .edges
                         .iter()
-                        .any(|t| t.len() >= 3 && text_lower.contains(t.as_str()));
+                        .filter_map(|(_eid, edge)| {
+                            if edge.valid_until.is_some() {
+                                if let crate::structures::EdgeType::Association {
+                                    association_type,
+                                    ..
+                                } = &edge.edge_type
+                                {
+                                    association_type.split(':').next().map(|c| c.to_lowercase())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    let is_stale = superseded_targets.iter().any(|t| {
+                        if t.len() >= 3 && text_lower.contains(t.as_str()) {
+                            // Check if claim's edge category matches a superseded category
+                            let claim_cat: Option<String> = graph
+                                .get_edges_to(node_id)
+                                .iter()
+                                .find_map(|e| {
+                                    if let crate::structures::EdgeType::Association {
+                                        association_type,
+                                        ..
+                                    } = &e.edge_type
+                                    {
+                                        association_type.split(':').next().map(|c| c.to_lowercase())
+                                    } else {
+                                        None
+                                    }
+                                });
+                            match claim_cat {
+                                Some(cat) => superseded_categories.contains(&cat),
+                                None => true, // No category info → conservative: filter
+                            }
+                        } else {
+                            false
+                        }
+                    });
                     if is_stale {
                         continue;
                     }
@@ -228,9 +286,11 @@ pub fn format_unified_results(
         }
     }
 
-    // Claims and entity results (capped at 10 for focused context)
+    // Claims and entity results — cap more aggressively when state facts
+    // already provide authoritative context (reduces stale noise)
     if !content_items.is_empty() {
-        let limit = content_items.len().min(10);
+        let max_facts = if state_facts.is_empty() { 10 } else { 7 };
+        let limit = content_items.len().min(max_facts);
         let mut section = vec!["Known facts:".to_string()];
         for item in content_items.iter().take(limit) {
             section.push(format!("- {}", item.text));
