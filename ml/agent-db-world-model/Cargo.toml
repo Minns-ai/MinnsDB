@@ -2,7 +2,7 @@
 name = "agent-db-world-model"
 version = "0.1.0"
 edition = "2021"
-description = "Energy-based predictive coding world model (Critic) for EventGraphDB"
+description = "Energy-based predictive coding world model (Critic) for MinnsDB"
 
 [dependencies]
 agent-db-core = { path = "../../crates/agent-db-core" }

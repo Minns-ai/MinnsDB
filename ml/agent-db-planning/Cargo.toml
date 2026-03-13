@@ -2,7 +2,7 @@
 name = "agent-db-planning"
 version = "0.1.0"
 edition = "2021"
-description = "Generative strategy/action planning engine for EventGraphDB"
+description = "Generative strategy/action planning engine for MinnsDB"
 
 [dependencies]
 agent-db-core = { path = "../../crates/agent-db-core" }

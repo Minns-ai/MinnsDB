@@ -1,4 +1,4 @@
-//! Energy-based predictive coding world model (Critic) for EventGraphDB.
+//! Energy-based predictive coding world model (Critic) for MinnsDB.
 //!
 //! This crate implements a **Generator + Critic** architecture's Critic component:
 //! an energy-based model (EBM) that scores configurations of (policy, strategy,

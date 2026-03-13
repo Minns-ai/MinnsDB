@@ -1414,7 +1414,13 @@ fn ensure_concept_node(graph: &mut agent_db_graph::Graph, name: &str) -> u64 {
         concept_type: ConceptType::NamedEntity,
         confidence: 1.0,
     });
-    graph.add_node(node).expect("Failed to create concept node")
+    match graph.add_node(node) {
+        Ok(nid) => nid,
+        Err(e) => {
+            tracing::error!("Failed to create concept node '{name}': {e}");
+            0
+        }
+    }
 }
 
 /// Resolve the current step state by walking `workflow:step_state` edges.

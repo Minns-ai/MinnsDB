@@ -168,16 +168,16 @@ setup-dev: install-tools
 
 # Container commands
 docker-build:
-	docker build --build-arg SERVICE_PROFILE=normal -t eventgraphdb:latest .
+	docker build --build-arg SERVICE_PROFILE=normal -t minnsdb:latest .
 
 docker-build-free:
-	docker build --build-arg SERVICE_PROFILE=free -t eventgraphdb:free .
+	docker build --build-arg SERVICE_PROFILE=free -t minnsdb:free .
 
 docker-run:
-	docker run -it --rm -v $(PWD)/test_data:/data eventgraphdb:latest
+	docker run -it --rm -v $(PWD)/test_data:/data minnsdb:latest
 
 docker-run-free:
-	docker run -it --rm -v $(PWD)/test_data:/data eventgraphdb:free
+	docker run -it --rm -v $(PWD)/test_data:/data minnsdb:free
 
 docker-bench:
 	docker run -it --rm agent-db:latest cargo bench

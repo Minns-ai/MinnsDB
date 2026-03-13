@@ -51,7 +51,7 @@ impl<'a> GraphAnalytics<'a> {
             modularity: self.modularity()?,
             community_count: self.community_count()?,
 
-            // EventGraphDB-specific learning metrics
+            // MinnsDB-specific learning metrics
             learning_metrics: self.calculate_learning_metrics()?,
         })
     }
@@ -284,7 +284,7 @@ impl<'a> GraphAnalytics<'a> {
         Ok(all_centralities.top_combined(n))
     }
 
-    /// Calculate learning-specific metrics for EventGraphDB
+    /// Calculate learning-specific metrics for MinnsDB
     fn calculate_learning_metrics(&self) -> GraphResult<LearningMetrics> {
         // Count different node types
         let event_nodes = self.graph.get_nodes_by_type("Event");
@@ -358,7 +358,7 @@ pub struct GraphMetrics {
     pub modularity: f32,
     pub community_count: usize,
 
-    // Learning metrics (EventGraphDB-specific)
+    // Learning metrics (MinnsDB-specific)
     pub learning_metrics: LearningMetrics,
 }
 

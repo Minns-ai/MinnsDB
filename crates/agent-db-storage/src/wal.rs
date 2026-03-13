@@ -142,16 +142,25 @@ impl WriteAheadLog {
         })
     }
 
+    /// Current time as nanoseconds since epoch.  Uses `unwrap_or_default` so a
+    /// misconfigured system clock (before 1970) yields 0 instead of a panic,
+    /// and converts via milliseconds to stay within u64 range.
+    #[inline]
+    fn timestamp_nanos() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+            * 1_000_000
+    }
+
     /// Log event storage operation
     pub async fn log_store_event(
         &self,
         event: &Event,
         compressed_data: Vec<u8>,
     ) -> StorageResult<()> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let timestamp = Self::timestamp_nanos();
 
         let entry = WalEntry::StoreEvent {
             event_id: event.id,
@@ -164,10 +173,7 @@ impl WriteAheadLog {
 
     /// Log event deletion operation
     pub async fn log_delete_event(&self, event_id: EventId) -> StorageResult<()> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let timestamp = Self::timestamp_nanos();
 
         let entry = WalEntry::DeleteEvent {
             event_id,
@@ -179,10 +185,7 @@ impl WriteAheadLog {
 
     /// Create checkpoint
     pub async fn checkpoint(&self, last_event_id: EventId) -> StorageResult<()> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let timestamp = Self::timestamp_nanos();
 
         let entry = WalEntry::Checkpoint {
             timestamp,
@@ -205,10 +208,7 @@ impl WriteAheadLog {
 
     /// Write WAL entry
     async fn write_entry(&self, entry: WalEntry) -> StorageResult<()> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let timestamp = Self::timestamp_nanos();
 
         // Get next sequence number
         let sequence = {
@@ -273,8 +273,13 @@ impl WriteAheadLog {
             let serialized = rmp_serde::to_vec(&entry)
                 .map_err(|e| StorageError::Serialization(e.to_string()))?;
 
-            // Write length prefix
-            let len = serialized.len() as u32;
+            // Write length prefix (reject entries > 4 GiB)
+            let len: u32 = serialized.len().try_into().map_err(|_| {
+                StorageError::Serialization(format!(
+                    "WAL entry too large: {} bytes",
+                    serialized.len()
+                ))
+            })?;
             writer
                 .write_all(&len.to_le_bytes())
                 .map_err(StorageError::Io)?;

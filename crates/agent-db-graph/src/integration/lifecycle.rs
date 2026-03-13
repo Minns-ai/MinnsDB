@@ -214,8 +214,9 @@ impl GraphEngine {
                 if let Some(ref graph_store) = engine.graph_store {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() as u64;
+                        .unwrap_or_default()
+                        .as_millis() as u64
+                        * 1_000_000; // convert ms→ns without u128 truncation risk
 
                     let pruner = crate::graph_pruning::GraphPruner::new(
                         engine.config.pruning_config.clone(),

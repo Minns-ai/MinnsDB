@@ -81,7 +81,8 @@ pub async fn register_agent(
         let graph = inf.graph_mut();
 
         // Find or create Agent node
-        let agent_nid = find_or_create_agent(graph, &req.agent_id, &req.group_id, &capabilities);
+        let agent_nid = find_or_create_agent(graph, &req.agent_id, &req.group_id, &capabilities)
+            .map_err(|e| ApiError::Internal(format!("Failed to create agent node: {e}")))?;
 
         // Update last_seen timestamp and capabilities
         if let Some(node) = graph.get_node_mut(agent_nid) {
@@ -123,7 +124,7 @@ pub async fn register_agent(
                     .insert("repository".to_string(), json!(repo_name));
                 node.properties
                     .insert("content_type".to_string(), json!("repository"));
-                graph.add_node(node).expect("Failed to create repo node")
+                graph.add_node(node).map_err(|e| ApiError::Internal(format!("Failed to create repo node: {e}")))?
             };
 
             // Check if edge already exists
@@ -273,7 +274,7 @@ fn find_or_create_agent(
     agent_name: &str,
     group_id: &str,
     capabilities: &[String],
-) -> u64 {
+) -> Result<u64, agent_db_graph::GraphError> {
     // Search for existing agent node by agent_name property
     for node in graph.nodes() {
         if let NodeType::Agent { .. } = node.node_type {
@@ -288,7 +289,7 @@ fn find_or_create_agent(
                 .and_then(|v: &serde_json::Value| v.as_str())
                 .unwrap_or("");
             if name == agent_name && node_group == group_id {
-                return node.id;
+                return Ok(node.id);
             }
         }
     }
@@ -304,5 +305,5 @@ fn find_or_create_agent(
         .insert("group_id".to_string(), json!(group_id));
     node.properties
         .insert("agent_name".to_string(), json!(agent_name));
-    graph.add_node(node).expect("Failed to create agent node")
+    graph.add_node(node)
 }

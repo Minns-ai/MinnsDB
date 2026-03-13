@@ -1,4 +1,4 @@
-//! Dynamic structured memory templates for EventGraphDB.
+//! Dynamic structured memory templates for MinnsDB.
 //!
 //! Provides typed memory structures (ledgers, trees, state machines, preference lists)
 //! with O(1) current-state lookup and append-only ledger balances.

@@ -142,8 +142,11 @@ fn is_likely_sentence_end(text: &str, period_idx: usize) -> bool {
         }
     }
 
-    // Check what follows the period
-    let after_period = &text[period_idx + 1..];
+    // Check what follows the period (use get() for UTF-8 safety)
+    let after_period = match text.get(period_idx + 1..) {
+        Some(s) => s,
+        None => return true, // period is at end of text
+    };
     if after_period.is_empty() {
         return true; // End of text
     }

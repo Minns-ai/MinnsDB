@@ -2090,14 +2090,11 @@ pub async fn run_compaction_with_context(
             extract_financial_facts_llm(llm.as_ref(), &messages_text)
         );
 
-        let batch_label = if batch.len() > 1 {
-            format!(
-                "batch {}-{}",
-                batch_start_idx,
-                batch.last().unwrap().turn_index
-            )
-        } else {
-            format!("turn {}", batch_start_idx)
+        let batch_label = match batch.last() {
+            Some(last) if batch.len() > 1 => {
+                format!("batch {}-{}", batch_start_idx, last.turn_index)
+            }
+            _ => format!("turn {}", batch_start_idx),
         };
 
         match &turn_facts {
@@ -2221,12 +2218,13 @@ pub async fn run_compaction_with_context(
                             .next()
                             .unwrap_or("state");
                         let pred = loc_slot.association_type.split(':').nth(1).unwrap_or("in");
-                        fact.depends_on = Some(format!("{} {} {}", fact.subject, pred, loc_val));
+                        let dep = format!("{} {} {}", fact.subject, pred, loc_val);
                         tracing::debug!(
                             "COMPACTION: auto-stamped depends_on='{}' on fact '{}'",
-                            fact.depends_on.as_ref().unwrap(),
+                            dep,
                             fact.statement,
                         );
+                        fact.depends_on = Some(dep);
                     }
                 }
             }

@@ -77,7 +77,7 @@ pub async fn health_check(State(state): State<AppState>) -> Result<Json<HealthRe
 
 // GET / - Root endpoint
 pub async fn root() -> &'static str {
-    "EventGraphDB REST API Server v0.2.0\n\n\
+    "MinnsDB REST API Server v0.2.0\n\n\
      Core Endpoints:\n\
      POST /api/events - Process event\n\
      GET /api/memories/agent/:id - Get agent memories\n\
@@ -104,6 +104,6 @@ pub async fn root() -> &'static str {
 
 // GET /docs - API documentation
 pub async fn docs() -> &'static str {
-    "EventGraphDB API Documentation\n\n\
+    "MinnsDB API Documentation\n\n\
      See API_REFERENCE.md for complete documentation."
 }

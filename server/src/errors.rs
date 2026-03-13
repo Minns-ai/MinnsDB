@@ -1,4 +1,4 @@
-// Error handling for EventGraphDB REST API
+// Error handling for MinnsDB REST API
 
 use axum::{
     http::StatusCode,

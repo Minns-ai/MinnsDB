@@ -288,7 +288,7 @@ impl ParallelGraphAlgorithms {
     }
 
     /// Parallel batch event processing
-    /// Process multiple events simultaneously (for EventGraphDB)
+    /// Process multiple events simultaneously (for MinnsDB)
     pub fn parallel_event_batch_process<F>(
         &self,
         events: Vec<EventId>,

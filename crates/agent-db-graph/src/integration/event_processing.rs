@@ -225,7 +225,7 @@ impl GraphEngine {
                         behavior_signature_hash: 0,
                     };
                     let policy_features = agent_db_world_model::PolicyFeatures {
-                        goal_count: ready_event.context.active_goals.len() as u32,
+                        goal_count: ready_event.context.active_goals.len().min(u32::MAX as usize) as u32,
                         top_goal_priority: ready_event
                             .context
                             .active_goals
@@ -791,7 +791,7 @@ impl GraphEngine {
                 let memory = agent_db_world_model::MemoryFeatures {
                     tier: 0,
                     strength: 0.5,
-                    access_count: memory_used.len() as u32,
+                    access_count: memory_used.len().min(u32::MAX as usize) as u32,
                     context_fingerprint: 0,
                     goal_bucket_id: 0,
                 };
