@@ -3,7 +3,7 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'eventgraphdb'
+  - job_name: 'minnsdb'
     static_configs:
-      - targets: ['eventgraphdb:9090']
+      - targets: ['minnsdb:9090']
     metrics_path: '/metrics'

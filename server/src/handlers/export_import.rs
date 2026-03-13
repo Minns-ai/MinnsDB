@@ -1,4 +1,4 @@
-// Export/Import handlers for EventGraphDB REST API — streaming binary v2
+// Export/Import handlers for MinnsDB REST API — streaming binary v2
 
 use crate::errors::ApiError;
 use crate::state::AppState;
@@ -159,7 +159,7 @@ pub async fn export_handler(State(state): State<AppState>) -> Result<Response, A
             (header::CONTENT_TYPE, "application/octet-stream"),
             (
                 header::CONTENT_DISPOSITION,
-                "attachment; filename=\"eventgraphdb-export.bin\"",
+                "attachment; filename=\"minnsdb-export.bin\"",
             ),
         ],
         body,

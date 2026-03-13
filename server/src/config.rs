@@ -1,4 +1,4 @@
-// Configuration for EventGraphDB Server
+// Configuration for MinnsDB Server
 
 use agent_db_graph::{integration::StorageBackend, GraphEngineConfig};
 use std::env;
@@ -20,7 +20,7 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
 
     // Configure persistent storage backend
     config.storage_backend = StorageBackend::Persistent;
-    config.redb_path = PathBuf::from("./data/eventgraph.redb");
+    config.redb_path = PathBuf::from("./data/minns.redb");
 
     // Apply profile-specific limits
     if is_free {

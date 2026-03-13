@@ -1,4 +1,4 @@
-// Router setup for EventGraphDB REST API
+// Router setup for MinnsDB REST API
 
 use crate::handlers;
 use crate::state::AppState;

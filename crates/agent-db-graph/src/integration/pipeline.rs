@@ -1443,7 +1443,7 @@ impl GraphEngine {
         }
 
         // Track Event→Concept mentions for creating About edges later.
-        // Maps event_graph_node_id → Vec<concept_node_id>.
+        // Maps minns_node_id → Vec<concept_node_id>.
         let mut event_concept_mentions: HashSet<(NodeId, NodeId)> = HashSet::new();
 
         let (
@@ -1470,11 +1470,11 @@ impl GraphEngine {
 
             for event in &events {
                 // Look up this event's graph node ID for creating About edges
-                let event_graph_nid = graph.event_index.get(&event.id).copied();
+                let minns_nid = graph.event_index.get(&event.id).copied();
 
                 // Scan event content for known concept names → track for About edges.
                 // This connects Conversation events to entity Concept nodes.
-                if let Some(egnid) = event_graph_nid {
+                if let Some(egnid) = minns_nid {
                     let content = match &event.event_type {
                         EventType::Conversation { content, .. } => Some(content.as_str()),
                         EventType::Action { action_name, .. } => Some(action_name.as_str()),
@@ -1505,7 +1505,7 @@ impl GraphEngine {
                     "STATE_TRACKING event_id={} type={} graph_nid={:?} metadata_keys={:?}",
                     event.id,
                     event_type_name,
-                    event_graph_nid,
+                    minns_nid,
                     meta_keys
                 );
                 let mut normalized = self.metadata_normalizer.normalize(&event.metadata);
@@ -1582,7 +1582,7 @@ impl GraphEngine {
                     {
                         if let Some(node_id) = ensure_node(graph, entity, ConceptType::NamedEntity)
                         {
-                            if let Some(egnid) = event_graph_nid {
+                            if let Some(egnid) = minns_nid {
                                 event_concept_mentions.insert((egnid, node_id));
                             }
                             let _trigger = match &event.event_type {
@@ -1648,7 +1648,7 @@ impl GraphEngine {
                         let to_id = ensure_node(graph, to, ConceptType::NamedEntity);
 
                         if let (Some(fid), Some(tid)) = (from_id, to_id) {
-                            if let Some(egnid) = event_graph_nid {
+                            if let Some(egnid) = minns_nid {
                                 event_concept_mentions.insert((egnid, fid));
                                 event_concept_mentions.insert((egnid, tid));
                             }
@@ -1706,7 +1706,7 @@ impl GraphEngine {
                     if let (Some(subj), Some(obj), Some(rel)) = (subject, object, relation_type) {
                         if !subj.is_empty() && !obj.is_empty() && !rel.is_empty() {
                             // Track mentions for About edges (concept IDs resolved in Phase B)
-                            if let Some(egnid) = event_graph_nid {
+                            if let Some(egnid) = minns_nid {
                                 if let Some(&snid) = graph.concept_index.get(subj.as_str()) {
                                     event_concept_mentions.insert((egnid, snid));
                                 }
@@ -1745,7 +1745,7 @@ impl GraphEngine {
 
                     if let (Some(ent), Some(itm), Some(cat)) = (entity, item, category) {
                         if !ent.is_empty() && !itm.is_empty() {
-                            if let Some(egnid) = event_graph_nid {
+                            if let Some(egnid) = minns_nid {
                                 if let Some(&enid) = graph.concept_index.get(ent.as_str()) {
                                     event_concept_mentions.insert((egnid, enid));
                                 }

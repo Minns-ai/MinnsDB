@@ -1,4 +1,4 @@
-# EventGraphDB API Reference
+# MinnsDB API Reference
 
 **Complete REST API documentation for SDK integration**
 
@@ -33,7 +33,7 @@ Last Updated: 2026-03-07
 
 ## Architecture
 
-EventGraphDB has a unified pipeline. All data — structured events and conversations — flows through the same graph engine.
+MinnsDB has a unified pipeline. All data — structured events and conversations — flows through the same graph engine.
 
 ### Unified Event Pipeline
 
@@ -258,7 +258,7 @@ One of: `"GoalFormation"`, `"Planning"`, `"Reasoning"`, `"MemoryRetrieval"`, `"L
 ```json
 {
   "environment": {
-    "variables": {"lang": "rust", "project": "eventgraphdb"},
+    "variables": {"lang": "rust", "project": "minnsdb"},
     "spatial": null,
     "temporal": {"time_of_day": null, "deadlines": [], "patterns": []}
   },
@@ -1839,7 +1839,7 @@ cargo build --features code-intelligence
 
 Export entire database as streaming binary (versioned v2 format).
 
-**Response:** `application/octet-stream` with `Content-Disposition: attachment; filename="eventgraphdb-export.bin"`
+**Response:** `application/octet-stream` with `Content-Disposition: attachment; filename="minnsdb-export.bin"`
 
 ### POST /api/admin/import?mode=replace
 

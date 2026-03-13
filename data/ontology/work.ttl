@@ -14,7 +14,7 @@
 ## the previous employer. Also symmetric so the reverse edge is created.
 ## ──────────────────────────────────────────────────────────────────
 
-@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix eg:     <http://minnsdb.local/ontology#> .
 @prefix owl:    <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix schema: <https://schema.org/> .

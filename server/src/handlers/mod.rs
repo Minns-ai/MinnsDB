@@ -1,4 +1,4 @@
-// Handler modules for EventGraphDB REST API
+// Handler modules for MinnsDB REST API
 
 pub mod agents;
 pub mod analytics;

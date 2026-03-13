@@ -1,7 +1,7 @@
-// EventGraphDB Integration Test
+// MinnsDB Integration Test
 // Tests the complete stack: Rust server + JS client
 
-const { EventGraphDBClient } = require('./client/dist/index');
+const { MinnsDBClient } = require('./client/dist/index');
 
 // Helper to generate unique IDs
 // EventId in Rust is u128, so we use a large number
@@ -31,10 +31,10 @@ function hashString(str) {
 
 // Test runner
 async function runTests() {
-  console.log('🧪 EventGraphDB Integration Test Suite\n');
+  console.log('🧪 MinnsDB Integration Test Suite\n');
   console.log('=' .repeat(60));
 
-  const client = new EventGraphDBClient({
+  const client = new MinnsDBClient({
     baseUrl: 'http://127.0.0.1:3000',
     timeout: 10000,
   });
@@ -396,7 +396,7 @@ async function runTests() {
   console.log(`   📈 Success Rate: ${((passed / (passed + failed)) * 100).toFixed(1)}%`);
 
   if (failed === 0) {
-    console.log('\n🎉 All tests passed! EventGraphDB is working correctly!\n');
+    console.log('\n🎉 All tests passed! MinnsDB is working correctly!\n');
     process.exit(0);
   } else {
     console.log('\n⚠️  Some tests failed. Please check the errors above.\n');
@@ -405,7 +405,7 @@ async function runTests() {
 }
 
 // Run tests
-console.log('\n🚀 Starting EventGraphDB Integration Tests...');
+console.log('\n🚀 Starting MinnsDB Integration Tests...');
 console.log('⏳ Connecting to server at http://127.0.0.1:3000...\n');
 
 // Give user a moment to ensure server is running

@@ -1,4 +1,4 @@
-//! Named Entity Recognition (NER) for EventGraphDB
+//! Named Entity Recognition (NER) for MinnsDB
 //!
 //! This crate provides NER capabilities via an external service.
 //! Features:

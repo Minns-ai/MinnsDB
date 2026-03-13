@@ -1,4 +1,4 @@
-// Request and Response Models for EventGraphDB REST API
+// Request and Response Models for MinnsDB REST API
 
 use agent_db_core::types::{AgentId, AgentType, ContextHash, EventId, SessionId};
 use agent_db_events::core::EventContext;

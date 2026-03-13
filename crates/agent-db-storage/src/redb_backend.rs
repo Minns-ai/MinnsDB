@@ -130,7 +130,7 @@ pub struct RedbConfig {
 impl Default for RedbConfig {
     fn default() -> Self {
         Self {
-            data_path: PathBuf::from("./data/eventgraphdb.redb"),
+            data_path: PathBuf::from("./data/minns.redb"),
             cache_size_bytes: 256 * 1024 * 1024, // 256 MB
             repair_on_open: false,
         }

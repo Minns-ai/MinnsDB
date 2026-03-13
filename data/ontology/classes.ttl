@@ -20,7 +20,7 @@
 ## used by EventGraphDB's ConceptType system.
 ## ──────────────────────────────────────────────────────────────────
 
-@prefix eg:     <http://eventgraphdb.local/ontology#> .
+@prefix eg:     <http://minnsdb.local/ontology#> .
 @prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix schema: <https://schema.org/> .
 @prefix foaf:   <http://xmlns.com/foaf/0.1/> .

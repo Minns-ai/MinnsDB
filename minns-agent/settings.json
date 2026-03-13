@@ -1,0 +1,12 @@
+{
+  "env": {
+    "MINNS_URL": "http://127.0.0.1:3000",
+    "MINNS_GROUP_ID": "default"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(minns *)",
+      "Bash($HOME/.cargo/bin/cargo run --release -p minns-cli -- *)"
+    ]
+  }
+}

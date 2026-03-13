@@ -1,5 +1,5 @@
 // Test persistence of memories and strategies across server restarts
-const { EventGraphDBClient } = require('./client/dist/index');
+const { MinnsDBClient } = require('./client/dist/index');
 
 // Helper functions
 function generateEventId() {
@@ -16,7 +16,7 @@ async function testPersistence() {
   console.log('Testing Persistent Storage Integration\n');
   console.log('=' .repeat(60));
 
-  const client = new EventGraphDBClient({
+  const client = new MinnsDBClient({
     baseUrl: 'http://127.0.0.1:3000',
     timeout: 10000,
   });
@@ -93,7 +93,7 @@ async function testPersistence() {
   }
 
   console.log('\n✅ All tests passed!');
-  console.log('\n💾 Data is now persisted in ./data/eventgraph.redb');
+  console.log('\n💾 Data is now persisted in ./data/minns.redb');
   console.log('   You can restart the server and verify the data persists.');
 }
 

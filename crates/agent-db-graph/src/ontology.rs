@@ -837,7 +837,7 @@ impl OntologyRegistry {
         use rio_api::parser::TriplesParser;
         use rio_turtle::TurtleParser;
 
-        let eg = "http://eventgraphdb.local/ontology#";
+        let eg = "http://minnsdb.local/ontology#";
         let owl = "http://www.w3.org/2002/07/owl#";
         let rdfs = "http://www.w3.org/2000/01/rdf-schema#";
         let rdf = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -850,7 +850,7 @@ impl OntologyRegistry {
         }
         let mut triples = Vec::new();
 
-        let base_iri = oxiri::Iri::parse("http://eventgraphdb.local/ontology".to_string())
+        let base_iri = oxiri::Iri::parse("http://minnsdb.local/ontology".to_string())
             .map_err(|e| OntologyError::Parse(format!("Invalid base IRI: {}", e)))?;
         let mut parser = TurtleParser::new(ttl.as_bytes(), Some(base_iri));
 
@@ -998,8 +998,8 @@ impl OntologyRegistry {
 }
 
 /// Extract the local name from a URI or prefixed name.
-/// E.g., "<http://eventgraphdb.local/ontology#location>" → "location"
-/// E.g., "http://eventgraphdb.local/ontology#location" → "location"
+/// E.g., "<http://minnsdb.local/ontology#location>" → "location"
+/// E.g., "http://minnsdb.local/ontology#location" → "location"
 fn extract_local_name(uri: &str) -> String {
     // Strip angle brackets if present
     let uri = uri.trim_start_matches('<').trim_end_matches('>');
@@ -1419,7 +1419,7 @@ mod tests {
     #[test]
     fn test_turtle_loading() {
         let ttl = r#"
-@prefix eg:   <http://eventgraphdb.local/ontology#> .
+@prefix eg:   <http://minnsdb.local/ontology#> .
 @prefix owl:  <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
@@ -1454,7 +1454,7 @@ eg:testprop a owl:ObjectProperty ;
     #[test]
     fn test_turtle_sub_property() {
         let ttl = r#"
-@prefix eg:   <http://eventgraphdb.local/ontology#> .
+@prefix eg:   <http://minnsdb.local/ontology#> .
 @prefix owl:  <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 

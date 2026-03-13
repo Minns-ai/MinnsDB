@@ -1,14 +1,14 @@
 version: "3.8"
 
 services:
-  # EventGraphDB Main Service
+  # MinnsDB Main Service
   # Note: NER service runs on separate server
-  eventgraphdb:
+  minnsdb:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: eventgraphdb
-    image: eventgraphdb:latest
+    container_name: minnsdb
+    image: minnsdb:latest
 
     ports:
       - "3000:3000"
@@ -19,7 +19,7 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=3000
       - STORAGE_BACKEND=persistent
-      - REDB_PATH=/data/eventgraph.redb
+      - REDB_PATH=/data/minns.redb
       - REDB_CACHE_SIZE_MB=256
       - MEMORY_CACHE_SIZE=10000
       - STRATEGY_CACHE_SIZE=5000
@@ -30,7 +30,7 @@ services:
       - NER_REQUEST_TIMEOUT_MS=${NER_REQUEST_TIMEOUT_MS:-5000}
 
     volumes:
-      - eventgraph-data:/data
+      - minns-data:/data
 
     restart: unless-stopped
 
@@ -42,12 +42,12 @@ services:
       start_period: 10s
 
     networks:
-      - eventgraph-network
+      - minns-network
 
 volumes:
-  eventgraph-data:
+  minns-data:
     driver: local
 
 networks:
-  eventgraph-network:
+  minns-network:
     driver: bridge

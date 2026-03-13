@@ -1,4 +1,4 @@
-//! Generative strategy/action planning engine for EventGraphDB.
+//! Generative strategy/action planning engine for MinnsDB.
 //!
 //! This crate implements the **Generator** side of the Generator + Critic
 //! architecture. It provides:

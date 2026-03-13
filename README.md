@@ -1,65 +1,188 @@
-# EventGraphDB
+<p align="center">
+  <img src="img/minnsFish.png" alt="MinnsDB" width="400" />
+</p>
 
-**An event-driven contextual graph database with memory-inspired learning, graph algorithms, and generative planning.**
+<h1 align="center">MinnsDB</h1>
 
-## Overview
+<p align="center">
+  <strong>A graph database that learns from events.</strong><br>
+  Events go in. A knowledge graph grows. Episodes form. Strategies emerge.
+</p>
 
-EventGraphDB is a specialized database that captures, learns from, and enhances agent behavior through contextual memory formation. Events flow in, a knowledge graph grows, memories consolidate, strategies emerge, and the system tells your agent what to do next.
+<p align="center">
+  Pure Rust &middot; Single binary &middot; Embedded storage &middot; No GPU &middot; 800+ tests
+</p>
 
-### Key Features
+---
 
-- **Event-First Architecture** - All knowledge derives from immutable event streams
-- **Memory-Inspired** - Episodic/Semantic/Schema tiers with consolidation and decay
-- **Contextual Graph** - Relationships emerge from actual agent experiences
-- **Graph Algorithms** - Louvain communities, temporal reachability, PageRank, centrality, random walks
-- **Generative Planning** - LLM-based strategy/action generation with energy-based world model scoring
-- **Semantic Search** - BM25 + vector hybrid search over claims and entities
-- **Code Intelligence** - Tree-sitter AST parsing, code graph building, structural code search
-- **NER Pipeline** - Named entity recognition with claim extraction and embedding
-- **Bounded Sharding** - Per-goal-bucket partitions with capped shard count (256 max)
-- **Delta Persistence** - Only dirty nodes/edges written to disk on save
-- **Streaming Queries** - Batched iteration with early termination
-- **Pure Rust** - No Python, no GPU, no external ML frameworks
-
-## Quick Start
-
-### Prerequisites
-
-- Rust 1.70+
-- NER service running (see [NER Setup](#ner-service))
-- LLM API key (optional, for claim extraction + planning)
-
-### Installation
+## 30-second demo
 
 ```bash
-git clone https://github.com/your-org/eventgraphdb.git
-cd eventgraphdb
+cargo run --release -p minnsdb-server
+# → Listening on http://0.0.0.0:3000
+```
+
+```bash
+# Ingest a conversation
+curl -X POST http://localhost:3000/api/conversations/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "agent_id": 1,
+    "sessions": [{
+      "session_id": "s1",
+      "messages": [
+        {"role": "user", "content": "I just moved from London to Berlin for a new job at Stripe"},
+        {"role": "assistant", "content": "Congrats on the move and the new role at Stripe!"}
+      ]
+    }]
+  }'
+
+# Query the graph
+curl -X POST http://localhost:3000/api/conversations/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "Where does the user live?"}'
+# → {"answer": "Berlin", "confidence": 0.95, "source": "graph_projection"}
+```
+
+That single ingest created graph nodes for `user`, `London`, `Berlin`, `Stripe` with typed edges (`location:lives_in`, `work:employed_at`), temporal validity (`London` edge superseded, `Berlin` active), and extracted claims indexed for hybrid search. The old `London` fact isn't deleted — it gets a `valid_until` timestamp and becomes history.
+
+---
+
+## Why not just use X?
+
+| | Vector DB | Graph DB (external graph backend) | KV + embeddings | **MinnsDB** |
+|---|---|---|---|---|
+| Tracks relationships | No | Yes | No | **Yes** — typed edges with temporal validity |
+| Forgets stale info | No | No | No | **Yes** — half-life decay per claim type |
+| Handles contradictions | Last write wins | Last write wins | Last write wins | **Confidence scoring** — claims compete |
+| Understands time | No | Manual | No | **Built-in** — every edge has `valid_from`/`valid_until` |
+| Learns from outcomes | No | No | No | **Yes** — Q-learning on edge weights |
+| External deps | Vector service | JVM + Cypher | Redis/Postgres | **None** — single binary, embedded ReDB |
+
+---
+
+## How it works
+
+### Unified pipeline
+
+Two entry points, same pipeline. Structured events (`POST /api/events`) and raw conversation text (`POST /api/conversations/ingest`) both flow through:
+
+```
+  Event or Conversation
+          │
+          ▼
+  ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
+  │    GRAPH       │     │   EPISODE      │     │    CLAIMS      │
+  │  CONSTRUCTION  │────▶│  DETECTION     │────▶│  EXTRACTION    │
+  │                │     │                │     │                │
+  │ NER entities   │     │ Temporal gaps  │     │ LLM-driven     │
+  │ Typed edges    │     │ Context switch │     │ Subject/pred/  │
+  │ OWL/RDFS       │     │ Salience score │     │ object triples │
+  │ enforcement    │     │                │     │ BM25 + vector  │
+  └───────────────┘     └───────────────┘     │ indexing       │
+                                               └───────┬───────┘
+                          ┌─────────────────────────────┤
+                          ▼                             ▼
+                 ┌───────────────┐            ┌───────────────┐
+                 │   MEMORY       │            │   STRATEGY     │
+                 │   FORMATION    │            │   EXTRACTION   │
+                 │   [WIP]        │            │   [WIP]        │
+                 │                │            │                │
+                 │ Episodic →     │            │ Pattern mining │
+                 │ Semantic →     │            │ Q-value RL on  │
+                 │ Schema tiers   │            │ edge weights   │
+                 │ Consolidation  │            │ Context-action │
+                 │ Half-life decay│            │ mappings       │
+                 └───────────────┘            └───────────────┘
+```
+
+### Graph as source of truth
+
+The graph is the primary data structure — not a secondary index. State queries walk edges with temporal filtering. "Where does Alice live?" finds the latest `location:lives_in` edge where `valid_until = None`. When Alice moves, the old edge gets closed with a timestamp. Never deleted. Full history, always.
+
+Edge types follow `{category}:{predicate}`:
+```
+location:lives_in     relationship:colleague    financial:payment
+work:employed_at      preference:prefers        routine:morning
+health:condition      education:studies_at      state:status
+```
+
+Property behaviors are defined in OWL/RDFS Turtle files (`data/ontology/*.ttl`), not hardcoded:
+
+- **`owl:FunctionalProperty`** — single-valued, new value supersedes old (e.g., `location:lives_in`)
+- **`owl:SymmetricProperty`** — bidirectional (e.g., `relationship:colleague`)
+- **`owl:TransitiveProperty`** — transitive closure (e.g., geographic `containedIn`)
+- **`eg:appendOnly`** — immutable history, no conflict detection (e.g., `financial:payment`)
+- **`eg:cascadeDependents`** — changing location invalidates dependent routines/commute
+
+Sub-property expansion is automatic — querying `relationship` also matches `colleague`, `friend`, `sibling`, `spouse`.
+
+### Event types
+
+The system handles 8 event types:
+
+| Type | What it captures |
+|------|-----------------|
+| `Action` | Agent actions with outcome (Success/Failure/Partial) and duration |
+| `Observation` | Environmental observations with confidence and source |
+| `Cognitive` | Goal formation, planning, reasoning, memory retrieval |
+| `Communication` | Agent-to-agent messages |
+| `Learning` | Telemetry: memory retrieved/used, strategy served/used, outcomes |
+| `Conversation` | Multi-turn dialogue (classified into transaction/state_change/relationship/preference) |
+| `CodeReview` | PR review actions with file/line context |
+| `CodeFile` | Source file snapshots for AST parsing |
+
+---
+
+## What's stable, what's WIP
+
+| Component | Status | |
+|-----------|--------|-|
+| Graph construction + typed edges + temporal validity | **Stable** | NER entity extraction, ontology enforcement, `valid_from`/`valid_until` on all edges |
+| Episode detection | **Stable** | Sliding window, temporal gap + context switch boundaries, salience scoring |
+| Claims extraction + hybrid search | **Stable** | LLM-driven subject/predicate/object facts, BM25 + vector search, confidence scoring |
+| Graph algorithms | **Stable** | Louvain communities, label propagation, personalized PageRank, betweenness/closeness centrality, temporal reachability, causal paths |
+| Code intelligence | **Stable** | Tree-sitter AST parsing for Rust, Python, TypeScript, JavaScript, Go. Extracts functions, structs, traits, enums, imports. Structural code graph with relationship edges |
+| Natural language queries | **Stable** | Graph projection with structured memory fallback, optional LLM hint |
+| Conversation ingestion + compaction | **Stable** | Multi-turn LLM compaction, fact extraction, entity resolution, rolling summaries |
+| Structured memory | **Stable** | Ledgers, state machines, preference vectors, tree structures — all backed by graph edges |
+| Workflows | **Stable** | DAG-based workflow engine with step state tracking, feedback, diff-based updates |
+| Persistence + export/import | **Stable** | ReDB (20 tables), delta writes, streaming binary v2 export/import |
+| Write lanes + read gate | **Stable** | Sharded write pipeline with backpressure, semaphore-based read concurrency |
+| Memory formation | **WIP** | Episodic/semantic/schema tiers implemented. Consolidation heuristics and tier promotion under active development |
+| Strategy extraction | **WIP** | Pattern mining and context-action mappings implemented. RL on edge weights is experimental (Phase 1: Bayesian prior <5 outcomes, Phase 2: EMA Q-values) |
+| Energy-based world model | **WIP** | ~30K param EBM critic, contrastive learning. CPU-only (<100us/score). Enable with `ENABLE_WORLD_MODEL=true`. Experimental |
+| LLM planning | **WIP** | Generator + critic architecture. Strategy/action candidate generation with validation and repair. Experimental |
+
+---
+
+## Quick start
+
+### From source
+
+```bash
+git clone https://github.com/your-org/minnsdb.git
+cd minnsdb
 cargo build --release
-```
-
-### Environment
-
-```bash
-cp .env.example .env
-# Edit .env with your settings:
-#   NER_SERVICE_URL=http://192.168.1.100:8081/ner  (full URL with protocol)
-#   LLM_API_KEY=sk-your-key                         (optional)
-```
-
-### Run the Server
-
-```bash
-cargo run --release -p eventgraphdb-server
-# Listening on http://0.0.0.0:8080
+cargo run --release -p minnsdb-server
+# → http://0.0.0.0:3000
 ```
 
 ### Docker
 
 ```bash
 docker compose up -d
+# → http://localhost:3000
 ```
 
-### Basic Rust Usage
+Two service profiles: `normal` (256MB cache, 1M max nodes, Louvain enabled) and `free` (64MB cache, 50K max nodes).
+
+```bash
+# Build free tier
+docker build --build-arg SERVICE_PROFILE=free -t minnsdb:free .
+```
+
+### Rust SDK
 
 ```rust
 use agent_db_graph::{GraphEngine, GraphEngineConfig};
@@ -81,697 +204,149 @@ let event = Event {
         },
         duration_ns: 1_500_000_000,
     },
-    causality_chain: vec![],
     context: your_context,
-    metadata: HashMap::new(),
     ..Default::default()
 };
 
 engine.process_event(event).await?;
 
-// Query what the system learned
 let memories = engine.get_agent_memories(1, 10).await;
 let strategies = engine.get_agent_strategies(1, 10).await;
 let suggestions = engine.get_next_action_suggestions(context_hash, None, 5).await?;
 ```
 
+---
+
 ## Architecture
 
 ```
-SDK / Agent ──HTTP──▶ REST API Server (axum)
-                           │
-                     ┌─────▼──────┐
-                     │ GraphEngine │ ◀── Central Hub
-                     └─────┬──────┘
-           ┌───────┬───────┼───────┬──────────┐
-           ▼       ▼       ▼       ▼          ▼
-        Events   Graph   Memory  Strategy   Planning
-        Pipeline Store   System  Extractor  (LLM+EBM)
-           │       │       │       │          │
-           └───────┴───────┴───────┴──────────┘
-                           │
-                     ┌─────▼──────┐
-                     │   ReDB     │ ◀── Persistent Storage
-                     │  (embedded)│
-                     └────────────┘
-```
-
-### Data Flow
-
-```
-Events → Graph Construction → Episode Detection → Memory Formation → Strategy Extraction
-  ↑                                                                         ↓
-  └── Action Suggestions ← Context Matching ← Memory Retrieval ← Patterns ─┘
-```
-
-### Crate Structure
-
-```
-eventgraphdb/
+minnsdb/
 ├── crates/
-│   ├── agent-db-core/      # Core types: AgentId, Timestamp, EventId, etc.
-│   ├── agent-db-events/    # Event, EventType, EventContext, ActionOutcome
-│   ├── agent-db-storage/   # ReDB backend, versioned serialization
-│   ├── agent-db-graph/     # Graph engine, algorithms, memory, strategies
-│   ├── agent-db-ast/       # Tree-sitter AST parsing (Rust, Python, TS, Go)
-│   └── agent-db-ner/       # NER service client, entity extraction
+│   ├── agent-db-core/       # Type aliases: EventId, AgentId, Timestamp, NodeId, ContextHash
+│   │                        # Trait definitions: Database, Storage, GraphEngine, MemoryEngine
+│   ├── agent-db-events/     # Event struct, 8 EventType variants, EventContext, ActionOutcome
+│   │                        # Event buffer, validation, causality chain checking
+│   ├── agent-db-storage/    # ReDB backend (20 tables), WAL, versioned serialization
+│   │                        # Tables: graph nodes/edges, memories, strategies, claims,
+│   │                        #         transition stats, decision traces, world model state
+│   ├── agent-db-graph/      # GraphEngine — the main orchestrator
+│   │                        # Graph structures (SlotVec arena, typed edges, temporal validity)
+│   │                        # Episode detection, memory formation, strategy extraction
+│   │                        # Claims (LLM extraction, BM25+vector search, embedding queue)
+│   │                        # Conversation compaction, NLQ, graph projection
+│   │                        # Algorithms: Louvain, PageRank, centrality, reachability
+│   │                        # Code graph, workflow engine, structured memory
+│   │                        # Ontology (OWL/RDFS from TTL), graph pruning, property indexing
+│   ├── agent-db-ast/        # Tree-sitter AST parsing: Rust, Python, TS, JS, Go
+│   │                        # Extracts functions, structs, traits, enums, imports
+│   │                        # Diff parsing for PR reviews
+│   └── agent-db-ner/        # HTTP client to external NER service
+│                             # Async extraction queue, ReDB-backed feature store
 ├── ml/
-│   ├── agent-db-world-model/  # Energy-based model (~30K params)
-│   └── agent-db-planning/     # LLM generator + critic architecture
-├── server/                 # Axum REST API server
-└── examples/               # Usage examples
+│   ├── agent-db-world-model/  # Energy-based model critic (~30K params) [WIP]
+│   │                          # Contrastive learning, layer-wise scoring
+│   │                          # Top-down (planning → prediction) + bottom-up (reality → error)
+│   └── agent-db-planning/     # LLM-based generator [WIP]
+│                               # Strategy/action candidate generation
+│                               # Validation, repair, selection (accept/revise/reject)
+├── server/                  # Axum HTTP server, 60+ endpoints
+│   ├── src/handlers/        # 18 handler modules
+├── data/ontology/           # 9 OWL/RDFS Turtle files defining property behaviors
+├── examples/                # 6 Rust examples (basic → end-to-end pipeline)
+└── tests/                   # Integration test suite (9 tests, 700 lines)
 ```
+
+### Key internals
+
+**GraphEngine** is the central orchestrator. It holds: the graph (`Arc<RwLock<GraphInference>>`), memory store, strategy store, structured memory store, claim store, optional world model, optional NER client, and optional LLM client. Lock ordering is documented: `inference.read → drop → structured_memory.write → drop → inference.write`.
+
+**Graph** uses `SlotVec` (arena allocation, O(1) insert/lookup by NodeId). 11 node types. Bi-temporal edges with transaction time and valid time. Bounded at configurable max size with automatic pruning.
+
+**Write lanes** shard incoming events by session_id hash across N lanes (default: `num_cpus/2`, clamped 2-8). Each lane has bounded capacity (default: 128) and processes sequentially. Per-lane p50/p95/p99 latency tracking.
+
+**Read gate** is a semaphore-based permit system (default: `num_cpus * 2` concurrent reads) with latency tracking.
+
+**Persistence** uses ReDB with 20 tables: graph nodes/edges/adjacency, memories (4 indexes), strategies (3 indexes), transition/motif stats, decision traces, outcome signals, claims, world model state, schema versions.
+
+---
 
 ## REST API
 
-**Base URL:** `http://localhost:8080`
+**Base URL:** `http://localhost:3000`
 
-See **[API_REFERENCE.md](API_REFERENCE.md)** for complete endpoint documentation with request/response examples.
+Full documentation: **[docs.minns.ai](https://docs.minns.ai)**
 
-### Endpoint Summary
+60+ endpoints across these groups:
 
-| Method | Path | Description |
-|--------|------|-------------|
-| **Events** | | |
-| `POST` | `/api/events` | Process full event through pipeline |
-| `POST` | `/api/events/simple` | Simplified event submission |
-| `GET` | `/api/events` | List recent events |
-| `GET` | `/api/episodes` | List completed episodes |
-| **Memories** | | |
-| `GET` | `/api/memories/agent/:agent_id` | Get agent memories |
-| `POST` | `/api/memories/context` | Find memories by context similarity |
-| **Strategies** | | |
-| `GET` | `/api/strategies/agent/:agent_id` | Get agent strategies |
-| `POST` | `/api/strategies/similar` | Find similar strategies |
-| `GET` | `/api/suggestions` | Get next-action suggestions |
-| **Graph** | | |
-| `GET` | `/api/graph` | Get graph structure |
-| `GET` | `/api/graph/context` | Get graph for context |
-| `POST` | `/api/graph/persist` | Force persist to disk |
-| `GET` | `/api/stats` | Engine statistics |
-| **Analytics** | | |
-| `GET` | `/api/analytics` | Graph analytics (components, clustering, modularity) |
-| `GET` | `/api/communities` | Community detection (Louvain / Label Propagation) |
-| `GET` | `/api/centrality` | Node centrality scores (degree, betweenness, pagerank) |
-| `GET` | `/api/ppr` | Personalized PageRank from source node |
-| `GET` | `/api/reachability` | Temporal reachability from source |
-| `GET` | `/api/causal-path` | Causal path between two nodes |
-| `GET` | `/api/indexes` | Index performance stats |
-| **Search** | | |
-| `POST` | `/api/search` | Unified search (keyword/semantic/hybrid) |
-| **Claims** | | |
-| `GET` | `/api/claims` | List active claims |
-| `GET` | `/api/claims/:id` | Get claim by ID |
-| `POST` | `/api/claims/search` | Semantic claim search |
-| `POST` | `/api/embeddings/process` | Process pending embeddings |
-| **Code Intelligence** | | |
-| `POST` | `/api/events/code-file` | Submit source file for AST analysis |
-| `POST` | `/api/events/code-review` | Submit code review event |
-| `POST` | `/api/code/search` | Search code entities by name/kind/file |
-| **Planning** | | |
-| `POST` | `/api/planning/strategies` | Generate strategy candidates |
-| `POST` | `/api/planning/actions` | Generate action candidates |
-| `POST` | `/api/planning/plan` | Full planning pipeline for a goal |
-| `POST` | `/api/planning/execute` | Start execution tracking |
-| `POST` | `/api/planning/validate` | Validate event against prediction |
-| `GET` | `/api/world-model/stats` | World model statistics |
-| **Admin** | | |
-| `POST` | `/api/admin/export` | Export database (streaming binary) |
-| `POST` | `/api/admin/import` | Import database (replace/merge) |
-| `GET` | `/api/health` | Health check |
+| Group | Key Endpoints |
+|-------|--------------|
+| **Events** | `POST /api/events` — full pipeline processing<br>`POST /api/events/simple` — simplified event<br>`POST /api/events/state-change` — typed state transitions<br>`POST /api/events/transaction` — typed financial transactions<br>`POST /api/events/code-file` — source file AST analysis<br>`POST /api/events/code-review` — code review events<br>`GET /api/events` — list recent events<br>`GET /api/episodes` — list completed episodes |
+| **Conversations** | `POST /api/conversations/ingest` — batch ingest sessions (requires LLM)<br>`POST /api/messages` — single message with buffering + auto-compaction |
+| **Queries** | `POST /api/nlq` — natural language query against graph<br>`POST /api/conversations/query` — conversation-style query<br>`POST /api/search` — unified keyword/semantic/hybrid search<br>`POST /api/claims/search` — semantic claim search<br>`POST /api/code/search` — structural code search |
+| **Memory & Strategy** | `GET /api/memories/agent/:id` — agent memories<br>`POST /api/memories/context` — context similarity search<br>`GET /api/strategies/agent/:id` — learned strategies<br>`GET /api/suggestions` — next-action recommendations |
+| **Graph & Analytics** | `GET /api/graph` — graph structure<br>`GET /api/stats` — system statistics<br>`GET /api/analytics` — components, clustering, modularity<br>`GET /api/communities` — Louvain / label propagation<br>`GET /api/centrality` — PageRank, betweenness, closeness<br>`GET /api/causal-path` — causal paths between nodes<br>`GET /api/reachability` — temporal reachability |
+| **Structured Memory** | `POST /api/structured-memory` — upsert<br>`POST .../ledger/:key/append` — append ledger entry<br>`POST .../state/:key/transition` — state machine transition<br>`POST .../preference/:key/update` — preference vector update<br>`POST .../tree/:key/add-child` — tree structure |
+| **Workflows** | `POST /api/workflows` — create DAG workflow<br>`POST .../steps/:step_id/transition` — step state transition<br>`POST .../feedback` — workflow feedback |
+| **Agents** | `POST /api/agents/register` — register agent node<br>`GET /api/agents` — list agents by group |
+| **Planning** | `POST /api/planning/strategies` — generate candidates [WIP]<br>`POST /api/planning/plan` — full planning pipeline [WIP] |
+| **Admin** | `POST /api/admin/export` — streaming binary export<br>`POST /api/admin/import` — import (replace/merge)<br>`GET /api/health` — health + write lane + read gate metrics |
+
+---
 
 ## Configuration
 
-### Environment Variables
-
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NER_SERVICE_URL` | `http://localhost:8081/ner` | NER service URL (full URL with protocol) |
-| `NER_REQUEST_TIMEOUT_MS` | `5000` | NER request timeout |
-| `LLM_API_KEY` | - | OpenAI-compatible API key for claims + planning |
-| `LLM_MODEL` | `gpt-4o-mini` | LLM model name |
-| `PLANNING_LLM_API_KEY` | falls back to `LLM_API_KEY` | Separate key for planning |
-| `PLANNING_LLM_PROVIDER` | `openai` | LLM provider |
-| `SERVER_HOST` | `0.0.0.0` | Server bind address |
-| `SERVER_PORT` | `8080` | Server port |
+| `SERVER_HOST` | `0.0.0.0` | Bind address |
+| `SERVER_PORT` | `3000` | Bind port |
 | `RUST_LOG` | `info` | Log level |
-| `REDB_CACHE_SIZE_MB` | `256` | ReDB cache size |
-| `MEMORY_CACHE_SIZE` | `10000` | In-memory cache size |
-| `STRATEGY_CACHE_SIZE` | `5000` | Strategy cache size |
-| `ENABLE_WORLD_MODEL` | `false` | Enable energy-based world model |
-| `WORLD_MODEL_MODE` | `Disabled` | Shadow/ScoringOnly/ScoringAndReranking/Full |
-| `ENABLE_STRATEGY_GENERATION` | `false` | Enable LLM strategy generation |
-| `ENABLE_ACTION_GENERATION` | `false` | Enable LLM action generation |
-| `REPAIR_ENABLED` | `false` | Enable auto-repair on prediction error |
+| `SERVICE_PROFILE` | `normal` | `normal` or `free` (controls cache sizes + limits) |
+| `WRITE_LANE_COUNT` | `num_cpus/2` | Write lane concurrency (clamped 2-8) |
+| `WRITE_LANE_CAPACITY` | `128` | Per-lane queue depth |
+| `READ_GATE_PERMITS` | `num_cpus*2` | Concurrent read permits |
+| `REDB_CACHE_SIZE_MB` | `256` | ReDB page cache (64 in free profile) |
+| `NER_SERVICE_URL` | `http://localhost:8081/ner` | External NER service (full URL) |
+| `NER_REQUEST_TIMEOUT_MS` | `5000` | NER timeout |
+| `LLM_API_KEY` | - | OpenAI-compatible key (required for conversation ingest + claims) |
+| `LLM_MODEL` | `gpt-4o-mini` | LLM model for claims extraction |
+| `NLQ_HINT_MODEL` | `gpt-4o-mini` | LLM model for NLQ hints |
+| `SYNTHESIS_MODEL` | `gpt-4.1` | LLM model for answer synthesis |
+| `PLANNING_LLM_API_KEY` | falls back to `LLM_API_KEY` | Separate key for planning |
+| `ENABLE_WORLD_MODEL` | `false` | Enable energy-based world model [WIP] |
+| `WORLD_MODEL_MODE` | `Disabled` | `Shadow` / `ScoringOnly` / `Full` |
+| `ENABLE_STRATEGY_GENERATION` | `false` | Enable LLM strategy generation [WIP] |
+| `ENABLE_LOUVAIN` | `true` | Background community detection |
+| `LOUVAIN_INTERVAL` | `1000` | Events between Louvain runs |
 
-### NER Service
+Full reference at [docs.minns.ai](https://docs.minns.ai).
 
-The NER service runs separately (GPU-accelerated). The `NER_SERVICE_URL` must be a full URL with protocol:
-
-```
-NER_SERVICE_URL=http://192.168.1.100:8081/ner
-```
+---
 
 ## Development
 
 ```bash
-# Build
-cargo build
-
-# Test (431+ tests across workspace)
-cargo test --workspace
-
-# Clippy
-cargo clippy --workspace
-
-# Format
-cargo fmt --all
+cargo build                     # Build all crates
+cargo test --workspace          # 800+ tests
+cargo clippy --workspace        # Lint
+cargo fmt --all                 # Format
 ```
 
-## Building a Claude Code Memory Plugin
+The `Makefile` has additional targets: `bench`, `bench-baseline`, `bench-compare`, `perf-test`, `memory-test`, `flamegraph`, `load-test`, `stress-test`, `audit`, `pre-release`. Run `make help` to see all.
 
-EventGraphDB can serve as a persistent memory backend for Claude Code via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). This gives Claude long-term memory that persists across conversations — it remembers your codebase, decisions, preferences, bugs, and patterns.
+### Examples
 
-### How It Works
-
-```
-Claude Code ──MCP──▶ MCP Server (thin wrapper)
-                           │
-                     HTTP calls to
-                     EventGraphDB API
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         store_memory  recall_memory  index_code
-              │            │            │
-              ▼            ▼            ▼
-         POST /api/    POST /api/   POST /api/
-         events/simple  claims/search events/code-file
-              │            │            │
-              └────────────┼────────────┘
-                           ▼
-                    EventGraphDB
-                  (graph, claims,
-                   episodes, decay)
-```
-
-1. Claude Code calls MCP tools like `store_memory`, `recall_memory`, `index_code`
-2. Your MCP server translates these into EventGraphDB REST API calls
-3. EventGraphDB processes them through the full pipeline — graph construction, claim extraction, episode detection, memory consolidation
-4. When Claude recalls, it gets semantically ranked results with confidence scores and temporal decay built in
-
-### What Makes This Different From Flat File Memory
-
-| Feature | Flat files (CLAUDE.md) | EventGraphDB |
-|---------|----------------------|--------------|
-| Storage | Plain text, manual | Structured graph with relationships |
-| Search | Substring / none | BM25 + vector hybrid semantic search |
-| Decay | Never expires | Half-life decay (facts: 2yr, bugs: 90d) |
-| Relationships | None | Entity graph with typed edges |
-| Code awareness | None | AST-parsed function/struct/trait graph |
-| Cross-session | Single file | Full event history with episodes |
-| Conflicting info | Last write wins | Claim confidence + temporal scoring |
-
-### MCP Server Setup
-
-You need a thin MCP server that wraps EventGraphDB's REST API. This can be an HTTP server (for teams) or a stdio process (for local use).
-
-#### Option A: HTTP Transport (recommended for teams)
-
-Create a `.mcp.json` in your project root:
-
-```json
-{
-  "mcpServers": {
-    "eventgraphdb": {
-      "type": "http",
-      "url": "http://localhost:3001/mcp"
-    }
-  }
-}
-```
-
-Or add it via CLI:
+Six Rust examples in `examples/`:
 
 ```bash
-claude mcp add --transport http eventgraphdb http://localhost:3001/mcp
+cargo run --example basic_usage
+cargo run --example graph_integration
+cargo run --example scoped_inference
+cargo run --example concurrent_events
+cargo run --example end_to_end_demo
 ```
 
-#### Option B: Stdio Transport (local dev)
-
-```bash
-claude mcp add --transport stdio eventgraphdb -- node ./mcp-server/index.js
-```
-
-### MCP Tool Definitions
-
-Your MCP server should expose these tools. Each one maps to one or more EventGraphDB API calls.
-
-#### `store_memory` — Remember something
-
-Stores a fact, decision, preference, or observation. Maps to `POST /api/events/simple`.
-
-```json
-{
-  "name": "store_memory",
-  "description": "Store a memory that persists across conversations. Use for facts, decisions, user preferences, bug reports, architectural choices, or anything worth remembering.",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "content": {
-        "type": "string",
-        "description": "What to remember (a clear, specific statement)"
-      },
-      "category": {
-        "type": "string",
-        "enum": ["fact", "preference", "decision", "bug", "pattern", "api_contract"],
-        "description": "Type of memory"
-      },
-      "tags": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "Tags for categorization (e.g. ['auth', 'backend', 'rust'])"
-      }
-    },
-    "required": ["content"]
-  }
-}
-```
-
-**MCP server implementation** — translates to:
-
-```bash
-POST /api/events/simple
-{
-  "agent_id": 1,
-  "agent_type": "claude-code",
-  "session_id": <session_hash>,
-  "event_type": "observation",
-  "content": "User prefers async/await over callback patterns",
-  "enable_semantic": true
-}
-```
-
-EventGraphDB then extracts claims, detects entities, builds graph relationships, and indexes everything for semantic search — automatically.
-
-#### `recall_memory` — Search for memories
-
-Retrieves relevant memories using hybrid semantic search. Maps to `POST /api/claims/search` and `POST /api/search`.
-
-```json
-{
-  "name": "recall_memory",
-  "description": "Search persistent memory for relevant information. Returns memories ranked by relevance and recency. Use before making decisions, to check for prior context, or when the user references something from a previous session.",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "query": {
-        "type": "string",
-        "description": "What to search for (natural language)"
-      },
-      "category": {
-        "type": "string",
-        "enum": ["fact", "preference", "decision", "bug", "pattern", "api_contract"],
-        "description": "Filter by memory type"
-      },
-      "limit": {
-        "type": "integer",
-        "description": "Max results (default: 10)"
-      }
-    },
-    "required": ["query"]
-  }
-}
-```
-
-**MCP server implementation** — translates to:
-
-```bash
-POST /api/claims/search
-{
-  "query_text": "authentication error handling",
-  "top_k": 10,
-  "min_similarity": 0.3
-}
-```
-
-Returns claims in a grouped response: `{ groups: [{subject, claims}], ungrouped: [...], total_results }`. Claims are ranked by similarity, weighted by confidence and temporal decay.
-
-#### `index_code` — Parse and remember code structure
-
-Submits a source file for AST analysis. EventGraphDB parses it with tree-sitter, extracts functions/structs/traits/enums, builds a code graph, and extracts structural claims. Maps to `POST /api/events/code-file`.
-
-```json
-{
-  "name": "index_code",
-  "description": "Index a source file into persistent memory. Parses the AST to extract functions, structs, traits, enums, and their relationships. Use when exploring a new codebase or after significant refactors.",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "file_path": {
-        "type": "string",
-        "description": "Path to the source file"
-      },
-      "content": {
-        "type": "string",
-        "description": "Full source code content"
-      },
-      "language": {
-        "type": "string",
-        "description": "Language (auto-detected from extension if omitted)"
-      },
-      "repository": {
-        "type": "string",
-        "description": "Repository name for scoping"
-      }
-    },
-    "required": ["file_path", "content"]
-  }
-}
-```
-
-**MCP server implementation** — translates to:
-
-```bash
-POST /api/events/code-file
-{
-  "agent_id": 1,
-  "agent_type": "claude-code",
-  "session_id": <session_hash>,
-  "file_path": "src/auth/login.rs",
-  "content": "<file contents>",
-  "language": "rust",
-  "repository": "my-app",
-  "enable_ast": true,
-  "enable_semantic": true
-}
-```
-
-This creates Concept nodes for every function, struct, trait, and enum in the file — with edges for contains, imports, field_of, returns, and implements relationships. Claude can later search these with `search_code`.
-
-#### `search_code` — Find code entities
-
-Searches the code graph by name, kind, language, or file path. Maps to `POST /api/code/search`.
-
-```json
-{
-  "name": "search_code",
-  "description": "Search indexed code entities (functions, structs, traits, enums). Use to find function signatures, locate definitions, or understand code structure.",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "name": {
-        "type": "string",
-        "description": "Name substring to search for"
-      },
-      "kind": {
-        "type": "string",
-        "enum": ["function", "class", "enum", "interface", "module", "variable", "typealias"],
-        "description": "Filter by entity kind"
-      },
-      "file_path": {
-        "type": "string",
-        "description": "Filter by file path substring"
-      },
-      "language": {
-        "type": "string",
-        "description": "Filter by language"
-      }
-    }
-  }
-}
-```
-
-#### `store_review` — Remember code review feedback
-
-Stores a code review comment with file/line context. Maps to `POST /api/events/code-review`.
-
-```json
-{
-  "name": "store_review",
-  "description": "Store a code review observation — bug found, pattern noted, improvement suggested. Attached to specific file and line range.",
-  "inputSchema": {
-    "type": "object",
-    "properties": {
-      "body": {
-        "type": "string",
-        "description": "Review comment text"
-      },
-      "file_path": {
-        "type": "string",
-        "description": "File being reviewed"
-      },
-      "line_range": {
-        "type": "array",
-        "items": { "type": "integer" },
-        "description": "[start_line, end_line]"
-      },
-      "action": {
-        "type": "string",
-        "enum": ["comment", "approve", "request_changes"],
-        "description": "Review action type"
-      },
-      "repository": {
-        "type": "string",
-        "description": "Repository name"
-      }
-    },
-    "required": ["body", "repository"]
-  }
-}
-```
-
-### Example MCP Server (Node.js)
-
-A minimal MCP server that wraps EventGraphDB:
-
-```javascript
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import express from "express";
-import { z } from "zod";
-
-const EVENTGRAPHDB_URL = process.env.EVENTGRAPHDB_URL || "http://localhost:8080";
-const AGENT_ID = 1;
-const SESSION_ID = Date.now();
-
-const server = new McpServer({
-  name: "eventgraphdb-memory",
-  version: "1.0.0",
-});
-
-// store_memory tool
-server.tool(
-  "store_memory",
-  "Store a memory that persists across conversations",
-  {
-    content: z.string().describe("What to remember"),
-    category: z.enum(["fact", "preference", "decision", "bug", "pattern"]).optional(),
-    tags: z.array(z.string()).optional(),
-  },
-  async ({ content, category, tags }) => {
-    const res = await fetch(`${EVENTGRAPHDB_URL}/api/events/simple`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        agent_id: AGENT_ID,
-        agent_type: "claude-code",
-        session_id: SESSION_ID,
-        event_type: "observation",
-        content: `[${category || "fact"}] ${content}` + (tags ? ` #${tags.join(" #")}` : ""),
-        enable_semantic: true,
-      }),
-    });
-    const data = await res.json();
-    return { content: [{ type: "text", text: `Stored (event_id: ${data.event_id})` }] };
-  }
-);
-
-// recall_memory tool
-server.tool(
-  "recall_memory",
-  "Search persistent memory for relevant information",
-  {
-    query: z.string().describe("What to search for"),
-    limit: z.number().optional().default(10),
-  },
-  async ({ query, limit }) => {
-    const res = await fetch(`${EVENTGRAPHDB_URL}/api/claims/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query_text: query, top_k: limit, min_similarity: 0.3 }),
-    });
-    const data = await res.json();
-    // Response has { groups: [{subject, claims}], ungrouped: [...], total_results }
-    const allClaims = [
-      ...data.groups.flatMap((g) => g.claims),
-      ...data.ungrouped,
-    ];
-    const memories = allClaims
-      .map((c, i) => `${i + 1}. [${c.claim_type}] ${c.subject_entity || "general"}: ${c.claim_text} (confidence: ${c.confidence?.toFixed(2)})`)
-      .join("\n");
-    return { content: [{ type: "text", text: memories || "No memories found." }] };
-  }
-);
-
-// index_code tool
-server.tool(
-  "index_code",
-  "Index a source file into persistent memory via AST parsing",
-  {
-    file_path: z.string().describe("Path to the source file"),
-    content: z.string().describe("Full source code"),
-    language: z.string().optional(),
-    repository: z.string().optional(),
-  },
-  async ({ file_path, content, language, repository }) => {
-    const res = await fetch(`${EVENTGRAPHDB_URL}/api/events/code-file`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        agent_id: AGENT_ID,
-        agent_type: "claude-code",
-        session_id: SESSION_ID,
-        file_path,
-        content,
-        language,
-        repository,
-        enable_ast: true,
-        enable_semantic: true,
-      }),
-    });
-    const data = await res.json();
-    return {
-      content: [{ type: "text", text: `Indexed ${file_path}: ${data.nodes_created} nodes created` }],
-    };
-  }
-);
-
-// search_code tool
-server.tool(
-  "search_code",
-  "Search indexed code entities",
-  {
-    name: z.string().optional(),
-    kind: z.string().optional(),
-    file_path: z.string().optional(),
-    language: z.string().optional(),
-  },
-  async (params) => {
-    const res = await fetch(`${EVENTGRAPHDB_URL}/api/code/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...params, limit: 20 }),
-    });
-    const data = await res.json();
-    const results = (data.entities || [])
-      .map((e) => `${e.kind} ${e.qualified_name} (${e.file_path}:${e.line_range?.[0] || "?"})${e.signature ? "\n  " + e.signature : ""}`)
-      .join("\n");
-    return { content: [{ type: "text", text: results || "No code entities found." }] };
-  }
-);
-
-// Start HTTP transport
-const app = express();
-const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-app.use("/mcp", transport.requestHandler);
-server.connect(transport);
-
-const port = process.env.MCP_PORT || 3001;
-app.listen(port, () => console.log(`EventGraphDB MCP server on port ${port}`));
-```
-
-Run it:
-
-```bash
-npm install @modelcontextprotocol/sdk express zod
-EVENTGRAPHDB_URL=http://localhost:8080 node mcp-server.js
-```
-
-### Usage In Practice
-
-Once configured, Claude Code automatically discovers and uses the tools:
-
-**Storing memories** — Claude calls `store_memory` when it learns something worth persisting:
-```
-User: "We always use sqlx for database access, never diesel"
-Claude: [calls store_memory] Noted — I'll remember that for future sessions.
-```
-
-**Recalling context** — Claude calls `recall_memory` when it needs prior context:
-```
-User: "Set up the database layer for the new service"
-Claude: [calls recall_memory("database library preference")]
-        → "preference: Use sqlx for database access, not diesel (confidence: 0.95)"
-        I see from our history that you prefer sqlx. I'll set that up.
-```
-
-**Indexing code** — Claude calls `index_code` to build structural understanding:
-```
-User: "Learn the auth module"
-Claude: [reads src/auth/*.rs]
-        [calls index_code for each file]
-        Indexed 4 files — found 12 functions, 3 structs, 2 traits, and their relationships.
-```
-
-**Searching code** — Claude queries the structural code graph:
-```
-User: "What functions handle token validation?"
-Claude: [calls search_code(name: "token", kind: "function")]
-        → Function auth::tokens::validate_token (src/auth/tokens.rs:45)
-        → Function auth::middleware::check_token (src/auth/middleware.rs:12)
-```
-
-### Memory Lifecycle
-
-EventGraphDB doesn't just store memories — it manages them over time:
-
-```
-New memory stored
-    ↓
-Claim extracted with type + confidence
-    ↓
-Indexed for semantic search (BM25 + embeddings)
-    ↓
-Linked to entity graph (relationships emerge)
-    ↓
-Half-life decay over time:
-  Facts: 730 days       Preferences: 365 days
-  Code patterns: 365d   API contracts: 180 days
-  Bug fixes: 90 days    Intentions: 30 days
-    ↓
-Low-confidence claims fade naturally
-Reinforced claims stay strong
-Contradicting claims compete on score
-```
-
-### Hooks Integration
-
-You can use Claude Code [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) to automatically index code on file changes:
-
-```json
-// .claude/settings.json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "command": "curl -s -X POST http://localhost:8080/api/events/code-file -H 'Content-Type: application/json' -d \"$(jq -n --arg fp \"$TOOL_INPUT_FILE_PATH\" --rawfile content \"$TOOL_INPUT_FILE_PATH\" '{agent_id:1, agent_type:\"claude-code\", session_id:1, file_path:$fp, content:$content, enable_ast:true}')\""
-      }
-    ]
-  }
-}
-```
-
-This automatically re-indexes any file Claude writes or edits, keeping the code graph up to date.
-
-## Documentation
-
-- **[API_REFERENCE.md](API_REFERENCE.md)** - Complete REST API with request/response schemas
-- [TECHNICAL_SPECIFICATION.md](TECHNICAL_SPECIFICATION.md) - System architecture
-- [MVP_SPECIFICATION.md](MVP_SPECIFICATION.md) - Requirements and targets
-- [Gplan.md](Gplan.md) - Graph layer improvement plan (Phases 1-4 complete)
+---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MinnsDB is licensed under the **Business Source License 1.1 (BSL)**. It converts to the **AGPL v3.0 with a linking exception** after a few years. The linking exception means you are not required to open-source your own code if you use MinnsDB. You only need to contribute back changes to MinnsDB itself.

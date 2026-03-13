@@ -59,7 +59,8 @@
       "Bash(/tmp/temporal_tracking_analysis.md:*)",
       "Bash(/Users/jonathanfarrow/.cargo/bin/cargo clippy:*)",
       "Bash($HOME/.cargo/bin/cargo test:*)",
-      "WebFetch(domain:www.machinebrief.com)"
+      "WebFetch(domain:www.machinebrief.com)",
+      "Bash($HOME/.cargo/bin/cargo fmt:*)"
     ]
   }
 }

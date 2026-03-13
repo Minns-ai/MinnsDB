@@ -166,7 +166,7 @@ pub(super) fn extract_strategy_features(strategy: Option<&Strategy>) -> Strategy
 /// Extract PolicyFeatures from an Episode's context.
 pub(super) fn extract_policy_features(episode: &Episode) -> PolicyFeatures {
     PolicyFeatures {
-        goal_count: episode.context.active_goals.len() as u32,
+        goal_count: episode.context.active_goals.len().min(u32::MAX as usize) as u32,
         top_goal_priority: episode
             .context
             .active_goals
@@ -193,11 +193,12 @@ pub(super) fn assemble_training_tuple(
         return None;
     }
 
-    // Pick the most significant event: first Action event, or last event
+    // Pick the most significant event: first Action event, or last event.
+    // Safety: events.len() >= 3 is guaranteed by the guard above.
     let representative_event = events
         .iter()
         .find(|e| matches!(e.event_type, EventType::Action { .. }))
-        .unwrap_or_else(|| events.last().unwrap());
+        .unwrap_or(&events[events.len() - 1]);
 
     let event_features = extract_event_features(representative_event, episode);
     let memory_features = extract_memory_features(memory, episode);

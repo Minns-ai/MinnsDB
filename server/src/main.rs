@@ -1,4 +1,4 @@
-// EventGraphDB REST API Server
+// MinnsDB REST API Server
 //
 // Provides HTTP endpoints for the self-evolving agent database
 
@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
-    info!("Starting EventGraphDB REST API Server");
+    info!("Starting MinnsDB REST API Server");
 
     // Load configuration
     info!("Initializing GraphEngine with persistent storage...");
@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize GraphEngine
     let engine = GraphEngine::with_config(config).await?;
-    info!("GraphEngine initialized with persistent storage at ./data/eventgraph.redb");
+    info!("GraphEngine initialized with persistent storage at ./data/minns.redb");
 
     let engine = Arc::new(engine);
 
