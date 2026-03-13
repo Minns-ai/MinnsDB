@@ -862,6 +862,9 @@ impl GraphEngine {
                                 );
                                 avoidance.claim_type = crate::claims::types::ClaimType::Avoidance;
                                 avoidance.entities = updated.entities.clone();
+                                // Copy subject_entity from the source claim
+                                avoidance.subject_entity = updated.subject_entity.clone();
+                                avoidance.category = updated.category.clone();
                                 if let Err(e) = claim_store.store(&avoidance) {
                                     tracing::warn!(
                                         "Failed to store avoidance claim for claim_id={}: {}",
@@ -874,6 +877,36 @@ impl GraphEngine {
                                         avoidance.id,
                                         claim_id
                                     );
+                                    // Stamp state anchors on the avoidance claim
+                                    if let Some(ref subj) = avoidance.subject_entity {
+                                        let inference_guard = self.inference.read().await;
+                                        let projected =
+                                            crate::conversation::graph_projection::project_entity_state(
+                                                inference_guard.graph(),
+                                                subj,
+                                                u64::MAX,
+                                                Some(self.ontology.as_ref()),
+                                            );
+                                        drop(inference_guard);
+                                        let mut anchor_meta: std::collections::HashMap<String, String> =
+                                            std::collections::HashMap::new();
+                                        for slot in projected.slots.values() {
+                                            let cat = slot.association_type.split(':').next().unwrap_or("");
+                                            if self.ontology.is_single_valued(cat) {
+                                                let key = format!("state_anchor:{}", slot.association_type);
+                                                let val = slot.value.as_deref().unwrap_or(&slot.target_name);
+                                                anchor_meta.insert(key, val.to_string());
+                                            }
+                                        }
+                                        if !anchor_meta.is_empty() {
+                                            let _ = claim_store.update_metadata(avoidance.id, &anchor_meta);
+                                            tracing::debug!(
+                                                "Stamped {} state anchors on avoidance claim {}",
+                                                anchor_meta.len(),
+                                                avoidance.id,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         },
