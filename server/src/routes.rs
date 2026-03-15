@@ -118,6 +118,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/search", post(handlers::search))
         // Natural language query
         .route("/api/nlq", post(handlers::nlq_query))
+        // MinnsQL structured query
+        .route("/api/query", post(handlers::minnsql_query))
         // Semantic memory / claims
         .route("/api/claims", get(handlers::list_claims))
         .route("/api/claims/:id", get(handlers::get_claim))
@@ -188,6 +190,17 @@ pub fn create_router(state: AppState) -> Router {
             "/api/conversations/ingest",
             post(handlers::ingest_conversation),
         )
+        // Ontology
+        .route("/api/ontology/properties", get(handlers::list_ontology_properties))
+        .route("/api/ontology/upload", post(handlers::upload_ontology))
+        .route("/api/ontology/discover", post(handlers::discover_ontology))
+        .route("/api/ontology/cascade-inference", post(handlers::run_cascade_inference))
+        .route("/api/ontology/observations", get(handlers::list_ontology_observations))
+        .route("/api/ontology/proposals", get(handlers::list_ontology_proposals))
+        .route("/api/ontology/proposals/:id", get(handlers::get_ontology_proposal))
+        .route("/api/ontology/proposals/:id/approve", post(handlers::approve_ontology_proposal))
+        .route("/api/ontology/proposals/:id/reject", post(handlers::reject_ontology_proposal))
+        .route("/api/ontology/stats", get(handlers::ontology_evolution_stats))
         // Admin: Export/Import
         .route("/api/admin/export", post(handlers::export_handler))
         .route("/api/admin/import", post(handlers::import_handler))

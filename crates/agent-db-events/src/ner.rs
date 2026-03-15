@@ -176,8 +176,17 @@ impl EntitySpan {
             return false;
         }
 
-        // Extract and compare text
-        let extracted = &source_text[self.start_offset..self.end_offset];
+        // Extract and compare text (adjust to nearest char boundaries to avoid UTF-8 panics)
+        let extracted = source_text.get(self.start_offset..self.end_offset)
+            .unwrap_or_else(|| {
+                let start = (0..=self.start_offset).rev()
+                    .find(|&i| source_text.is_char_boundary(i))
+                    .unwrap_or(0);
+                let end = (self.end_offset..=source_text.len())
+                    .find(|&i| source_text.is_char_boundary(i))
+                    .unwrap_or(source_text.len());
+                &source_text[start..end]
+            });
         extracted == self.text
     }
 }

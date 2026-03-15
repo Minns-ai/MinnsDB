@@ -95,6 +95,16 @@ pub async fn ingest_conversation(
     State(state): State<AppState>,
     Json(request): Json<ConversationIngestRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Validate request size limits to prevent DoS
+    if request.sessions.len() > 100 {
+        return Err(ApiError::BadRequest("Maximum 100 sessions per request".into()));
+    }
+    for session in &request.sessions {
+        if session.messages.len() > 1000 {
+            return Err(ApiError::BadRequest("Maximum 1000 messages per session".into()));
+        }
+    }
+
     // Hard fail: LLM is required for conversation ingest.
     // Without it, no facts can be extracted and the graph would contain only
     // raw Conversation events with no structure.

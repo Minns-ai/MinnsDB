@@ -136,6 +136,9 @@ pub mod domain_schema;
 // OWL/RDFS-aligned ontology layer (replaces hardcoded domain checks)
 pub mod ontology;
 
+// Self-expanding ontology: discovery, inference, and LLM-assisted evolution
+pub mod ontology_evolution;
+
 // Community summaries for graph communities
 pub mod community_summary;
 
@@ -216,6 +219,9 @@ pub use redb_graph_store::RedbGraphStore;
 // Graph Pruning (streaming, bounded)
 pub mod graph_pruning;
 pub use graph_pruning::{GraphPruner, GraphPruningConfig, PruneResult};
+
+// MinnsQL query language
+pub mod query_lang;
 
 // Export/Import
 pub use export::{ExportError, ImportError, ImportMode, ImportStats};

@@ -327,6 +327,10 @@ impl WriteAheadLog {
         checksum
     }
 
+    /// Maximum allowed WAL entry size (64 MB). Any entry larger than this is
+    /// treated as corrupt data to prevent OOM from crafted length prefixes.
+    const MAX_WAL_ENTRY_SIZE: usize = 64 * 1024 * 1024;
+
     /// Read last sequence number from existing WAL files
     fn read_last_sequence(wal_directory: &Path) -> StorageResult<u64> {
         let wal_file_path = wal_directory.join("wal_current.log");
@@ -347,6 +351,9 @@ impl WriteAheadLog {
             }
 
             let entry_len = u32::from_le_bytes(len_bytes) as usize;
+            if entry_len > Self::MAX_WAL_ENTRY_SIZE {
+                break; // Entry too large — likely corrupt data
+            }
 
             // Read entry data
             let mut entry_data = vec![0u8; entry_len];
@@ -387,6 +394,9 @@ impl WriteAheadLog {
             }
 
             let entry_len = u32::from_le_bytes(len_bytes) as usize;
+            if entry_len > Self::MAX_WAL_ENTRY_SIZE {
+                break; // Entry too large — likely corrupt data
+            }
             let mut entry_data = vec![0u8; entry_len];
 
             if reader.read_exact(&mut entry_data).is_err() {
@@ -411,6 +421,9 @@ impl WriteAheadLog {
             }
 
             let entry_len = u32::from_le_bytes(len_bytes) as usize;
+            if entry_len > Self::MAX_WAL_ENTRY_SIZE {
+                break; // Entry too large — likely corrupt data
+            }
             let mut entry_data = vec![0u8; entry_len];
 
             if reader.read_exact(&mut entry_data).is_err() {

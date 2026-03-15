@@ -1,0 +1,215 @@
+// GraphEngine methods for ontology management: listing, upload, evolution, cascade inference.
+
+use crate::llm_client::{LlmRequest, LlmResponse};
+use crate::ontology_evolution::OntologyEvolutionEngine;
+
+impl super::GraphEngine {
+    /// List all registered ontology property IDs.
+    pub fn list_ontology_property_ids(&self) -> Vec<String> {
+        self.ontology.all_property_ids()
+    }
+
+    /// List all ontology properties as JSON-serializable values.
+    pub fn list_ontology_properties_json(&self) -> Vec<serde_json::Value> {
+        self.ontology
+            .all_property_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let desc = self.ontology.resolve(&id)?;
+                Some(serde_json::json!({
+                    "id": desc.id,
+                    "label": desc.label,
+                    "comment": desc.comment,
+                    "domain": desc.domain,
+                    "range": desc.range,
+                    "characteristics": desc.characteristics.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>(),
+                    "sub_property_of": desc.sub_property_of,
+                    "inverse_of": desc.inverse_of,
+                    "append_only": desc.append_only,
+                    "cascade_dependents": desc.cascade_dependents,
+                    "cascade_dependent": desc.cascade_dependent,
+                    "canonical_predicate": desc.canonical_predicate,
+                }))
+            })
+            .collect()
+    }
+
+    /// Upload new ontology TTL content, register properties, and run LLM cascade inference.
+    ///
+    /// Returns `(properties_registered, cascade_updates)`.
+    pub async fn upload_ontology_ttl(
+        &self,
+        ttl_content: &str,
+    ) -> Result<(usize, usize), String> {
+        // Phase 1: Parse TTL and register properties
+        let before_ids: std::collections::HashSet<String> =
+            self.ontology.all_property_ids().into_iter().collect();
+
+        self.ontology
+            .load_turtle_shared(ttl_content)
+            .map_err(|e| format!("TTL parse error: {}", e))?;
+
+        let after_ids: std::collections::HashSet<String> =
+            self.ontology.all_property_ids().into_iter().collect();
+        let new_count = after_ids.difference(&before_ids).count();
+
+        tracing::info!(
+            "Ontology upload: parsed TTL, {} new properties registered",
+            new_count
+        );
+
+        // Phase 2: Run LLM cascade inference on the full registry
+        let cascade_updates = self.run_ontology_cascade_inference().await.unwrap_or(0);
+
+        // Phase 3: Write back updated TTL to disk for persistence
+        if new_count > 0 {
+            if let Err(e) = self.persist_ontology_cascade_updates() {
+                tracing::warn!("Failed to persist cascade updates: {}", e);
+            }
+        }
+
+        Ok((new_count, cascade_updates))
+    }
+
+    /// Run LLM cascade/temporal dependency inference across all ontology properties.
+    ///
+    /// Builds a prompt, sends it to the LLM, parses the response, and updates
+    /// the OntologyRegistry with inferred cascade_dependents/cascade_dependent.
+    pub async fn run_ontology_cascade_inference(&self) -> Result<usize, String> {
+        let llm = match &self.unified_llm_client {
+            Some(client) => client.clone(),
+            None => {
+                tracing::debug!("No LLM client available, skipping cascade inference");
+                return Ok(0);
+            }
+        };
+
+        let (system_prompt, user_prompt) =
+            OntologyEvolutionEngine::build_cascade_inference_prompt(&self.ontology);
+
+        tracing::info!("Running LLM cascade inference on {} properties",
+            self.ontology.all_property_ids().len());
+
+        let request = LlmRequest {
+            system_prompt,
+            user_prompt,
+            temperature: 0.1,
+            max_tokens: 2000,
+            json_mode: true,
+        };
+
+        let response: LlmResponse = llm
+            .complete(request)
+            .await
+            .map_err(|e| format!("LLM cascade inference failed: {}", e))?;
+
+        let updated = OntologyEvolutionEngine::parse_cascade_inference_response(
+            &response.content,
+            &self.ontology,
+        );
+
+        tracing::info!("Cascade inference: updated {} properties", updated);
+
+        // Persist to disk
+        if updated > 0 {
+            if let Err(e) = self.persist_ontology_cascade_updates() {
+                tracing::warn!("Failed to persist cascade updates: {}", e);
+            }
+        }
+
+        Ok(updated)
+    }
+
+    /// Write a `_cascade_inferred.ttl` file capturing current cascade relationships.
+    ///
+    /// This augments the hand-written TTL files so cascade info survives restart.
+    fn persist_ontology_cascade_updates(&self) -> Result<(), String> {
+        let mut ttl = String::new();
+        ttl.push_str("## ── Auto-inferred cascade dependencies ──\n");
+        ttl.push_str("## Generated by LLM cascade inference pass. Do not edit manually.\n\n");
+        ttl.push_str("@prefix eg:   <http://minnsdb.local/ontology#> .\n");
+        ttl.push_str("@prefix owl:  <http://www.w3.org/2002/07/owl#> .\n\n");
+
+        let mut has_content = false;
+        for pid in self.ontology.all_property_ids() {
+            if let Some(desc) = self.ontology.resolve(&pid) {
+                let has_deps = !desc.cascade_dependents.is_empty();
+                let is_dep = desc.cascade_dependent;
+                if has_deps || is_dep {
+                    ttl.push_str(&format!("eg:{} a owl:ObjectProperty", pid));
+                    if has_deps {
+                        let deps: Vec<String> =
+                            desc.cascade_dependents.iter().map(|d| format!("eg:{}", d)).collect();
+                        ttl.push_str(&format!(" ;\n    eg:cascadeDependents {}", deps.join(", ")));
+                    }
+                    if is_dep {
+                        ttl.push_str(" ;\n    eg:cascadeDependent \"true\"");
+                    }
+                    ttl.push_str(" .\n\n");
+                    has_content = true;
+                }
+            }
+        }
+
+        if !has_content {
+            return Ok(());
+        }
+
+        let path = std::path::PathBuf::from("data/ontology/_cascade_inferred.ttl");
+        std::fs::write(&path, &ttl).map_err(|e| format!("Write failed: {}", e))?;
+        tracing::info!("Persisted cascade dependencies to {:?}", path);
+        Ok(())
+    }
+
+    /// Run behavior inference + hierarchy discovery (evolution pass).
+    pub async fn run_ontology_evolution_pass(&self) -> Result<Vec<u64>, String> {
+        // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
+        tracing::warn!("run_ontology_evolution_pass: evolution engine not yet wired to GraphEngine");
+        Ok(Vec::new())
+    }
+
+    /// Run LLM-assisted hierarchy discovery for unknown predicates.
+    pub async fn run_ontology_hierarchy_discovery(&self) -> Result<Vec<u64>, String> {
+        // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
+        tracing::warn!("run_ontology_hierarchy_discovery: evolution engine not yet wired to GraphEngine");
+        Ok(Vec::new())
+    }
+
+    /// List ontology observations from the evolution engine.
+    pub async fn list_ontology_observations(
+        &self,
+    ) -> (Vec<serde_json::Value>, serde_json::Value) {
+        // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
+        (Vec::new(), serde_json::json!({"total_observations": 0}))
+    }
+
+    /// List evolution proposals.
+    pub async fn ontology_evolution_proposals(
+        &self,
+    ) -> Vec<crate::ontology_evolution::OntologyProposal> {
+        // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
+        Vec::new()
+    }
+
+    /// Approve and apply a proposal.
+    pub async fn approve_and_apply_ontology_proposal(
+        &self,
+        _id: u64,
+    ) -> Result<usize, String> {
+        Err("Evolution engine not yet wired to GraphEngine".into())
+    }
+
+    /// Reject a proposal.
+    pub async fn reject_ontology_proposal(&self, _id: u64) -> bool {
+        false
+    }
+
+    /// Evolution engine statistics.
+    pub async fn ontology_evolution_stats(&self) -> serde_json::Value {
+        serde_json::json!({
+            "total_observations": 0,
+            "pending_proposals": 0,
+            "status": "evolution engine not yet wired"
+        })
+    }
+}

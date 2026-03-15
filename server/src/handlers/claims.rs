@@ -66,14 +66,16 @@ pub async fn search_claims(
         .await
         .map_err(ApiError::ServiceUnavailable)?;
 
+    let top_k = payload.top_k.min(500);
+
     info!(
         "Searching for claims: query={} top_k={} min_similarity={}",
-        payload.query_text, payload.top_k, payload.min_similarity
+        payload.query_text, top_k, payload.min_similarity
     );
 
     let results = state
         .engine
-        .search_similar_claims(&payload.query_text, payload.top_k, payload.min_similarity)
+        .search_similar_claims(&payload.query_text, top_k, payload.min_similarity)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to search claims: {}", e)))?;
 

@@ -18,6 +18,19 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Truncate a string to at most `max_bytes` bytes, ensuring the cut
+/// falls on a valid UTF-8 character boundary.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Configuration for Active Retrieval Testing.
 #[derive(Debug, Clone)]
 pub struct ArtConfig {
@@ -352,7 +365,7 @@ pub async fn run_art_pass(
             tracing::debug!(
                 "ART: node {} '{}' passed ({}/{} hit rate {:.0}%)",
                 node_id,
-                &node_label[..node_label.len().min(40)],
+                safe_truncate(&node_label, 40),
                 hits,
                 total,
                 hit_rate * 100.0
@@ -364,7 +377,7 @@ pub async fn run_art_pass(
         tracing::info!(
             "ART: node {} '{}' failed ({}/{} hit rate {:.0}%), enhancing",
             node_id,
-            &node_label[..node_label.len().min(40)],
+            safe_truncate(&node_label, 40),
             hits,
             total,
             hit_rate * 100.0

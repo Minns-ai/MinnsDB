@@ -15,6 +15,8 @@ pub mod search;
 pub mod strategies;
 pub mod structured_memory;
 pub mod workflows;
+pub mod ontology_evolution;
+pub mod query;
 pub mod world_model;
 
 // Re-export all handlers for convenience
@@ -33,4 +35,6 @@ pub use search::*;
 pub use strategies::*;
 pub use structured_memory::*;
 pub use workflows::*;
+pub use ontology_evolution::*;
+pub use query::*;
 pub use world_model::*;

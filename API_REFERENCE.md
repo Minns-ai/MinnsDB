@@ -2,8 +2,8 @@
 
 **Complete REST API documentation for SDK integration**
 
-Version: 2.4.0
-Last Updated: 2026-03-07
+Version: 2.5.0
+Last Updated: 2026-03-15
 
 ---
 
@@ -19,15 +19,20 @@ Last Updated: 2026-03-07
 8. [Analytics](#analytics)
 9. [Search](#search)
 10. [Natural Language Query (NLQ)](#natural-language-query-nlq)
-11. [Claims](#claims)
-12. [Structured Memory](#structured-memory)
-13. [Conversation Ingestion](#conversation-ingestion)
-14. [Planning & World Model](#planning--world-model)
-15. [Code Intelligence](#code-intelligence)
-16. [Admin](#admin)
-17. [Health](#health)
-18. [Error Handling](#error-handling)
-19. [Configuration](#configuration)
+11. [MinnsQL Structured Query](#minnsql-structured-query)
+12. [Claims](#claims)
+13. [Structured Memory](#structured-memory)
+14. [Conversation Ingestion](#conversation-ingestion)
+15. [Single Message Ingestion](#single-message-ingestion)
+16. [Workflows](#workflows)
+17. [Agent Registry](#agent-registry)
+18. [Ontology Evolution](#ontology-evolution)
+19. [Planning & World Model](#planning--world-model)
+20. [Code Intelligence](#code-intelligence)
+21. [Admin](#admin)
+22. [Health](#health)
+23. [Error Handling](#error-handling)
+24. [Configuration](#configuration)
 
 ---
 
@@ -982,6 +987,202 @@ When `ENABLE_NLQ_HINT=true`, an LLM advisory classifier runs alongside the rule-
 
 ---
 
+## MinnsQL Structured Query
+
+Execute structured graph queries using MinnsQL, a Cypher-inspired query language with built-in temporal semantics.
+
+### POST /api/query
+
+**Request:**
+```json
+{
+  "query": "MATCH (a:Person)-[r:location]->(b) RETURN a.name, b.name",
+  "group_id": "tenant-1"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | string | yes | MinnsQL query (max 4096 bytes) |
+| `group_id` | string | no | Multi-tenant partition key |
+
+**Response (200):**
+```json
+{
+  "columns": ["a.name", "b.name"],
+  "rows": [["alice", "london"], ["bob", "berlin"]],
+  "stats": {
+    "nodes_scanned": 150,
+    "edges_traversed": 42,
+    "execution_time_ms": 3
+  }
+}
+```
+
+**Error responses:**
+- `400` — Parse error (includes position and message)
+- `504` — Query execution timed out (30s limit)
+- `500` — Internal execution error
+
+### MinnsQL Language Reference
+
+#### Basic Syntax
+
+```sql
+MATCH (variable:Label {prop: "value"})-[edge:TYPE]->(target)
+WHERE condition
+RETURN expression AS alias
+ORDER BY alias ASC|DESC
+LIMIT n
+```
+
+#### Temporal Clauses
+
+**WHEN** — Filter edges by valid-time (real-world validity period):
+
+```sql
+-- Only currently active edges (default)
+MATCH (a)-[r]->(b) RETURN a
+
+-- All edges regardless of temporal validity
+MATCH (a)-[r]->(b) WHEN ALL RETURN a
+
+-- Edges valid at a specific point
+MATCH (a)-[r]->(b) WHEN "2024-06-15" RETURN a
+
+-- Edges valid during a range
+MATCH (a)-[r]->(b) WHEN "2024-01-01" TO "2024-06-01" RETURN a
+
+-- Edges valid in the last N duration
+MATCH (a)-[r]->(b) WHEN LAST "30d" RETURN a
+```
+
+**AS OF** — Filter by transaction-time (when data was recorded). Only nodes/edges with `created_at <= cutoff` are visible:
+
+```sql
+-- See the graph as it was known at a specific time
+MATCH (a)-[r]->(b) WHEN ALL AS OF "2024-06-01T00:00:00Z" RETURN a
+```
+
+**Bi-temporal composition** — WHEN and AS OF can be combined. AS OF filters by when data was recorded; WHEN filters by when it was valid in the real world:
+
+```sql
+MATCH (a)-[r]->(b) WHEN "2024-01-01" TO "2024-03-01" AS OF "2024-06-01" RETURN a
+```
+
+#### Aggregation and GROUP BY
+
+Non-aggregate expressions in RETURN automatically become group keys:
+
+```sql
+MATCH (a:Person)-[r]->(b)
+RETURN a.name, count(*) AS cnt
+ORDER BY cnt DESC
+LIMIT 10
+```
+
+Aggregate functions: `count(*)`, `sum(expr)`, `avg(expr)`, `min(expr)`, `max(expr)`, `collect(expr)`.
+
+#### Variable-Length Paths
+
+```sql
+-- 1 to 3 hops
+MATCH (a)-[*1..3]->(b) RETURN a, b
+
+-- Unbounded (capped at 10 hops)
+MATCH (a)-[*1..]->(b) RETURN a, b
+```
+
+#### Built-in Functions
+
+**Scalar functions:**
+
+| Function | Args | Returns | Description |
+|----------|------|---------|-------------|
+| `type(x)` | node or edge | String | Node type or edge type name |
+| `id(x)` | node or edge | Int | Internal ID |
+| `labels(n)` | node | String | Node type name |
+| `properties(x)` | node or edge | Map | All properties as a map |
+| `now()` | — | Int | Current time (nanoseconds since epoch) |
+| `coalesce(a, b, ...)` | any | any | First non-null argument |
+| `toUpper(s)` | string | String | Uppercase |
+| `toLower(s)` | string | String | Lowercase |
+| `path(a, b)` | two nodes | List | Shortest path between nodes |
+| `hops(p)` | path or list | Int | Number of hops in a path |
+
+**Temporal accessor functions:**
+
+| Function | Args | Returns | Description |
+|----------|------|---------|-------------|
+| `valid_from(r)` | edge | Int or Null | Start of valid-time period (nanos) |
+| `valid_until(r)` | edge | Int or Null | End of valid-time period (nanos, Null = open-ended) |
+| `created_at(x)` | node or edge | Int | Transaction-time creation timestamp |
+| `updated_at(x)` | node or edge | Int | Transaction-time last update |
+| `duration(r)` | edge | Int or Null | `valid_until - valid_from` (Null if open-ended) |
+| `open_ended(r)` | edge | Bool | True if `valid_until` is Null |
+| `change_type(r, t1, t2)` | edge, timestamp, timestamp | String | One of: "started", "ended", "started_and_ended", "created", "stable" |
+
+**Time bucketing functions:**
+
+| Function | Args | Returns | Description |
+|----------|------|---------|-------------|
+| `time_bucket(width, ts)` | string, Int | Int | Floor timestamp to bucket boundary. Width: `"1d"`, `"6h"`, `"30m"`, `"month"`, `"quarter"`, `"year"` |
+| `date_trunc(unit, ts)` | string, Int | Int | Calendar-aware truncation. Units: `"second"`, `"minute"`, `"hour"`, `"day"`, `"week"`, `"month"`, `"quarter"`, `"year"` |
+| `ago(duration)` | string | Int | `now() - duration`. Accepts: `"30s"`, `"5m"`, `"2h"`, `"7d"`, `"1w"`. Rejects calendar units (month/year) |
+
+Example — bucketed time series:
+```sql
+MATCH (a:Person)-[r:location]->(b)
+WHEN ALL
+RETURN time_bucket("1d", valid_from(r)) AS day, count(*) AS moves
+ORDER BY day
+```
+
+**Temporal join predicates (Allen's interval algebra):**
+
+| Predicate | Condition | Description |
+|-----------|-----------|-------------|
+| `overlap(r1, r2)` | intervals overlap | True if the two edges' valid-time periods overlap |
+| `precedes(r1, r2)` | r1.end ≤ r2.start | r1 ends before or when r2 starts |
+| `meets(r1, r2)` | r1.end = r2.start | r1 ends exactly when r2 starts |
+| `covers(r1, r2)` | r1 contains r2 | r1's interval fully contains r2's |
+| `starts(r1, r2)` | same start, r1 ≤ r2 | r1 starts with r2 but ends sooner or same |
+| `finishes(r1, r2)` | same end, r1 ≥ r2 | r1 finishes with r2 but starts later or same |
+| `equals(r1, r2)` | identical intervals | Same valid_from and valid_until |
+
+Open-ended edges (`valid_until = Null`) are treated as extending to infinity.
+
+Example:
+```sql
+MATCH (a)-[r1]->(b), (a)-[r2]->(c)
+WHEN ALL
+WHERE meets(r1, r2)
+RETURN a.name, type(r1), type(r2)
+```
+
+**TCell history functions (confidence/weight over time):**
+
+| Function | Args | Returns | Description |
+|----------|------|---------|-------------|
+| `confidence_at(r, ts)` | edge, timestamp | Float or Null | Confidence value at or before the given time |
+| `weight_at(r, ts)` | edge, timestamp | Float or Null | Weight value at or before the given time |
+| `confidence_history(r)` | edge | List | All `[timestamp, value]` pairs, chronological |
+| `weight_history(r)` | edge | List | All `[timestamp, value]` pairs, chronological |
+
+**Boolean predicates (used in WHERE):**
+
+| Predicate | Args | Description |
+|-----------|------|-------------|
+| `SUCCESSIVE(r1, r2)` | two edges, optional tolerance | True if r1.valid_until ≈ r2.valid_from (default tolerance: 1s) |
+| `SUCCESSIVE(r1, r2, "100ms")` | two edges + duration | With custom tolerance |
+| `CHANGED(r, t1, t2)` | edge, start, end | True if edge started, ended, or was created in [t1, t2] |
+
+**Comparison operators:** `=`, `!=`, `<`, `>`, `<=`, `>=`, `CONTAINS`, `STARTS WITH`, `IS NULL`, `IS NOT NULL`
+
+**Boolean logic:** `AND`, `OR`, `NOT`, parentheses for grouping
+
+---
+
 ## Claims
 
 Claims are semantic assertions extracted by the NER + LLM pipeline from events.
@@ -1391,6 +1592,467 @@ Ingest one or more conversation sessions. Each message is converted to a Convers
 | `routine` | `state:routine` | `"I take morning walks in Battery Park"` |
 
 **NER financial extraction** (parallel with LLM cascade): When NER is enabled, the specialized accounting model extracts PAYER/AMOUNT/PAYEE triplets from financial messages and creates `financial:payment` edges. These are deduped against LLM-extracted financial facts.
+
+---
+
+## Single Message Ingestion
+
+Ingest individual messages (user or assistant turns) with automatic buffering and LLM compaction. Messages are buffered per-session until enough context accumulates, then compacted into facts and graph edges.
+
+### POST /api/messages
+
+**Request:**
+```json
+{
+  "role": "user",
+  "content": "I just moved from London to Berlin last week",
+  "session_id": "session-abc",
+  "case_id": "case-123",
+  "include_assistant_facts": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `role` | string | yes | `"user"` or `"assistant"` |
+| `content` | string | yes | Message text |
+| `session_id` | string | no | Session ID (auto-generated if omitted) |
+| `case_id` | string | no | Case ID for cross-session grouping (auto-generated if omitted) |
+| `include_assistant_facts` | bool | no | Extract facts from assistant messages too (default: false) |
+
+**Response (200):**
+```json
+{
+  "case_id": "case-123",
+  "session_id": "session-abc",
+  "messages_processed": 1,
+  "events_submitted": 1,
+  "buffered": true,
+  "buffer_size": 3,
+  "compaction": null
+}
+```
+
+When the buffer reaches the compaction threshold, `compaction` is populated:
+```json
+{
+  "compaction": {
+    "facts_extracted": 2,
+    "goals_extracted": 0,
+    "goals_deduplicated": 0,
+    "procedural_steps": 0,
+    "memories_created": 1,
+    "memories_updated": 0,
+    "memories_deleted": 0,
+    "playbooks_extracted": 0,
+    "llm_success": true
+  }
+}
+```
+
+---
+
+## Workflows
+
+Multi-step workflows represented as graph structures. Each workflow is a set of steps with dependencies, roles, and state tracking.
+
+### POST /api/workflows
+
+Create a new workflow.
+
+**Request:**
+```json
+{
+  "name": "Deploy Pipeline",
+  "intent": "deploy",
+  "description": "Standard deployment workflow",
+  "steps": [
+    {
+      "id": "build",
+      "role": "ci",
+      "task": "Build and test",
+      "depends_on": [],
+      "inputs": ["source_branch"],
+      "outputs": ["build_artifact"]
+    },
+    {
+      "id": "deploy",
+      "role": "cd",
+      "task": "Deploy to staging",
+      "depends_on": ["build"],
+      "inputs": ["build_artifact"],
+      "outputs": ["deploy_url"]
+    }
+  ],
+  "group_id": "team-1",
+  "metadata": {"priority": "high"}
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "workflow_id": 42,
+  "workflow_name": "Deploy Pipeline",
+  "nodes_created": 3,
+  "edges_created": 2,
+  "step_node_ids": {"build": 43, "deploy": 44}
+}
+```
+
+### GET /api/workflows
+
+List workflows.
+
+| Query Parameter | Type | Default | Description |
+|-----------------|------|---------|-------------|
+| `group_id` | string | — | Filter by group |
+| `limit` | integer | 50 | Max workflows to return |
+
+**Response (200):**
+```json
+{
+  "workflows": [
+    {
+      "workflow_id": 42,
+      "name": "Deploy Pipeline",
+      "intent": "deploy",
+      "step_count": 2,
+      "group_id": "team-1",
+      "created_at": "2026-03-15T10:00:00Z",
+      "active": true
+    }
+  ],
+  "count": 1
+}
+```
+
+### GET /api/workflows/:id
+
+Get full workflow details including steps.
+
+**Response (200):**
+```json
+{
+  "workflow_id": 42,
+  "name": "Deploy Pipeline",
+  "intent": "deploy",
+  "description": "Standard deployment workflow",
+  "group_id": "team-1",
+  "created_at": "2026-03-15T10:00:00Z",
+  "steps": [
+    {
+      "node_id": 43,
+      "id": "build",
+      "role": "ci",
+      "task": "Build and test",
+      "depends_on": [],
+      "inputs": ["source_branch"],
+      "outputs": ["build_artifact"],
+      "state": null,
+      "metadata": {}
+    }
+  ],
+  "metadata": {"priority": "high"}
+}
+```
+
+### PUT /api/workflows/:id
+
+Update a workflow. Supersedes old step nodes/edges and creates new ones.
+
+**Request:** Same shape as POST, all fields optional.
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "workflow_id": 42,
+  "nodes_created": 2,
+  "nodes_superseded": 2,
+  "edges_created": 1,
+  "edges_superseded": 1,
+  "step_node_ids": {"build": 50, "deploy": 51}
+}
+```
+
+### DELETE /api/workflows/:id
+
+Soft-delete a workflow (supersedes edges).
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "workflow_id": 42,
+  "edges_superseded": 3
+}
+```
+
+### POST /api/workflows/:id/steps/:step_id/transition
+
+Transition a workflow step to a new state.
+
+**Request:**
+```json
+{
+  "state": "completed",
+  "result": "Build succeeded, artifact at s3://..."
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "workflow_id": 42,
+  "step_id": "build",
+  "new_state": "completed"
+}
+```
+
+### POST /api/workflows/:id/feedback
+
+Attach outcome feedback to a workflow.
+
+**Request:**
+```json
+{
+  "feedback": "Deployment completed with zero downtime",
+  "outcome": "success"
+}
+```
+
+| `outcome` values | Description |
+|-------------------|-------------|
+| `"success"` | Workflow succeeded |
+| `"partial"` | Partial completion |
+| `"failure"` | Workflow failed |
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "workflow_id": 42,
+  "feedback_node_id": 55
+}
+```
+
+---
+
+## Agent Registry
+
+Register agents and their capabilities for multi-agent coordination.
+
+### POST /api/agents/register
+
+**Request:**
+```json
+{
+  "agent_id": "coder-agent-1",
+  "group_id": "team-1",
+  "repository": "backend",
+  "capabilities": ["code", "test", "review"]
+}
+```
+
+**Response (200):**
+```json
+{
+  "agent_node_id": 60,
+  "repo_node_id": 61,
+  "status": "registered"
+}
+```
+
+### GET /api/agents
+
+| Query Parameter | Type | Required | Description |
+|-----------------|------|----------|-------------|
+| `group_id` | string | yes | Partition key for agent filtering |
+
+**Response (200):**
+```json
+{
+  "agents": [
+    {
+      "node_id": 60,
+      "agent_id": "coder-agent-1",
+      "group_id": "team-1",
+      "repositories": ["backend"],
+      "capabilities": ["code", "test", "review"],
+      "last_seen": 1742025600000000000
+    }
+  ]
+}
+```
+
+---
+
+## Ontology Evolution
+
+Manage the OWL/RDFS ontology that drives edge behaviors (symmetry, functional constraints, cascade dependencies). Properties are defined in Turtle (TTL) format and can be discovered automatically from graph patterns.
+
+### GET /api/ontology/properties
+
+List all registered ontology properties.
+
+**Response (200):**
+```json
+{
+  "properties": [
+    {
+      "property_name": "location:lives_in",
+      "domain": "Person",
+      "range": "Location",
+      "is_symmetric": false,
+      "is_functional": true,
+      "is_append_only": false,
+      "cascade_dependents": ["location:commutes_to"]
+    }
+  ],
+  "count": 12
+}
+```
+
+### POST /api/ontology/upload
+
+Upload a Turtle ontology file. Properties are registered and cascade dependencies are inferred.
+
+**Request:**
+```json
+{
+  "ttl": "@prefix : <http://minnsdb.dev/ontology/> .\n:lives_in a owl:FunctionalProperty ."
+}
+```
+
+**Response (200):**
+```json
+{
+  "status": "ok",
+  "properties_registered": 3,
+  "cascade_properties_updated": 1
+}
+```
+
+### POST /api/ontology/discover
+
+Run three-phase automatic ontology discovery: behavior inference from graph patterns, hierarchy discovery, and cascade dependency inference.
+
+**Request:** Empty POST body.
+
+**Response (200):**
+```json
+{
+  "proposals_created": 5,
+  "proposal_ids": [1, 2, 3, 4, 5],
+  "cascade_properties_updated": 2
+}
+```
+
+### POST /api/ontology/cascade-inference
+
+Run cascade dependency inference only (without full discovery).
+
+**Request:** Empty POST body.
+
+**Response (200):**
+```json
+{
+  "status": "ok",
+  "properties_updated": 3
+}
+```
+
+### GET /api/ontology/observations
+
+List observed predicates and usage statistics from the graph.
+
+**Response (200):**
+```json
+{
+  "observations": [
+    {
+      "predicate": "location:lives_in",
+      "domain": "Person",
+      "range": "Location",
+      "count": 42,
+      "last_seen": 1742025600000000000
+    }
+  ],
+  "stats": {
+    "total_predicates": 15,
+    "total_observations": 230,
+    "timestamp": 1742025600000000000
+  }
+}
+```
+
+### GET /api/ontology/proposals
+
+List ontology evolution proposals (pending review).
+
+**Response (200):**
+```json
+{
+  "proposals": [
+    {
+      "id": 1,
+      "property_name": "works_with",
+      "domain": "Person",
+      "range": "Person",
+      "is_symmetric": true,
+      "is_functional": false,
+      "status": "pending",
+      "confidence": 0.87
+    }
+  ],
+  "count": 1
+}
+```
+
+### GET /api/ontology/proposals/:id
+
+Get a specific proposal.
+
+### POST /api/ontology/proposals/:id/approve
+
+Approve a proposal and apply it to the ontology registry.
+
+**Response (200):**
+```json
+{
+  "status": "applied",
+  "properties_registered": 1
+}
+```
+
+### POST /api/ontology/proposals/:id/reject
+
+Reject a proposal.
+
+**Response (200):**
+```json
+{
+  "status": "rejected"
+}
+```
+
+### GET /api/ontology/stats
+
+Ontology evolution statistics.
+
+**Response (200):**
+```json
+{
+  "total_proposals": 12,
+  "pending_proposals": 3,
+  "approved_proposals": 8,
+  "total_properties": 25,
+  "evolution_passes": 4
+}
+```
 
 ---
 
@@ -1987,21 +2649,29 @@ Use this path when your agent needs the full learning loop: events → episodes 
 4. **Full telemetry:** Use `Learning` events (`MemoryUsed`, `StrategyUsed`, `Outcome`) to close the feedback loop
 5. **Semantic search:** Enable `enable_semantic: true` on events, then use `POST /api/search` with Hybrid mode
 6. **Natural language queries:** Use `POST /api/nlq` to ask questions in plain English. Pass `session_id` for conversational follow-ups
-7. **Structured memory:** Use `/api/structured-memory/*` endpoints for domain-specific data (ledgers, state machines, preference lists, trees)
-8. **Typed state changes:** Use `POST /api/events/state-change` to emit state transitions — auto-detected and tracked in structured memory state machines
-9. **Typed transactions:** Use `POST /api/events/transaction` to emit financial/quantity transactions — auto-detected and appended to structured memory ledgers
-10. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
-11. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
+7. **MinnsQL queries:** Use `POST /api/query` for structured graph queries with temporal filtering, aggregation, and Allen's interval algebra predicates
+8. **Structured memory:** Use `/api/structured-memory/*` endpoints for domain-specific data (ledgers, state machines, preference lists, trees)
+9. **Typed state changes:** Use `POST /api/events/state-change` to emit state transitions — auto-detected and tracked in structured memory state machines
+10. **Typed transactions:** Use `POST /api/events/transaction` to emit financial/quantity transactions — auto-detected and appended to structured memory ledgers
+11. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
+12. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
 
 ### Conversation Ingestion
 
 Conversations go through the full event pipeline with LLM compaction for fact extraction. Events, episodes, memories, and graph edges are all created.
 
-12. **Conversation ingestion:** Use `POST /api/conversations/ingest` to ingest multi-session conversations. Requires an LLM client. Use the same `case_id` across calls for incremental ingestion with stable entity resolution and automatic deduplication.
-13. **Multi-source queries:** Use `POST /api/nlq` to query the graph. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment.
-14. **Incremental pattern:** Send messages as they arrive with the same `case_id`. The server preserves conversation state and deduplicates already-processed messages automatically. No client-side state management needed.
+13. **Conversation ingestion:** Use `POST /api/conversations/ingest` to ingest multi-session conversations. Requires an LLM client. Use the same `case_id` across calls for incremental ingestion with stable entity resolution and automatic deduplication.
+14. **Single message ingestion:** Use `POST /api/messages` to send individual messages with automatic buffering and compaction.
+15. **Multi-source queries:** Use `POST /api/nlq` to query the graph. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment.
+16. **Incremental pattern:** Send messages as they arrive with the same `case_id`. The server preserves conversation state and deduplicates already-processed messages automatically. No client-side state management needed.
+
+### Multi-Agent Coordination
+
+17. **Agent registry:** Use `POST /api/agents/register` to register agents with capabilities, then `GET /api/agents` to discover peers.
+18. **Workflows:** Use `POST /api/workflows` to create multi-step workflows with dependency tracking, then transition steps with `/api/workflows/:id/steps/:step_id/transition`.
+19. **Ontology evolution:** Use `POST /api/ontology/discover` for automatic property discovery, review proposals with `/api/ontology/proposals`, and upload custom TTL with `POST /api/ontology/upload`.
 
 ### Configuration
 
-15. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)
-16. **Metadata normalization:** Alias-based normalization is always active. Set `ENABLE_METADATA_NORMALIZATION=true` for LLM fallback on unrecognized metadata keys
+20. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)
+21. **Metadata normalization:** Alias-based normalization is always active. Set `ENABLE_METADATA_NORMALIZATION=true` for LLM fallback on unrecognized metadata keys
