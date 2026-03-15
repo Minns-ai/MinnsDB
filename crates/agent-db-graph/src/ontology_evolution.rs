@@ -161,6 +161,10 @@ pub struct ProposedProperty {
     pub sub_property_of: Option<String>,
     pub append_only: bool,
     pub canonical_predicate: String,
+    /// Properties whose edges should be superseded when this property changes.
+    pub cascade_dependents: Vec<String>,
+    /// Whether this property's edges are affected by cascades from other properties.
+    pub cascade_dependent: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +428,8 @@ impl OntologyEvolutionEngine {
                     max_cardinality: if b.is_functional { Some(1) } else { None },
                     sub_property_of,
                     append_only: b.is_append_only,
+                    cascade_dependents: Vec::new(),
+                    cascade_dependent: false,
                     canonical_predicate: b.predicate.clone(),
                 });
             }
@@ -584,6 +590,8 @@ impl OntologyEvolutionEngine {
                     max_cardinality: None,
                     sub_property_of: None,
                     append_only: false,
+                    cascade_dependents: Vec::new(),
+                    cascade_dependent: false,
                     canonical_predicate: String::new(),
                 });
             }
@@ -615,6 +623,8 @@ impl OntologyEvolutionEngine {
                     max_cardinality: None,
                     sub_property_of: Some(parent.clone()),
                     append_only: false,
+                    cascade_dependents: Vec::new(),
+                    cascade_dependent: false,
                     canonical_predicate: child_id.clone(),
                 });
             }
@@ -637,6 +647,173 @@ impl OntologyEvolutionEngine {
         }
 
         proposal_ids
+    }
+
+    // ── LLM-Assisted Cascade & Temporal Dependency Inference ──
+
+    /// Build a prompt for the LLM to infer cascade dependencies and temporal
+    /// groupings across all registered ontology properties.
+    ///
+    /// This should be called after new properties are added (via hierarchy
+    /// discovery or TTL upload) to automatically determine which properties
+    /// are temporally dependent on others.
+    ///
+    /// Returns `(system_prompt, user_prompt)` for the LLM call. The caller
+    /// passes the response to `parse_cascade_inference_response`.
+    pub fn build_cascade_inference_prompt(
+        ontology: &OntologyRegistry,
+    ) -> (String, String) {
+        let system = concat!(
+            "You are an ontology engineer analyzing temporal dependencies in a personal knowledge graph.\n\n",
+            "When a person's single-valued property changes (e.g., they move cities), some other properties\n",
+            "become stale and should be superseded. For example:\n",
+            "- When someone moves cities, their neighbor relationship is no longer valid\n",
+            "- When someone changes jobs, their colleague relationships may change\n",
+            "- When someone moves, their daily routine (gym, commute) likely changes\n\n",
+            "Your job: given the full list of ontology properties, determine:\n",
+            "1. Which single-valued (Functional) properties are \"triggers\" — when they change, other properties become stale\n",
+            "2. Which properties are \"cascade dependents\" — their edges become stale when a trigger changes\n\n",
+            "Output strict JSON:\n",
+            "{\n",
+            "  \"cascade_rules\": [\n",
+            "    {\n",
+            "      \"trigger\": \"property_id\",\n",
+            "      \"dependents\": [\"dependent_property_id_1\", \"dependent_property_id_2\"],\n",
+            "      \"rationale\": \"Why these depend on the trigger\"\n",
+            "    }\n",
+            "  ]\n",
+            "}\n\n",
+            "Rules:\n",
+            "- Only single-valued (Functional) properties can be triggers\n",
+            "- Append-only properties (like financial transactions) are NEVER dependents\n",
+            "- Family relationships (parent, child, sibling, spouse) are NOT location-dependent\n",
+            "- Only include dependencies where a real-world change in the trigger would genuinely\n",
+            "  invalidate the dependent (e.g., moving cities invalidates neighbor, but NOT friend)\n",
+            "- Be conservative — false positives cause data loss. Only flag clear temporal dependencies\n",
+            "- Use only property IDs from the provided list\n",
+            "- No markdown fences, no explanation outside JSON",
+        )
+        .to_string();
+
+        let all_ids = ontology.all_property_ids();
+        let mut user = String::from("Ontology properties:\n\n");
+        for pid in &all_ids {
+            if let Some(desc) = ontology.resolve(pid) {
+                let chars: Vec<&str> = desc.characteristics.iter().map(|c| match c {
+                    PropertyCharacteristic::Functional => "Functional",
+                    PropertyCharacteristic::Symmetric => "Symmetric",
+                    PropertyCharacteristic::Transitive => "Transitive",
+                    PropertyCharacteristic::InverseFunctional => "InverseFunctional",
+                }).collect();
+                let parent = desc.sub_property_of.as_deref().unwrap_or("(root)");
+                user.push_str(&format!(
+                    "- {} (label: \"{}\", comment: \"{}\", parent: {}, characteristics: [{}], append_only: {})\n",
+                    pid, desc.label, desc.comment, parent, chars.join(", "), desc.append_only
+                ));
+            }
+        }
+
+        (system, user)
+    }
+
+    /// Parse the LLM's cascade inference response and update the ontology registry
+    /// with inferred cascade_dependents and cascade_dependent flags.
+    ///
+    /// Returns the number of properties updated.
+    pub fn parse_cascade_inference_response(
+        response: &str,
+        ontology: &OntologyRegistry,
+    ) -> usize {
+        let parsed: serde_json::Value = match crate::llm_client::parse_json_from_llm(response) {
+            Some(v) => v,
+            None => {
+                tracing::warn!("Failed to parse cascade inference LLM response");
+                return 0;
+            }
+        };
+
+        let rules = match parsed["cascade_rules"].as_array() {
+            Some(r) => r,
+            None => return 0,
+        };
+
+        let mut updated = 0usize;
+
+        for rule in rules {
+            let trigger = match rule["trigger"].as_str() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let dependents: Vec<String> = rule["dependents"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if dependents.is_empty() {
+                continue;
+            }
+
+            // Validate: trigger must exist and be functional
+            let trigger_desc = match ontology.resolve(trigger) {
+                Some(d) => d,
+                None => {
+                    tracing::warn!("Cascade inference: trigger '{}' not found in ontology", trigger);
+                    continue;
+                }
+            };
+            if !trigger_desc.characteristics.contains(&PropertyCharacteristic::Functional) {
+                tracing::warn!(
+                    "Cascade inference: trigger '{}' is not Functional, skipping",
+                    trigger
+                );
+                continue;
+            }
+
+            // Filter dependents to only valid property IDs, exclude append-only
+            let valid_dependents: Vec<String> = dependents
+                .into_iter()
+                .filter(|dep| {
+                    if let Some(d) = ontology.resolve(dep) {
+                        if d.append_only {
+                            tracing::debug!("Cascade inference: skipping append-only dependent '{}'", dep);
+                            return false;
+                        }
+                        true
+                    } else {
+                        tracing::warn!("Cascade inference: dependent '{}' not found in ontology", dep);
+                        false
+                    }
+                })
+                .collect();
+
+            if valid_dependents.is_empty() {
+                continue;
+            }
+
+            // Update the trigger property's cascade_dependents
+            if ontology.update_cascade_dependents(trigger, &valid_dependents) {
+                updated += 1;
+                tracing::info!(
+                    "Cascade inference: {} triggers cascade on [{}]",
+                    trigger,
+                    valid_dependents.join(", ")
+                );
+            }
+
+            // Mark each dependent as cascade_dependent
+            for dep in &valid_dependents {
+                if ontology.mark_cascade_dependent(dep) {
+                    updated += 1;
+                }
+            }
+        }
+
+        updated
     }
 
     // ── Proposal Management ──
@@ -720,11 +897,10 @@ impl OntologyEvolutionEngine {
                 sub_property_of: prop.sub_property_of.clone(),
                 inverse_of: None,
                 append_only: prop.append_only,
-                cascade_dependents: Vec::new(),
-                cascade_dependent: false,
+                cascade_dependents: prop.cascade_dependents.clone(),
+                cascade_dependent: prop.cascade_dependent,
                 skip_conflict_detection: prop.append_only,
                 canonical_predicate: prop.canonical_predicate.clone(),
-                generated_keywords: Vec::new(),
             };
             if ontology.register_property(descriptor) {
                 registered += 1;
@@ -937,6 +1113,13 @@ fn generate_ttl_for_properties(properties: &[ProposedProperty]) -> String {
         if prop.append_only {
             ttl.push_str("    eg:appendOnly true ;\n");
         }
+        if !prop.cascade_dependents.is_empty() {
+            let deps: Vec<String> = prop.cascade_dependents.iter().map(|d| format!("eg:{}", d)).collect();
+            ttl.push_str(&format!("    eg:cascadeDependents {} ;\n", deps.join(", ")));
+        }
+        if prop.cascade_dependent {
+            ttl.push_str("    eg:cascadeDependent \"true\" ;\n");
+        }
         if !prop.canonical_predicate.is_empty() {
             ttl.push_str(&format!(
                 "    eg:canonicalPredicate \"{}\" ;\n",
@@ -1032,6 +1215,8 @@ mod tests {
             max_cardinality: None,
             sub_property_of: Some("hobby".to_string()),
             append_only: false,
+            cascade_dependents: Vec::new(),
+            cascade_dependent: false,
             canonical_predicate: "plays_tennis".to_string(),
         }];
 
@@ -1106,5 +1291,200 @@ mod tests {
         assert_eq!(stats.total_observations, 1);
         assert_eq!(stats.total_edge_count, 1);
         assert_eq!(stats.pending_proposals, 0);
+    }
+
+    #[test]
+    fn test_cascade_inference_prompt_includes_all_properties() {
+        let ontology = crate::ontology::tests::test_registry();
+        let (system, user) = OntologyEvolutionEngine::build_cascade_inference_prompt(&ontology);
+
+        assert!(system.contains("cascade"));
+        assert!(system.contains("temporal dependencies"));
+        // Should include all registered properties
+        assert!(user.contains("location"));
+        assert!(user.contains("relationship"));
+        assert!(user.contains("financial"));
+        assert!(user.contains("routine"));
+        // Should show characteristics
+        assert!(user.contains("Functional"));
+        assert!(user.contains("Symmetric"));
+    }
+
+    #[test]
+    fn test_parse_cascade_inference_response() {
+        let ontology = crate::ontology::tests::test_registry();
+
+        // Clear existing cascade_dependents on location to test inference
+        // (test_registry already sets them, so we test with a fresh ontology)
+        let fresh_ontology = crate::ontology::OntologyRegistry::new();
+        fresh_ontology.register_property(crate::ontology::PropertyDescriptor {
+            id: "location".into(),
+            label: "Location".into(),
+            comment: "where someone lives".into(),
+            domain: vec!["Person".into()],
+            range: vec!["Location".into()],
+            characteristics: vec![PropertyCharacteristic::Functional],
+            max_cardinality: Some(1),
+            sub_property_of: None,
+            inverse_of: None,
+            append_only: false,
+            cascade_dependents: Vec::new(),
+            cascade_dependent: false,
+            skip_conflict_detection: false,
+            canonical_predicate: "lives_in".into(),
+        });
+        fresh_ontology.register_property(crate::ontology::PropertyDescriptor {
+            id: "routine".into(),
+            label: "Routine".into(),
+            comment: "daily habits".into(),
+            domain: Vec::new(),
+            range: Vec::new(),
+            characteristics: Vec::new(),
+            max_cardinality: None,
+            sub_property_of: None,
+            inverse_of: None,
+            append_only: false,
+            cascade_dependents: Vec::new(),
+            cascade_dependent: false,
+            skip_conflict_detection: false,
+            canonical_predicate: String::new(),
+        });
+        fresh_ontology.register_property(crate::ontology::PropertyDescriptor {
+            id: "financial".into(),
+            label: "Financial".into(),
+            comment: "payments".into(),
+            domain: Vec::new(),
+            range: Vec::new(),
+            characteristics: Vec::new(),
+            max_cardinality: None,
+            sub_property_of: None,
+            inverse_of: None,
+            append_only: true,
+            cascade_dependents: Vec::new(),
+            cascade_dependent: false,
+            skip_conflict_detection: true,
+            canonical_predicate: String::new(),
+        });
+
+        let llm_response = r#"{
+            "cascade_rules": [
+                {
+                    "trigger": "location",
+                    "dependents": ["routine", "financial"],
+                    "rationale": "Moving invalidates daily routines"
+                }
+            ]
+        }"#;
+
+        let updated = OntologyEvolutionEngine::parse_cascade_inference_response(
+            llm_response,
+            &fresh_ontology,
+        );
+
+        // Should have updated location's cascade_dependents (added routine)
+        // and marked routine as cascade_dependent.
+        // financial should be excluded (append-only).
+        assert!(updated > 0);
+        let loc = fresh_ontology.resolve("location").unwrap();
+        assert_eq!(loc.cascade_dependents, vec!["routine"]);
+        assert!(fresh_ontology.is_cascade_dependent("routine"));
+        // financial is append-only, should not be marked
+        assert!(!fresh_ontology.is_cascade_dependent("financial"));
+    }
+
+    #[test]
+    fn test_parse_cascade_inference_rejects_non_functional_trigger() {
+        let ontology = crate::ontology::OntologyRegistry::new();
+        ontology.register_property(crate::ontology::PropertyDescriptor {
+            id: "relationship".into(),
+            label: "Relationship".into(),
+            comment: "connections".into(),
+            domain: Vec::new(),
+            range: Vec::new(),
+            characteristics: vec![PropertyCharacteristic::Symmetric], // NOT Functional
+            max_cardinality: None,
+            sub_property_of: None,
+            inverse_of: None,
+            append_only: false,
+            cascade_dependents: Vec::new(),
+            cascade_dependent: false,
+            skip_conflict_detection: false,
+            canonical_predicate: String::new(),
+        });
+        ontology.register_property(crate::ontology::PropertyDescriptor {
+            id: "routine".into(),
+            label: "Routine".into(),
+            comment: "habits".into(),
+            domain: Vec::new(),
+            range: Vec::new(),
+            characteristics: Vec::new(),
+            max_cardinality: None,
+            sub_property_of: None,
+            inverse_of: None,
+            append_only: false,
+            cascade_dependents: Vec::new(),
+            cascade_dependent: false,
+            skip_conflict_detection: false,
+            canonical_predicate: String::new(),
+        });
+
+        let llm_response = r#"{
+            "cascade_rules": [
+                {
+                    "trigger": "relationship",
+                    "dependents": ["routine"],
+                    "rationale": "Bad inference"
+                }
+            ]
+        }"#;
+
+        let updated = OntologyEvolutionEngine::parse_cascade_inference_response(
+            llm_response,
+            &ontology,
+        );
+
+        // Should reject: relationship is not Functional
+        assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn test_proposed_property_cascade_fields_in_ttl() {
+        let props = vec![ProposedProperty {
+            id: "location".to_string(),
+            label: "Location".to_string(),
+            comment: "where someone lives".to_string(),
+            domain: vec!["Person".to_string()],
+            range: vec!["Location".to_string()],
+            characteristics: vec![PropertyCharacteristic::Functional],
+            max_cardinality: Some(1),
+            sub_property_of: None,
+            append_only: false,
+            cascade_dependents: vec!["routine".to_string(), "relationship".to_string()],
+            cascade_dependent: false,
+            canonical_predicate: "lives_in".to_string(),
+        }];
+
+        let ttl = generate_ttl_for_properties(&props);
+        assert!(ttl.contains("eg:cascadeDependents eg:routine, eg:relationship"));
+        assert!(!ttl.contains("eg:cascadeDependent \"true\""));
+
+        // Test cascade_dependent property
+        let props2 = vec![ProposedProperty {
+            id: "routine".to_string(),
+            label: "Routine".to_string(),
+            comment: "daily habits".to_string(),
+            domain: Vec::new(),
+            range: Vec::new(),
+            characteristics: Vec::new(),
+            max_cardinality: None,
+            sub_property_of: None,
+            append_only: false,
+            cascade_dependents: Vec::new(),
+            cascade_dependent: true,
+            canonical_predicate: String::new(),
+        }];
+
+        let ttl2 = generate_ttl_for_properties(&props2);
+        assert!(ttl2.contains("eg:cascadeDependent \"true\""));
     }
 }

@@ -24,6 +24,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Truncate a string to at most `max_bytes` bytes, ensuring the cut
+/// falls on a valid UTF-8 character boundary.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // ────────── Quality Gate Constants ──────────
 
 /// Minimum transcript length (chars) to attempt playbook extraction.
@@ -1176,7 +1189,7 @@ async fn extract_turn_facts(llm: &dyn LlmClient, transcript: &str) -> Option<Vec
         None => {
             tracing::warn!(
                 "extract_turn_facts JSON parse failed, raw response: {}",
-                &response.content[..response.content.len().min(300)]
+                safe_truncate(&response.content, 300)
             );
             return None;
         },
@@ -1251,10 +1264,11 @@ async fn extract_turn_facts(llm: &dyn LlmClient, transcript: &str) -> Option<Vec
             Some(facts)
         },
         Err(e) => {
+            let json_str = value.to_string();
             tracing::warn!(
                 "extract_turn_facts deserialization failed: {}. JSON: {}",
                 e,
-                &value.to_string()[..value.to_string().len().min(500)]
+                safe_truncate(&json_str, 500)
             );
             None
         },
@@ -2093,7 +2107,7 @@ pub async fn run_compaction_with_context(
         let batch_label = match batch.last() {
             Some(last) if batch.len() > 1 => {
                 format!("batch {}-{}", batch_start_idx, last.turn_index)
-            }
+            },
             _ => format!("turn {}", batch_start_idx),
         };
 
@@ -2333,7 +2347,7 @@ pub async fn run_compaction_with_context(
         if summaries.is_empty() {
             full_transcript.clone()
         } else {
-            let topic_slice = &full_transcript[..full_transcript.len().min(500)];
+            let topic_slice = safe_truncate(&full_transcript, 500);
             let ctx = crate::context_enrichment::community_context_for_topic(
                 topic_slice,
                 &summaries,
@@ -2452,7 +2466,7 @@ pub async fn run_compaction_with_context(
                 } else {
                     let topic = classifiable.join(" ");
                     let ctx = crate::context_enrichment::community_context_for_topic(
-                        &topic[..topic.len().min(500)],
+                        safe_truncate(&topic, 500),
                         &summaries,
                         &engine.config.enrichment_config,
                     );

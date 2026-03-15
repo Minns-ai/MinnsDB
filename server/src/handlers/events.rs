@@ -178,8 +178,9 @@ pub async fn get_events(
         .await
         .map_err(ApiError::ServiceUnavailable)?;
 
+    let limit = pagination.limit.min(1000);
     info!("Getting recent events");
-    let events = state.engine.get_recent_events(pagination.limit).await;
+    let events = state.engine.get_recent_events(limit).await;
     Ok(Json(events))
 }
 
@@ -196,11 +197,12 @@ pub async fn get_episodes(
 
     info!("Getting episodes");
 
+    let limit = pagination.limit.min(1000);
     let episodes = state.engine.get_completed_episodes().await;
 
     let response: Vec<crate::models::EpisodeResponse> = episodes
         .into_iter()
-        .take(pagination.limit)
+        .take(limit)
         .map(|e| crate::models::EpisodeResponse {
             id: e.id,
             agent_id: e.agent_id,

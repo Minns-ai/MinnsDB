@@ -124,7 +124,9 @@ pub async fn register_agent(
                     .insert("repository".to_string(), json!(repo_name));
                 node.properties
                     .insert("content_type".to_string(), json!("repository"));
-                graph.add_node(node).map_err(|e| ApiError::Internal(format!("Failed to create repo node: {e}")))?
+                graph
+                    .add_node(node)
+                    .map_err(|e| ApiError::Internal(format!("Failed to create repo node: {e}")))?
             };
 
             // Check if edge already exists

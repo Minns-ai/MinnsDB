@@ -107,17 +107,23 @@ pub fn format_unified_results(
             // Format state facts as natural language (generic, no hardcoded categories)
             let cat = assoc.split(':').next().unwrap_or(assoc);
             // Add temporal context (valid_from) for recency awareness
-            let since_suffix = slot.valid_from.map(|vf| {
-                // Format as relative hint: show epoch nanos as a date-like marker
-                format!(" (since epoch {})", vf)
-            }).unwrap_or_default();
+            let since_suffix = slot
+                .valid_from
+                .map(|vf| {
+                    // Format as relative hint: show epoch nanos as a date-like marker
+                    format!(" (since epoch {})", vf)
+                })
+                .unwrap_or_default();
 
             let text = if assoc.starts_with("state:") {
                 // Legacy "state:*" format
                 format!("Current {}: {}{}", attr, value, since_suffix)
             } else if slot.target_name != value && !slot.target_name.is_empty() {
                 // Relationship-like: "{entity} {predicate} {target}"
-                format!("{} {} {}{}", entity_name, attr, slot.target_name, since_suffix)
+                format!(
+                    "{} {} {}{}",
+                    entity_name, attr, slot.target_name, since_suffix
+                )
             } else {
                 // Generic: "Category: value"
                 let cat_display = {
@@ -192,10 +198,8 @@ pub fn format_unified_results(
                     let is_stale = superseded_targets.iter().any(|t| {
                         if t.len() >= 3 && text_lower.contains(t.as_str()) {
                             // Check if claim's edge category matches a superseded category
-                            let claim_cat: Option<String> = graph
-                                .get_edges_to(node_id)
-                                .iter()
-                                .find_map(|e| {
+                            let claim_cat: Option<String> =
+                                graph.get_edges_to(node_id).iter().find_map(|e| {
                                     if let crate::structures::EdgeType::Association {
                                         association_type,
                                         ..

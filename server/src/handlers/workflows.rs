@@ -371,27 +371,28 @@ pub async fn create_workflow(
                     // ── Phase 2: Create initial state edges for each step ──
                     // Each step gets a `workflow:step_state` edge pointing to a
                     // "pending" concept node — same pattern as pipeline state tracking.
-                    let pending_nid = ensure_concept_node(graph, "pending");
-                    for step in &request.steps {
-                        let step_nid = step_node_ids[&step.id];
-                        let mut state_edge = GraphEdge::new(
-                            step_nid,
-                            pending_nid,
-                            EdgeType::Association {
-                                association_type: "workflow:step_state".to_string(),
-                                evidence_count: 1,
-                                statistical_significance: 1.0,
-                            },
-                            1.0,
-                        );
-                        state_edge.valid_from = Some(now);
-                        state_edge.confidence = 1.0;
-                        state_edge.group_id = request.group_id.clone();
-                        state_edge
-                            .properties
-                            .insert("step_id".into(), json!(step.id));
-                        if graph.add_edge(state_edge).is_some() {
-                            edges_created += 1;
+                    if let Some(pending_nid) = ensure_concept_node(graph, "pending") {
+                        for step in &request.steps {
+                            let step_nid = step_node_ids[&step.id];
+                            let mut state_edge = GraphEdge::new(
+                                step_nid,
+                                pending_nid,
+                                EdgeType::Association {
+                                    association_type: "workflow:step_state".to_string(),
+                                    evidence_count: 1,
+                                    statistical_significance: 1.0,
+                                },
+                                1.0,
+                            );
+                            state_edge.valid_from = Some(now);
+                            state_edge.confidence = 1.0;
+                            state_edge.group_id = request.group_id.clone();
+                            state_edge
+                                .properties
+                                .insert("step_id".into(), json!(step.id));
+                            if graph.add_edge(state_edge).is_some() {
+                                edges_created += 1;
+                            }
                         }
                     }
 
@@ -979,28 +980,29 @@ pub async fn update_workflow(
                     }
 
                     // Create initial state edges for new steps
-                    let pending_nid = ensure_concept_node(graph, "pending");
-                    for step in &request.steps {
-                        if !existing_steps.contains_key(&step.id) {
-                            let step_nid = step_node_ids[&step.id];
-                            let mut state_edge = GraphEdge::new(
-                                step_nid,
-                                pending_nid,
-                                EdgeType::Association {
-                                    association_type: "workflow:step_state".to_string(),
-                                    evidence_count: 1,
-                                    statistical_significance: 1.0,
-                                },
-                                1.0,
-                            );
-                            state_edge.valid_from = Some(now);
-                            state_edge.confidence = 1.0;
-                            state_edge.group_id = group_id.clone();
-                            state_edge
-                                .properties
-                                .insert("step_id".into(), json!(step.id));
-                            if graph.add_edge(state_edge).is_some() {
-                                edges_created += 1;
+                    if let Some(pending_nid) = ensure_concept_node(graph, "pending") {
+                        for step in &request.steps {
+                            if !existing_steps.contains_key(&step.id) {
+                                let step_nid = step_node_ids[&step.id];
+                                let mut state_edge = GraphEdge::new(
+                                    step_nid,
+                                    pending_nid,
+                                    EdgeType::Association {
+                                        association_type: "workflow:step_state".to_string(),
+                                        evidence_count: 1,
+                                        statistical_significance: 1.0,
+                                    },
+                                    1.0,
+                                );
+                                state_edge.valid_from = Some(now);
+                                state_edge.confidence = 1.0;
+                                state_edge.group_id = group_id.clone();
+                                state_edge
+                                    .properties
+                                    .insert("step_id".into(), json!(step.id));
+                                if graph.add_edge(state_edge).is_some() {
+                                    edges_created += 1;
+                                }
                             }
                         }
                     }
@@ -1182,7 +1184,16 @@ pub async fn workflow_step_transition(
                     }
 
                     // Create concept node for the new state value
-                    let new_state_nid = ensure_concept_node(graph, &request.state);
+                    let new_state_nid = match ensure_concept_node(graph, &request.state) {
+                        Some(nid) => nid,
+                        None => {
+                            drop(inference);
+                            return Err(format!(
+                                "Failed to create concept node for state '{}'",
+                                request.state
+                            ));
+                        }
+                    };
 
                     // Create new state edge
                     let mut state_edge = GraphEdge::new(
@@ -1403,10 +1414,10 @@ fn supersede_node_edges(graph: &mut agent_db_graph::Graph, node_id: u64, _timest
 
 /// Ensure a concept node exists for a state value (e.g., "pending", "running", "completed").
 /// Returns the node ID, creating if needed. Same pattern as `ensure_concept` in pipeline.rs.
-fn ensure_concept_node(graph: &mut agent_db_graph::Graph, name: &str) -> u64 {
+fn ensure_concept_node(graph: &mut agent_db_graph::Graph, name: &str) -> Option<u64> {
     // Check if concept already exists
     if let Some(nid) = graph.find_concept_node(name) {
-        return nid;
+        return Some(nid);
     }
     // Create new concept node
     let node = GraphNode::new(NodeType::Concept {
@@ -1415,11 +1426,11 @@ fn ensure_concept_node(graph: &mut agent_db_graph::Graph, name: &str) -> u64 {
         confidence: 1.0,
     });
     match graph.add_node(node) {
-        Ok(nid) => nid,
+        Ok(nid) => Some(nid),
         Err(e) => {
             tracing::error!("Failed to create concept node '{name}': {e}");
-            0
-        }
+            None
+        },
     }
 }
 

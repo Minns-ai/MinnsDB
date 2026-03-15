@@ -22,6 +22,7 @@ mod pipeline;
 mod planning;
 pub(crate) mod planning_llm_adapter;
 mod queries;
+mod ontology;
 mod stats;
 mod world_model;
 
@@ -367,11 +368,12 @@ impl GraphEngineConfig {
     /// Call this after constructing a config to ensure all numerical
     /// parameters are sane (no NaN, no out-of-range values).
     pub fn validate(&mut self) {
-        // Clamp probability/confidence fields to [0.0, 1.0]
-        self.claim_min_confidence = self.claim_min_confidence.clamp(0.0, 1.0);
+        // NaN check must come before clamp (clamp panics on NaN)
         if self.claim_min_confidence.is_nan() {
             self.claim_min_confidence = 0.5; // sensible default
         }
+        // Clamp probability/confidence fields to [0.0, 1.0]
+        self.claim_min_confidence = self.claim_min_confidence.clamp(0.0, 1.0);
 
         // Ensure positive intervals
         if self.persistence_interval == 0 {
@@ -379,6 +381,9 @@ impl GraphEngineConfig {
         }
         if self.max_graph_size == 0 {
             self.max_graph_size = 10_000;
+        }
+        if self.louvain_interval == 0 {
+            self.louvain_interval = 1000;
         }
     }
 }

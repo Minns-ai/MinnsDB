@@ -225,7 +225,11 @@ impl GraphEngine {
                         behavior_signature_hash: 0,
                     };
                     let policy_features = agent_db_world_model::PolicyFeatures {
-                        goal_count: ready_event.context.active_goals.len().min(u32::MAX as usize) as u32,
+                        goal_count: ready_event
+                            .context
+                            .active_goals
+                            .len()
+                            .min(u32::MAX as usize) as u32,
                         top_goal_priority: ready_event
                             .context
                             .active_goals
@@ -474,7 +478,7 @@ impl GraphEngine {
             }
 
             // Run Louvain community detection periodically
-            if self.config.enable_louvain && new_count.is_multiple_of(self.config.louvain_interval)
+            if self.config.enable_louvain && new_count % self.config.louvain_interval == 0
             {
                 if let Err(e) = self.run_community_detection().await {
                     result.errors.push(e);
@@ -888,18 +892,31 @@ impl GraphEngine {
                                                 Some(self.ontology.as_ref()),
                                             );
                                         drop(inference_guard);
-                                        let mut anchor_meta: std::collections::HashMap<String, String> =
-                                            std::collections::HashMap::new();
+                                        let mut anchor_meta: std::collections::HashMap<
+                                            String,
+                                            String,
+                                        > = std::collections::HashMap::new();
                                         for slot in projected.slots.values() {
-                                            let cat = slot.association_type.split(':').next().unwrap_or("");
+                                            let cat = slot
+                                                .association_type
+                                                .split(':')
+                                                .next()
+                                                .unwrap_or("");
                                             if self.ontology.is_single_valued(cat) {
-                                                let key = format!("state_anchor:{}", slot.association_type);
-                                                let val = slot.value.as_deref().unwrap_or(&slot.target_name);
+                                                let key = format!(
+                                                    "state_anchor:{}",
+                                                    slot.association_type
+                                                );
+                                                let val = slot
+                                                    .value
+                                                    .as_deref()
+                                                    .unwrap_or(&slot.target_name);
                                                 anchor_meta.insert(key, val.to_string());
                                             }
                                         }
                                         if !anchor_meta.is_empty() {
-                                            let _ = claim_store.update_metadata(avoidance.id, &anchor_meta);
+                                            let _ = claim_store
+                                                .update_metadata(avoidance.id, &anchor_meta);
                                             tracing::debug!(
                                                 "Stamped {} state anchors on avoidance claim {}",
                                                 anchor_meta.len(),
@@ -944,13 +961,9 @@ impl GraphEngine {
             errors: Vec::new(),
         };
 
-        // Add all events to buffer
-        {
-            let mut buffer = self.event_buffer.write().await;
-            buffer.extend(events.clone());
-        }
+        let event_count = events.len() as u64;
 
-        // Process through inference engine
+        // Process through inference engine (no buffer — results are returned immediately)
         match self.inference.write().await.process_events(events) {
             Ok(inference_results) => {
                 combined_result.nodes_created = inference_results.nodes_created;
@@ -967,7 +980,7 @@ impl GraphEngine {
         // Update statistics
         {
             self.stats.total_events_processed.fetch_add(
-                combined_result.nodes_created.len() as u64,
+                event_count,
                 AtomicOrdering::Relaxed,
             );
             self.stats.total_nodes_created.fetch_add(

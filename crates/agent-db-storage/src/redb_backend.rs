@@ -161,7 +161,9 @@ impl RedbBackend {
                 .open(&config.data_path)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?
         } else {
-            Database::create(&config.data_path)
+            Database::builder()
+                .set_cache_size(config.cache_size_bytes)
+                .create(&config.data_path)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?
         };
 

@@ -28,12 +28,16 @@
 @prefix schema: <https://schema.org/> .
 
 # ── Primary: relationship (general interpersonal connections) ──
+# Relationships like "neighbor" are often location-dependent: when someone
+# moves cities, their neighbor changes. Marking as cascade-dependent on
+# location ensures these edges get superseded when location changes.
 eg:relationship a owl:ObjectProperty ;
     rdfs:label "Relationship" ;
     rdfs:comment "connections between people" ;
     rdfs:domain eg:Person, eg:NamedEntity ;
     rdfs:range  eg:Person, eg:NamedEntity ;
     a owl:SymmetricProperty ;
+    eg:cascadeDependent "true" ;
     rdfs:seeAlso foaf:knows, schema:knows .
 
 # ── Sub-property: colleague (workplace connections) ────────────

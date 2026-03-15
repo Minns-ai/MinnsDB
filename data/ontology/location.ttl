@@ -33,7 +33,7 @@ eg:location a owl:ObjectProperty ;
     rdfs:range  eg:Location ;
     a owl:FunctionalProperty ;
     eg:canonicalPredicate "lives_in" ;
-    eg:cascadeDependents  eg:routine ;
+    eg:cascadeDependents  eg:routine, eg:relationship ;
     rdfs:seeAlso gn:locatedIn, schema:homeLocation .
 
 # ── Sub-property: birthplace (single-valued, immutable) ────────

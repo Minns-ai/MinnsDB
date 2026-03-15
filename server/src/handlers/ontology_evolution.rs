@@ -4,7 +4,43 @@ use crate::errors::ApiError;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
+
+/// Request body for ontology TTL upload.
+#[derive(Deserialize)]
+pub struct UploadOntologyRequest {
+    /// Raw Turtle (TTL) content to parse and register.
+    pub ttl: String,
+}
+
+/// POST /api/ontology/upload — Upload new ontology TTL, register properties, run cascade inference.
+pub async fn upload_ontology(
+    State(state): State<AppState>,
+    Json(body): Json<UploadOntologyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    match state.engine.upload_ontology_ttl(&body.ttl).await {
+        Ok((registered, cascade_updates)) => Ok(Json(json!({
+            "status": "ok",
+            "properties_registered": registered,
+            "cascade_properties_updated": cascade_updates,
+        }))),
+        Err(e) => Err(ApiError::BadRequest(e)),
+    }
+}
+
+/// POST /api/ontology/cascade-inference — Run LLM cascade inference on current ontology.
+pub async fn run_cascade_inference(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    match state.engine.run_ontology_cascade_inference().await {
+        Ok(updated) => Ok(Json(json!({
+            "status": "ok",
+            "properties_updated": updated,
+        }))),
+        Err(e) => Err(ApiError::Internal(format!("Cascade inference failed: {}", e))),
+    }
+}
 
 /// GET /api/ontology/properties — List all current ontology properties.
 pub async fn list_ontology_properties(
@@ -26,7 +62,7 @@ pub async fn list_ontology_observations(
     })))
 }
 
-/// POST /api/ontology/discover — Trigger behavior inference + hierarchy discovery.
+/// POST /api/ontology/discover — Trigger behavior inference + hierarchy discovery + cascade inference.
 pub async fn discover_ontology(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, ApiError> {
@@ -44,11 +80,20 @@ pub async fn discover_ontology(
         .await
         .unwrap_or_default();
 
+    // Phase 3: LLM cascade/temporal dependency inference
+    // Analyzes all properties and infers cascadeDependents/cascadeDependent relationships
+    let cascade_updates: usize = state
+        .engine
+        .run_ontology_cascade_inference()
+        .await
+        .unwrap_or(0);
+
     let all_ids: Vec<u64> = inference_ids.into_iter().chain(hierarchy_ids).collect();
 
     Ok(Json(json!({
         "proposals_created": all_ids.len(),
         "proposal_ids": all_ids,
+        "cascade_properties_updated": cascade_updates,
     })))
 }
 

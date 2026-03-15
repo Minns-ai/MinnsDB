@@ -122,7 +122,7 @@ pub struct ClassDescriptor {
 
 /// Class hierarchy for rdfs:domain/range validation.
 pub struct ClassHierarchy {
-    classes: HashMap<String, ClassDescriptor>,
+    classes: std::sync::RwLock<HashMap<String, ClassDescriptor>>,
 }
 
 impl Default for ClassHierarchy {
@@ -134,12 +134,12 @@ impl Default for ClassHierarchy {
 impl ClassHierarchy {
     pub fn new() -> Self {
         Self {
-            classes: HashMap::new(),
+            classes: std::sync::RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn register(&mut self, desc: ClassDescriptor) {
-        self.classes.insert(desc.id.clone(), desc);
+    pub fn register(&self, desc: ClassDescriptor) {
+        self.classes.write().unwrap().insert(desc.id.clone(), desc);
     }
 
     /// Check if `child` is a subclass of `parent` (transitive).
@@ -147,16 +147,16 @@ impl ClassHierarchy {
         if child == parent {
             return true;
         }
-        let mut current = child;
+        let classes = self.classes.read().unwrap();
+        let mut current = child.to_string();
         let mut visited = std::collections::HashSet::new();
-        while visited.insert(current.to_string()) {
-            if let Some(desc) = self.classes.get(current) {
+        while visited.insert(current.clone()) {
+            if let Some(desc) = classes.get(&current) {
                 for sup in &desc.sub_class_of {
                     if sup == parent {
                         return true;
                     }
-                    // Follow the first parent chain (single inheritance for simplicity)
-                    current = sup;
+                    current = sup.clone();
                 }
             } else {
                 break;
@@ -576,6 +576,35 @@ impl OntologyRegistry {
         true
     }
 
+    /// Update the cascade_dependents list for a property. Merges with existing
+    /// dependents (no duplicates). Returns true if any new dependents were added.
+    pub fn update_cascade_dependents(&self, property_id: &str, dependents: &[String]) -> bool {
+        let mut props = self.properties.write().unwrap();
+        if let Some(prop) = props.get_mut(property_id) {
+            let before = prop.cascade_dependents.len();
+            for dep in dependents {
+                if !prop.cascade_dependents.contains(dep) {
+                    prop.cascade_dependents.push(dep.clone());
+                }
+            }
+            prop.cascade_dependents.len() > before
+        } else {
+            false
+        }
+    }
+
+    /// Mark a property as cascade_dependent. Returns true if changed from false to true.
+    pub fn mark_cascade_dependent(&self, property_id: &str) -> bool {
+        let mut props = self.properties.write().unwrap();
+        if let Some(prop) = props.get_mut(property_id) {
+            if !prop.cascade_dependent {
+                prop.cascade_dependent = true;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Resolve a property descriptor by ID.
     pub fn resolve(&self, property_id: &str) -> Option<PropertyDescriptor> {
         let props = self.properties.read().unwrap();
@@ -831,8 +860,18 @@ impl OntologyRegistry {
         }
     }
 
+    /// Parse a Turtle string and register PropertyDescriptors and ClassDescriptors.
+    /// Thread-safe: can be called on a shared reference.
+    pub fn load_turtle_shared(&self, ttl: &str) -> Result<(), OntologyError> {
+        self.load_turtle_inner(ttl)
+    }
+
     /// Parse a Turtle string and extract PropertyDescriptors and ClassDescriptors.
     fn load_turtle(&mut self, ttl: &str) -> Result<(), OntologyError> {
+        self.load_turtle_inner(ttl)
+    }
+
+    fn load_turtle_inner(&self, ttl: &str) -> Result<(), OntologyError> {
         use rio_api::model::{Literal, Term};
         use rio_api::parser::TriplesParser;
         use rio_turtle::TurtleParser;
@@ -1040,10 +1079,10 @@ impl std::error::Error for OntologyError {}
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn test_registry() -> OntologyRegistry {
+    pub(crate) fn test_registry() -> OntologyRegistry {
         let reg = OntologyRegistry::new();
 
         // location: functional, cascades routine
@@ -1058,13 +1097,13 @@ mod tests {
             sub_property_of: None,
             inverse_of: None,
             append_only: false,
-            cascade_dependents: vec!["routine".into()],
+            cascade_dependents: vec!["routine".into(), "relationship".into()],
             cascade_dependent: false,
             skip_conflict_detection: false,
             canonical_predicate: "lives_in".into(),
         });
 
-        // relationship: symmetric
+        // relationship: symmetric, cascade-dependent on location
         reg.register_property(PropertyDescriptor {
             id: "relationship".into(),
             label: "Relationship".into(),
@@ -1077,7 +1116,7 @@ mod tests {
             inverse_of: None,
             append_only: false,
             cascade_dependents: Vec::new(),
-            cascade_dependent: false,
+            cascade_dependent: true,
             skip_conflict_detection: false,
             canonical_predicate: String::new(),
         });
@@ -1200,7 +1239,7 @@ mod tests {
         let reg = test_registry();
         assert!(reg.triggers_cascade("location"));
         assert!(!reg.triggers_cascade("financial"));
-        assert_eq!(reg.cascade_dependents("location"), vec!["routine"]);
+        assert_eq!(reg.cascade_dependents("location"), vec!["routine", "relationship"]);
     }
 
     #[test]
