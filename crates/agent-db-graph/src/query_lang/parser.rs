@@ -18,6 +18,38 @@ impl Parser {
         parser.parse_query()
     }
 
+    /// Parse a full statement (SUBSCRIBE, UNSUBSCRIBE, or regular query).
+    pub fn parse_statement(input: &str) -> Result<Statement, QueryError> {
+        let tokens = Lexer::tokenize(input).map_err(|e| QueryError::ParseError {
+            message: e.message,
+            position: e.position,
+        })?;
+        let mut parser = Parser { tokens, pos: 0 };
+
+        if parser.at(&Token::Subscribe) {
+            parser.advance(); // consume SUBSCRIBE
+            let query = parser.parse_query()?;
+            Ok(Statement::Subscribe(query))
+        } else if parser.at(&Token::Unsubscribe) {
+            parser.advance(); // consume UNSUBSCRIBE
+            // Expect an integer literal (subscription ID).
+            match parser.peek() {
+                Token::IntLit(id) => {
+                    let id = *id as u64;
+                    parser.advance();
+                    if !parser.at(&Token::Eof) {
+                        return Err(parser.error("expected end of input after UNSUBSCRIBE <id>".into()));
+                    }
+                    Ok(Statement::Unsubscribe(id))
+                }
+                other => Err(parser.error(format!("expected subscription ID after UNSUBSCRIBE, got {:?}", other))),
+            }
+        } else {
+            let query = parser.parse_query()?;
+            Ok(Statement::Query(query))
+        }
+    }
+
     // ── Top-level ───────────────────────────────────────────────────────
 
     fn parse_query(&mut self) -> Result<Query, QueryError> {

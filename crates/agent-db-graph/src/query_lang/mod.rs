@@ -8,6 +8,7 @@ pub mod planner;
 pub mod token;
 pub mod types;
 
+pub use ast::Statement;
 pub use types::{QueryError, QueryOutput, QueryStats, Value};
 
 /// Parse and execute a MinnsQL query against a Graph.
