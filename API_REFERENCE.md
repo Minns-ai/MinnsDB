@@ -2,8 +2,8 @@
 
 **Complete REST API documentation for SDK integration**
 
-Version: 2.5.0
-Last Updated: 2026-03-15
+Version: 2.6.0
+Last Updated: 2026-03-17
 
 ---
 
@@ -20,19 +20,20 @@ Last Updated: 2026-03-15
 9. [Search](#search)
 10. [Natural Language Query (NLQ)](#natural-language-query-nlq)
 11. [MinnsQL Structured Query](#minnsql-structured-query)
-12. [Claims](#claims)
-13. [Structured Memory](#structured-memory)
-14. [Conversation Ingestion](#conversation-ingestion)
-15. [Single Message Ingestion](#single-message-ingestion)
-16. [Workflows](#workflows)
-17. [Agent Registry](#agent-registry)
-18. [Ontology Evolution](#ontology-evolution)
-19. [Planning & World Model](#planning--world-model)
-20. [Code Intelligence](#code-intelligence)
-21. [Admin](#admin)
-22. [Health](#health)
-23. [Error Handling](#error-handling)
-24. [Configuration](#configuration)
+12. [Reactive Subscriptions](#reactive-subscriptions)
+13. [Claims](#claims)
+14. [Structured Memory](#structured-memory)
+15. [Conversation Ingestion](#conversation-ingestion)
+16. [Single Message Ingestion](#single-message-ingestion)
+17. [Workflows](#workflows)
+18. [Agent Registry](#agent-registry)
+19. [Ontology Evolution](#ontology-evolution)
+20. [Planning & World Model](#planning--world-model)
+21. [Code Intelligence](#code-intelligence)
+22. [Admin](#admin)
+23. [Health](#health)
+24. [Error Handling](#error-handling)
+25. [Configuration](#configuration)
 
 ---
 
@@ -1180,6 +1181,296 @@ RETURN a.name, type(r1), type(r2)
 **Comparison operators:** `=`, `!=`, `<`, `>`, `<=`, `>=`, `CONTAINS`, `STARTS WITH`, `IS NULL`, `IS NOT NULL`
 
 **Boolean logic:** `AND`, `OR`, `NOT`, parentheses for grouping
+
+---
+
+## Reactive Subscriptions
+
+Register live MinnsQL queries that automatically receive incremental updates as the graph changes. The reactive engine captures deltas at mutation time (node/edge add, remove, supersede, merge) and maintains operator state per subscription for efficient incremental view maintenance.
+
+Two delivery modes: **REST polling** for simple integrations and **WebSocket streaming** for real-time push.
+
+### Architecture
+
+```
+Graph Mutation (add_node, add_edge, supersede, merge, ...)
+        │
+        ▼
+  DeltaBatch (broadcast channel)
+        │
+        ▼
+  SubscriptionManager
+        │
+        ├── Trigger Set fast rejection (node types, edge types)
+        ├── Incremental maintenance (ScanState → ExpandState → FilterState → AggregationState)
+        │   OR full rerun + structural diff (for complex cases)
+        │
+        ▼
+  Per-subscription pending updates (inserts / deletes)
+        │
+        ├── REST poll endpoint (client pulls)
+        └── WebSocket push (server pushes every ~100ms)
+```
+
+**Maintenance strategies:**
+- **Incremental** — operator states track scan/expand/filter/aggregation. Only delta-affected rows are reprocessed. Used for simple scan + expand + filter + aggregation queries.
+- **Full rerun** — re-executes the full query and diffs against cached output using structural `RowId` identity. Used when: variable-length paths, `NodeMerged` deltas, generation gaps, or complex query patterns.
+
+**Trigger set optimization:** Each subscription compiles a trigger set from its execution plan (node type discriminants, edge type strings). Incoming delta batches are rejected in O(1) if they can't affect the subscription.
+
+**Performance:** Background task processes deltas every 50ms (configurable via `SUBSCRIPTION_INTERVAL_MS`). Max 100 concurrent subscriptions (configurable). Zero overhead when no subscriptions are active (`delta_tx = None`).
+
+### POST /api/subscriptions
+
+Create a new subscription. Returns the initial result set and the maintenance strategy chosen.
+
+**Request:**
+```json
+{
+  "query": "MATCH (a:Agent)-[e:KNOWS]->(b:Agent) RETURN a.name, b.name, e.weight",
+  "group_id": "tenant-1"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `query` | string | yes | MinnsQL query (max 4096 bytes). Same syntax as `POST /api/query` |
+| `group_id` | string | no | Multi-tenant partition key |
+
+**Response (200):**
+```json
+{
+  "subscription_id": 7,
+  "initial": {
+    "columns": ["a.name", "b.name", "e.weight"],
+    "rows": [["Alice", "Bob", 0.8], ["Bob", "Charlie", 0.6]]
+  },
+  "strategy": "incremental"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `subscription_id` | integer | Unique ID for this subscription |
+| `initial.columns` | string[] | Column names from the RETURN clause |
+| `initial.rows` | any[][] | Initial matching rows |
+| `strategy` | string | `"incremental"` or `"full_rerun: <reason>"` |
+
+**Error responses:**
+- `400` — Parse or plan error (includes message)
+- `500` — Internal error
+
+### GET /api/subscriptions
+
+List all active subscriptions.
+
+**Response (200):**
+```json
+{
+  "subscriptions": [
+    {
+      "subscription_id": 7,
+      "query": "MATCH (a:Agent)-[e:KNOWS]->(b:Agent) RETURN a.name, b.name",
+      "strategy": "incremental",
+      "cached_row_count": 42
+    }
+  ]
+}
+```
+
+### GET /api/subscriptions/:id/poll
+
+Poll for pending updates since the last poll (or since subscription creation).
+
+**Response (200):**
+```json
+{
+  "updates": [
+    {
+      "subscription_id": 7,
+      "inserts": [["Alice", "Diana", 0.9]],
+      "deletes": [["Bob", "Charlie", 0.6]],
+      "count": null,
+      "was_full_rerun": false
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `inserts` | any[][] | New rows matching the query |
+| `deletes` | any[][] | Rows that no longer match |
+| `count` | integer or null | For count-only aggregations, the new total |
+| `was_full_rerun` | boolean | `true` if the update was computed via full rerun + diff rather than incremental maintenance |
+
+If no updates are pending, `updates` is an empty array.
+
+### DELETE /api/subscriptions/:id
+
+Unsubscribe and release all operator state for the given subscription.
+
+**Response (200):**
+```json
+{
+  "unsubscribed": true
+}
+```
+
+**Error responses:**
+- `404` — Subscription ID not found
+
+### GET /api/subscriptions/ws
+
+Upgrade to a WebSocket connection for real-time streaming. All subscriptions created over this connection are automatically cleaned up on disconnect.
+
+**Wire protocol (JSON text frames):**
+
+#### Client → Server messages
+
+**Subscribe:**
+```json
+{
+  "type": "subscribe",
+  "query": "MATCH (a:Agent)-[e:KNOWS]->(b:Agent) RETURN a.name, b.name",
+  "request_id": "req-123"
+}
+```
+`request_id` is optional — if provided, it is echoed back in the `subscribed` response for client-side correlation.
+
+**Unsubscribe:**
+```json
+{
+  "type": "unsubscribe",
+  "subscription_id": 7
+}
+```
+
+**Ping:**
+```json
+{
+  "type": "ping"
+}
+```
+
+#### Server → Client messages
+
+**Subscribed (response to subscribe):**
+```json
+{
+  "type": "subscribed",
+  "subscription_id": 7,
+  "request_id": "req-123",
+  "initial": {
+    "columns": ["a.name", "b.name"],
+    "rows": [["Alice", "Bob"], ["Bob", "Charlie"]]
+  }
+}
+```
+
+**Update (pushed when graph changes affect a subscription):**
+```json
+{
+  "type": "update",
+  "subscription_id": 7,
+  "inserts": [["Alice", "Diana"]],
+  "deletes": [["Bob", "Eve"]],
+  "count": null
+}
+```
+
+**Unsubscribed:**
+```json
+{
+  "type": "unsubscribed",
+  "subscription_id": 7
+}
+```
+
+**Error:**
+```json
+{
+  "type": "error",
+  "message": "Parse error at position 15: expected RETURN",
+  "request_id": "req-123"
+}
+```
+
+**Pong (response to ping):**
+```json
+{
+  "type": "pong"
+}
+```
+
+#### Connection behavior
+
+- **Poll interval:** Updates are pushed approximately every 100ms when changes are pending.
+- **Heartbeat:** Server sends a ping every 30s for keep-alive.
+- **Cleanup on disconnect:** All subscriptions created over the connection are automatically unsubscribed.
+- **Multiple subscriptions:** A single WebSocket connection can hold multiple concurrent subscriptions.
+
+### Delta types
+
+The reactive engine captures these atomic graph mutations:
+
+| Delta | Trigger | Description |
+|-------|---------|-------------|
+| `NodeAdded` | `add_node()` | New node created, includes type discriminant |
+| `NodeRemoved` | `remove_node()` | Node deleted, cascades to `EdgeRemoved` for incident edges |
+| `EdgeAdded` | `add_edge()` | New edge created, includes edge type tag |
+| `EdgeRemoved` | `remove_edge()` | Edge deleted |
+| `EdgeSuperseded` | temporal supersession | Edge's `valid_until` set (no longer active) |
+| `EdgeMutated` | `invalidate_edge()` | Edge properties changed |
+| `NodeMerged` | `merge_nodes()` | Two nodes merged into one (forces full rerun) |
+
+### Subscription examples
+
+**Track agent relationships in real time:**
+```
+POST /api/subscriptions
+{
+  "query": "MATCH (a:Agent)-[e:relationship]->(b:Agent) RETURN a.name, b.name, type(e)"
+}
+```
+
+**Monitor active locations:**
+```
+POST /api/subscriptions
+{
+  "query": "MATCH (a:Agent)-[e:location]->(b:Concept) RETURN a.name, b.name"
+}
+```
+
+**Aggregation — count events by type:**
+```
+POST /api/subscriptions
+{
+  "query": "MATCH (n:Event) RETURN type(n), count(*) AS cnt"
+}
+```
+
+**Variable-length path monitoring (uses full rerun strategy):**
+```
+POST /api/subscriptions
+{
+  "query": "MATCH (a:Agent)-[*1..3]->(b:Agent) RETURN a.name, b.name"
+}
+```
+
+### MinnsQL SUBSCRIBE syntax
+
+The query language also supports inline subscription statements:
+
+```sql
+-- Create a subscription
+SUBSCRIBE MATCH (a:Agent)-[e:KNOWS]->(b:Agent) RETURN a.name, b.name
+
+-- Cancel a subscription by ID
+UNSUBSCRIBE 7
+```
+
+These are parsed as `Statement::Subscribe(Query)` and `Statement::Unsubscribe(id)` respectively, and can be used via `POST /api/query` when subscription support is wired through the query endpoint.
 
 ---
 
@@ -2602,6 +2893,8 @@ HTTP status codes:
 | `ENABLE_METADATA_NORMALIZATION` | `false` | Enable LLM fallback for metadata key normalization |
 | `METADATA_NORMALIZATION_MODEL` | `NLQ_HINT_MODEL` | Model name for metadata normalization LLM (falls back to `NLQ_HINT_MODEL`) |
 | `METADATA_NORMALIZATION_TIMEOUT_MS` | `3000` | Timeout for LLM metadata normalization calls |
+| `SUBSCRIPTION_INTERVAL_MS` | `50` | Background subscription processing interval in ms |
+| `CORS_ALLOWED_ORIGINS` | - | Comma-separated allowed CORS origins (for WebSocket and REST) |
 
 ### World Model Modes
 
@@ -2650,28 +2943,30 @@ Use this path when your agent needs the full learning loop: events → episodes 
 5. **Semantic search:** Enable `enable_semantic: true` on events, then use `POST /api/search` with Hybrid mode
 6. **Natural language queries:** Use `POST /api/nlq` to ask questions in plain English. Pass `session_id` for conversational follow-ups
 7. **MinnsQL queries:** Use `POST /api/query` for structured graph queries with temporal filtering, aggregation, and Allen's interval algebra predicates
-8. **Structured memory:** Use `/api/structured-memory/*` endpoints for domain-specific data (ledgers, state machines, preference lists, trees)
-9. **Typed state changes:** Use `POST /api/events/state-change` to emit state transitions — auto-detected and tracked in structured memory state machines
-10. **Typed transactions:** Use `POST /api/events/transaction` to emit financial/quantity transactions — auto-detected and appended to structured memory ledgers
-11. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
-12. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
+8. **Reactive subscriptions (REST):** Use `POST /api/subscriptions` to create a live query, then `GET /api/subscriptions/:id/poll` for incremental updates (inserts/deletes). Use `DELETE /api/subscriptions/:id` to unsubscribe
+9. **Reactive subscriptions (WebSocket):** Connect to `GET /api/subscriptions/ws` for real-time push. Send `{"type": "subscribe", "query": "..."}` to start, receive `{"type": "update", ...}` as the graph changes
+10. **Structured memory:** Use `/api/structured-memory/*` endpoints for domain-specific data (ledgers, state machines, preference lists, trees)
+11. **Typed state changes:** Use `POST /api/events/state-change` to emit state transitions — auto-detected and tracked in structured memory state machines
+12. **Typed transactions:** Use `POST /api/events/transaction` to emit financial/quantity transactions — auto-detected and appended to structured memory ledgers
+13. **Code events:** Set `is_code: true` on events containing source code for code-aware tokenization and indexing
+14. **Planning:** Enable world model + strategy generation, use `POST /api/planning/plan` for goal-driven agents
 
 ### Conversation Ingestion
 
 Conversations go through the full event pipeline with LLM compaction for fact extraction. Events, episodes, memories, and graph edges are all created.
 
-13. **Conversation ingestion:** Use `POST /api/conversations/ingest` to ingest multi-session conversations. Requires an LLM client. Use the same `case_id` across calls for incremental ingestion with stable entity resolution and automatic deduplication.
-14. **Single message ingestion:** Use `POST /api/messages` to send individual messages with automatic buffering and compaction.
-15. **Multi-source queries:** Use `POST /api/nlq` to query the graph. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment.
-16. **Incremental pattern:** Send messages as they arrive with the same `case_id`. The server preserves conversation state and deduplicates already-processed messages automatically. No client-side state management needed.
+15. **Conversation ingestion:** Use `POST /api/conversations/ingest` to ingest multi-session conversations. Requires an LLM client. Use the same `case_id` across calls for incremental ingestion with stable entity resolution and automatic deduplication.
+16. **Single message ingestion:** Use `POST /api/messages` to send individual messages with automatic buffering and compaction.
+17. **Multi-source queries:** Use `POST /api/nlq` to query the graph. Responses include `related_memories` and `related_strategies` from the episodic stores for full context enrichment.
+18. **Incremental pattern:** Send messages as they arrive with the same `case_id`. The server preserves conversation state and deduplicates already-processed messages automatically. No client-side state management needed.
 
 ### Multi-Agent Coordination
 
-17. **Agent registry:** Use `POST /api/agents/register` to register agents with capabilities, then `GET /api/agents` to discover peers.
-18. **Workflows:** Use `POST /api/workflows` to create multi-step workflows with dependency tracking, then transition steps with `/api/workflows/:id/steps/:step_id/transition`.
-19. **Ontology evolution:** Use `POST /api/ontology/discover` for automatic property discovery, review proposals with `/api/ontology/proposals`, and upload custom TTL with `POST /api/ontology/upload`.
+19. **Agent registry:** Use `POST /api/agents/register` to register agents with capabilities, then `GET /api/agents` to discover peers.
+20. **Workflows:** Use `POST /api/workflows` to create multi-step workflows with dependency tracking, then transition steps with `/api/workflows/:id/steps/:step_id/transition`.
+21. **Ontology evolution:** Use `POST /api/ontology/discover` for automatic property discovery, review proposals with `/api/ontology/proposals`, and upload custom TTL with `POST /api/ontology/upload`.
 
 ### Configuration
 
-20. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)
-21. **Metadata normalization:** Alias-based normalization is always active. Set `ENABLE_METADATA_NORMALIZATION=true` for LLM fallback on unrecognized metadata keys
+22. **NLQ hint classifier:** Set `ENABLE_NLQ_HINT=true` for LLM-assisted intent routing (improves structured memory detection)
+23. **Metadata normalization:** Alias-based normalization is always active. Set `ENABLE_METADATA_NORMALIZATION=true` for LLM fallback on unrecognized metadata keys

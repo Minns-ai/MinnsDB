@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>A graph database that learns from conversations.</strong><br>
-  Send messages in. Ask questions in plain English. Get answers from the graph.
+  Send messages in. Ask questions in plain English. Subscribe to live queries. Get answers from the graph.
 </p>
 
 <p align="center">
@@ -49,6 +49,18 @@ curl -X POST http://localhost:3000/api/nlq \
   -H 'Content-Type: application/json' \
   -d '{"query": "What are their work preferences?", "agent_id": 1}'
 # → {"answer": "prefers remote work", "confidence": 0.9, "intent": "Preference"}
+
+# 3. Query the graph directly with MinnsQL
+curl -X POST http://localhost:3000/api/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "MATCH (a:Agent)-[e:location]->(b) RETURN a.name, b.name"}'
+# → {"columns": ["a.name", "b.name"], "rows": [["user", "Berlin"]], ...}
+
+# 4. Subscribe to live updates
+curl -X POST http://localhost:3000/api/subscriptions \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "MATCH (a:Agent)-[e]->(b:Concept) RETURN a.name, b.name, type(e)"}'
+# → {"subscription_id": 1, "initial": {"columns": [...], "rows": [...]}, "strategy": "incremental"}
 ```
 
 Behind that single ingest, MinnsDB ran LLM compaction to extract facts (`lives_in: Berlin`, `employed_at: Stripe`, `prefers: remote work`), created typed graph edges with temporal validity (the old `London` edge gets a `valid_until` timestamp — never deleted, just superseded), and indexed everything for natural language queries. No schema definition needed.
@@ -65,6 +77,7 @@ Behind that single ingest, MinnsDB ran LLM compaction to extract facts (`lives_i
 | Understands time | No | Manual | No | **Built-in** — every edge has `valid_from`/`valid_until` |
 | Learns from outcomes | No | No | No | **Yes** — Q-learning on edge weights |
 | Accepts raw conversation | No | No | No | **Yes** — LLM compaction extracts facts automatically |
+| Reactive live queries | No | No | No | **Yes** — subscribe to MinnsQL, get incremental inserts/deletes via REST or WebSocket |
 | External deps | Vector service | JVM + Cypher | Redis/Postgres | **None** — single binary, embedded ReDB |
 
 ---
@@ -106,14 +119,14 @@ Behind that single ingest, MinnsDB ran LLM compaction to extract facts (`lives_i
   │ Salience scoring │     │ Schema tiers   │     │                │
   └─────────┬────────┘     └───────────────┘     └───────────────┘
             ▼
-  ┌─────────────────┐
-  │ CLAIMS            │
-  │ EXTRACTION        │
-  │                   │
-  │ Subject/pred/obj  │
-  │ BM25 + vector     │
-  │ indexing           │
-  └───────────────────┘
+  ┌─────────────────┐     ┌───────────────────────────────────────┐
+  │ CLAIMS            │     │ REACTIVE ENGINE                       │
+  │ EXTRACTION        │     │                                       │
+  │                   │     │ Graph mutations → DeltaBatch broadcast │
+  │ Subject/pred/obj  │     │ Trigger-set fast rejection             │
+  │ BM25 + vector     │     │ Incremental view maintenance           │
+  │ indexing           │     │ REST polling + WebSocket push          │
+  └───────────────────┘     └───────────────────────────────────────┘
 ```
 
 ### Conversation ingestion
@@ -166,6 +179,73 @@ Property behaviors are defined in OWL/RDFS Turtle files (`data/ontology/*.ttl`),
 
 Sub-property expansion is automatic — querying `relationship` also matches `colleague`, `friend`, `sibling`, `spouse`.
 
+### MinnsQL — Structured graph queries
+
+MinnsDB includes MinnsQL, a Cypher-inspired query language with built-in temporal semantics, aggregation, and variable-length path traversal:
+
+```sql
+-- Current relationships
+MATCH (a:Agent)-[e:relationship]->(b:Agent)
+RETURN a.name, b.name, type(e)
+
+-- Temporal: who lived where last year?
+MATCH (a:Agent)-[e:location]->(b:Concept)
+WHEN "2025-01-01" TO "2025-12-31"
+RETURN a.name, b.name, valid_from(e)
+
+-- Aggregation
+MATCH (a:Agent)-[e]->(b)
+RETURN a.name, count(*) AS connections
+ORDER BY connections DESC
+LIMIT 10
+
+-- Variable-length paths (up to 3 hops)
+MATCH (a:Agent)-[*1..3]->(b:Agent)
+RETURN a.name, b.name
+```
+
+Full language reference including temporal functions, Allen's interval algebra predicates, and TCell history functions: see [API Reference](API_REFERENCE.md#minnsql-structured-query).
+
+### Reactive subscriptions — Live queries
+
+Register a MinnsQL query as a live subscription and receive incremental updates (inserts/deletes) as the graph changes. The reactive engine captures deltas at mutation time and maintains per-subscription operator state for efficient incremental view maintenance.
+
+**REST polling:**
+```bash
+# Create a subscription
+curl -X POST http://localhost:3000/api/subscriptions \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "MATCH (a:Agent)-[e:KNOWS]->(b:Agent) RETURN a.name, b.name"}'
+# → {"subscription_id": 7, "initial": {"columns": [...], "rows": [...]}, "strategy": "incremental"}
+
+# Poll for updates
+curl http://localhost:3000/api/subscriptions/7/poll
+# → {"updates": [{"inserts": [["Alice", "Diana"]], "deletes": [], ...}]}
+
+# Unsubscribe
+curl -X DELETE http://localhost:3000/api/subscriptions/7
+```
+
+**WebSocket streaming:**
+```javascript
+const ws = new WebSocket("ws://localhost:3000/api/subscriptions/ws");
+
+ws.send(JSON.stringify({
+  type: "subscribe",
+  query: "MATCH (a:Agent)-[e:relationship]->(b:Agent) RETURN a.name, b.name",
+  request_id: "req-1"
+}));
+
+ws.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+  if (data.type === "update") {
+    console.log("Inserts:", data.inserts, "Deletes:", data.deletes);
+  }
+};
+```
+
+Updates are pushed every ~100ms when changes are pending. Zero overhead when no subscriptions are active. See [API Reference](API_REFERENCE.md#reactive-subscriptions) for the full wire protocol.
+
 ### Advanced: Direct event API
 
 For programmatic graph building beyond conversations, MinnsDB accepts 8 structured event types via `POST /api/events`:
@@ -197,6 +277,8 @@ Events flow through the same pipeline: Graph Construction → Episode Detection 
 | Graph algorithms | **Stable** | Louvain communities, label propagation, personalized PageRank, betweenness/closeness centrality, temporal reachability, causal paths |
 | Code intelligence | **Stable** | Tree-sitter AST parsing for Rust, Python, TypeScript, JavaScript, Go |
 | Structured memory | **Stable** | Ledgers, state machines, preference vectors, tree structures — all backed by graph edges |
+| MinnsQL query language | **Stable** | Cypher-inspired queries with temporal clauses, aggregation, variable-length paths, Allen's interval algebra |
+| Reactive subscriptions | **Stable** | Live MinnsQL queries with incremental view maintenance, REST polling, WebSocket streaming |
 | Workflows | **Stable** | DAG-based workflow engine with step state tracking, feedback, diff-based updates |
 | Persistence + export/import | **Stable** | ReDB (20 tables), delta writes, streaming binary v2 export/import |
 | Write lanes + read gate | **Stable** | Sharded write pipeline with backpressure, semaphore-based read concurrency |
@@ -265,12 +347,13 @@ engine.process_event(event).await?;
 
 Full documentation: **[docs.minns.ai](https://docs.minns.ai)**
 
-60+ endpoints across these groups:
+70+ endpoints across these groups:
 
 | Group | Key Endpoints |
 |-------|--------------|
 | **Conversations** | `POST /api/conversations/ingest` — batch ingest sessions (requires LLM)<br>`POST /api/messages` — single message with buffering + auto-compaction |
-| **Queries** | `POST /api/nlq` — natural language query against graph<br>`POST /api/conversations/query` — conversation-style query<br>`POST /api/search` — unified keyword/semantic/hybrid search<br>`POST /api/claims/search` — semantic claim search<br>`POST /api/code/search` — structural code search |
+| **Queries** | `POST /api/nlq` — natural language query against graph<br>`POST /api/query` — MinnsQL structured query with temporal semantics<br>`POST /api/conversations/query` — conversation-style query<br>`POST /api/search` — unified keyword/semantic/hybrid search<br>`POST /api/claims/search` — semantic claim search<br>`POST /api/code/search` — structural code search |
+| **Subscriptions** | `POST /api/subscriptions` — create live query subscription<br>`GET /api/subscriptions` — list active subscriptions<br>`GET /api/subscriptions/:id/poll` — poll for incremental updates<br>`DELETE /api/subscriptions/:id` — unsubscribe<br>`GET /api/subscriptions/ws` — WebSocket for real-time streaming |
 | **Events** | `POST /api/events` — full pipeline processing<br>`POST /api/events/simple` — simplified event<br>`POST /api/events/state-change` — typed state transitions<br>`POST /api/events/transaction` — typed financial transactions<br>`POST /api/events/code-file` — source file AST analysis<br>`POST /api/events/code-review` — code review events<br>`GET /api/events` — list recent events<br>`GET /api/episodes` — list completed episodes |
 | **Memory & Strategy** | `GET /api/memories/agent/:id` — agent memories<br>`POST /api/memories/context` — context similarity search<br>`GET /api/strategies/agent/:id` — learned strategies<br>`GET /api/suggestions` — next-action recommendations |
 | **Graph & Analytics** | `GET /api/graph` — graph structure<br>`GET /api/stats` — system statistics<br>`GET /api/analytics` — components, clustering, modularity<br>`GET /api/communities` — Louvain / label propagation<br>`GET /api/centrality` — PageRank, betweenness, closeness<br>`GET /api/causal-path` — causal paths between nodes<br>`GET /api/reachability` — temporal reachability |
@@ -295,6 +378,7 @@ minnsdb/
 │   │                        # Episode detection, memory formation, strategy extraction
 │   │                        # Claims (LLM extraction, BM25+vector search)
 │   │                        # Algorithms: Louvain, PageRank, centrality, reachability
+│   │                        # MinnsQL query language, reactive subscriptions
 │   │                        # Code graph, workflow engine, structured memory
 │   │                        # Ontology (OWL/RDFS from TTL), graph pruning
 │   ├── agent-db-ast/        # Tree-sitter AST parsing: Rust, Python, TS, JS, Go
@@ -302,8 +386,8 @@ minnsdb/
 ├── ml/
 │   ├── agent-db-world-model/  # Energy-based model critic (~30K params) [WIP]
 │   └── agent-db-planning/     # LLM-based generator [WIP]
-├── server/                  # Axum HTTP server, 60+ endpoints
-│   ├── src/handlers/        # 18 handler modules
+├── server/                  # Axum HTTP server, 70+ endpoints, WebSocket support
+│   ├── src/handlers/        # 20 handler modules (incl. subscriptions, websocket)
 ├── data/ontology/           # 9 OWL/RDFS Turtle files defining property behaviors
 ├── examples/                # 6 Rust examples (basic → end-to-end pipeline)
 └── tests/                   # Integration test suite
@@ -318,6 +402,8 @@ minnsdb/
 **Write lanes** shard incoming events by session_id hash across N lanes (default: `num_cpus/2`, clamped 2-8). Each lane has bounded capacity (default: 128) and processes sequentially. Per-lane p50/p95/p99 latency tracking.
 
 **Read gate** is a semaphore-based permit system (default: `num_cpus * 2` concurrent reads) with latency tracking.
+
+**Reactive engine** captures graph mutations as `DeltaBatch` events via a broadcast channel. `SubscriptionManager` holds per-subscription operator state (ScanState, ExpandState, FilterState, AggregationState) for incremental view maintenance. Complex patterns (variable-length paths, node merges) fall back to full rerun with structural diff. A background task processes deltas every 50ms. REST polling and WebSocket push are both supported.
 
 **Persistence** uses ReDB with 20 tables: graph nodes/edges/adjacency, memories (4 indexes), strategies (3 indexes), transition/motif stats, decision traces, outcome signals, claims, world model state, schema versions.
 
@@ -347,6 +433,8 @@ minnsdb/
 | `ENABLE_STRATEGY_GENERATION` | `false` | Enable LLM strategy generation [WIP] |
 | `ENABLE_LOUVAIN` | `true` | Background community detection |
 | `LOUVAIN_INTERVAL` | `1000` | Events between Louvain runs |
+| `SUBSCRIPTION_INTERVAL_MS` | `50` | Background subscription processing interval (ms) |
+| `CORS_ALLOWED_ORIGINS` | - | Comma-separated allowed CORS origins |
 
 Full reference at [docs.minns.ai](https://docs.minns.ai).
 
