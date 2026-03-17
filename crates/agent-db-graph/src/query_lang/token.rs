@@ -27,6 +27,8 @@ pub enum Token {
     False,
     Contains,
     StartsWith,
+    Subscribe,
+    Unsubscribe,
 
     // Literals
     Ident(String),

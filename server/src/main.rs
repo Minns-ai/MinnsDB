@@ -10,11 +10,15 @@ mod read_gate;
 mod routes;
 mod sequence;
 mod state;
+mod subscription_task;
 mod write_lanes;
 
 use agent_db_graph::GraphEngine;
+use agent_db_graph::subscription::manager::SubscriptionManager;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Mutex;
 use tracing::info;
 
 #[tokio::main]
@@ -71,6 +75,16 @@ async fn main() -> anyhow::Result<()> {
     // ── Sequence Tracker ─────────────────────────────────────────────────
     let seq_tracker = Arc::new(sequence::SequenceTracker::new());
 
+    // ── Subscription Manager ─────────────────────────────────────────────
+    let subscription_rx = {
+        let mut inference = engine.inference().write().await;
+        let graph = inference.graph_mut();
+        graph.enable_subscriptions()
+    };
+    let subscription_manager = Arc::new(Mutex::new(SubscriptionManager::new(subscription_rx)));
+    let _subscription_task = subscription_task::spawn(engine.clone(), subscription_manager.clone());
+    info!("Subscription system enabled (background processing active)");
+
     // Create application state
     let state = state::AppState {
         engine: engine.clone(),
@@ -78,6 +92,8 @@ async fn main() -> anyhow::Result<()> {
         read_gate,
         seq_tracker,
         started_at: Instant::now(),
+        subscription_manager,
+        subscription_queries: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Build router

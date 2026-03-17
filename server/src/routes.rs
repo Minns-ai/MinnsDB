@@ -4,7 +4,7 @@ use crate::handlers;
 use crate::state::AppState;
 use axum::http::Method;
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
@@ -201,6 +201,25 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/ontology/proposals/:id/approve", post(handlers::approve_ontology_proposal))
         .route("/api/ontology/proposals/:id/reject", post(handlers::reject_ontology_proposal))
         .route("/api/ontology/stats", get(handlers::ontology_evolution_stats))
+        // Subscriptions (live queries)
+        .route(
+            "/api/subscriptions",
+            post(handlers::create_subscription).get(handlers::list_subscriptions),
+        )
+        .route(
+            "/api/subscriptions/:id",
+            delete(handlers::delete_subscription),
+        )
+        .route(
+            "/api/subscriptions/:id/poll",
+            get(handlers::poll_subscription),
+        )
+        .route(
+            "/api/subscriptions/ws",
+            get(handlers::ws_handler),
+        )
+        // Graph import (bulk knowledge graph)
+        .route("/api/graph/import", post(handlers::import_graph))
         // Admin: Export/Import
         .route("/api/admin/export", post(handlers::export_handler))
         .route("/api/admin/import", post(handlers::import_handler))

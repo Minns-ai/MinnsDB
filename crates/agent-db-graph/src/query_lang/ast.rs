@@ -1,5 +1,16 @@
 /// AST types for MinnsQL.
 
+/// Top-level statement: a query, subscription, or unsubscription.
+#[derive(Debug, Clone)]
+pub enum Statement {
+    /// Regular MATCH ... RETURN query.
+    Query(Query),
+    /// SUBSCRIBE MATCH ... RETURN — creates a live subscription.
+    Subscribe(Query),
+    /// UNSUBSCRIBE <id> — removes a subscription.
+    Unsubscribe(u64),
+}
+
 #[derive(Debug, Clone)]
 pub struct Query {
     pub match_clauses: Vec<Pattern>,

@@ -11,7 +11,7 @@ agent-db-core = { path = "../crates/agent-db-core" }
 agent-db-planning = { path = "../ml/agent-db-planning" }
 
 # Web framework
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 

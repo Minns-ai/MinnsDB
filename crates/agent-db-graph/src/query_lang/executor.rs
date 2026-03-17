@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
+use smallvec::SmallVec;
+
 use super::ast::{CompOp, Direction as AstDirection, Literal};
 use super::planner::{
     AggregateFunction, Aggregation, ExecutionPlan, OrderSpec, PlanStep, Projection, RBoolExpr,
@@ -1683,6 +1685,216 @@ impl<'a> Executor<'a> {
             }
             std::cmp::Ordering::Equal
         });
+    }
+
+    /// Execute a plan and return results with binding rows preserved.
+    /// Used by the subscription system to build structural RowIds.
+    pub fn execute_with_bindings(
+        graph: &'a Graph,
+        ontology: &'a OntologyRegistry,
+        plan: ExecutionPlan,
+    ) -> Result<(QueryOutput, Vec<SmallVec<[(SlotIdx, crate::subscription::incremental::BoundEntityId); 4]>>), QueryError> {
+        let start = Instant::now();
+
+        let mut executor = Executor {
+            graph,
+            ontology,
+            viewport: plan.temporal_viewport.clone(),
+            transaction_cutoff: plan.transaction_cutoff,
+            stats: ExecutionStats {
+                nodes_scanned: 0,
+                edges_traversed: 0,
+            },
+            deadline: start + QUERY_TIMEOUT,
+        };
+
+        let mut rows: Vec<BindingRow> = vec![BindingRow::new(plan.var_count)];
+
+        for step in &plan.steps {
+            rows = executor.execute_step(step, rows)?;
+        }
+
+        // Extract binding rows before projection.
+        let binding_rows: Vec<SmallVec<[(SlotIdx, crate::subscription::incremental::BoundEntityId); 4]>> = rows
+            .iter()
+            .map(|br| {
+                let mut slots = SmallVec::new();
+                for i in 0..plan.var_count {
+                    if let Some(bv) = br.get(i) {
+                        let entity = match bv {
+                            BoundValue::Node(id) => crate::subscription::incremental::BoundEntityId::Node(*id),
+                            BoundValue::Edge(id) => crate::subscription::incremental::BoundEntityId::Edge(*id),
+                            BoundValue::Path(_) => continue, // Paths not supported in subscriptions
+                        };
+                        slots.push((i, entity));
+                    }
+                }
+                slots
+            })
+            .collect();
+
+        // Projection.
+        let columns: Vec<String> = plan.projections.iter().map(|p| p.alias.clone()).collect();
+        let mut result_rows: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+        for binding in &rows {
+            let mut row = Vec::with_capacity(plan.projections.len());
+            for proj in &plan.projections {
+                let val = executor.evaluate_expr(&proj.expr, binding)?;
+                row.push(val);
+            }
+            result_rows.push(row);
+        }
+
+        // Aggregation.
+        if !plan.aggregations.is_empty() {
+            result_rows = executor.apply_aggregations(
+                &result_rows,
+                &columns,
+                &plan.aggregations,
+                &plan.group_by_keys,
+                &plan.projections,
+                &rows,
+            )?;
+        }
+
+        // DISTINCT.
+        if plan.projections.iter().any(|p| p.distinct) {
+            let mut seen = HashSet::new();
+            let mut deduped = Vec::new();
+            for row in result_rows {
+                let hash = hash_row(&row);
+                if seen.insert(hash) {
+                    deduped.push(row);
+                }
+            }
+            result_rows = deduped;
+        }
+
+        // ORDER BY.
+        if !plan.ordering.is_empty() {
+            executor.apply_ordering(&mut result_rows, &columns, &plan.ordering);
+        }
+
+        // LIMIT.
+        if let Some(limit) = plan.limit {
+            result_rows.truncate(limit as usize);
+        }
+
+        let elapsed = start.elapsed();
+
+        let output = QueryOutput {
+            columns,
+            rows: result_rows,
+            stats: QueryStats {
+                nodes_scanned: executor.stats.nodes_scanned,
+                edges_traversed: executor.stats.edges_traversed,
+                execution_time_ms: elapsed.as_millis() as u64,
+            },
+        };
+
+        Ok((output, binding_rows))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone visibility/matching functions for subscription system
+// ---------------------------------------------------------------------------
+
+/// Check whether an edge is visible under a temporal viewport.
+/// Standalone version of `Executor::edge_visible` for use by subscription operators.
+pub fn edge_visible_standalone(
+    edge: &GraphEdge,
+    viewport: &TemporalViewport,
+    txn_cutoff: Option<u64>,
+) -> bool {
+    if !edge.is_valid() {
+        return false;
+    }
+    if let Some(cutoff) = txn_cutoff {
+        if edge.created_at > cutoff {
+            return false;
+        }
+    }
+    match viewport {
+        TemporalViewport::ActiveOnly => edge.valid_until.is_none(),
+        TemporalViewport::PointInTime(ts) => edge.valid_at(*ts),
+        TemporalViewport::Range(t1, t2) => edge.valid_during(*t1, *t2),
+        TemporalViewport::All => true,
+    }
+}
+
+/// Check whether an edge matches a type filter.
+/// Standalone version of `Executor::edge_matches_type` for use by subscription operators.
+pub fn edge_matches_type_standalone(edge: &GraphEdge, filter: &Option<String>) -> bool {
+    let filter = match filter {
+        Some(f) => f,
+        None => return true,
+    };
+
+    match &edge.edge_type {
+        EdgeType::Association {
+            association_type, ..
+        } => {
+            if association_type == filter {
+                return true;
+            }
+            if association_type.len() > filter.len()
+                && association_type.as_bytes().get(filter.len()) == Some(&b':')
+                && association_type[..filter.len()].eq_ignore_ascii_case(filter)
+            {
+                return true;
+            }
+            false
+        }
+        other => {
+            let variant_name = edge_type_variant_name(other);
+            variant_name.eq_ignore_ascii_case(filter)
+        }
+    }
+}
+
+/// Check whether a node satisfies property filters.
+/// Standalone version of `Executor::node_matches_props` for use by subscription operators.
+pub fn node_matches_props_standalone(
+    node: &GraphNode,
+    props: &[(String, Literal)],
+    _graph: &Graph,
+) -> bool {
+    for (key, lit) in props {
+        let val = node_property_value_standalone(node, key);
+        let expected = literal_to_value(lit);
+        if !value_eq_loose(&val, &expected) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Extract a named property from a node (standalone version).
+pub(crate) fn node_property_value_standalone(node: &GraphNode, prop: &str) -> Value {
+    match prop {
+        "id" => Value::Int(node.id as i64),
+        "name" | "label" => Value::String(node.label()),
+        "type" => Value::String(node.type_name().to_string()),
+        "created_at" => Value::Int(node.created_at as i64),
+        "updated_at" => Value::Int(node.updated_at as i64),
+        "group_id" => Value::String(node.group_id.clone()),
+        "degree" => Value::Int(node.degree as i64),
+        "confidence" => match &node.node_type {
+            NodeType::Concept { confidence, .. } | NodeType::Claim { confidence, .. } => {
+                Value::Float(*confidence as f64)
+            }
+            _ => Value::Null,
+        },
+        "concept_name" => match &node.node_type {
+            NodeType::Concept { concept_name, .. } => Value::String(concept_name.clone()),
+            _ => Value::Null,
+        },
+        _ => node
+            .properties
+            .get(prop)
+            .map(|jv| json_to_value(jv))
+            .unwrap_or(Value::Null),
     }
 }
 

@@ -119,6 +119,9 @@ pub struct Graph {
 
     /// Running sum of all node degrees for O(1) avg_degree computation.
     pub(crate) total_degree: u64,
+
+    /// Broadcast channel for subscription deltas. None = no subscribers, negligible overhead.
+    pub(crate) delta_tx: Option<tokio::sync::broadcast::Sender<crate::subscription::delta::DeltaBatch>>,
 }
 
 /// Graph statistics for monitoring and optimization
@@ -212,6 +215,23 @@ impl Graph {
             deleted_edges: HashSet::new(),
             adjacency_dirty: false,
             total_degree: 0,
+            delta_tx: None,
+        }
+    }
+
+    /// Enable the subscription delta broadcast channel.
+    ///
+    /// If already enabled, reuses the existing sender and returns a new receiver.
+    /// Prior receivers remain valid. Channel capacity is 4096 batches.
+    pub fn enable_subscriptions(
+        &mut self,
+    ) -> tokio::sync::broadcast::Receiver<crate::subscription::delta::DeltaBatch> {
+        if let Some(tx) = &self.delta_tx {
+            tx.subscribe()
+        } else {
+            let (tx, rx) = tokio::sync::broadcast::channel(4096);
+            self.delta_tx = Some(tx);
+            rx
         }
     }
 

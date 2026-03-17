@@ -4,9 +4,35 @@
 // merge_nodes, reindex_node_with_edges, invalidate_edge.
 
 use super::adj_list::AdjList;
+use super::edge::EdgeType;
 use super::graph::{Graph, edge_text_for_bm25};
 use super::node::{GraphNode, NodeType};
 use super::types::{EdgeId, NodeId};
+use crate::subscription::delta::{DeltaBatch, GraphDelta};
+
+/// Extract a compact string tag from an EdgeType for delta emission.
+fn edge_type_tag(edge_type: &EdgeType) -> String {
+    match edge_type {
+        EdgeType::Association {
+            association_type, ..
+        } => association_type.clone(),
+        EdgeType::Causality { .. } => "Causality".to_string(),
+        EdgeType::Temporal { .. } => "Temporal".to_string(),
+        EdgeType::Contextual { .. } => "Contextual".to_string(),
+        EdgeType::Interaction { .. } => "Interaction".to_string(),
+        EdgeType::GoalRelation { .. } => "GoalRelation".to_string(),
+        EdgeType::Communication { .. } => "Communication".to_string(),
+        EdgeType::DerivedFrom { .. } => "DerivedFrom".to_string(),
+        EdgeType::SupportedBy { .. } => "SupportedBy".to_string(),
+        EdgeType::CodeStructure {
+            relation_kind, ..
+        } => relation_kind.clone(),
+        EdgeType::About {
+            predicate: Some(p), ..
+        } => p.clone(),
+        EdgeType::About { .. } => "About".to_string(),
+    }
+}
 
 impl Graph {
     /// Add a node to the graph.
@@ -28,9 +54,12 @@ impl Graph {
 
         node.id = node_id;
 
+        // Capture discriminant before potential move
+        let disc = node.node_type.discriminant();
+
         // Update type index (u8 discriminant key)
         self.type_index
-            .entry(node.node_type.discriminant())
+            .entry(disc)
             .or_default()
             .insert(node_id);
 
@@ -57,6 +86,18 @@ impl Graph {
         self.dirty_nodes.insert(node_id);
         self.adjacency_dirty = true;
         self.update_stats();
+
+        // Emit subscription delta
+        if let Some(tx) = &self.delta_tx {
+            let _ = tx.send(DeltaBatch {
+                deltas: vec![GraphDelta::NodeAdded {
+                    node_id,
+                    node_type_disc: disc,
+                    generation: self.generation,
+                }],
+                generation_range: (self.generation, self.generation),
+            });
+        }
 
         Ok(node_id)
     }
@@ -90,6 +131,12 @@ impl Graph {
 
         let source = edge.source;
         let target = edge.target;
+        // Defer edge_type_tag computation to avoid String allocation when no subscribers.
+        let tag = if self.delta_tx.is_some() {
+            Some(edge_type_tag(&edge.edge_type))
+        } else {
+            None
+        };
         let inserted_id = self.edges.insert(edge);
         debug_assert_eq!(inserted_id, edge_id);
         self.dirty_edges.insert(edge_id);
@@ -110,6 +157,20 @@ impl Graph {
 
         // Bump generation for cache invalidation
         self.generation += 1;
+
+        // Emit subscription delta
+        if let Some(tx) = &self.delta_tx {
+            let _ = tx.send(DeltaBatch {
+                deltas: vec![GraphDelta::EdgeAdded {
+                    edge_id,
+                    source,
+                    target,
+                    edge_type_tag: tag.unwrap(),
+                    generation: self.generation,
+                }],
+                generation_range: (self.generation, self.generation),
+            });
+        }
 
         self.update_stats();
 
@@ -220,6 +281,20 @@ impl Graph {
         self.adjacency_dirty = true;
         self.generation += 1;
 
+        // Emit subscription delta
+        if let Some(tx) = &self.delta_tx {
+            let _ = tx.send(DeltaBatch {
+                deltas: vec![GraphDelta::EdgeRemoved {
+                    edge_id,
+                    source: edge.source,
+                    target: edge.target,
+                    edge_type_tag: edge_type_tag(&edge.edge_type),
+                    generation: self.generation,
+                }],
+                generation_range: (self.generation, self.generation),
+            });
+        }
+
         self.update_stats();
         Some(edge)
     }
@@ -299,9 +374,22 @@ impl Graph {
         let outgoing_edge_ids = self.adjacency_out.remove(node_id).unwrap_or_default();
         let incoming_edge_ids = self.adjacency_in.remove(node_id).unwrap_or_default();
 
+        // Accumulate edge removal deltas for subscription broadcast
+        let has_subs = self.delta_tx.is_some();
+        let mut edge_deltas: Vec<GraphDelta> = Vec::new();
+
         // Remove outgoing edges and update targets' incoming adjacency + degree
         for edge_id in &outgoing_edge_ids {
             if let Some(edge) = self.edges.remove(*edge_id) {
+                if has_subs {
+                    edge_deltas.push(GraphDelta::EdgeRemoved {
+                        edge_id: *edge_id,
+                        source: edge.source,
+                        target: edge.target,
+                        edge_type_tag: edge_type_tag(&edge.edge_type),
+                        generation: self.generation,
+                    });
+                }
                 self.deleted_edges.insert(*edge_id);
                 self.dirty_edges.remove(edge_id);
                 if edge.target != node_id {
@@ -320,6 +408,15 @@ impl Graph {
         // Remove incoming edges and update sources' outgoing adjacency + degree
         for edge_id in &incoming_edge_ids {
             if let Some(edge) = self.edges.remove(*edge_id) {
+                if has_subs {
+                    edge_deltas.push(GraphDelta::EdgeRemoved {
+                        edge_id: *edge_id,
+                        source: edge.source,
+                        target: edge.target,
+                        edge_type_tag: edge_type_tag(&edge.edge_type),
+                        generation: self.generation,
+                    });
+                }
                 self.deleted_edges.insert(*edge_id);
                 self.dirty_edges.remove(edge_id);
                 if edge.source != node_id {
@@ -339,6 +436,20 @@ impl Graph {
         self.deleted_nodes.insert(node_id);
         self.dirty_nodes.remove(&node_id);
         self.adjacency_dirty = true;
+
+        // Emit subscription deltas: NodeRemoved + cascaded EdgeRemoved
+        if let Some(tx) = &self.delta_tx {
+            let mut deltas = vec![GraphDelta::NodeRemoved {
+                node_id,
+                node_type_disc: disc,
+                generation: self.generation,
+            }];
+            deltas.append(&mut edge_deltas);
+            let _ = tx.send(DeltaBatch {
+                generation_range: (self.generation, self.generation),
+                deltas,
+            });
+        }
 
         self.update_stats();
         Some(node)
@@ -495,15 +606,70 @@ impl Graph {
             self.total_degree = self.total_degree.saturating_sub(old_degree) + new_degree;
         }
 
+        // Emit subscription delta for node merge
+        if let Some(tx) = &self.delta_tx {
+            let _ = tx.send(DeltaBatch {
+                deltas: vec![GraphDelta::NodeMerged {
+                    survivor_id,
+                    absorbed_id,
+                    generation: self.generation,
+                }],
+                generation_range: (self.generation, self.generation),
+            });
+        }
+
         Ok(self.nodes.get(survivor_id).unwrap().clone())
     }
 
     /// Soft-delete an edge by ID, marking it invalid with a reason.
     pub fn invalidate_edge(&mut self, edge_id: EdgeId, reason: &str) -> bool {
         if let Some(edge) = self.edges.get_mut(edge_id) {
+            // Capture pre-mutation state for delta emission
+            let old_valid_until = edge.valid_until;
+            let source = edge.source;
+            let target = edge.target;
+            // Defer tag computation to avoid allocation when no subscribers
+            let tag = if self.delta_tx.is_some() {
+                Some(edge_type_tag(&edge.edge_type))
+            } else {
+                None
+            };
+
             edge.invalidate(reason);
+
+            let new_valid_until = edge.valid_until;
+
             self.dirty_edges.insert(edge_id);
             self.generation += 1;
+
+            // Emit subscription delta
+            if let Some(tx) = &self.delta_tx {
+                let tag = tag.unwrap();
+                let delta = if old_valid_until != new_valid_until {
+                    GraphDelta::EdgeSuperseded {
+                        edge_id,
+                        source,
+                        target,
+                        edge_type_tag: tag,
+                        old_valid_until,
+                        new_valid_until,
+                        generation: self.generation,
+                    }
+                } else {
+                    GraphDelta::EdgeMutated {
+                        edge_id,
+                        source,
+                        target,
+                        edge_type_tag: tag,
+                        generation: self.generation,
+                    }
+                };
+                let _ = tx.send(DeltaBatch {
+                    deltas: vec![delta],
+                    generation_range: (self.generation, self.generation),
+                });
+            }
+
             true
         } else {
             false

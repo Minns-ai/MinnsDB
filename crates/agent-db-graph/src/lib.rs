@@ -223,6 +223,9 @@ pub use graph_pruning::{GraphPruner, GraphPruningConfig, PruneResult};
 // MinnsQL query language
 pub mod query_lang;
 
+// Subscription system (delta capture + trigger set compilation)
+pub mod subscription;
+
 // Export/Import
 pub use export::{ExportError, ImportError, ImportMode, ImportStats};
 pub use stores::{build_memory_index_ops, build_strategy_index_ops};

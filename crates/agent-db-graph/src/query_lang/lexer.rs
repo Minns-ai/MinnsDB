@@ -324,6 +324,8 @@ impl<'a> Lexer<'a> {
             "TRUE" => Token::True,
             "FALSE" => Token::False,
             "CONTAINS" => Token::Contains,
+            "SUBSCRIBE" => Token::Subscribe,
+            "UNSUBSCRIBE" => Token::Unsubscribe,
             _ => Token::Ident(text.to_string()),
         };
 
