@@ -115,11 +115,17 @@ async fn test_real_claims_pipeline_end_to_end() {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         claim_count = claim_store.count().unwrap();
         if claim_count > 0 {
-            println!("=== Claims appeared after {}s: {} claims ===", attempt, claim_count);
+            println!(
+                "=== Claims appeared after {}s: {} claims ===",
+                attempt, claim_count
+            );
             break;
         }
         if attempt % 5 == 0 {
-            println!("=== Waiting for claims... {}s elapsed, {} claims so far ===", attempt, claim_count);
+            println!(
+                "=== Waiting for claims... {}s elapsed, {} claims so far ===",
+                attempt, claim_count
+            );
         }
     }
 
