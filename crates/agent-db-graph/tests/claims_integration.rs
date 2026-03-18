@@ -105,21 +105,32 @@ async fn test_real_claims_pipeline_end_to_end() {
     );
 
     // The claim extraction runs in a background tokio::spawn.
-    // Give it time to complete (LLM call + embedding generation).
-    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-    // Verify claims were stored in the ClaimStore (redb)
+    // Poll until claims appear or timeout after 30 seconds.
     let claim_store = engine
         .claim_store()
         .expect("Claim store should be initialized");
-    let claim_count = claim_store.count().unwrap();
+
+    let mut claim_count = 0;
+    for attempt in 1..=30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        claim_count = claim_store.count().unwrap();
+        if claim_count > 0 {
+            println!("=== Claims appeared after {}s: {} claims ===", attempt, claim_count);
+            break;
+        }
+        if attempt % 5 == 0 {
+            println!("=== Waiting for claims... {}s elapsed, {} claims so far ===", attempt, claim_count);
+        }
+    }
 
     println!("=== Claims pipeline produced {} claims ===", claim_count);
 
     // We expect at least 1 claim from this rich factual text
     assert!(
         claim_count >= 1,
-        "Expected at least 1 claim from factual text, got {}",
+        "Expected at least 1 claim from factual text, got {}. \
+         The background claim extraction task may have failed silently — \
+         check CI logs for LLM API errors above this line.",
         claim_count
     );
 
