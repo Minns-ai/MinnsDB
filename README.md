@@ -24,6 +24,10 @@
   <a href="https://minns.ai">Website</a>
 </p>
 
+<p align="center">
+  <img src="img/digram.png" alt="MinnsDB Architecture" width="900" />
+</p>
+
 ---
 
 ## What is MinnsDB?
@@ -129,51 +133,6 @@ curl -X POST http://localhost:3000/api/query \
 | Reactive live queries | No | No | No | **Yes** — incremental updates via REST or WebSocket |
 | Auth built in | Varies | Bolt auth | Varies | **Yes** — API keys with group scoping + permissions |
 | External deps | Vector service | JVM + Cypher | Redis/Postgres | **None** — single binary, embedded ReDB |
-
----
-
-## How it works
-
-```
-  Conversations / Events / API calls
-         │
-         ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  AUTH LAYER                                                          │
-  │  API key verification → group_id + permissions                       │
-  └──────────┬──────────────────────────────────────────────────────────┘
-             │
-     ┌───────┴──────────┬──────────────────┬────────────────────┐
-     ▼                  ▼                  ▼                    ▼
-  ┌──────────┐   ┌─────────────┐   ┌─────────────┐   ┌──────────────┐
-  │ GRAPH     │   │ TABLES       │   │ MinnsQL      │   │ WASM MODULES  │
-  │ ENGINE    │   │ ENGINE       │   │ ENGINE       │   │ RUNTIME       │
-  │           │   │              │   │              │   │               │
-  │ LLM       │   │ 8KB pages    │   │ Parser →     │   │ Wasmtime +    │
-  │ compaction│   │ blake3       │   │ Planner →    │   │ sandboxing    │
-  │ NLQ       │   │ checksums    │   │ Executor     │   │ permissions   │
-  │ pipeline  │   │ bi-temporal  │   │              │   │ life metering │
-  │ OWL/RDFS  │   │ versioning   │   │ Graph +      │   │ MessagePack   │
-  │ ontology  │   │ O(1) column  │   │ Table +      │   │ triggers      │
-  │           │   │ access       │   │ JOIN         │   │ scheduler     │
-  └─────┬─────┘   └──────┬──────┘   └──────┬──────┘   └───────┬───────┘
-        │                │                  │                  │
-        └────────┬───────┴──────────────────┴──────────────────┘
-                 ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  REACTIVE ENGINE                                                     │
-  │  Graph deltas + table deltas → DeltaBatch broadcast                  │
-  │  Trigger-set fast rejection → Incremental view maintenance           │
-  │  REST polling + WebSocket push + WASM trigger dispatch               │
-  └──────────┬──────────────────────────────────────────────────────────┘
-             ▼
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  PERSISTENCE (ReDB)                                                  │
-  │  Graph nodes/edges/adjacency │ Table pages (raw 8KB blobs)           │
-  │  WASM module blobs (blake3)  │ API keys (blake3 hashed)              │
-  │  Memories, strategies, claims │ Usage counters, schedules            │
-  └─────────────────────────────────────────────────────────────────────┘
-```
 
 ---
 
