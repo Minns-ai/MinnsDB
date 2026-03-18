@@ -60,7 +60,13 @@
       "Bash(/Users/jonathanfarrow/.cargo/bin/cargo clippy:*)",
       "Bash($HOME/.cargo/bin/cargo test:*)",
       "WebFetch(domain:www.machinebrief.com)",
-      "Bash($HOME/.cargo/bin/cargo fmt:*)"
+      "Bash($HOME/.cargo/bin/cargo fmt:*)",
+      "Bash(for item:*)",
+      "Bash($HOME/.cargo/bin/cargo check:*)",
+      "Bash(/Users/jonathanfarrow/.cargo/bin/rustc --edition 2021 --crate-type lib crates/agent-db-graph/src/query_lang/lexer.rs 2>&1 | head -202)",
+      "Bash(/Users/jonathanfarrow/.cargo/bin/rustfmt /Users/jonathanfarrow/EventGraphDB/crates/agent-db-graph/src/query_lang/parser.rs 2>&1)",
+      "WebFetch(domain:ori-cohen.medium.com)",
+      "Bash(/Users/jonathanfarrow/.cargo/bin/cargo audit:*)"
     ]
   }
 }

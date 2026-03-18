@@ -313,10 +313,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/keys",
             post(handlers::auth::create_key).get(handlers::auth::list_keys),
         )
-        .route(
-            "/api/keys/:name",
-            delete(handlers::auth::delete_key),
-        )
+        .route("/api/keys/:name", delete(handlers::auth::delete_key))
         // Admin: Export/Import
         .route("/api/admin/export", post(handlers::export_handler))
         .route("/api/admin/import", post(handlers::import_handler))

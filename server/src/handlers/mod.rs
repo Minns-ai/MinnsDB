@@ -1,8 +1,8 @@
 // Handler modules for MinnsDB REST API
 
 pub mod agents;
-pub mod auth;
 pub mod analytics;
+pub mod auth;
 pub mod claims;
 pub mod code;
 pub mod conversation;

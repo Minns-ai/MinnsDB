@@ -56,9 +56,7 @@ pub async fn create_key(
     headers: axum::http::HeaderMap,
     Json(req): Json<CreateKeyRequest>,
 ) -> impl IntoResponse {
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
     let identity = match extract_auth(&state, auth_header).await {
         Ok(id) => id,
         Err(e) => return e,
@@ -74,7 +72,11 @@ pub async fn create_key(
     let mut store = state.key_store.write().await;
     let raw_key = store.create_key(req.name.clone(), req.group_id, req.permissions.clone());
 
-    tracing::info!("API key created: name='{}', group_id={:?}", req.name, req.group_id);
+    tracing::info!(
+        "API key created: name='{}', group_id={:?}",
+        req.name,
+        req.group_id
+    );
 
     (
         StatusCode::CREATED,
@@ -93,9 +95,7 @@ pub async fn list_keys(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
     let identity = match extract_auth(&state, auth_header).await {
         Ok(id) => id,
         Err(e) => return e,
@@ -112,7 +112,10 @@ pub async fn list_keys(
     let keys = store.list();
     (
         StatusCode::OK,
-        Json(serde_json::to_value(keys).unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))),
+        Json(
+            serde_json::to_value(keys)
+                .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()})),
+        ),
     )
 }
 
@@ -122,9 +125,7 @@ pub async fn delete_key(
     headers: axum::http::HeaderMap,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
     let identity = match extract_auth(&state, auth_header).await {
         Ok(id) => id,
         Err(e) => return e,

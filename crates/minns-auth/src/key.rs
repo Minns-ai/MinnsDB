@@ -51,7 +51,9 @@ pub fn hash_key(raw_key: &str) -> [u8; 32] {
 pub fn is_valid_format(key: &str) -> bool {
     key.starts_with(KEY_PREFIX)
         && key.len() == KEY_PREFIX.len() + KEY_RANDOM_BYTES * 2
-        && key[KEY_PREFIX.len()..].chars().all(|c| c.is_ascii_hexdigit())
+        && key[KEY_PREFIX.len()..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
 }
 
 /// Known permission strings.
@@ -78,7 +80,9 @@ impl ApiKeyRecord {
     /// Check if this key has a specific permission.
     /// Admin keys have all permissions.
     pub fn has_permission(&self, required: &str) -> bool {
-        self.permissions.iter().any(|p| p == permissions::ADMIN || p == required)
+        self.permissions
+            .iter()
+            .any(|p| p == permissions::ADMIN || p == required)
     }
 
     /// Check if this key can access a specific group_id.
@@ -117,10 +121,14 @@ mod tests {
 
     #[test]
     fn test_format_validation() {
-        assert!(is_valid_format("mndb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+        assert!(is_valid_format(
+            "mndb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
         assert!(!is_valid_format("wrong_prefix"));
         assert!(!is_valid_format("mndb_tooshort"));
-        assert!(!is_valid_format("mndb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg")); // 'g' invalid
+        assert!(!is_valid_format(
+            "mndb_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
+        )); // 'g' invalid
     }
 
     #[test]
