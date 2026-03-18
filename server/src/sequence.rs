@@ -105,6 +105,12 @@ pub struct SequenceTracker {
     domain_state: DashMap<String, DomainState>,
 }
 
+impl Default for SequenceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SequenceTracker {
     pub fn new() -> Self {
         Self {

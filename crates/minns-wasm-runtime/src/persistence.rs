@@ -9,6 +9,7 @@ use crate::usage::ModuleUsage;
 const MODULE_REGISTRY: &str = "module_registry";
 const MODULE_BLOBS: &str = "module_blobs";
 const MODULE_USAGE: &str = "module_usage";
+#[allow(dead_code)]
 const MODULE_SCHEDULES: &str = "module_schedules";
 
 /// Persist all module records, blobs, and usage to ReDB.

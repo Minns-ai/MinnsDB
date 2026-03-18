@@ -24,6 +24,7 @@ pub struct SubscribeRequest {
     pub query: String,
     /// Optional group_id scope.
     #[serde(default)]
+    #[allow(dead_code)]
     pub group_id: Option<String>,
 }
 
@@ -120,7 +121,7 @@ pub async fn create_subscription(
 
         let (sub_id, initial_output) =
             sub_mgr
-                .subscribe(plan, graph, &ontology)
+                .subscribe(plan, graph, ontology)
                 .map_err(|e| match e {
                     agent_db_graph::query_lang::QueryError::ExecutionError(ref msg)
                         if msg.contains("Subscription limit") =>

@@ -1,7 +1,7 @@
 //! Tests for graph traversal and query engine.
 
 use super::*;
-use crate::structures::{EdgeId, EdgeType, Graph, GraphEdge, GraphNode, NodeId, NodeType};
+use crate::structures::{EdgeType, Graph, GraphEdge, GraphNode, NodeId, NodeType};
 use ordered_float::OrderedFloat;
 use std::collections::HashMap;
 use std::sync::Arc;

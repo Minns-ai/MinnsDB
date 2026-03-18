@@ -1371,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_parse_cascade_inference_response() {
-        let ontology = crate::ontology::tests::test_registry();
+        let _ontology = crate::ontology::tests::test_registry();
 
         // Clear existing cascade_dependents on location to test inference
         // (test_registry already sets them, so we test with a fresh ontology)

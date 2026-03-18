@@ -1034,8 +1034,8 @@ impl<'a> Executor<'a> {
                         let t1 = self.resolve_timestamp_arg(&args[1], binding)?;
                         let t2 = self.resolve_timestamp_arg(&args[2], binding)?;
 
-                        let started = edge.valid_from.map_or(false, |vf| vf >= t1 && vf <= t2);
-                        let ended = edge.valid_until.map_or(false, |vu| vu >= t1 && vu <= t2);
+                        let started = edge.valid_from.is_some_and(|vf| vf >= t1 && vf <= t2);
+                        let ended = edge.valid_until.is_some_and(|vu| vu >= t1 && vu <= t2);
                         let created = edge.created_at >= t1 && edge.created_at <= t2;
 
                         let label = if started && ended {
@@ -1353,11 +1353,7 @@ impl<'a> Executor<'a> {
         // r1.valid_until must exist and be close to r2.valid_from.
         match (edge1.valid_until, edge2.valid_from) {
             (Some(end1), Some(start2)) => {
-                let diff = if end1 > start2 {
-                    end1 - start2
-                } else {
-                    start2 - end1
-                };
+                let diff = end1.abs_diff(start2);
                 Ok(diff <= tolerance)
             },
             _ => Ok(false),
@@ -1382,8 +1378,8 @@ impl<'a> Executor<'a> {
         let t2 = self.resolve_timestamp_arg(&args[2], binding)?;
 
         // Edge "changed" if: started in range, ended in range, or was created in range.
-        let started_in = edge.valid_from.map_or(false, |vf| vf >= t1 && vf <= t2);
-        let ended_in = edge.valid_until.map_or(false, |vu| vu >= t1 && vu <= t2);
+        let started_in = edge.valid_from.is_some_and(|vf| vf >= t1 && vf <= t2);
+        let ended_in = edge.valid_until.is_some_and(|vu| vu >= t1 && vu <= t2);
         let created_in = edge.created_at >= t1 && edge.created_at <= t2;
 
         Ok(started_in || ended_in || created_in)
@@ -1599,7 +1595,7 @@ impl<'a> Executor<'a> {
 
         let mut output = Vec::with_capacity(groups.len());
 
-        for (_key, row_indices) in &groups {
+        for row_indices in groups.values() {
             let mut out_row = Vec::with_capacity(projections.len());
 
             for proj in projections {
@@ -1902,7 +1898,7 @@ pub(crate) fn node_property_value_standalone(node: &GraphNode, prop: &str) -> Va
         _ => node
             .properties
             .get(prop)
-            .map(|jv| json_to_value(jv))
+            .map(json_to_value)
             .unwrap_or(Value::Null),
     }
 }
@@ -2061,7 +2057,7 @@ fn compare_values(lhs: &Value, op: &CompOp, rhs: &Value) -> bool {
                     && haystack.as_bytes()[..prefix.len()]
                         .iter()
                         .zip(prefix.as_bytes())
-                        .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+                        .all(|(a, b)| a.eq_ignore_ascii_case(b))
             },
             _ => false,
         },
@@ -3053,7 +3049,6 @@ mod tests {
 
     #[test]
     fn test_parse_as_of() {
-        use super::super::ast::BoolExpr;
         use super::super::ast::Expr;
         let q = super::super::parser::Parser::parse(r#"MATCH (n) AS OF "2024-06-15" RETURN n"#)
             .unwrap();
@@ -3076,7 +3071,7 @@ mod tests {
 
     #[test]
     fn test_parse_func_predicate_in_where() {
-        use super::super::ast::{BoolExpr, Expr};
+        use super::super::ast::BoolExpr;
         let q = super::super::parser::Parser::parse(
             r#"MATCH (n)-[r1]->(m), (n)-[r2]->(o) WHERE SUCCESSIVE(r1, r2) RETURN n"#,
         )
@@ -3119,7 +3114,7 @@ mod tests {
 
     #[test]
     fn test_truncate_timestamp_day() {
-        use super::super::planner::{civil_to_nanos, days_from_civil};
+        use super::super::planner::civil_to_nanos;
         // 2024-06-15T12:30:00 → should truncate to 2024-06-15T00:00:00
         let noon = civil_to_nanos(2024, 6, 15) + 12 * 3_600_000_000_000 + 30 * 60_000_000_000;
         let result = truncate_timestamp(noon, "1d").unwrap();

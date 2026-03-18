@@ -145,7 +145,7 @@ impl Table {
             self.history_index.entry(key).or_default().push(*ptr);
             self.temporal_index
                 .entry(hdr.valid_from)
-                .or_insert_with(SmallVec::new)
+                .or_default()
                 .push(*ptr);
 
             if hdr.valid_until.is_none() {
@@ -224,7 +224,7 @@ impl Table {
         self.version_index.insert(vid, ptr);
         self.temporal_index
             .entry(now)
-            .or_insert_with(SmallVec::new)
+            .or_default()
             .push(ptr);
         self.insert_unique_entries(group_id, row_id, &values);
         self.insert_node_ref_entries(group_id, row_id, &values);
@@ -294,7 +294,7 @@ impl Table {
         self.version_index.insert(new_vid, new_ptr);
         self.temporal_index
             .entry(now)
-            .or_insert_with(SmallVec::new)
+            .or_default()
             .push(new_ptr);
         self.insert_unique_entries(group_id, row_id, &values);
         self.insert_node_ref_entries(group_id, row_id, &values);
@@ -387,7 +387,7 @@ impl Table {
                 if let Some(bytes) = self.store.read(*ptr) {
                     let hdr = row_codec::read_header(bytes);
                     if hdr.valid_from <= timestamp
-                        && hdr.valid_until.map_or(true, |u| u > timestamp)
+                        && hdr.valid_until.is_none_or(|u| u > timestamp)
                     {
                         results.push(row_codec::decode_row(
                             &self.layout,
@@ -442,7 +442,7 @@ impl Table {
                 if let Some(data) = self.store.read(*ptr) {
                     let hdr = row_codec::read_header(data);
                     // Overlap check: valid_from <= end AND (valid_until is None OR valid_until >= start)
-                    if hdr.valid_from <= end && hdr.valid_until.map_or(true, |vu| vu >= start) {
+                    if hdr.valid_from <= end && hdr.valid_until.is_none_or(|vu| vu >= start) {
                         results.push(row_codec::decode_row(
                             &self.layout,
                             data,

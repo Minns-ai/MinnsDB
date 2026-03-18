@@ -191,7 +191,7 @@ impl VarLengthExpandState {
             }
         }
         for t in &old_targets {
-            if !new_targets.map_or(false, |n| n.contains(t)) {
+            if !new_targets.is_some_and(|n| n.contains(t)) {
                 out.push(RowDelta::delete(self.make_row_id(source, *t)));
             }
         }

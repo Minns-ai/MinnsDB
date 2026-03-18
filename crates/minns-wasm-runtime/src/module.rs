@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use wasmtime::{Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
+use wasmtime::{Instance, Linker, Module, Store};
 
 use agent_db_tables::catalog::TableCatalog;
 

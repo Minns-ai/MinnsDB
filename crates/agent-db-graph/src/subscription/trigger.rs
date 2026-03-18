@@ -88,7 +88,7 @@ impl TriggerSet {
             TriggerSet::TableIds(ids) => batch
                 .deltas
                 .iter()
-                .any(|d| d.table_id().map_or(false, |tid| ids.contains(&tid))),
+                .any(|d| d.table_id().is_some_and(|tid| ids.contains(&tid))),
             TriggerSet::CombinedWithTables {
                 node_types,
                 edge_types,

@@ -113,7 +113,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         let reply = handle_client_message(&text, &state, &mut my_subs).await;
                         if let Some(msg) = reply {
                             let json = serde_json::to_string(&msg).unwrap_or_default();
-                            if socket.send(Message::Text(json.into())).await.is_err() {
+                            if socket.send(Message::Text(json)).await.is_err() {
                                 break 'outer;
                             }
                         }
@@ -172,14 +172,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         count: u.count,
                     };
                     let json = serde_json::to_string(&msg).unwrap_or_default();
-                    if socket.send(Message::Text(json.into())).await.is_err() {
+                    if socket.send(Message::Text(json)).await.is_err() {
                         break 'outer;
                     }
                 }
             }
             // Heartbeat ping.
             _ = heartbeat.tick() => {
-                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                if socket.send(Message::Ping(vec![])).await.is_err() {
                     break 'outer;
                 }
             }
@@ -251,7 +251,7 @@ async fn handle_client_message(
                 let graph = inference.graph();
                 let ontology = state.engine.ontology();
                 let mut mgr = state.subscription_manager.lock().await;
-                mgr.subscribe(plan, graph, &ontology)
+                mgr.subscribe(plan, graph, ontology)
             };
 
             match result {

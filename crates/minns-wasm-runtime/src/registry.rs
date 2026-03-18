@@ -9,12 +9,11 @@ use tokio::sync::RwLock;
 use agent_db_core::types::Timestamp;
 use agent_db_tables::catalog::TableCatalog;
 
-use crate::abi::ModuleDescriptor;
 use crate::error::WasmError;
 use crate::module::ModuleInstance;
 use crate::permissions::PermissionSet;
 use crate::runtime::WasmRuntime;
-use crate::usage::{ModuleUsage, ModuleUsageCounters};
+use crate::usage::ModuleUsage;
 
 /// Persistent record stored in ReDB for each module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +42,12 @@ pub struct ModuleRegistry {
     period_start: Timestamp,
     /// Usage data to restore after recompilation (loaded from persistence).
     usage_to_restore: FxHashMap<String, ModuleUsage>,
+}
+
+impl Default for ModuleRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ModuleRegistry {

@@ -4,7 +4,6 @@ use serde::Serialize;
 
 use crate::abi;
 use crate::error::WasmError;
-use crate::module::ModuleInstance;
 use crate::registry::ModuleRegistry;
 use crate::runtime::WasmRuntime;
 

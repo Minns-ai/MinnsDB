@@ -116,7 +116,7 @@ pub async fn minnsql_query(
 
                 // Execute the already-planned query directly (avoid re-parsing).
                 let result =
-                    agent_db_graph::query_lang::executor::Executor::execute(graph, &ontology, plan)
+                    agent_db_graph::query_lang::executor::Executor::execute(graph, ontology, plan)
                         .map_err(|e| map_query_error(&e))?;
 
                 Ok(Json(QueryResponse {
@@ -157,7 +157,7 @@ pub async fn minnsql_query(
                 let mut sub_mgr = state.subscription_manager.lock().await;
                 let (sub_id, output) =
                     sub_mgr
-                        .subscribe(plan, graph, &ontology)
+                        .subscribe(plan, graph, ontology)
                         .map_err(|e| match e {
                             agent_db_graph::query_lang::QueryError::ExecutionError(ref msg)
                                 if msg.contains("Subscription limit") =>
@@ -494,7 +494,7 @@ fn eval_where_on_row(
     row: &agent_db_tables::row_codec::DecodedRow,
     schema: &agent_db_tables::schema::TableSchema,
 ) -> bool {
-    use agent_db_graph::query_lang::ast::{BoolExpr, CompOp, Expr, Literal};
+    use agent_db_graph::query_lang::ast::{BoolExpr, CompOp};
 
     match expr {
         BoolExpr::Comparison(lhs, op, rhs) => {
@@ -504,16 +504,16 @@ fn eval_where_on_row(
                 CompOp::Eq => cell_values_equal(&l, &r),
                 CompOp::Neq => !cell_values_equal(&l, &r),
                 CompOp::Lt => {
-                    cell_values_cmp(&l, &r).map_or(false, |o| o == std::cmp::Ordering::Less)
+                    cell_values_cmp(&l, &r) == Some(std::cmp::Ordering::Less)
                 },
                 CompOp::Gt => {
-                    cell_values_cmp(&l, &r).map_or(false, |o| o == std::cmp::Ordering::Greater)
+                    cell_values_cmp(&l, &r) == Some(std::cmp::Ordering::Greater)
                 },
                 CompOp::Lte => {
-                    cell_values_cmp(&l, &r).map_or(false, |o| o != std::cmp::Ordering::Greater)
+                    cell_values_cmp(&l, &r).is_some_and(|o| o != std::cmp::Ordering::Greater)
                 },
                 CompOp::Gte => {
-                    cell_values_cmp(&l, &r).map_or(false, |o| o != std::cmp::Ordering::Less)
+                    cell_values_cmp(&l, &r).is_some_and(|o| o != std::cmp::Ordering::Less)
                 },
                 CompOp::Contains => match (&l, &r) {
                     (
@@ -556,7 +556,7 @@ fn eval_expr_on_row(
     row: &agent_db_tables::row_codec::DecodedRow,
     schema: &agent_db_tables::schema::TableSchema,
 ) -> agent_db_tables::types::CellValue {
-    use agent_db_graph::query_lang::ast::{Expr, Literal};
+    use agent_db_graph::query_lang::ast::Expr;
 
     match expr {
         Expr::Var(name) | Expr::Property(_, name) => {

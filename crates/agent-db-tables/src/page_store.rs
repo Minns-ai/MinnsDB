@@ -28,6 +28,12 @@ pub struct PageStore {
     dirty_pages: FxHashSet<u32>,
 }
 
+impl Default for PageStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PageStore {
     pub fn new() -> Self {
         PageStore {
@@ -87,7 +93,7 @@ impl PageStore {
 
         // Re-bucket the page
         let new_free = page.free_space();
-        if new_free >= SLOT_SIZE + 1 {
+        if new_free > SLOT_SIZE {
             let bucket = bucket_for(new_free);
             self.free_list.entry(bucket).or_default().push(page_id);
             self.page_bucket.insert(page_id, bucket);
@@ -172,7 +178,7 @@ impl PageStore {
         self.remove_from_free_list(page_id);
         self.pages[page_id as usize].compact();
         let new_free = self.pages[page_id as usize].free_space();
-        if new_free >= SLOT_SIZE + 1 {
+        if new_free > SLOT_SIZE {
             let bucket = bucket_for(new_free);
             self.free_list.entry(bucket).or_default().push(page_id);
             self.page_bucket.insert(page_id, bucket);
@@ -189,7 +195,7 @@ impl PageStore {
         for page in &pages {
             let pid = page.page_id();
             let free = page.free_space();
-            if free >= SLOT_SIZE + 1 {
+            if free > SLOT_SIZE {
                 let bucket = bucket_for(free);
                 free_list.entry(bucket).or_insert_with(Vec::new).push(pid);
                 page_bucket.insert(pid, bucket);

@@ -46,7 +46,7 @@ pub fn spawn(
             let ontology = engine.ontology();
 
             let mut mgr = manager.lock().await;
-            mgr.drain_and_process(graph, &ontology);
+            mgr.drain_and_process(graph, ontology);
             // Locks dropped here.
         }
     })
