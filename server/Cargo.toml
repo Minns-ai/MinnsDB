@@ -12,6 +12,7 @@ agent-db-planning = { path = "../ml/agent-db-planning" }
 agent-db-tables = { path = "../crates/agent-db-tables" }
 agent-db-storage = { path = "../crates/agent-db-storage" }
 minns-wasm-runtime = { path = "../crates/minns-wasm-runtime" }
+minns-auth = { path = "../crates/minns-auth" }
 
 # Web framework
 axum = { version = "0.7", features = ["ws"] }

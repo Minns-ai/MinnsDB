@@ -103,6 +103,9 @@ mod table_defs {
     pub const MODULE_USAGE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("module_usage");
     pub const MODULE_SCHEDULES: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("module_schedules");
+
+    // Authentication
+    pub const API_KEYS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("api_keys");
 }
 
 /// Table names (for string-based access)
@@ -135,6 +138,7 @@ pub mod table_names {
     pub const MODULE_BLOBS: &str = "module_blobs";
     pub const MODULE_USAGE: &str = "module_usage";
     pub const MODULE_SCHEDULES: &str = "module_schedules";
+    pub const API_KEYS: &str = "api_keys";
 }
 
 /// redb backend configuration
@@ -287,6 +291,11 @@ impl RedbBackend {
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
             let _ = write_txn
                 .open_table(table_defs::MODULE_SCHEDULES)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+            // Authentication
+            let _ = write_txn
+                .open_table(table_defs::API_KEYS)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
             // Temporal tables
