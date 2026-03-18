@@ -5,363 +5,345 @@
 <h1 align="center">MinnsDB</h1>
 
 <p align="center">
-  <strong>A graph database that learns from conversations.</strong><br>
-  Send messages in. Ask questions in plain English. Subscribe to live queries. Get answers from the graph.
+  <strong>The agentic database — graph + tables + WASM agents in one binary.</strong><br>
+  Ingest conversations. Query with MinnsQL. Run sandboxed agents. Subscribe to live changes.
 </p>
 
 <p align="center">
-  Pure Rust &middot; Single binary &middot; Embedded storage &middot; No GPU &middot; 800+ tests
+  Pure Rust &middot; Single binary &middot; Embedded storage &middot; No GPU &middot; 1,100+ tests
 </p>
 
 ---
 
-## 30-second demo
+## What is MinnsDB?
 
-```bash
-cargo run --release -p minnsdb-server
-# → Listening on http://0.0.0.0:3000
-```
+MinnsDB is a database purpose-built for AI agent workloads. It combines a temporal knowledge graph, a relational table engine, and a sandboxed WASM agent runtime into a single Rust binary.
 
-```bash
-# 1. Send in a conversation
-curl -X POST http://localhost:3000/api/conversations/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "agent_id": 1,
-    "sessions": [{
-      "session_id": "s1",
-      "messages": [
-        {"role": "user", "content": "I just moved from London to Berlin for a new job at Stripe"},
-        {"role": "assistant", "content": "Congrats on the move and the new role at Stripe!"},
-        {"role": "user", "content": "Thanks! I prefer working remotely though"},
-        {"role": "assistant", "content": "Good to know. Remote work is great in Berlin."}
-      ]
-    }]
-  }'
+**Graph** — send in conversations, get typed knowledge edges with temporal validity. Every fact has a `valid_from` and `valid_until`. Nothing is deleted, only superseded.
 
-# 2. Ask questions in natural language
-curl -X POST http://localhost:3000/api/nlq \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "Where does the user live?", "agent_id": 1}'
-# → {"answer": "Berlin", "confidence": 0.95, "intent": "State"}
+**Tables** — a full bi-temporal row store with page-based storage, blake3 checksums, SQL-style CRUD, JOINs, and bulk import. Tables and graph are co-equal — connected via NodeRef columns.
 
-curl -X POST http://localhost:3000/api/nlq \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "What are their work preferences?", "agent_id": 1}'
-# → {"answer": "prefers remote work", "confidence": 0.9, "intent": "Preference"}
+**WASM Agents** — upload sandboxed modules that read/write tables, query the graph, call external APIs, and trigger on events. Instruction-metered, memory-capped, permission-controlled.
 
-# 3. Query the graph directly with MinnsQL
-curl -X POST http://localhost:3000/api/query \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "MATCH (a:Agent)-[e:location]->(b) RETURN a.name, b.name"}'
-# → {"columns": ["a.name", "b.name"], "rows": [["user", "Berlin"]], ...}
-
-# 4. Subscribe to live updates
-curl -X POST http://localhost:3000/api/subscriptions \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "MATCH (a:Agent)-[e]->(b:Concept) RETURN a.name, b.name, type(e)"}'
-# → {"subscription_id": 1, "initial": {"columns": [...], "rows": [...]}, "strategy": "incremental"}
-```
-
-Behind that single ingest, MinnsDB ran LLM compaction to extract facts (`lives_in: Berlin`, `employed_at: Stripe`, `prefers: remote work`), created typed graph edges with temporal validity (the old `London` edge gets a `valid_until` timestamp — never deleted, just superseded), and indexed everything for natural language queries. No schema definition needed.
+**MinnsQL** — one query language for everything: graph pattern matching (`MATCH`), table queries (`FROM`), DDL (`CREATE TABLE`), DML (`INSERT`/`UPDATE`/`DELETE`), and JOINs across tables and graph.
 
 ---
 
-## Why not just use X?
+## Quick start
+
+```bash
+git clone https://github.com/Minns-ai/EventGraphDB.git
+cd EventGraphDB
+cargo build --release
+cargo run --release -p minnsdb-server
+```
+
+On first boot, the server generates a root API key and prints it once:
+
+```
+========================================
+  ROOT API KEY (save this — shown once):
+  mndb_a1b2c3d4e5f6789...
+========================================
+Listening on http://0.0.0.0:3000
+```
+
+All requests require the API key:
+
+```bash
+export MINNS_KEY="mndb_a1b2c3d4e5f6789..."
+
+# Health check
+curl -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/health
+```
+
+For development, disable auth with `MINNS_AUTH_DISABLED=true`.
+
+---
+
+## 60-second demo
+
+```bash
+# 1. Create a table
+curl -X POST http://localhost:3000/api/query \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "CREATE TABLE orders (id Int64 PRIMARY KEY, customer String NOT NULL, amount Float64, status String)"}'
+
+# 2. Insert data
+curl -X POST http://localhost:3000/api/query \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "INSERT INTO orders VALUES (1, \"Alice\", 99.99, \"pending\")"}'
+
+# 3. Query with MinnsQL
+curl -X POST http://localhost:3000/api/query \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "FROM orders WHERE orders.status = \"pending\" RETURN orders.customer, orders.amount"}'
+# → {"columns": ["orders.customer", "orders.amount"], "rows": [["Alice", 99.99]], ...}
+
+# 4. Ingest a conversation into the graph
+curl -X POST http://localhost:3000/api/events/simple \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": 1, "agent_type": "assistant", "session_id": 1, "action": "chat", "data": {"message": "User moved from London to Berlin for a job at Stripe"}}'
+
+# 5. Query the graph
+curl -X POST http://localhost:3000/api/query \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "MATCH (n) RETURN n.id, n.type LIMIT 10"}'
+
+# 6. Subscribe to live updates
+curl -X POST http://localhost:3000/api/query \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "SUBSCRIBE MATCH (n) RETURN n.id, n.type LIMIT 50"}'
+# → {"subscription_id": 1, "columns": [...], "rows": [...], "strategy": "incremental"}
+```
+
+---
+
+## Why MinnsDB?
 
 | | Vector DB | Graph DB (external graph backend) | KV + embeddings | **MinnsDB** |
 |---|---|---|---|---|
 | Tracks relationships | No | Yes | No | **Yes** — typed edges with temporal validity |
-| Forgets stale info | No | No | No | **Yes** — half-life decay per claim type |
+| Relational tables | No | No | No | **Yes** — bi-temporal row store with JOINs |
 | Handles contradictions | Last write wins | Last write wins | Last write wins | **Confidence scoring** — claims compete |
-| Understands time | No | Manual | No | **Built-in** — every edge has `valid_from`/`valid_until` |
-| Learns from outcomes | No | No | No | **Yes** — Q-learning on edge weights |
+| Understands time | No | Manual | No | **Built-in** — every edge and row has `valid_from`/`valid_until` |
+| Runs agent code | No | No | No | **Yes** — sandboxed WASM with permissions + metering |
 | Accepts raw conversation | No | No | No | **Yes** — LLM compaction extracts facts automatically |
-| Reactive live queries | No | No | No | **Yes** — subscribe to MinnsQL, get incremental inserts/deletes via REST or WebSocket |
+| Reactive live queries | No | No | No | **Yes** — incremental updates via REST or WebSocket |
+| Auth built in | Varies | Bolt auth | Varies | **Yes** — API keys with group scoping + permissions |
 | External deps | Vector service | JVM + Cypher | Redis/Postgres | **None** — single binary, embedded ReDB |
 
 ---
 
 ## How it works
 
-### Primary flow: Conversations in, answers out
-
 ```
-  POST /api/conversations/ingest          POST /api/nlq
-  POST /api/messages                      POST /api/conversations/query
-         │                                         │
-         ▼                                         ▼
-  ┌─────────────────┐                    ┌──────────────────┐
-  │  LLM COMPACTION  │                    │  NLQ PIPELINE     │
-  │                  │                    │                   │
-  │  Raw messages →  │                    │  Question →       │
-  │  Facts extracted │                    │  Intent classify  │
-  │  Goals detected  │                    │  Entity extract   │
-  │  Summaries built │                    │  Graph projection │
-  └────────┬─────────┘                    │  Answer synthesis │
-           ▼                              └──────────────────┘
-  ┌─────────────────┐                              ▲
-  │  GRAPH EDGES     │                              │
-  │                  │                    walks edges with
-  │  Typed edges     │                    temporal filtering
-  │  Temporal        │──────────────────────────────┘
-  │  validity        │
-  │  OWL/RDFS        │
-  │  enforcement     │
-  └────────┬─────────┘
-           ▼
-  ┌─────────────────┐     ┌───────────────┐     ┌───────────────┐
-  │ EPISODE          │     │  MEMORY        │     │  STRATEGY      │
-  │ DETECTION        │     │  FORMATION     │     │  EXTRACTION    │
-  │                  │     │  [WIP]         │     │  [WIP]         │
-  │ Temporal gaps    │     │ Consolidation  │     │ Pattern mining │
-  │ Context switch   │     │ Half-life decay│     │ Q-value RL     │
-  │ Salience scoring │     │ Schema tiers   │     │                │
-  └─────────┬────────┘     └───────────────┘     └───────────────┘
-            ▼
-  ┌─────────────────┐     ┌───────────────────────────────────────┐
-  │ CLAIMS            │     │ REACTIVE ENGINE                       │
-  │ EXTRACTION        │     │                                       │
-  │                   │     │ Graph mutations → DeltaBatch broadcast │
-  │ Subject/pred/obj  │     │ Trigger-set fast rejection             │
-  │ BM25 + vector     │     │ Incremental view maintenance           │
-  │ indexing           │     │ REST polling + WebSocket push          │
-  └───────────────────┘     └───────────────────────────────────────┘
+  Conversations / Events / API calls
+         │
+         ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  AUTH LAYER                                                          │
+  │  API key verification → group_id + permissions                       │
+  └──────────┬──────────────────────────────────────────────────────────┘
+             │
+     ┌───────┴──────────┬──────────────────┬────────────────────┐
+     ▼                  ▼                  ▼                    ▼
+  ┌──────────┐   ┌─────────────┐   ┌─────────────┐   ┌──────────────┐
+  │ GRAPH     │   │ TABLES       │   │ MinnsQL      │   │ WASM MODULES  │
+  │ ENGINE    │   │ ENGINE       │   │ ENGINE       │   │ RUNTIME       │
+  │           │   │              │   │              │   │               │
+  │ LLM       │   │ 8KB pages    │   │ Parser →     │   │ Wasmtime +    │
+  │ compaction│   │ blake3       │   │ Planner →    │   │ sandboxing    │
+  │ NLQ       │   │ checksums    │   │ Executor     │   │ permissions   │
+  │ pipeline  │   │ bi-temporal  │   │              │   │ life metering │
+  │ OWL/RDFS  │   │ versioning   │   │ Graph +      │   │ MessagePack   │
+  │ ontology  │   │ O(1) column  │   │ Table +      │   │ triggers      │
+  │           │   │ access       │   │ JOIN         │   │ scheduler     │
+  └─────┬─────┘   └──────┬──────┘   └──────┬──────┘   └───────┬───────┘
+        │                │                  │                  │
+        └────────┬───────┴──────────────────┴──────────────────┘
+                 ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  REACTIVE ENGINE                                                     │
+  │  Graph deltas + table deltas → DeltaBatch broadcast                  │
+  │  Trigger-set fast rejection → Incremental view maintenance           │
+  │  REST polling + WebSocket push + WASM trigger dispatch               │
+  └──────────┬──────────────────────────────────────────────────────────┘
+             ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  PERSISTENCE (ReDB)                                                  │
+  │  Graph nodes/edges/adjacency │ Table pages (raw 8KB blobs)           │
+  │  WASM module blobs (blake3)  │ API keys (blake3 hashed)              │
+  │  Memories, strategies, claims │ Usage counters, schedules            │
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Conversation ingestion
+---
 
-Two ways to send data in:
+## Core Systems
 
-**Batch ingest** (`POST /api/conversations/ingest`) — send full sessions with multiple messages. The LLM compaction pass extracts facts, goals, and procedural summaries, then creates typed graph edges automatically. Pre-creates participant entity nodes and runs the full pipeline.
+### 1. Temporal Knowledge Graph
 
-**Streaming messages** (`POST /api/messages`) — send individual messages as they arrive. Messages are buffered per conversation (default buffer size: 6, timeout: 30s). When the buffer fills or times out, compaction runs automatically with a rolling summary for context continuity.
+The graph is the primary knowledge structure. Conversations are ingested, facts are extracted, and typed edges are created with temporal validity.
 
-Both require an LLM API key (`LLM_API_KEY` or `OPENAI_API_KEY`).
-
-### Natural language queries
-
-The NLQ pipeline resolves questions against the graph in 7 steps:
-
-1. **Intent classification** — categorizes the question (State, Preference, EntitySummary, Numeric, RelationshipPath, FindNeighbors, FindPath, TemporalChain, Ranking, Aggregation, etc.)
-2. **Entity extraction** — 6 strategies: code identifiers, quoted strings, hash IDs, keyword-typed, capitalized words, dedup
-3. **Entity resolution** — exact index → BM25 → fuzzy → n-gram matching
-4. **Template matching** — maps intent + entities to a graph query template
-5. **Query building + validation** — instantiates query, validates node existence, auto-repairs
-6. **Graph projection** — walks edges with temporal filtering. For state queries: finds latest edge where `valid_until = None`
-7. **Answer formatting** — graph results → human-readable answer with confidence score
-
-Conversation-aware query types:
-- **State** — "Where does Alice live?" → walks `location:lives_in` edges, returns current
-- **Preference** — "What does Bob prefer?" → walks `preference:*` edges
-- **EntitySummary** — "Tell me about Alice" → aggregates all current edges for entity
-- **Numeric** — "What's the net balance?" → walks `financial:*` edges, computes sum
-- **RelationshipPath** — "How are Alice and Bob connected?" → shortest path through relationship edges
-
-### Graph as source of truth
-
-The graph is the primary data structure — not a secondary index. State queries walk edges with temporal filtering. "Where does Alice live?" finds the latest `location:lives_in` edge where `valid_until = None`. When Alice moves, the old edge gets closed with a timestamp. Never deleted. Full history, always.
+```
+POST /api/conversations/ingest   →  LLM compaction  →  Graph edges
+POST /api/events/simple          →  Direct graph construction
+POST /api/nlq                    →  Natural language query against graph
+POST /api/query                  →  MinnsQL graph query (MATCH ...)
+```
 
 Edge types follow `{category}:{predicate}`:
 ```
 location:lives_in     relationship:colleague    financial:payment
 work:employed_at      preference:prefers        routine:morning
-health:condition      education:studies_at      state:status
 ```
 
-Property behaviors are defined in OWL/RDFS Turtle files (`data/ontology/*.ttl`), not hardcoded:
+Property behaviors defined in OWL/RDFS Turtle files (`data/ontology/*.ttl`):
+- `owl:FunctionalProperty` — single-valued, new value supersedes old
+- `owl:SymmetricProperty` — bidirectional
+- `owl:TransitiveProperty` — transitive closure
+- `eg:appendOnly` — immutable history
+- `eg:cascadeDependents` — changing one property invalidates dependents
 
-- **`owl:FunctionalProperty`** — single-valued, new value supersedes old (e.g., `location:lives_in`)
-- **`owl:SymmetricProperty`** — bidirectional (e.g., `relationship:colleague`)
-- **`owl:TransitiveProperty`** — transitive closure (e.g., geographic `containedIn`)
-- **`eg:appendOnly`** — immutable history, no conflict detection (e.g., `financial:payment`)
-- **`eg:cascadeDependents`** — changing location invalidates dependent routines/commute
+### 2. Temporal Tables
 
-Sub-property expansion is automatic — querying `relationship` also matches `colleague`, `friend`, `sibling`, `spouse`.
-
-### MinnsQL — Structured graph queries
-
-MinnsDB includes MinnsQL, a Cypher-inspired query language with built-in temporal semantics, aggregation, and variable-length path traversal:
+A page-based relational row store that lives alongside the graph.
 
 ```sql
--- Current relationships
-MATCH (a:Agent)-[e:relationship]->(b:Agent)
-RETURN a.name, b.name, type(e)
+-- DDL
+CREATE TABLE customers (id Int64 PRIMARY KEY, name String NOT NULL, region String)
+CREATE TABLE orders (id Int64 PRIMARY KEY, customer_id Int64, amount Float64, status String)
 
--- Temporal: who lived where last year?
-MATCH (a:Agent)-[e:location]->(b:Concept)
-WHEN "2025-01-01" TO "2025-12-31"
-RETURN a.name, b.name, valid_from(e)
+-- DML
+INSERT INTO orders VALUES (1, 100, 99.99, "pending")
+UPDATE orders SET status = "shipped" WHERE id = 1
+DELETE FROM orders WHERE status = "cancelled"
 
--- Aggregation
-MATCH (a:Agent)-[e]->(b)
-RETURN a.name, count(*) AS connections
-ORDER BY connections DESC
-LIMIT 10
+-- Queries
+FROM orders WHERE orders.amount > 50.0 RETURN orders.id, orders.customer_id ORDER BY orders.amount DESC
+FROM orders WHEN ALL RETURN orders.id, orders.status, orders.valid_from, orders.valid_until
 
--- Variable-length paths (up to 3 hops)
-MATCH (a:Agent)-[*1..3]->(b:Agent)
-RETURN a.name, b.name
+-- Table-to-table JOINs
+FROM orders JOIN customers ON orders.customer_id = customers.id
+RETURN customers.name, orders.amount
 ```
 
-Full language reference including temporal functions, Allen's interval algebra predicates, and TCell history functions: see [API Reference](API_REFERENCE.md#minnsql-structured-query).
+**Storage internals:**
+- 8KB slotted pages with blake3 checksums
+- Custom binary row format with O(1) column access
+- Bi-temporal versioning — every UPDATE creates a new version, closes the old one
+- Dead slot reuse, predicate pushdown for PK lookups
+- In-memory indexes rebuilt from pages on startup
+- Column types: `String`, `Int64`, `Float64`, `Bool`, `Timestamp`, `Json`, `NodeRef`
 
-### Reactive subscriptions — Live queries
+**REST API:** 9 endpoints — `POST /api/tables` (create), `DELETE /api/tables/:name` (drop), `POST /api/tables/:name/rows` (insert), `PUT /api/tables/:name/rows/:id` (update), `DELETE /api/tables/:name/rows/:id` (delete), `GET /api/tables/:name/rows` (scan with `?when=all`, `?as_of=`), `GET /api/tables/:name/by-node/:id` (NodeRef reverse lookup), `POST /api/tables/:name/compact`, `GET /api/tables/:name/stats`.
 
-Register a MinnsQL query as a live subscription and receive incremental updates (inserts/deletes) as the graph changes. The reactive engine captures deltas at mutation time and maintains per-subscription operator state for efficient incremental view maintenance.
+### 3. WASM Agent Runtime
+
+Upload sandboxed WASM modules that interact with the database.
+
+```bash
+# Upload a module
+curl -X POST http://localhost:3000/api/modules \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "order-processor", "wasm_base64": "<base64>", "permissions": ["table:orders:read", "table:orders:write"]}'
+
+# Call a function
+curl -X POST http://localhost:3000/api/modules/order-processor/call/process \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"args_base64": "<msgpack args>"}'
+
+# Check usage
+curl -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/modules/order-processor/usage
+```
+
+**Sandboxing:**
+- Per-call instruction budget ("life") — default ~1 minute of WASM, resets each call
+- 30s wall-time limit via epoch interruption (10ms ticks)
+- 64MB memory cap enforced by wasmtime
+- Permission system: modules declare needs, admin approves at upload
+
+**Permissions:** `table:<name>:read`, `table:<name>:write`, `table:*:read`, `graph:query`, `http:fetch:<domain>`, `http:fetch:*`, `schedule`
+
+**Host functions:** `table_get`, `table_insert`, `table_delete`, `table_query`, `graph_query`, `http_fetch` (SSRF-hardened), `log`, `result_len`, `module_id`, `group_id`
+
+**Triggers:** HTTP call, table insert/update/delete, graph edge/node changes, cron schedules
+
+**Usage metering:** Every call records life consumed, rows read/written, HTTP requests/bytes. Resettable monthly via `POST /api/modules/:name/usage/reset`.
+
+**Data exchange:** MessagePack for all host-to-module communication.
+
+### 4. MinnsQL
+
+One query language for graph and tables:
+
+```sql
+-- Graph queries
+MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE r.confidence > 0.8 RETURN a.name, b.name
+MATCH (a)-[r]->(b) WHEN LAST "30d" RETURN a.name, count(*) AS cnt ORDER BY cnt DESC LIMIT 10
+
+-- Table queries
+FROM orders WHERE orders.status = "pending" RETURN orders.id, orders.amount
+FROM orders JOIN customers ON orders.customer_id = customers.id RETURN customers.name, orders.amount
+
+-- DDL/DML
+CREATE TABLE items (id Int64 PRIMARY KEY, name String, price Float64)
+INSERT INTO items (id, name, price) VALUES (1, "Widget", 9.99), (2, "Gadget", 19.99)
+UPDATE items SET price = 12.99 WHERE name = "Widget"
+DELETE FROM items WHERE id = 2
+DROP TABLE items
+
+-- Temporal
+MATCH (a)-[r]->(b) WHEN ALL RETURN a.name, valid_from(r), valid_until(r)
+MATCH (a)-[r]->(b) WHEN "2025-01-01" TO "2025-06-01" AS OF "2025-07-01" RETURN a.name
+FROM orders WHEN ALL RETURN orders.id, orders.valid_from, orders.valid_until
+
+-- Subscriptions
+SUBSCRIBE MATCH (n:Person) RETURN n.name, n.id
+UNSUBSCRIBE 7
+```
+
+**Built-in functions:** `type()`, `id()`, `labels()`, `properties()`, `now()`, `coalesce()`, `valid_from()`, `valid_until()`, `duration()`, `open_ended()`, `time_bucket()`, `date_trunc()`, `ago()`, `count()`, `sum()`, `avg()`, `min()`, `max()`, `collect()`, `path()`, `hops()`, `SUCCESSIVE()`, `CHANGED()`, `overlap()`, `precedes()`, `meets()`, `covers()`, and more.
+
+Full language reference: [API_REFERENCE.md](API_REFERENCE.md#minnsql-language-reference)
+
+### 5. Authentication
+
+API key-based authentication with group scoping and permissions.
+
+```bash
+# Create a scoped key (admin only)
+curl -X POST http://localhost:3000/api/keys \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "my-app", "group_id": 1, "permissions": ["read", "write", "query"]}'
+# → {"key": "mndb_...", "warning": "Save this key — it cannot be retrieved again."}
+
+# List keys
+curl -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/keys
+
+# Delete a key
+curl -X DELETE -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/keys/my-app
+```
+
+- Keys are `mndb_` + 64 hex chars (32 random bytes)
+- Stored as blake3 hashes — raw keys never persisted
+- Admin keys access all groups; scoped keys access one group
+- Permissions: `admin`, `read`, `write`, `query`, `tables`, `modules`, `ingest`, `subscribe`
+- Root key generated on first boot, printed once to console
+- `MINNS_AUTH_DISABLED=true` for development
+
+### 6. Reactive Subscriptions
+
+Register MinnsQL queries as live subscriptions. Get incremental updates as data changes.
 
 **REST polling:**
 ```bash
-# Create a subscription
 curl -X POST http://localhost:3000/api/subscriptions \
+  -H "Authorization: Bearer $MINNS_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"query": "MATCH (a:Agent)-[e:KNOWS]->(b:Agent) RETURN a.name, b.name"}'
+  -d '{"query": "MATCH (a)-[e:KNOWS]->(b) RETURN a.name, b.name"}'
 # → {"subscription_id": 7, "initial": {"columns": [...], "rows": [...]}, "strategy": "incremental"}
 
-# Poll for updates
-curl http://localhost:3000/api/subscriptions/7/poll
-# → {"updates": [{"inserts": [["Alice", "Diana"]], "deletes": [], ...}]}
-
-# Unsubscribe
-curl -X DELETE http://localhost:3000/api/subscriptions/7
+curl -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/subscriptions/7/poll
+# → {"updates": [{"inserts": [["Alice", "Diana"]], "deletes": []}]}
 ```
 
-**WebSocket streaming:**
+**WebSocket:**
 ```javascript
 const ws = new WebSocket("ws://localhost:3000/api/subscriptions/ws");
-
-ws.send(JSON.stringify({
-  type: "subscribe",
-  query: "MATCH (a:Agent)-[e:relationship]->(b:Agent) RETURN a.name, b.name",
-  request_id: "req-1"
-}));
-
-ws.onmessage = (msg) => {
-  const data = JSON.parse(msg.data);
-  if (data.type === "update") {
-    console.log("Inserts:", data.inserts, "Deletes:", data.deletes);
-  }
-};
+ws.send(JSON.stringify({ type: "subscribe", query: "MATCH (n) RETURN n.name" }));
+ws.onmessage = (msg) => console.log(JSON.parse(msg.data));
 ```
-
-Updates are pushed every ~100ms when changes are pending. Zero overhead when no subscriptions are active. See [API Reference](API_REFERENCE.md#reactive-subscriptions) for the full wire protocol.
-
-### Advanced: Direct event API
-
-For programmatic graph building beyond conversations, MinnsDB accepts 8 structured event types via `POST /api/events`:
-
-| Type | What it captures |
-|------|-----------------|
-| `Action` | Agent actions with outcome (Success/Failure/Partial) and duration |
-| `Observation` | Environmental observations with confidence and source |
-| `Cognitive` | Goal formation, planning, reasoning, memory retrieval |
-| `Communication` | Agent-to-agent messages |
-| `Learning` | Telemetry: memory retrieved/used, strategy served/used, outcomes |
-| `Conversation` | Multi-turn dialogue (classified into transaction/state_change/relationship/preference) |
-| `CodeReview` | PR review actions with file/line context |
-| `CodeFile` | Source file snapshots for AST parsing |
-
-Events flow through the same pipeline: Graph Construction → Episode Detection → Claims Extraction → Memory Formation → Strategy Extraction.
-
----
-
-## What's stable, what's WIP
-
-| Component | Status | |
-|-----------|--------|-|
-| Conversation ingestion + LLM compaction | **Stable** | Multi-turn compaction, fact/goal/procedural extraction, rolling summaries, buffered streaming |
-| Natural language queries (NLQ) | **Stable** | 10+ intent types, 6 entity extraction strategies, graph projection with structured memory fallback |
-| Graph construction + typed edges + temporal validity | **Stable** | NER entity extraction, ontology enforcement, `valid_from`/`valid_until` on all edges |
-| Episode detection | **Stable** | Sliding window, temporal gap + context switch boundaries, salience scoring |
-| Claims extraction + hybrid search | **Stable** | LLM-driven subject/predicate/object facts, BM25 + vector search, confidence scoring |
-| Graph algorithms | **Stable** | Louvain communities, label propagation, personalized PageRank, betweenness/closeness centrality, temporal reachability, causal paths |
-| Code intelligence | **Stable** | Tree-sitter AST parsing for Rust, Python, TypeScript, JavaScript, Go |
-| Structured memory | **Stable** | Ledgers, state machines, preference vectors, tree structures — all backed by graph edges |
-| MinnsQL query language | **Stable** | Cypher-inspired queries with temporal clauses, aggregation, variable-length paths, Allen's interval algebra |
-| Reactive subscriptions | **Stable** | Live MinnsQL queries with incremental view maintenance, REST polling, WebSocket streaming |
-| Workflows | **Stable** | DAG-based workflow engine with step state tracking, feedback, diff-based updates |
-| Persistence + export/import | **Stable** | ReDB (20 tables), delta writes, streaming binary v2 export/import |
-| Write lanes + read gate | **Stable** | Sharded write pipeline with backpressure, semaphore-based read concurrency |
-| Memory formation | **WIP** | Episodic/semantic/schema tiers implemented. Consolidation heuristics and tier promotion under active development |
-| Strategy extraction | **WIP** | Pattern mining and context-action mappings implemented. RL on edge weights is experimental |
-| Energy-based world model | **WIP** | ~30K param EBM critic, contrastive learning. CPU-only (<100us/score). Enable with `ENABLE_WORLD_MODEL=true` |
-| LLM planning | **WIP** | Generator + critic architecture. Strategy/action candidate generation with validation and repair |
-
----
-
-## Quick start
-
-### From source
-
-```bash
-git clone https://github.com/your-org/minnsdb.git
-cd minnsdb
-cargo build --release
-cargo run --release -p minnsdb-server
-# → http://0.0.0.0:3000
-```
-
-### Docker
-
-```bash
-docker compose up -d
-# → http://localhost:3000
-```
-
-Two service profiles: `normal` (256MB cache, 1M max nodes, Louvain enabled) and `free` (64MB cache, 50K max nodes).
-
-```bash
-# Build free tier
-docker build --build-arg SERVICE_PROFILE=free -t minnsdb:free .
-```
-
-### Rust SDK
-
-```rust
-use agent_db_graph::{GraphEngine, GraphEngineConfig};
-
-let engine = GraphEngine::new().await?;
-
-// Conversation ingestion is the primary interface — but you can also
-// work directly with the graph engine for programmatic use:
-let event = Event {
-    event_type: EventType::Action {
-        action_name: "fix_null_error".to_string(),
-        parameters: json!({"fix": "add_null_check"}),
-        outcome: ActionOutcome::Success {
-            result: json!({"tests_pass": true})
-        },
-        duration_ns: 1_500_000_000,
-    },
-    ..Default::default()
-};
-
-engine.process_event(event).await?;
-```
-
----
-
-## REST API
-
-**Base URL:** `http://localhost:3000`
-
-Full documentation: **[docs.minns.ai](https://docs.minns.ai)**
-
-70+ endpoints across these groups:
-
-| Group | Key Endpoints |
-|-------|--------------|
-| **Conversations** | `POST /api/conversations/ingest` — batch ingest sessions (requires LLM)<br>`POST /api/messages` — single message with buffering + auto-compaction |
-| **Queries** | `POST /api/nlq` — natural language query against graph<br>`POST /api/query` — MinnsQL structured query with temporal semantics<br>`POST /api/conversations/query` — conversation-style query<br>`POST /api/search` — unified keyword/semantic/hybrid search<br>`POST /api/claims/search` — semantic claim search<br>`POST /api/code/search` — structural code search |
-| **Subscriptions** | `POST /api/subscriptions` — create live query subscription<br>`GET /api/subscriptions` — list active subscriptions<br>`GET /api/subscriptions/:id/poll` — poll for incremental updates<br>`DELETE /api/subscriptions/:id` — unsubscribe<br>`GET /api/subscriptions/ws` — WebSocket for real-time streaming |
-| **Events** | `POST /api/events` — full pipeline processing<br>`POST /api/events/simple` — simplified event<br>`POST /api/events/state-change` — typed state transitions<br>`POST /api/events/transaction` — typed financial transactions<br>`POST /api/events/code-file` — source file AST analysis<br>`POST /api/events/code-review` — code review events<br>`GET /api/events` — list recent events<br>`GET /api/episodes` — list completed episodes |
-| **Memory & Strategy** | `GET /api/memories/agent/:id` — agent memories<br>`POST /api/memories/context` — context similarity search<br>`GET /api/strategies/agent/:id` — learned strategies<br>`GET /api/suggestions` — next-action recommendations |
-| **Graph & Analytics** | `GET /api/graph` — graph structure<br>`GET /api/stats` — system statistics<br>`GET /api/analytics` — components, clustering, modularity<br>`GET /api/communities` — Louvain / label propagation<br>`GET /api/centrality` — PageRank, betweenness, closeness<br>`GET /api/causal-path` — causal paths between nodes<br>`GET /api/reachability` — temporal reachability |
-| **Structured Memory** | `POST /api/structured-memory` — upsert<br>`POST .../ledger/:key/append` — append ledger entry<br>`POST .../state/:key/transition` — state machine transition<br>`POST .../preference/:key/update` — preference vector update<br>`POST .../tree/:key/add-child` — tree structure |
-| **Workflows** | `POST /api/workflows` — create DAG workflow<br>`POST .../steps/:step_id/transition` — step state transition<br>`POST .../feedback` — workflow feedback |
-| **Agents** | `POST /api/agents/register` — register agent node<br>`GET /api/agents` — list agents by group |
-| **Planning** | `POST /api/planning/strategies` — generate candidates [WIP]<br>`POST /api/planning/plan` — full planning pipeline [WIP] |
-| **Admin** | `POST /api/admin/export` — streaming binary export<br>`POST /api/admin/import` — import (replace/merge)<br>`GET /api/health` — health + write lane + read gate metrics |
 
 ---
 
@@ -370,42 +352,46 @@ Full documentation: **[docs.minns.ai](https://docs.minns.ai)**
 ```
 minnsdb/
 ├── crates/
-│   ├── agent-db-core/       # Type aliases: EventId, AgentId, Timestamp, NodeId, ContextHash
-│   ├── agent-db-events/     # Event struct, 8 EventType variants, EventContext, ActionOutcome
-│   ├── agent-db-storage/    # ReDB backend (20 tables), WAL, versioned serialization
-│   ├── agent-db-graph/      # GraphEngine — the main orchestrator
-│   │                        # Conversation compaction, NLQ pipeline, graph projection
-│   │                        # Episode detection, memory formation, strategy extraction
-│   │                        # Claims (LLM extraction, BM25+vector search)
-│   │                        # Algorithms: Louvain, PageRank, centrality, reachability
-│   │                        # MinnsQL query language, reactive subscriptions
-│   │                        # Code graph, workflow engine, structured memory
-│   │                        # Ontology (OWL/RDFS from TTL), graph pruning
-│   ├── agent-db-ast/        # Tree-sitter AST parsing: Rust, Python, TS, JS, Go
-│   └── agent-db-ner/        # HTTP client to external NER service
+│   ├── agent-db-core/          # Core types: Timestamp, NodeId, RowId, GroupId
+│   ├── agent-db-events/        # Event struct, 8 EventType variants
+│   ├── agent-db-storage/       # ReDB backend (30+ tables)
+│   ├── agent-db-graph/         # GraphEngine — orchestrator
+│   │                           #   Conversation compaction, NLQ pipeline
+│   │                           #   Episode detection, claims extraction
+│   │                           #   MinnsQL (parser, planner, executor, table executor)
+│   │                           #   Reactive subscriptions, graph algorithms
+│   │                           #   OWL/RDFS ontology, structured memory
+│   ├── agent-db-tables/        # Temporal row store
+│   │                           #   8KB slotted pages, blake3 checksums
+│   │                           #   Row codec, page store, table engine
+│   │                           #   Catalog, compaction, CSV/JSON import
+│   ├── minns-wasm-runtime/     # WASM agent runtime
+│   │                           #   Wasmtime, host functions, permissions
+│   │                           #   Module lifecycle, triggers, scheduler
+│   │                           #   Usage metering, MessagePack ABI
+│   ├── minns-auth/             # API key authentication
+│   │                           #   Key generation, blake3 hashing, permissions
+│   │                           #   Group scoping, ReDB persistence
+│   ├── agent-db-ast/           # Tree-sitter AST: Rust, Python, TS, JS, Go
+│   └── agent-db-ner/           # External NER service client
 ├── ml/
-│   ├── agent-db-world-model/  # Energy-based model critic (~30K params) [WIP]
-│   └── agent-db-planning/     # LLM-based generator [WIP]
-├── server/                  # Axum HTTP server, 70+ endpoints, WebSocket support
-│   ├── src/handlers/        # 20 handler modules (incl. subscriptions, websocket)
-├── data/ontology/           # 9 OWL/RDFS Turtle files defining property behaviors
-├── examples/                # 6 Rust examples (basic → end-to-end pipeline)
-└── tests/                   # Integration test suite
+│   ├── agent-db-world-model/   # Energy-based model critic [WIP]
+│   └── agent-db-planning/      # LLM planning pipeline [WIP]
+├── server/                     # Axum HTTP server
+│   ├── src/handlers/           # 22 handler modules
+│   └── tests/end_to_end.rs     # Full E2E integration test
+├── data/ontology/              # OWL/RDFS Turtle files
+└── examples/                   # Rust examples
 ```
 
-### Key internals
-
-**GraphEngine** is the central orchestrator. It holds: the graph (`Arc<RwLock<GraphInference>>`), memory store, strategy store, structured memory store, claim store, optional world model, optional NER client, and optional LLM client. Lock ordering is documented: `inference.read → drop → structured_memory.write → drop → inference.write`.
-
-**Graph** uses `SlotVec` (arena allocation, O(1) insert/lookup by NodeId). 11 node types. Bi-temporal edges with transaction time and valid time. Bounded at configurable max size with automatic pruning.
-
-**Write lanes** shard incoming events by session_id hash across N lanes (default: `num_cpus/2`, clamped 2-8). Each lane has bounded capacity (default: 128) and processes sequentially. Per-lane p50/p95/p99 latency tracking.
-
-**Read gate** is a semaphore-based permit system (default: `num_cpus * 2` concurrent reads) with latency tracking.
-
-**Reactive engine** captures graph mutations as `DeltaBatch` events via a broadcast channel. `SubscriptionManager` holds per-subscription operator state (ScanState, ExpandState, FilterState, AggregationState) for incremental view maintenance. Complex patterns (variable-length paths, node merges) fall back to full rerun with structural diff. A background task processes deltas every 50ms. REST polling and WebSocket push are both supported.
-
-**Persistence** uses ReDB with 20 tables: graph nodes/edges/adjacency, memories (4 indexes), strategies (3 indexes), transition/motif stats, decision traces, outcome signals, claims, world model state, schema versions.
+**Key internals:**
+- **GraphEngine** — central orchestrator holding graph, memory store, strategy store, claim store, NLQ pipeline, ontology registry
+- **Graph** — `SlotVec` arena allocation, 11 node types, bi-temporal edges, configurable max size with pruning
+- **Table engine** — 8KB pages, custom binary row format, 6 index types, commit flags for crash safety
+- **WASM runtime** — wasmtime with instruction metering, epoch interruption, `StoreLimits` for memory
+- **Write lanes** — sharded by session_id, bounded capacity, per-lane latency tracking
+- **Reactive engine** — `DeltaBatch` broadcast, trigger-set fast rejection, incremental operator state
+- **Persistence** — ReDB with 30+ tables, raw page blobs for table store, blake3 content-addressed WASM blobs
 
 ---
 
@@ -415,53 +401,88 @@ minnsdb/
 |----------|---------|-------------|
 | `SERVER_HOST` | `0.0.0.0` | Bind address |
 | `SERVER_PORT` | `3000` | Bind port |
+| `MINNS_AUTH_DISABLED` | `false` | Set `true` to disable API key auth (dev only) |
 | `RUST_LOG` | `info` | Log level |
 | `SERVICE_PROFILE` | `normal` | `normal` or `free` (controls cache sizes + limits) |
-| `LLM_API_KEY` | - | OpenAI-compatible key (required for conversation ingest + claims) |
-| `LLM_MODEL` | `gpt-4o-mini` | LLM model for claims extraction |
-| `NLQ_HINT_MODEL` | `gpt-4o-mini` | LLM model for NLQ hints |
-| `SYNTHESIS_MODEL` | `gpt-4.1` | LLM model for answer synthesis |
+| `LLM_API_KEY` | — | OpenAI-compatible key (required for conversation ingest + claims) |
+| `LLM_MODEL` | `gpt-4o-mini` | LLM model for compaction |
 | `WRITE_LANE_COUNT` | `num_cpus/2` | Write lane concurrency (clamped 2-8) |
 | `WRITE_LANE_CAPACITY` | `128` | Per-lane queue depth |
 | `READ_GATE_PERMITS` | `num_cpus*2` | Concurrent read permits |
-| `REDB_CACHE_SIZE_MB` | `256` | ReDB page cache (64 in free profile) |
-| `NER_SERVICE_URL` | `http://localhost:8081/ner` | External NER service (full URL) |
-| `NER_REQUEST_TIMEOUT_MS` | `5000` | NER timeout |
-| `PLANNING_LLM_API_KEY` | falls back to `LLM_API_KEY` | Separate key for planning |
+| `REDB_CACHE_SIZE_MB` | `256` | ReDB page cache |
+| `NER_SERVICE_URL` | `http://localhost:8081/ner` | External NER service |
 | `ENABLE_WORLD_MODEL` | `false` | Enable energy-based world model [WIP] |
-| `WORLD_MODEL_MODE` | `Disabled` | `Shadow` / `ScoringOnly` / `Full` |
-| `ENABLE_STRATEGY_GENERATION` | `false` | Enable LLM strategy generation [WIP] |
 | `ENABLE_LOUVAIN` | `true` | Background community detection |
-| `LOUVAIN_INTERVAL` | `1000` | Events between Louvain runs |
-| `SUBSCRIPTION_INTERVAL_MS` | `50` | Background subscription processing interval (ms) |
-| `CORS_ALLOWED_ORIGINS` | - | Comma-separated allowed CORS origins |
+| `SUBSCRIPTION_INTERVAL_MS` | `50` | Subscription processing interval |
+| `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS origins |
 
-Full reference at [docs.minns.ai](https://docs.minns.ai).
+---
+
+## REST API
+
+**Base URL:** `http://localhost:3000`
+
+All requests require `Authorization: Bearer mndb_<key>` (unless `MINNS_AUTH_DISABLED=true`).
+
+Full reference: [API_REFERENCE.md](API_REFERENCE.md)
+
+| Group | Key Endpoints |
+|-------|--------------|
+| **Auth** | `POST /api/keys` — create key (admin)<br>`GET /api/keys` — list keys<br>`DELETE /api/keys/:name` — delete key |
+| **Tables** | `POST /api/tables` — create table<br>`DELETE /api/tables/:name` — drop<br>`POST/GET /api/tables/:name/rows` — insert/scan<br>`PUT/DELETE /api/tables/:name/rows/:id` — update/delete<br>`GET /api/tables/:name/stats` — stats<br>`POST /api/tables/:name/compact` — compaction |
+| **MinnsQL** | `POST /api/query` — execute any MinnsQL (MATCH, FROM, CREATE TABLE, INSERT, etc.) |
+| **WASM Modules** | `POST /api/modules` — upload<br>`POST /api/modules/:name/call/:fn` — call function<br>`GET /api/modules/:name/usage` — usage stats<br>`POST /api/modules/:name/usage/reset` — billing reset<br>`POST/GET /api/modules/:name/schedules` — cron |
+| **Conversations** | `POST /api/conversations/ingest` — batch (requires LLM)<br>`POST /api/messages` — streaming with auto-compaction |
+| **Queries** | `POST /api/nlq` — natural language<br>`POST /api/search` — keyword/semantic/hybrid<br>`POST /api/claims/search` — claim search |
+| **Subscriptions** | `POST /api/subscriptions` — create<br>`GET /api/subscriptions/:id/poll` — poll<br>`GET /api/subscriptions/ws` — WebSocket |
+| **Events** | `POST /api/events/simple` — simple event<br>`POST /api/events` — full event<br>`POST /api/events/state-change` — typed state change<br>`POST /api/events/transaction` — typed transaction |
+| **Graph & Analytics** | `GET /api/graph` — structure<br>`GET /api/communities` — Louvain/LP<br>`GET /api/centrality` — PageRank/betweenness<br>`GET /api/reachability` — temporal reachability |
+| **Admin** | `POST /api/admin/export` — binary export<br>`POST /api/admin/import` — import<br>`GET /api/health` — health check |
 
 ---
 
 ## Development
 
 ```bash
-cargo build                     # Build all crates
-cargo test --workspace          # 800+ tests
-cargo clippy --workspace        # Lint
-cargo fmt --all                 # Format
+cargo build                                              # Build all crates
+cargo test --workspace                                   # 1,100+ tests
+cargo clippy --all-targets --all-features -- -D warnings # Lint (zero warnings)
+cargo audit                                              # Security audit (zero vulnerabilities)
+cargo fmt --all                                          # Format
+cargo run --release -p minnsdb-server                    # Run server
 ```
 
-The `Makefile` has additional targets: `bench`, `bench-baseline`, `bench-compare`, `perf-test`, `memory-test`, `flamegraph`, `load-test`, `stress-test`, `audit`, `pre-release`. Run `make help` to see all.
-
-### Examples
-
-Six Rust examples in `examples/`:
+### Run the E2E test
 
 ```bash
-cargo run --example basic_usage
-cargo run --example graph_integration
-cargo run --example scoped_inference
-cargo run --example concurrent_events
-cargo run --example end_to_end_demo
+cargo test -p minnsdb-server --test end_to_end -- --nocapture
 ```
+
+Tests 15 scenarios: table CRUD, MinnsQL queries, JOINs, temporal history, graph events, subscriptions, parallel requests (20 concurrent).
+
+---
+
+## What's stable, what's WIP
+
+| Component | Status |
+|-----------|--------|
+| Temporal tables (CRUD, temporal queries, compaction, persistence) | **Stable** |
+| MinnsQL (graph + table queries, DDL, DML, JOINs) | **Stable** |
+| WASM agent runtime (sandboxing, permissions, metering, triggers) | **Stable** |
+| API key authentication | **Stable** |
+| Conversation ingestion + LLM compaction | **Stable** |
+| Natural language queries (NLQ) | **Stable** |
+| Graph construction + temporal edges + ontology | **Stable** |
+| Episode detection | **Stable** |
+| Claims extraction + hybrid search | **Stable** |
+| Graph algorithms (Louvain, PageRank, centrality) | **Stable** |
+| Reactive subscriptions (REST + WebSocket) | **Stable** |
+| Persistence + export/import | **Stable** |
+| Write lanes + read gate | **Stable** |
+| Memory formation (consolidation, tiers) | **WIP** |
+| Strategy extraction (RL on edge weights) | **WIP** |
+| Energy-based world model | **WIP** |
+| LLM planning pipeline | **WIP** |
 
 ---
 
