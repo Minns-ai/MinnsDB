@@ -222,10 +222,7 @@ impl Table {
         self.pk_index.insert(key, Some(ptr));
         self.history_index.entry(key).or_default().push(ptr);
         self.version_index.insert(vid, ptr);
-        self.temporal_index
-            .entry(now)
-            .or_default()
-            .push(ptr);
+        self.temporal_index.entry(now).or_default().push(ptr);
         self.insert_unique_entries(group_id, row_id, &values);
         self.insert_node_ref_entries(group_id, row_id, &values);
 
@@ -292,10 +289,7 @@ impl Table {
         self.pk_index.insert(key, Some(new_ptr));
         self.history_index.entry(key).or_default().push(new_ptr);
         self.version_index.insert(new_vid, new_ptr);
-        self.temporal_index
-            .entry(now)
-            .or_default()
-            .push(new_ptr);
+        self.temporal_index.entry(now).or_default().push(new_ptr);
         self.insert_unique_entries(group_id, row_id, &values);
         self.insert_node_ref_entries(group_id, row_id, &values);
 
@@ -386,8 +380,7 @@ impl Table {
             for ptr in ptrs.iter().rev() {
                 if let Some(bytes) = self.store.read(*ptr) {
                     let hdr = row_codec::read_header(bytes);
-                    if hdr.valid_from <= timestamp
-                        && hdr.valid_until.is_none_or(|u| u > timestamp)
+                    if hdr.valid_from <= timestamp && hdr.valid_until.is_none_or(|u| u > timestamp)
                     {
                         results.push(row_codec::decode_row(
                             &self.layout,

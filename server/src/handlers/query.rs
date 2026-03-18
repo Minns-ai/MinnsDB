@@ -503,12 +503,8 @@ fn eval_where_on_row(
             match op {
                 CompOp::Eq => cell_values_equal(&l, &r),
                 CompOp::Neq => !cell_values_equal(&l, &r),
-                CompOp::Lt => {
-                    cell_values_cmp(&l, &r) == Some(std::cmp::Ordering::Less)
-                },
-                CompOp::Gt => {
-                    cell_values_cmp(&l, &r) == Some(std::cmp::Ordering::Greater)
-                },
+                CompOp::Lt => cell_values_cmp(&l, &r) == Some(std::cmp::Ordering::Less),
+                CompOp::Gt => cell_values_cmp(&l, &r) == Some(std::cmp::Ordering::Greater),
                 CompOp::Lte => {
                     cell_values_cmp(&l, &r).is_some_and(|o| o != std::cmp::Ordering::Greater)
                 },
