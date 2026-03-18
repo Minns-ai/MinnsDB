@@ -10,8 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Minns-ai/EventGraphDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/EventGraphDB/ci.yml?branch=main&style=flat-square&label=build%20%2B%20clippy%20%2B%20tests" alt="CI"></a>
-  <a href="https://github.com/Minns-ai/EventGraphDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/EventGraphDB/ci.yml?branch=main&style=flat-square&label=security%20audit" alt="Security Audit"></a>
+  <a href="https://github.com/Minns-ai/EventGraphDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/EventGraphDB/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSL--1.1-blue?style=flat-square" alt="License: BSL 1.1"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.83%2B-orange?style=flat-square&logo=rust" alt="Rust"></a>
   <a href="https://discord.gg/6a2cCRPwUR"><img src="https://img.shields.io/discord/1472727097368641720?style=flat-square&logo=discord&label=discord&color=5865F2" alt="Discord"></a>
