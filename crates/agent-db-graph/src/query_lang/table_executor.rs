@@ -11,7 +11,7 @@ use agent_db_tables::row_codec::DecodedRow;
 use agent_db_tables::types::{CellValue, GroupId};
 
 use super::planner::{
-    Aggregation, ExecutionPlan, JoinCondition, OrderSpec, PlanStep, Projection, RExpr,
+    Aggregation, ExecutionPlan, JoinCondition, OrderSpec, PlanStep, RExpr,
     TemporalViewport,
 };
 use super::types::{QueryError, QueryOutput, QueryStats, Value};
@@ -40,7 +40,7 @@ pub fn execute_table_query(
     // use direct lookup instead of full scan.
     let pk_lookup = try_extract_pk_lookup(&plan.steps, catalog, group_id);
 
-    for (_step_idx, step) in plan.steps.iter().enumerate() {
+    for step in plan.steps.iter() {
         match step {
             PlanStep::ScanTable { table_name } => {
                 let table = catalog.get_table(table_name).ok_or_else(|| {
@@ -335,17 +335,15 @@ fn eval_filter(expr: &super::planner::RBoolExpr, row: &HashMap<String, Value>) -
                 super::ast::CompOp::Eq => values_equal(&l, &r),
                 super::ast::CompOp::Neq => !values_equal(&l, &r),
                 super::ast::CompOp::Lt => l
-                    .partial_cmp(&r)
-                    .map_or(false, |o| o == std::cmp::Ordering::Less),
+                    .partial_cmp(&r) == Some(std::cmp::Ordering::Less),
                 super::ast::CompOp::Gt => l
-                    .partial_cmp(&r)
-                    .map_or(false, |o| o == std::cmp::Ordering::Greater),
+                    .partial_cmp(&r) == Some(std::cmp::Ordering::Greater),
                 super::ast::CompOp::Lte => l
                     .partial_cmp(&r)
-                    .map_or(false, |o| o != std::cmp::Ordering::Greater),
+                    .is_some_and(|o| o != std::cmp::Ordering::Greater),
                 super::ast::CompOp::Gte => l
                     .partial_cmp(&r)
-                    .map_or(false, |o| o != std::cmp::Ordering::Less),
+                    .is_some_and(|o| o != std::cmp::Ordering::Less),
                 super::ast::CompOp::Contains => {
                     if let (Value::String(haystack), Value::String(needle)) = (&l, &r) {
                         haystack.contains(needle.as_str())
@@ -524,7 +522,7 @@ fn apply_aggregations(
 }
 
 /// Apply ordering to result rows.
-fn apply_ordering(rows: &mut Vec<Vec<Value>>, ordering: &[OrderSpec], columns: &[String]) {
+fn apply_ordering(rows: &mut [Vec<Value>], ordering: &[OrderSpec], columns: &[String]) {
     rows.sort_by(|a, b| {
         for spec in ordering {
             let col_idx = columns

@@ -272,7 +272,7 @@ pub(crate) async fn extract_turn_facts_cascade(
                         .facts
                         .into_iter()
                         .filter(|f| !f.statement.is_empty() || !f.subject.is_empty())
-                        .map(|f| lenient_to_extracted(f))
+                        .map(lenient_to_extracted)
                         .collect();
                     tracing::info!("CASCADE call 3: produced {} structured facts", facts.len());
                     Some(facts)

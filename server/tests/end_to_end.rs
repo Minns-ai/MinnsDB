@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! End-to-end integration test for MinnsDB.
 //!
 //! Tests the full stack: tables, graph, MinnsQL, WASM modules, subscriptions,
@@ -25,8 +26,10 @@ async fn build_test_app() -> Router {
     use minns_wasm_runtime::runtime::{RuntimeConfig, WasmRuntime};
     use minns_wasm_runtime::scheduler::ScheduleRunner;
 
-    let mut config = GraphEngineConfig::default();
-    config.storage_backend = StorageBackend::InMemory;
+    let config = GraphEngineConfig {
+        storage_backend: StorageBackend::InMemory,
+        ..GraphEngineConfig::default()
+    };
     let engine = Arc::new(GraphEngine::with_config(config).await.unwrap());
 
     // Write lanes

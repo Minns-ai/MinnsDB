@@ -204,13 +204,12 @@ impl IncrementalPlan {
         }
 
         // Check aggregation: single function allowed (grouped or ungrouped).
-        if !plan.aggregations.is_empty() {
-            if plan.aggregations.len() != 1 {
+        if !plan.aggregations.is_empty()
+            && plan.aggregations.len() != 1 {
                 return MaintenanceStrategy::FullRerun {
                     reason: "multiple aggregations".to_string(),
                 };
             }
-        }
 
         // Check for FuncPredicate in filters — not supported incrementally.
         for step in &plan.steps {
@@ -557,12 +556,12 @@ impl ExpandState {
                         TemporalViewport::PointInTime(ts) => {
                             let from = edge.valid_from.unwrap_or(0);
                             let old_end = *old_valid_until;
-                            from <= *ts && old_end.map_or(true, |u| u > *ts)
+                            from <= *ts && old_end.is_none_or(|u| u > *ts)
                         },
                         TemporalViewport::Range(t1, t2) => {
                             let from = edge.valid_from.unwrap_or(0);
                             let old_end = *old_valid_until;
-                            from <= *t2 && old_end.map_or(true, |u| u >= *t1)
+                            from <= *t2 && old_end.is_none_or(|u| u >= *t1)
                         },
                     }
                 } else {
@@ -888,12 +887,10 @@ impl MinMaxState {
                                 } else {
                                     self.current_extreme.clone()
                                 }
+                            } else if val.partial_cmp(cur) == Some(std::cmp::Ordering::Greater) {
+                                Some(val)
                             } else {
-                                if val.partial_cmp(cur) == Some(std::cmp::Ordering::Greater) {
-                                    Some(val)
-                                } else {
-                                    self.current_extreme.clone()
-                                }
+                                self.current_extreme.clone()
                             }
                         },
                     };
@@ -958,12 +955,10 @@ fn find_extreme(values: &FxHashMap<RowId, Value>, is_min: bool) -> Option<Value>
                 } else {
                     best
                 }
+            } else if ord == Some(std::cmp::Ordering::Greater) {
+                v
             } else {
-                if ord == Some(std::cmp::Ordering::Greater) {
-                    v
-                } else {
-                    best
-                }
+                best
             }
         })
 }
@@ -1140,10 +1135,7 @@ fn extract_group_key(exprs: &[RExpr], row_id: &RowId, graph: &Graph) -> GroupKey
 /// This is a simplified version that reads properties from the graph
 /// using the entity IDs in the RowId.
 pub(crate) fn evaluate_filter_for_row(expr: &RBoolExpr, row_id: &RowId, graph: &Graph) -> bool {
-    match evaluate_bool_for_row(expr, row_id, graph) {
-        Ok(v) => v,
-        Err(_) => false,
-    }
+    evaluate_bool_for_row(expr, row_id, graph).unwrap_or_default()
 }
 
 fn evaluate_bool_for_row(expr: &RBoolExpr, row_id: &RowId, graph: &Graph) -> Result<bool, ()> {

@@ -20,6 +20,12 @@ pub struct ModuleUsageCounters {
     pub total_subscription_events: AtomicU64,
 }
 
+impl Default for ModuleUsageCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModuleUsageCounters {
     pub fn new() -> Self {
         ModuleUsageCounters {

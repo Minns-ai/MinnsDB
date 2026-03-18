@@ -478,7 +478,7 @@ impl GraphEngine {
             }
 
             // Run Louvain community detection periodically
-            if self.config.enable_louvain && new_count % self.config.louvain_interval == 0 {
+            if self.config.enable_louvain && new_count.is_multiple_of(self.config.louvain_interval) {
                 if let Err(e) = self.run_community_detection().await {
                     result.errors.push(e);
                 } else {

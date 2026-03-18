@@ -23,6 +23,12 @@ pub struct VarTable {
     pub count: u8,
 }
 
+impl Default for VarTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VarTable {
     pub fn new() -> Self {
         VarTable {

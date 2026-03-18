@@ -46,6 +46,7 @@ const OFF_FLAGS: usize = 48;
 // OFF_RESERVED = 50, 2 bytes, always 0
 
 /// Encode a row into bytes for page insertion.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_row(
     layout: &RowLayout,
     version_id: RowVersionId,
@@ -381,7 +382,7 @@ mod tests {
         let values = vec![
             CellValue::Int64(42),
             CellValue::String("hello world".into()),
-            CellValue::Float64(3.14),
+            CellValue::Float64(3.125),
             CellValue::Bool(true),
             CellValue::Json(serde_json::json!({"key": "value"})),
             CellValue::NodeRef(999),
@@ -419,7 +420,7 @@ mod tests {
             other => panic!("expected String, got {:?}", other),
         }
         match &decoded.values[2] {
-            CellValue::Float64(v) => assert!((v - 3.14).abs() < 1e-10),
+            CellValue::Float64(v) => assert!((v - 3.125).abs() < 1e-10),
             other => panic!("expected Float64, got {:?}", other),
         }
         match &decoded.values[3] {
@@ -465,7 +466,7 @@ mod tests {
         let values = vec![
             CellValue::Int64(42),
             CellValue::String("test".into()),
-            CellValue::Float64(2.718),
+            CellValue::Float64(2.725),
             CellValue::Bool(true),
             CellValue::Json(serde_json::json!(null)),
             CellValue::NodeRef(7),

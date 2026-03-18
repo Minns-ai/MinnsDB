@@ -169,18 +169,13 @@ fn test_delta_merge_nodes() {
     // We should receive deltas — at minimum a NodeMerged and the NodeRemoved from remove_node
     let mut found_merge = false;
     // Drain all batches from the channel
-    loop {
-        match rx.try_recv() {
-            Ok(batch) => {
-                for d in &batch.deltas {
-                    if matches!(d, GraphDelta::NodeMerged { survivor_id, absorbed_id, .. }
-                        if *survivor_id == n1 && *absorbed_id == n2)
-                    {
-                        found_merge = true;
-                    }
-                }
-            },
-            Err(_) => break,
+    while let Ok(batch) = rx.try_recv() {
+        for d in &batch.deltas {
+            if matches!(d, GraphDelta::NodeMerged { survivor_id, absorbed_id, .. }
+                if *survivor_id == n1 && *absorbed_id == n2)
+            {
+                found_merge = true;
+            }
         }
     }
     assert!(found_merge, "Expected NodeMerged delta");
@@ -1102,7 +1097,7 @@ fn test_manager_subscribe_scan_expand() {
     };
 
     let mut mgr = SubscriptionManager::new(rx);
-    let (sub_id, initial) = mgr.subscribe(plan, &graph, &ontology).unwrap();
+    let (_sub_id, initial) = mgr.subscribe(plan, &graph, &ontology).unwrap();
     assert_eq!(initial.rows.len(), 1); // Alice -> Bob
 
     // Add another edge.
@@ -1171,7 +1166,7 @@ fn test_manager_edge_remove_propagates() {
     };
 
     let mut mgr = SubscriptionManager::new(rx);
-    let (sub_id, initial) = mgr.subscribe(plan, &graph, &ontology).unwrap();
+    let (_sub_id, initial) = mgr.subscribe(plan, &graph, &ontology).unwrap();
     assert_eq!(initial.rows.len(), 1);
 
     // Remove the edge.
@@ -1220,7 +1215,7 @@ fn test_manager_count_aggregation() {
     };
 
     let mut mgr = SubscriptionManager::new(rx);
-    let (sub_id, _initial) = mgr.subscribe(plan, &graph, &ontology).unwrap();
+    let (_sub_id, _initial) = mgr.subscribe(plan, &graph, &ontology).unwrap();
 
     // Add a node.
     let _n3 = graph.add_node(concept_node("Carol")).unwrap();
@@ -1328,7 +1323,7 @@ fn test_manager_node_merge_forces_rerun() {
     };
 
     let mut mgr = SubscriptionManager::new(rx);
-    let (sub_id, initial) = mgr.subscribe(plan, &graph, &ontology).unwrap();
+    let (_sub_id, initial) = mgr.subscribe(plan, &graph, &ontology).unwrap();
     assert_eq!(initial.rows.len(), 2);
 
     // Merge nodes.

@@ -28,7 +28,6 @@ const CHECKSUM_LEN: usize = 16;
 ///   offset: u16  (byte offset of row data from page start)
 ///   length: u16  (byte length of encoded row)
 /// A dead slot has offset = 0 AND length = 0.
-
 pub struct Page {
     data: Box<[u8; PAGE_SIZE]>,
 }
@@ -92,11 +91,7 @@ impl Page {
     pub fn free_space(&self) -> usize {
         let fs = self.free_start() as usize;
         let fe = self.free_end() as usize;
-        if fe > fs {
-            fe - fs
-        } else {
-            0
-        }
+        fe.saturating_sub(fs)
     }
 
     /// Read slot entry at index.
@@ -159,12 +154,7 @@ impl Page {
     /// Find the first dead slot in the directory (offset=0, length=0).
     fn find_dead_slot(&self) -> Option<u16> {
         let total = self.row_count();
-        for i in 0..total {
-            if self.is_dead(i) {
-                return Some(i);
-            }
-        }
-        None
+        (0..total).find(|&i| self.is_dead(i))
     }
 
     /// Read row bytes at a given slot index. Returns &[u8] slice into page.
@@ -467,7 +457,7 @@ mod tests {
         let mut page = Page::new(7);
         page.insert_row(b"test data").unwrap();
 
-        let bytes = page.as_bytes().clone();
+        let bytes = *page.as_bytes();
         let restored = Page::from_bytes(Box::new(bytes));
         assert_eq!(restored.page_id(), 7);
         assert_eq!(restored.read_row(0).unwrap(), b"test data");

@@ -28,12 +28,14 @@ pub struct CreateTableResponse {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct InsertRowRequest {
     pub group_id: Option<u64>,
     pub values: Vec<CellValue>,
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct InsertBatchRequest {
     pub group_id: Option<u64>,
     pub rows: Vec<Vec<CellValue>>,

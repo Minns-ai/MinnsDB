@@ -490,7 +490,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
                         .split("//")
                         .nth(1)
                         .and_then(|s| s.split('/').next())
-                        .and_then(|s| s.split('@').last()) // strip userinfo
+                        .and_then(|s| s.split('@').next_back()) // strip userinfo
                         .and_then(|s| s.split(':').next()) // strip port
                         .unwrap_or("");
 

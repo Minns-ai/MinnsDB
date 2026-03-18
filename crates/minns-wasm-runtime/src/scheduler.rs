@@ -26,6 +26,12 @@ pub struct ScheduleRunner {
     next_schedule_id: u64,
 }
 
+impl Default for ScheduleRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScheduleRunner {
     pub fn new() -> Self {
         ScheduleRunner {

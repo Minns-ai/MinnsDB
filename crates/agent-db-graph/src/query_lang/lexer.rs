@@ -368,7 +368,7 @@ impl<'a> Lexer<'a> {
             && self.input[self.pos + 1] != b'.'
         {
             self.advance(); // consume '.'
-            let has_frac = self.peek().map_or(false, |c| c.is_ascii_digit());
+            let has_frac = self.peek().is_some_and(|c| c.is_ascii_digit());
             if !has_frac {
                 return Err(LexError {
                     message: "expected digit after decimal point".into(),

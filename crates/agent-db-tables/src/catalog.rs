@@ -15,6 +15,12 @@ pub struct TableCatalog {
     next_table_id: TableId,
 }
 
+impl Default for TableCatalog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TableCatalog {
     pub fn new() -> Self {
         TableCatalog {

@@ -113,10 +113,7 @@ pub async fn upload_module(
                 enabled: instance.enabled,
                 permissions: instance
                     .permissions
-                    .grants()
-                    .iter()
-                    .map(|s| s.clone())
-                    .collect(),
+                    .grants().to_vec(),
                 functions: instance
                     .descriptor
                     .functions
@@ -170,10 +167,7 @@ pub async fn get_module(
                 enabled: instance.enabled,
                 permissions: instance
                     .permissions
-                    .grants()
-                    .iter()
-                    .map(|s| s.clone())
-                    .collect(),
+                    .grants().to_vec(),
                 functions: instance
                     .descriptor
                     .functions

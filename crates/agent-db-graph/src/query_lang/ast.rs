@@ -1,4 +1,4 @@
-/// AST types for MinnsQL.
+// AST types for MinnsQL.
 
 /// Top-level statement: a query, subscription, DDL, or DML.
 #[derive(Debug, Clone)]

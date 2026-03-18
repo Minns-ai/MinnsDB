@@ -109,7 +109,7 @@ pub fn read_from_wasm<T: wasmtime::AsContext>(
 
     let mut buf = vec![0u8; len as usize];
     memory
-        .read(&store, ptr as usize, &mut buf)
+        .read(store, ptr as usize, &mut buf)
         .map_err(|e| WasmError::AbiError(format!("memory read failed: {}", e)))?;
 
     Ok(buf)

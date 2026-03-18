@@ -3,6 +3,12 @@
 //! This crate provides graph construction and analysis capabilities
 //! for the agent database, inferring relationships from event patterns.
 //!
+#![allow(
+    clippy::too_many_arguments,
+    clippy::large_enum_variant,
+    clippy::type_complexity,
+    clippy::approx_constant
+)]
 //! ## New Features (2026-01-15)
 //! - Property indexing for 100-1000x faster queries
 //! - Louvain community detection for memory clustering
