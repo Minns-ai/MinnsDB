@@ -204,12 +204,11 @@ impl IncrementalPlan {
         }
 
         // Check aggregation: single function allowed (grouped or ungrouped).
-        if !plan.aggregations.is_empty()
-            && plan.aggregations.len() != 1 {
-                return MaintenanceStrategy::FullRerun {
-                    reason: "multiple aggregations".to_string(),
-                };
-            }
+        if !plan.aggregations.is_empty() && plan.aggregations.len() != 1 {
+            return MaintenanceStrategy::FullRerun {
+                reason: "multiple aggregations".to_string(),
+            };
+        }
 
         // Check for FuncPredicate in filters — not supported incrementally.
         for step in &plan.steps {

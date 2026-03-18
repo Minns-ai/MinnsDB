@@ -111,9 +111,7 @@ pub async fn upload_module(
                 name: instance.descriptor.name.clone(),
                 module_id: instance.module_id,
                 enabled: instance.enabled,
-                permissions: instance
-                    .permissions
-                    .grants().to_vec(),
+                permissions: instance.permissions.grants().to_vec(),
                 functions: instance
                     .descriptor
                     .functions
@@ -165,9 +163,7 @@ pub async fn get_module(
                 name: instance.descriptor.name.clone(),
                 module_id: instance.module_id,
                 enabled: instance.enabled,
-                permissions: instance
-                    .permissions
-                    .grants().to_vec(),
+                permissions: instance.permissions.grants().to_vec(),
                 functions: instance
                     .descriptor
                     .functions
