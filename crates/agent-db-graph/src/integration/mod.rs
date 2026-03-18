@@ -17,12 +17,12 @@ mod export_import;
 mod graph_analytics;
 mod graph_building;
 mod lifecycle;
+mod ontology;
 mod persistence;
 mod pipeline;
 mod planning;
 pub(crate) mod planning_llm_adapter;
 mod queries;
-mod ontology;
 mod stats;
 mod world_model;
 

@@ -227,8 +227,7 @@ fn directed_dfs_both() {
 fn directed_dijkstra_out() {
     use crate::structures::Direction;
     let g = build_directed_graph();
-    let results: Vec<(NodeId, f32)> =
-        DirectedDijkstraIter::new(&g, 1, Direction::Out).collect();
+    let results: Vec<(NodeId, f32)> = DirectedDijkstraIter::new(&g, 1, Direction::Out).collect();
     assert!(!results.is_empty());
     assert_eq!(results[0].0, 1); // start node first
     assert_eq!(results[0].1, 0.0); // zero cost to self

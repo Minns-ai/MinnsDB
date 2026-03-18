@@ -6,7 +6,7 @@ use agent_db_core::types::{AgentId, ContextHash, EventId, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::types::{GoalBucketId, NodeId, NUM_SHARDS, truncate_str};
+use super::types::{truncate_str, GoalBucketId, NodeId, NUM_SHARDS};
 
 /// Core graph node representing entities in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]

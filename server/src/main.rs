@@ -13,8 +13,12 @@ mod state;
 mod subscription_task;
 mod write_lanes;
 
-use agent_db_graph::GraphEngine;
 use agent_db_graph::subscription::manager::SubscriptionManager;
+use agent_db_graph::GraphEngine;
+use agent_db_tables::catalog::TableCatalog;
+use minns_wasm_runtime::registry::ModuleRegistry;
+use minns_wasm_runtime::runtime::{RuntimeConfig, WasmRuntime};
+use minns_wasm_runtime::scheduler::ScheduleRunner;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -85,6 +89,55 @@ async fn main() -> anyhow::Result<()> {
     let _subscription_task = subscription_task::spawn(engine.clone(), subscription_manager.clone());
     info!("Subscription system enabled (background processing active)");
 
+    // ── Table Catalog ──────────────────────────────────────────────────
+    let table_catalog = if let Some(backend) = engine.redb_backend() {
+        match agent_db_tables::persistence::load_catalog(backend) {
+            Ok(catalog) => {
+                let count = catalog.table_count();
+                info!("Loaded {} temporal tables from ReDB", count);
+                catalog
+            },
+            Err(e) => {
+                tracing::warn!("Failed to load table catalog: {} — starting fresh", e);
+                TableCatalog::new()
+            },
+        }
+    } else {
+        info!("No ReDB backend — temporal tables will be in-memory only");
+        TableCatalog::new()
+    };
+    let table_catalog = Arc::new(tokio::sync::RwLock::new(table_catalog));
+
+    // ── WASM Runtime ──────────────────────────────────────────────────
+    let wasm_runtime = Arc::new(
+        WasmRuntime::new(RuntimeConfig::default()).expect("failed to create WASM runtime"),
+    );
+    let module_registry = if let Some(backend) = engine.redb_backend() {
+        match minns_wasm_runtime::persistence::load_registry(backend) {
+            Ok(mut reg) => {
+                let errors = reg.recompile_all(&wasm_runtime, table_catalog.clone());
+                for (name, err) in &errors {
+                    tracing::warn!("Failed to load WASM module '{}': {}", name, err);
+                }
+                info!(
+                    "Loaded {} WASM modules ({} failed)",
+                    reg.module_count(),
+                    errors.len()
+                );
+                reg
+            },
+            Err(e) => {
+                tracing::warn!("Failed to load WASM registry: {} — starting fresh", e);
+                ModuleRegistry::new()
+            },
+        }
+    } else {
+        ModuleRegistry::new()
+    };
+    let module_registry = Arc::new(tokio::sync::RwLock::new(module_registry));
+    let schedule_runner = Arc::new(tokio::sync::RwLock::new(ScheduleRunner::new()));
+    info!("WASM agent runtime initialized");
+
     // Create application state
     let state = state::AppState {
         engine: engine.clone(),
@@ -94,6 +147,10 @@ async fn main() -> anyhow::Result<()> {
         started_at: Instant::now(),
         subscription_manager,
         subscription_queries: Arc::new(Mutex::new(HashMap::new())),
+        table_catalog: table_catalog.clone(),
+        wasm_runtime: wasm_runtime.clone(),
+        module_registry: module_registry.clone(),
+        schedule_runner: schedule_runner.clone(),
     };
 
     // Build router
@@ -115,9 +172,32 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    // ── Post-shutdown: drain write lanes, then flush engine to redb ──
+    // ── Post-shutdown: drain write lanes, persist tables, then flush engine ──
     info!("Server stopped accepting connections — draining write lanes");
     write_lanes.drain().await;
+
+    // Persist table catalog
+    if let Some(backend) = engine.redb_backend() {
+        info!("Persisting temporal tables to ReDB...");
+        let mut catalog = table_catalog.write().await;
+        if let Err(e) = agent_db_tables::persistence::persist_catalog(backend, &mut catalog) {
+            tracing::error!("Failed to persist table catalog: {}", e);
+        } else {
+            info!("Temporal tables persisted successfully");
+        }
+    }
+
+    // Persist WASM module registry
+    if let Some(backend) = engine.redb_backend() {
+        info!("Persisting WASM module registry...");
+        let registry = module_registry.read().await;
+        if let Err(e) = minns_wasm_runtime::persistence::persist_registry(backend, &registry) {
+            tracing::error!("Failed to persist WASM registry: {}", e);
+        } else {
+            info!("WASM module registry persisted");
+        }
+    }
+
     info!("Write lanes drained — flushing engine buffers");
     engine.shutdown().await;
     info!("Graceful shutdown complete");

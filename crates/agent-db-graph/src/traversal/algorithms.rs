@@ -16,7 +16,12 @@ impl GraphTraversal {
     ///
     /// Edge cost is derived from edge type metadata (strength, confidence, etc.)
     /// via `edge_cost()`. Stronger relationships have lower traversal cost.
-    pub(crate) fn shortest_path(&self, graph: &Graph, start: NodeId, end: NodeId) -> GraphResult<QueryResult> {
+    pub(crate) fn shortest_path(
+        &self,
+        graph: &Graph,
+        start: NodeId,
+        end: NodeId,
+    ) -> GraphResult<QueryResult> {
         if start == end {
             return Ok(QueryResult::Path(vec![start]));
         }
@@ -71,7 +76,12 @@ impl GraphTraversal {
     /// embeddings, which degrades gracefully to Dijkstra. When the target
     /// node has a known type, we give a small discount to neighbors sharing
     /// that type (since type-homogeneous paths are often shorter in practice).
-    pub(crate) fn a_star_search(&self, graph: &Graph, start: NodeId, end: NodeId) -> GraphResult<QueryResult> {
+    pub(crate) fn a_star_search(
+        &self,
+        graph: &Graph,
+        start: NodeId,
+        end: NodeId,
+    ) -> GraphResult<QueryResult> {
         if start == end {
             return Ok(QueryResult::Path(vec![start]));
         }
@@ -440,7 +450,9 @@ impl GraphTraversal {
             })
             .collect();
 
-        let custom_filters: Vec<fn(&crate::structures::GraphNode, &crate::structures::GraphEdge) -> bool> = constraints
+        let custom_filters: Vec<
+            fn(&crate::structures::GraphNode, &crate::structures::GraphEdge) -> bool,
+        > = constraints
             .iter()
             .filter_map(|c| match c {
                 PathConstraint::CustomFilter(f) => Some(*f),

@@ -19,6 +19,14 @@ pub enum TriggerSet {
         node_types: HashSet<u8>,
         edge_types: HashSet<String>,
     },
+    /// Specific table IDs — row changes in these tables trigger re-eval.
+    TableIds(HashSet<u64>),
+    /// Combined graph + table triggers.
+    CombinedWithTables {
+        node_types: HashSet<u8>,
+        edge_types: HashSet<String>,
+        table_ids: HashSet<u64>,
+    },
     /// Any change triggers (fallback for queries we can't analyze).
     Any,
 }
@@ -33,59 +41,73 @@ impl TriggerSet {
                 .iter()
                 .any(|d| d.touched_nodes().iter().any(|nid| set.contains(nid))),
             TriggerSet::NodeTypes(types) => batch.deltas.iter().any(|d| match d {
-                GraphDelta::NodeAdded {
-                    node_type_disc, ..
-                }
-                | GraphDelta::NodeRemoved {
-                    node_type_disc, ..
-                } => types.contains(node_type_disc),
-                // Edge changes could affect results if they connect nodes of watched types.
-                // Conservatively return true for edge changes — refined in Phase 3.
+                GraphDelta::NodeAdded { node_type_disc, .. }
+                | GraphDelta::NodeRemoved { node_type_disc, .. } => types.contains(node_type_disc),
                 GraphDelta::EdgeAdded { .. }
                 | GraphDelta::EdgeRemoved { .. }
                 | GraphDelta::EdgeSuperseded { .. }
                 | GraphDelta::EdgeMutated { .. } => true,
                 GraphDelta::NodeMerged { .. } => true,
+                // Table deltas don't affect graph-only triggers
+                GraphDelta::TableRowInserted { .. }
+                | GraphDelta::TableRowUpdated { .. }
+                | GraphDelta::TableRowDeleted { .. } => false,
             }),
             TriggerSet::EdgeTypes(types) => batch.deltas.iter().any(|d| match d {
-                GraphDelta::EdgeAdded {
-                    edge_type_tag, ..
-                }
-                | GraphDelta::EdgeRemoved {
-                    edge_type_tag, ..
-                }
-                | GraphDelta::EdgeSuperseded {
-                    edge_type_tag, ..
-                }
-                | GraphDelta::EdgeMutated {
-                    edge_type_tag, ..
-                } => types.contains(edge_type_tag.as_str()),
+                GraphDelta::EdgeAdded { edge_type_tag, .. }
+                | GraphDelta::EdgeRemoved { edge_type_tag, .. }
+                | GraphDelta::EdgeSuperseded { edge_type_tag, .. }
+                | GraphDelta::EdgeMutated { edge_type_tag, .. } => {
+                    types.contains(edge_type_tag.as_str())
+                },
                 GraphDelta::NodeAdded { .. } | GraphDelta::NodeRemoved { .. } => false,
                 GraphDelta::NodeMerged { .. } => true,
+                GraphDelta::TableRowInserted { .. }
+                | GraphDelta::TableRowUpdated { .. }
+                | GraphDelta::TableRowDeleted { .. } => false,
             }),
             TriggerSet::Combined {
                 node_types,
                 edge_types,
             } => batch.deltas.iter().any(|d| match d {
-                GraphDelta::NodeAdded {
-                    node_type_disc, ..
-                }
-                | GraphDelta::NodeRemoved {
-                    node_type_disc, ..
-                } => node_types.contains(node_type_disc),
-                GraphDelta::EdgeAdded {
-                    edge_type_tag, ..
-                }
-                | GraphDelta::EdgeRemoved {
-                    edge_type_tag, ..
-                }
-                | GraphDelta::EdgeSuperseded {
-                    edge_type_tag, ..
-                }
-                | GraphDelta::EdgeMutated {
-                    edge_type_tag, ..
-                } => edge_types.contains(edge_type_tag.as_str()),
+                GraphDelta::NodeAdded { node_type_disc, .. }
+                | GraphDelta::NodeRemoved { node_type_disc, .. } => {
+                    node_types.contains(node_type_disc)
+                },
+                GraphDelta::EdgeAdded { edge_type_tag, .. }
+                | GraphDelta::EdgeRemoved { edge_type_tag, .. }
+                | GraphDelta::EdgeSuperseded { edge_type_tag, .. }
+                | GraphDelta::EdgeMutated { edge_type_tag, .. } => {
+                    edge_types.contains(edge_type_tag.as_str())
+                },
                 GraphDelta::NodeMerged { .. } => true,
+                GraphDelta::TableRowInserted { .. }
+                | GraphDelta::TableRowUpdated { .. }
+                | GraphDelta::TableRowDeleted { .. } => false,
+            }),
+            TriggerSet::TableIds(ids) => batch
+                .deltas
+                .iter()
+                .any(|d| d.table_id().map_or(false, |tid| ids.contains(&tid))),
+            TriggerSet::CombinedWithTables {
+                node_types,
+                edge_types,
+                table_ids,
+            } => batch.deltas.iter().any(|d| match d {
+                GraphDelta::NodeAdded { node_type_disc, .. }
+                | GraphDelta::NodeRemoved { node_type_disc, .. } => {
+                    node_types.contains(node_type_disc)
+                },
+                GraphDelta::EdgeAdded { edge_type_tag, .. }
+                | GraphDelta::EdgeRemoved { edge_type_tag, .. }
+                | GraphDelta::EdgeSuperseded { edge_type_tag, .. }
+                | GraphDelta::EdgeMutated { edge_type_tag, .. } => {
+                    edge_types.contains(edge_type_tag.as_str())
+                },
+                GraphDelta::NodeMerged { .. } => true,
+                GraphDelta::TableRowInserted { table_id, .. }
+                | GraphDelta::TableRowUpdated { table_id, .. }
+                | GraphDelta::TableRowDeleted { table_id, .. } => table_ids.contains(table_id),
             }),
         }
     }
@@ -99,6 +121,7 @@ impl TriggerSet {
 pub fn compile_trigger_set(plan: &ExecutionPlan) -> TriggerSet {
     let mut node_types: HashSet<u8> = HashSet::new();
     let mut edge_types: HashSet<String> = HashSet::new();
+    let mut table_ids: HashSet<u64> = HashSet::new();
     let mut has_unfiltered_scan = false;
     let mut has_unfiltered_expand = false;
 
@@ -117,17 +140,36 @@ pub fn compile_trigger_set(plan: &ExecutionPlan) -> TriggerSet {
                         }
                     }
                 }
-            }
+            },
             PlanStep::Expand { edge_type, .. } => {
                 if let Some(et) = edge_type {
                     edge_types.insert(et.clone());
                 } else {
                     has_unfiltered_expand = true;
                 }
-            }
+            },
             PlanStep::Filter(_) => {
                 // Filters don't change what we watch, they narrow results.
-            }
+            },
+            PlanStep::ScanTable { table_name } => {
+                table_ids.insert(table_name_to_id(table_name));
+            },
+            PlanStep::JoinTable { table_name, .. } => {
+                table_ids.insert(table_name_to_id(table_name));
+            },
+        }
+    }
+
+    // If table IDs were collected, include them in the trigger set.
+    if !table_ids.is_empty() {
+        if node_types.is_empty() && edge_types.is_empty() {
+            return TriggerSet::TableIds(table_ids);
+        } else {
+            return TriggerSet::CombinedWithTables {
+                node_types,
+                edge_types,
+                table_ids,
+            };
         }
     }
 
@@ -144,14 +186,14 @@ pub fn compile_trigger_set(plan: &ExecutionPlan) -> TriggerSet {
             } else {
                 TriggerSet::NodeTypes(node_types)
             }
-        }
+        },
         (true, false) => {
             if has_unfiltered_scan {
                 TriggerSet::Any
             } else {
                 TriggerSet::EdgeTypes(edge_types)
             }
-        }
+        },
         (false, false) => TriggerSet::Combined {
             node_types,
             edge_types,
@@ -193,4 +235,13 @@ fn label_to_discriminant(label: &str) -> Option<u8> {
         "person" | "location" | "organization" | "thing" => Some(3),
         _ => None,
     }
+}
+
+/// Convert a table name to a u64 ID for trigger set matching.
+/// Uses a simple hash since we only need equality matching in the trigger set.
+fn table_name_to_id(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
 }

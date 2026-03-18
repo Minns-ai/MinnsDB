@@ -148,7 +148,11 @@ impl GraphEngine {
         let mut summaries = self.conversation_summaries.write().await;
         // Evict if too many conversation summaries tracked
         if summaries.len() > 1000 {
-            let keys: Vec<String> = summaries.keys().take(summaries.len() / 2).cloned().collect();
+            let keys: Vec<String> = summaries
+                .keys()
+                .take(summaries.len() / 2)
+                .cloned()
+                .collect();
             for k in keys {
                 summaries.remove(&k);
             }

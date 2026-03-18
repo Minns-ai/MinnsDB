@@ -7,6 +7,8 @@ members = [
     "crates/agent-db-storage",
     "crates/agent-db-graph",
     "crates/agent-db-ner",
+    "crates/agent-db-tables",
+    "crates/minns-wasm-runtime",
     "ml/agent-db-world-model",
     "ml/agent-db-planning",
     "examples",

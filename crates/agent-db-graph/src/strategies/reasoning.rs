@@ -10,7 +10,10 @@ use super::types::ReasoningStep;
 
 impl StrategyExtractor {
     /// Extract reasoning steps from cognitive events with generalization
-    pub(crate) fn extract_reasoning_steps(&self, events: &[Event]) -> GraphResult<Vec<ReasoningStep>> {
+    pub(crate) fn extract_reasoning_steps(
+        &self,
+        events: &[Event],
+    ) -> GraphResult<Vec<ReasoningStep>> {
         let mut raw_steps = Vec::new();
         let mut order = 0;
 

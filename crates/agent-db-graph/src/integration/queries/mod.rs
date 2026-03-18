@@ -19,5 +19,9 @@ mod synthesis;
 mod tests;
 
 // Re-export filter functions for use within the queries sub-modules
-pub(super) use filters::{apply_epoch_filter, apply_state_anchor_filter, apply_temporal_validity_filter};
-pub(super) use synthesis::{build_dynamic_projection, extract_entity_names_from_question, synthesize_answer};
+pub(super) use filters::{
+    apply_epoch_filter, apply_state_anchor_filter, apply_temporal_validity_filter,
+};
+pub(super) use synthesis::{
+    build_dynamic_projection, extract_entity_names_from_question, synthesize_answer,
+};

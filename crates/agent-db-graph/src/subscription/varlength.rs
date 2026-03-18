@@ -125,10 +125,7 @@ impl VarLengthExpandState {
                 if new_depth >= self.min_hops {
                     targets.insert(next);
                     // Reverse index: next is reachable from source.
-                    self.node_reached_by
-                        .entry(next)
-                        .or_default()
-                        .insert(source);
+                    self.node_reached_by.entry(next).or_default().insert(source);
                 }
 
                 if !visited.contains(&next) {
@@ -168,10 +165,7 @@ impl VarLengthExpandState {
         viewport: &TemporalViewport,
         txn_cutoff: Option<u64>,
     ) -> Vec<RowDelta> {
-        let old_targets: FxHashSet<NodeId> = self
-            .reachability
-            .remove(&source)
-            .unwrap_or_default();
+        let old_targets: FxHashSet<NodeId> = self.reachability.remove(&source).unwrap_or_default();
 
         // Clean indexes for this source before re-expanding.
         for target in &old_targets {
@@ -233,7 +227,7 @@ impl VarLengthExpandState {
                             }
                         }
                     }
-                }
+                },
                 RowDelta::Delete { row_id } => {
                     if let Some(BoundEntityId::Node(source)) = row_id.get(self.from_var) {
                         let source = *source;
@@ -244,7 +238,7 @@ impl VarLengthExpandState {
                         }
                         self.remove_source(source);
                     }
-                }
+                },
             }
         }
 
@@ -269,11 +263,8 @@ impl VarLengthExpandState {
                 };
 
                 // Use reverse index: find sources that already reach `from`.
-                let mut sources_to_reexpand: FxHashSet<NodeId> = self
-                    .node_reached_by
-                    .get(&from)
-                    .cloned()
-                    .unwrap_or_default();
+                let mut sources_to_reexpand: FxHashSet<NodeId> =
+                    self.node_reached_by.get(&from).cloned().unwrap_or_default();
 
                 // Also check if `from` is itself an active source.
                 if scan_state.active_nodes.contains(&from) {
@@ -289,12 +280,10 @@ impl VarLengthExpandState {
                     out.extend(self.reexpand_and_diff(source, graph, viewport, txn_cutoff));
                 }
                 out
-            }
+            },
             GraphDelta::EdgeRemoved { edge_id, .. } => {
-                let affected_sources: FxHashSet<NodeId> = self
-                    .edge_to_sources
-                    .remove(edge_id)
-                    .unwrap_or_default();
+                let affected_sources: FxHashSet<NodeId> =
+                    self.edge_to_sources.remove(edge_id).unwrap_or_default();
 
                 if affected_sources.is_empty() {
                     return Vec::new();
@@ -305,8 +294,13 @@ impl VarLengthExpandState {
                     out.extend(self.reexpand_and_diff(source, graph, viewport, txn_cutoff));
                 }
                 out
-            }
-            GraphDelta::EdgeSuperseded { edge_id, source, target, .. } => {
+            },
+            GraphDelta::EdgeSuperseded {
+                edge_id,
+                source,
+                target,
+                ..
+            } => {
                 if let Some(edge) = graph.get_edge(*edge_id) {
                     let is_visible = edge_visible_standalone(edge, viewport, txn_cutoff);
                     let was_used = self.edge_to_sources.contains_key(edge_id);
@@ -329,12 +323,15 @@ impl VarLengthExpandState {
                                 edge_type_tag: String::new(),
                                 generation: 0,
                             },
-                            scan_state, graph, viewport, txn_cutoff,
+                            scan_state,
+                            graph,
+                            viewport,
+                            txn_cutoff,
                         );
                     }
                 }
                 Vec::new()
-            }
+            },
             _ => Vec::new(),
         }
     }

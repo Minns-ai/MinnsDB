@@ -11,7 +11,10 @@ use super::types::ContextPattern;
 
 impl StrategyExtractor {
     /// Extract context patterns from events
-    pub(crate) fn extract_context_patterns(&self, events: &[Event]) -> GraphResult<Vec<ContextPattern>> {
+    pub(crate) fn extract_context_patterns(
+        &self,
+        events: &[Event],
+    ) -> GraphResult<Vec<ContextPattern>> {
         let mut patterns = Vec::new();
 
         // Analyze the first event's context as representative

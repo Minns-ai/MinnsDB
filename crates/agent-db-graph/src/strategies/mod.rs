@@ -23,9 +23,9 @@ mod tests;
 
 // Types
 pub use types::{
-    ContextPattern, PlaybookBranch, PlaybookStep, ReasoningStep, Strategy,
-    StrategyExtractionConfig, StrategyId, StrategySimilarityQuery, StrategyStats, StrategyType,
-    StrategyUpsert, compute_goal_bucket_id_from_ids,
+    compute_goal_bucket_id_from_ids, ContextPattern, PlaybookBranch, PlaybookStep, ReasoningStep,
+    Strategy, StrategyExtractionConfig, StrategyId, StrategySimilarityQuery, StrategyStats,
+    StrategyType, StrategyUpsert,
 };
 
 // Extractor

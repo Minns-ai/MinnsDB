@@ -1,7 +1,9 @@
 //! Graph query methods: find nodes/edges, subgraph extraction, PageRank,
 //! community detection, nearest-by-cost, deep reachability.
 
-use super::edge_cost::{MAX_PAGERANK_ITERATIONS, MAX_PAGERANK_NODES, MAX_TRAVERSAL_EDGES, MAX_TRAVERSAL_NODES};
+use super::edge_cost::{
+    MAX_PAGERANK_ITERATIONS, MAX_PAGERANK_NODES, MAX_TRAVERSAL_EDGES, MAX_TRAVERSAL_NODES,
+};
 use super::helpers::edge_type_name;
 use super::iterators::{BfsIter, DfsIter, DijkstraIter};
 use super::types::{CommunityAlgorithm, QueryResult};
@@ -13,7 +15,11 @@ use std::collections::HashSet;
 
 impl GraphTraversal {
     /// Find nodes by type
-    pub(crate) fn find_nodes_by_type(&self, graph: &Graph, node_type: &str) -> GraphResult<QueryResult> {
+    pub(crate) fn find_nodes_by_type(
+        &self,
+        graph: &Graph,
+        node_type: &str,
+    ) -> GraphResult<QueryResult> {
         let nodes = graph
             .get_nodes_by_type(node_type)
             .into_iter()
@@ -41,7 +47,10 @@ impl GraphTraversal {
     /// Find strongly connected components using Tarjan's algorithm.
     ///
     /// Uses an **iterative** implementation to avoid stack overflow on deep graphs.
-    pub(crate) fn find_strongly_connected_components(&self, graph: &Graph) -> GraphResult<QueryResult> {
+    pub(crate) fn find_strongly_connected_components(
+        &self,
+        graph: &Graph,
+    ) -> GraphResult<QueryResult> {
         let mut index: usize = 0;
         let mut scc_stack: Vec<NodeId> = Vec::new();
         let mut indices: FxHashMap<NodeId, usize> = FxHashMap::default();
@@ -338,7 +347,12 @@ impl GraphTraversal {
     /// from `start` in cost-ascending order via `DijkstraIter`.
     ///
     /// Returns `Rankings(Vec<(NodeId, cost)>)` sorted by increasing cost.
-    pub(crate) fn nearest_by_cost(&self, graph: &Graph, start: NodeId, k: usize) -> GraphResult<QueryResult> {
+    pub(crate) fn nearest_by_cost(
+        &self,
+        graph: &Graph,
+        start: NodeId,
+        k: usize,
+    ) -> GraphResult<QueryResult> {
         let rankings: Vec<(NodeId, f32)> = DijkstraIter::new(graph, start).take(k).collect();
         Ok(QueryResult::Rankings(rankings))
     }

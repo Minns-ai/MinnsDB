@@ -219,7 +219,9 @@ impl OntologyEvolutionEngine {
         *obs.subjects.entry(subject_name.to_string()).or_insert(0) += 1;
         *obs.objects.entry(object_name.to_string()).or_insert(0) += 1;
         if !subject_type.is_empty() {
-            *obs.domain_types.entry(subject_type.to_string()).or_insert(0) += 1;
+            *obs.domain_types
+                .entry(subject_type.to_string())
+                .or_insert(0) += 1;
         }
         if !object_type.is_empty() {
             *obs.range_types.entry(object_type.to_string()).or_insert(0) += 1;
@@ -232,10 +234,7 @@ impl OntologyEvolutionEngine {
     }
 
     /// Return observations for predicates not yet in the ontology.
-    pub fn unknown_observations(
-        &self,
-        ontology: &OntologyRegistry,
-    ) -> Vec<&PredicateObservation> {
+    pub fn unknown_observations(&self, ontology: &OntologyRegistry) -> Vec<&PredicateObservation> {
         self.observations
             .values()
             .filter(|obs| {
@@ -284,8 +283,7 @@ impl OntologyEvolutionEngine {
                 && (subjects_single as f64 / subjects_total as f64)
                     >= self.config.functional_ratio_threshold;
             let has_supersession = total >= 3
-                && (superseded as f64 / total as f64)
-                    >= self.config.supersession_ratio_threshold;
+                && (superseded as f64 / total as f64) >= self.config.supersession_ratio_threshold;
             let is_append_only = total >= self.config.min_observations && superseded == 0;
 
             // Confidence based on sample size
@@ -309,11 +307,7 @@ impl OntologyEvolutionEngine {
     /// Scan graph edges for a given association type, returning statistics.
     ///
     /// Returns `(forward_count, reverse_count, superseded, total, single_value_subjects, total_subjects)`.
-    fn scan_edges(
-        &self,
-        graph: &Graph,
-        assoc_type: &str,
-    ) -> (u64, u64, u64, u64, u64, u64) {
+    fn scan_edges(&self, graph: &Graph, assoc_type: &str) -> (u64, u64, u64, u64, u64, u64) {
         use crate::structures::EdgeType;
 
         let mut forward = 0u64;
@@ -361,7 +355,14 @@ impl OntologyEvolutionEngine {
         let subjects_total = subject_values.len() as u64;
         let subjects_single = subject_values.values().filter(|&&v| v == 1).count() as u64;
 
-        (forward, reverse, superseded, total, subjects_single, subjects_total)
+        (
+            forward,
+            reverse,
+            superseded,
+            total,
+            subjects_single,
+            subjects_total,
+        )
     }
 
     // ── Proposal Creation ──
@@ -513,10 +514,8 @@ impl OntologyEvolutionEngine {
 
         let mut user = String::from("Observed predicates:\n");
         for obs in &unknowns {
-            let dom = most_common_type(&obs.domain_types)
-                .unwrap_or_else(|| "unknown".to_string());
-            let rng = most_common_type(&obs.range_types)
-                .unwrap_or_else(|| "unknown".to_string());
+            let dom = most_common_type(&obs.domain_types).unwrap_or_else(|| "unknown".to_string());
+            let rng = most_common_type(&obs.range_types).unwrap_or_else(|| "unknown".to_string());
             user.push_str(&format!(
                 "- {} ({} edges, domain: {}, range: {})\n",
                 obs.predicate, obs.edge_count, dom, rng
@@ -541,7 +540,7 @@ impl OntologyEvolutionEngine {
             None => {
                 tracing::warn!("Failed to parse hierarchy discovery LLM response");
                 return Vec::new();
-            }
+            },
         };
 
         let groups = match parsed["groups"].as_array() {
@@ -599,7 +598,10 @@ impl OntologyEvolutionEngine {
             // Add children as sub-properties
             for child_id in &children {
                 // Look up observation data for domain/range
-                let obs_key_match = self.observations.values().find(|o| o.predicate == *child_id);
+                let obs_key_match = self
+                    .observations
+                    .values()
+                    .find(|o| o.predicate == *child_id);
                 let (domain, range) = if let Some(obs) = obs_key_match {
                     (
                         most_common_type(&obs.domain_types)
@@ -660,9 +662,7 @@ impl OntologyEvolutionEngine {
     ///
     /// Returns `(system_prompt, user_prompt)` for the LLM call. The caller
     /// passes the response to `parse_cascade_inference_response`.
-    pub fn build_cascade_inference_prompt(
-        ontology: &OntologyRegistry,
-    ) -> (String, String) {
+    pub fn build_cascade_inference_prompt(ontology: &OntologyRegistry) -> (String, String) {
         let system = concat!(
             "You are an ontology engineer analyzing temporal dependencies in a personal knowledge graph.\n\n",
             "When a person's single-valued property changes (e.g., they move cities), some other properties\n",
@@ -699,12 +699,16 @@ impl OntologyEvolutionEngine {
         let mut user = String::from("Ontology properties:\n\n");
         for pid in &all_ids {
             if let Some(desc) = ontology.resolve(pid) {
-                let chars: Vec<&str> = desc.characteristics.iter().map(|c| match c {
-                    PropertyCharacteristic::Functional => "Functional",
-                    PropertyCharacteristic::Symmetric => "Symmetric",
-                    PropertyCharacteristic::Transitive => "Transitive",
-                    PropertyCharacteristic::InverseFunctional => "InverseFunctional",
-                }).collect();
+                let chars: Vec<&str> = desc
+                    .characteristics
+                    .iter()
+                    .map(|c| match c {
+                        PropertyCharacteristic::Functional => "Functional",
+                        PropertyCharacteristic::Symmetric => "Symmetric",
+                        PropertyCharacteristic::Transitive => "Transitive",
+                        PropertyCharacteristic::InverseFunctional => "InverseFunctional",
+                    })
+                    .collect();
                 let parent = desc.sub_property_of.as_deref().unwrap_or("(root)");
                 user.push_str(&format!(
                     "- {} (label: \"{}\", comment: \"{}\", parent: {}, characteristics: [{}], append_only: {})\n",
@@ -720,16 +724,13 @@ impl OntologyEvolutionEngine {
     /// with inferred cascade_dependents and cascade_dependent flags.
     ///
     /// Returns the number of properties updated.
-    pub fn parse_cascade_inference_response(
-        response: &str,
-        ontology: &OntologyRegistry,
-    ) -> usize {
+    pub fn parse_cascade_inference_response(response: &str, ontology: &OntologyRegistry) -> usize {
         let parsed: serde_json::Value = match crate::llm_client::parse_json_from_llm(response) {
             Some(v) => v,
             None => {
                 tracing::warn!("Failed to parse cascade inference LLM response");
                 return 0;
-            }
+            },
         };
 
         let rules = match parsed["cascade_rules"].as_array() {
@@ -762,11 +763,17 @@ impl OntologyEvolutionEngine {
             let trigger_desc = match ontology.resolve(trigger) {
                 Some(d) => d,
                 None => {
-                    tracing::warn!("Cascade inference: trigger '{}' not found in ontology", trigger);
+                    tracing::warn!(
+                        "Cascade inference: trigger '{}' not found in ontology",
+                        trigger
+                    );
                     continue;
-                }
+                },
             };
-            if !trigger_desc.characteristics.contains(&PropertyCharacteristic::Functional) {
+            if !trigger_desc
+                .characteristics
+                .contains(&PropertyCharacteristic::Functional)
+            {
                 tracing::warn!(
                     "Cascade inference: trigger '{}' is not Functional, skipping",
                     trigger
@@ -780,12 +787,18 @@ impl OntologyEvolutionEngine {
                 .filter(|dep| {
                     if let Some(d) = ontology.resolve(dep) {
                         if d.append_only {
-                            tracing::debug!("Cascade inference: skipping append-only dependent '{}'", dep);
+                            tracing::debug!(
+                                "Cascade inference: skipping append-only dependent '{}'",
+                                dep
+                            );
                             return false;
                         }
                         true
                     } else {
-                        tracing::warn!("Cascade inference: dependent '{}' not found in ontology", dep);
+                        tracing::warn!(
+                            "Cascade inference: dependent '{}' not found in ontology",
+                            dep
+                        );
                         false
                     }
                 })
@@ -925,11 +938,7 @@ impl OntologyEvolutionEngine {
     /// Run a complete discovery pass: infer behaviors → create proposals.
     ///
     /// Returns IDs of newly created proposals.
-    pub fn run_inference_pass(
-        &mut self,
-        graph: &Graph,
-        ontology: &OntologyRegistry,
-    ) -> Vec<u64> {
+    pub fn run_inference_pass(&mut self, graph: &Graph, ontology: &OntologyRegistry) -> Vec<u64> {
         let behaviors = self.infer_behaviors(graph, ontology);
         if behaviors.is_empty() {
             return Vec::new();
@@ -981,11 +990,7 @@ impl OntologyEvolutionEngine {
                 .find(|p| p.id == pid)
                 .map(|p| {
                     p.properties.iter().all(|prop| {
-                        confidence_map
-                            .get(&prop.id)
-                            .copied()
-                            .unwrap_or(0.0)
-                            >= threshold
+                        confidence_map.get(&prop.id).copied().unwrap_or(0.0) >= threshold
                     })
                 })
                 .unwrap_or(false);
@@ -996,16 +1001,18 @@ impl OntologyEvolutionEngine {
                     Ok(n) => {
                         tracing::info!(
                             "Ontology evolution: auto-applied proposal {} ({} properties)",
-                            pid, n
+                            pid,
+                            n
                         );
                         auto_applied.push(pid);
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             "Ontology evolution: auto-apply failed for proposal {}: {}",
-                            pid, e
+                            pid,
+                            e
                         );
-                    }
+                    },
                 }
             }
         }
@@ -1098,23 +1105,27 @@ fn generate_ttl_for_properties(properties: &[ProposedProperty]) -> String {
             match ch {
                 PropertyCharacteristic::Symmetric => {
                     ttl.push_str("    a owl:SymmetricProperty ;\n");
-                }
+                },
                 PropertyCharacteristic::Functional => {
                     ttl.push_str("    a owl:FunctionalProperty ;\n");
-                }
+                },
                 PropertyCharacteristic::Transitive => {
                     ttl.push_str("    a owl:TransitiveProperty ;\n");
-                }
+                },
                 PropertyCharacteristic::InverseFunctional => {
                     ttl.push_str("    a owl:InverseFunctionalProperty ;\n");
-                }
+                },
             }
         }
         if prop.append_only {
             ttl.push_str("    eg:appendOnly true ;\n");
         }
         if !prop.cascade_dependents.is_empty() {
-            let deps: Vec<String> = prop.cascade_dependents.iter().map(|d| format!("eg:{}", d)).collect();
+            let deps: Vec<String> = prop
+                .cascade_dependents
+                .iter()
+                .map(|d| format!("eg:{}", d))
+                .collect();
             ttl.push_str(&format!("    eg:cascadeDependents {} ;\n", deps.join(", ")));
         }
         if prop.cascade_dependent {
@@ -1184,9 +1195,33 @@ mod tests {
         let config = OntologyEvolutionConfig::default();
         let mut engine = OntologyEvolutionEngine::new(config);
 
-        engine.record_observation("hobby", "plays_tennis", "Alice", "Tennis", "Person", "NamedEntity", 1000);
-        engine.record_observation("hobby", "plays_tennis", "Bob", "Tennis", "Person", "NamedEntity", 2000);
-        engine.record_observation("hobby", "plays_tennis", "Alice", "Tennis", "Person", "NamedEntity", 3000);
+        engine.record_observation(
+            "hobby",
+            "plays_tennis",
+            "Alice",
+            "Tennis",
+            "Person",
+            "NamedEntity",
+            1000,
+        );
+        engine.record_observation(
+            "hobby",
+            "plays_tennis",
+            "Bob",
+            "Tennis",
+            "Person",
+            "NamedEntity",
+            2000,
+        );
+        engine.record_observation(
+            "hobby",
+            "plays_tennis",
+            "Alice",
+            "Tennis",
+            "Person",
+            "NamedEntity",
+            3000,
+        );
 
         let obs = engine.observations.get("hobby:plays_tennis").unwrap();
         assert_eq!(obs.edge_count, 3);
@@ -1270,9 +1305,25 @@ mod tests {
 
         // Add observations
         for i in 0..5 {
-            engine.record_observation("hobby", "plays_tennis", "Alice", "Tennis", "Person", "NamedEntity", i);
+            engine.record_observation(
+                "hobby",
+                "plays_tennis",
+                "Alice",
+                "Tennis",
+                "Person",
+                "NamedEntity",
+                i,
+            );
         }
-        engine.record_observation("hobby", "plays_chess", "Bob", "Chess", "Person", "NamedEntity", 0);
+        engine.record_observation(
+            "hobby",
+            "plays_chess",
+            "Bob",
+            "Chess",
+            "Person",
+            "NamedEntity",
+            0,
+        );
 
         let ontology = OntologyRegistry::new();
         let unknowns = engine.unknown_observations(&ontology);
@@ -1285,7 +1336,15 @@ mod tests {
     fn test_evolution_stats() {
         let config = OntologyEvolutionConfig::default();
         let mut engine = OntologyEvolutionEngine::new(config);
-        engine.record_observation("hobby", "plays_tennis", "Alice", "Tennis", "Person", "NamedEntity", 0);
+        engine.record_observation(
+            "hobby",
+            "plays_tennis",
+            "Alice",
+            "Tennis",
+            "Person",
+            "NamedEntity",
+            0,
+        );
 
         let stats = engine.stats();
         assert_eq!(stats.total_observations, 1);
@@ -1438,10 +1497,8 @@ mod tests {
             ]
         }"#;
 
-        let updated = OntologyEvolutionEngine::parse_cascade_inference_response(
-            llm_response,
-            &ontology,
-        );
+        let updated =
+            OntologyEvolutionEngine::parse_cascade_inference_response(llm_response, &ontology);
 
         // Should reject: relationship is not Functional
         assert_eq!(updated, 0);

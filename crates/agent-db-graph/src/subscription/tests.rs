@@ -45,7 +45,7 @@ fn test_delta_node_add() {
         } => {
             assert_eq!(nid, &node_id);
             assert_eq!(*node_type_disc, 3); // Concept
-        }
+        },
         other => panic!("Expected NodeAdded, got {:?}", other),
     }
 }
@@ -72,7 +72,7 @@ fn test_delta_edge_add() {
             assert_eq!(*source, n1);
             assert_eq!(*target, n2);
             assert_eq!(edge_type_tag, "KNOWS");
-        }
+        },
         other => panic!("Expected EdgeAdded, got {:?}", other),
     }
 }
@@ -96,7 +96,7 @@ fn test_delta_edge_remove() {
         } => {
             assert_eq!(*edge_id, eid);
             assert_eq!(edge_type_tag, "KNOWS");
-        }
+        },
         other => panic!("Expected EdgeRemoved, got {:?}", other),
     }
 }
@@ -120,7 +120,10 @@ fn test_delta_node_remove_cascades_edges() {
         .iter()
         .any(|d| matches!(d, GraphDelta::EdgeRemoved { .. }));
     assert!(has_node_removed, "Expected NodeRemoved delta");
-    assert!(has_edge_removed, "Expected EdgeRemoved delta for cascaded edge");
+    assert!(
+        has_edge_removed,
+        "Expected EdgeRemoved delta for cascaded edge"
+    );
 }
 
 #[test]
@@ -146,7 +149,7 @@ fn test_delta_invalidate_edge_emits_mutated() {
 #[test]
 fn test_no_overhead_when_disabled() {
     let mut graph = Graph::new(); // delta_tx = None
-    // All mutations should work without panics
+                                  // All mutations should work without panics
     let n1 = graph.add_node(concept_node("Alice")).unwrap();
     let n2 = graph.add_node(concept_node("Bob")).unwrap();
     let eid = graph.add_edge(assoc_edge(n1, n2, "KNOWS")).unwrap();
@@ -176,7 +179,7 @@ fn test_delta_merge_nodes() {
                         found_merge = true;
                     }
                 }
-            }
+            },
             Err(_) => break,
         }
     }
@@ -360,7 +363,7 @@ fn test_compile_trigger_set_label_scan() {
     match ts {
         TriggerSet::NodeTypes(types) => {
             assert!(types.contains(&3)); // Person → Concept disc
-        }
+        },
         other => panic!("Expected NodeTypes, got {:?}", other),
     }
 }
@@ -401,7 +404,7 @@ fn test_compile_trigger_set_edge_type() {
         } => {
             assert!(node_types.contains(&3));
             assert!(edge_types.contains("KNOWS"));
-        }
+        },
         other => panic!("Expected Combined, got {:?}", other),
     }
 }
@@ -541,15 +544,24 @@ use super::incremental::*;
 
 #[test]
 fn test_row_id_structural_equality() {
-    let r1 = RowId::new(smallvec::smallvec![(0, BoundEntityId::Node(1)), (1, BoundEntityId::Node(2))]);
-    let r2 = RowId::new(smallvec::smallvec![(1, BoundEntityId::Node(2)), (0, BoundEntityId::Node(1))]);
+    let r1 = RowId::new(smallvec::smallvec![
+        (0, BoundEntityId::Node(1)),
+        (1, BoundEntityId::Node(2))
+    ]);
+    let r2 = RowId::new(smallvec::smallvec![
+        (1, BoundEntityId::Node(2)),
+        (0, BoundEntityId::Node(1))
+    ]);
     // Same bindings, different order → should be equal after sorting.
     assert_eq!(r1, r2);
 }
 
 #[test]
 fn test_row_id_get_slot() {
-    let r = RowId::new(smallvec::smallvec![(0, BoundEntityId::Node(42)), (2, BoundEntityId::Edge(7))]);
+    let r = RowId::new(smallvec::smallvec![
+        (0, BoundEntityId::Node(42)),
+        (2, BoundEntityId::Edge(7))
+    ]);
     assert_eq!(r.get(0), Some(&BoundEntityId::Node(42)));
     assert_eq!(r.get(2), Some(&BoundEntityId::Edge(7)));
     assert_eq!(r.get(1), None);
@@ -839,7 +851,8 @@ fn test_expand_state_edge_add_remove() {
         edge_type_tag: "KNOWS".to_string(),
         generation: 3,
     };
-    let deltas = expand.apply_edge_delta(&delta, &scan, &graph, &TemporalViewport::ActiveOnly, None);
+    let deltas =
+        expand.apply_edge_delta(&delta, &scan, &graph, &TemporalViewport::ActiveOnly, None);
     assert_eq!(deltas.len(), 1);
     assert!(deltas[0].is_insert());
 
@@ -851,7 +864,8 @@ fn test_expand_state_edge_add_remove() {
         edge_type_tag: "KNOWS".to_string(),
         generation: 4,
     };
-    let deltas = expand.apply_edge_delta(&delta, &scan, &graph, &TemporalViewport::ActiveOnly, None);
+    let deltas =
+        expand.apply_edge_delta(&delta, &scan, &graph, &TemporalViewport::ActiveOnly, None);
     assert_eq!(deltas.len(), 1);
     assert!(!deltas[0].is_insert());
 }
@@ -886,7 +900,8 @@ fn test_expand_state_upstream_propagation() {
         0,
         BoundEntityId::Node(n1)
     )]))];
-    let deltas = expand.apply_upstream_deltas(&scan_delete, &graph, &TemporalViewport::ActiveOnly, None);
+    let deltas =
+        expand.apply_upstream_deltas(&scan_delete, &graph, &TemporalViewport::ActiveOnly, None);
     assert_eq!(deltas.len(), 1);
     assert!(!deltas[0].is_insert());
     assert!(!expand.expansions.contains_key(&n1));
@@ -1098,7 +1113,11 @@ fn test_manager_subscribe_scan_expand() {
 
     // Should have at least one update with the new edge.
     let total_inserts: usize = updates.iter().map(|u| u.inserts.len()).sum();
-    assert!(total_inserts >= 1, "Expected at least 1 insert for new edge, got {}", total_inserts);
+    assert!(
+        total_inserts >= 1,
+        "Expected at least 1 insert for new edge, got {}",
+        total_inserts
+    );
 }
 
 #[test]
@@ -1266,8 +1285,14 @@ fn test_manager_no_update_when_irrelevant() {
     // so we should get no meaningful output deltas (or an empty update at most).
     let total_inserts: usize = updates.iter().map(|u| u.inserts.len()).sum();
     let total_deletes: usize = updates.iter().map(|u| u.deletes.len()).sum();
-    assert_eq!(total_inserts, 0, "Should not have inserts for WORKS_AT edge on KNOWS subscription");
-    assert_eq!(total_deletes, 0, "Should not have deletes for WORKS_AT edge on KNOWS subscription");
+    assert_eq!(
+        total_inserts, 0,
+        "Should not have inserts for WORKS_AT edge on KNOWS subscription"
+    );
+    assert_eq!(
+        total_deletes, 0,
+        "Should not have deletes for WORKS_AT edge on KNOWS subscription"
+    );
 }
 
 #[test]
@@ -1319,5 +1344,9 @@ fn test_manager_node_merge_forces_rerun() {
     // should reflect the merged state.
     let total_deletes: usize = updates.iter().map(|u| u.deletes.len()).sum();
     // At least one delete should have occurred (the absorbed node).
-    assert!(total_deletes >= 1, "Expected at least 1 delete from merge, got {}", total_deletes);
+    assert!(
+        total_deletes >= 1,
+        "Expected at least 1 delete from merge, got {}",
+        total_deletes
+    );
 }

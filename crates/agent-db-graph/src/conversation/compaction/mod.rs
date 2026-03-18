@@ -24,8 +24,8 @@ mod cascade;
 mod embedding;
 pub mod events;
 pub mod extraction;
-mod prompts;
 pub mod procedural;
+mod prompts;
 pub mod rolling_summary;
 pub mod turn_processing;
 pub mod types;
@@ -38,7 +38,9 @@ mod tests;
 pub use events::{compaction_to_events, filter_goals_by_classification};
 pub use extraction::{extract_compaction, extract_playbooks};
 pub use procedural::{build_procedural_memory, map_progress_to_outcome};
-pub use rolling_summary::{format_with_summary, update_rolling_summary, ConversationRollingSummary};
+pub use rolling_summary::{
+    format_with_summary, update_rolling_summary, ConversationRollingSummary,
+};
 pub use turn_processing::{
     build_graph_context_for_turn, format_transcript, format_turn_transcript, split_into_turns,
     ConversationTurn,
@@ -53,9 +55,7 @@ pub use types::{
 use crate::conversation::graph_projection;
 use crate::conversation::types::ConversationIngest;
 use crate::memory::Memory;
-use crate::memory_classifier::{
-    classify_memory_updates, resolve_target, MemoryAction,
-};
+use crate::memory_classifier::{classify_memory_updates, resolve_target, MemoryAction};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -74,12 +74,8 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     }
     &s[..end]
 }
-use extraction::{
-    extract_compaction_from_transcript, extract_financial_facts_llm,
-};
-use procedural::{
-    attach_playbooks, handle_procedural_memory, handle_procedural_memory_fallback,
-};
+use extraction::{extract_compaction_from_transcript, extract_financial_facts_llm};
+use procedural::{attach_playbooks, handle_procedural_memory, handle_procedural_memory_fallback};
 use turn_processing::{format_messages, TURN_GAP};
 use types::MIN_PLAYBOOK_CONFIDENCE;
 

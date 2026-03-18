@@ -78,63 +78,63 @@ impl<'a> Lexer<'a> {
                     token: Token::LParen,
                     span: (start, self.pos),
                 })
-            }
+            },
             b')' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::RParen,
                     span: (start, self.pos),
                 })
-            }
+            },
             b'{' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::LBrace,
                     span: (start, self.pos),
                 })
-            }
+            },
             b'}' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::RBrace,
                     span: (start, self.pos),
                 })
-            }
+            },
             b'[' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::LBracket,
                     span: (start, self.pos),
                 })
-            }
+            },
             b']' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::RBracket,
                     span: (start, self.pos),
                 })
-            }
+            },
             b':' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::Colon,
                     span: (start, self.pos),
                 })
-            }
+            },
             b',' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::Comma,
                     span: (start, self.pos),
                 })
-            }
+            },
             b'*' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::Star,
                     span: (start, self.pos),
                 })
-            }
+            },
             b'.' => {
                 self.advance();
                 if self.peek() == Some(b'.') {
@@ -149,7 +149,7 @@ impl<'a> Lexer<'a> {
                         span: (start, self.pos),
                     })
                 }
-            }
+            },
             b'-' => {
                 self.advance();
                 if self.peek() == Some(b'>') {
@@ -164,7 +164,7 @@ impl<'a> Lexer<'a> {
                         span: (start, self.pos),
                     })
                 }
-            }
+            },
             b'<' => {
                 self.advance();
                 if self.peek() == Some(b'-') {
@@ -185,7 +185,7 @@ impl<'a> Lexer<'a> {
                         span: (start, self.pos),
                     })
                 }
-            }
+            },
             b'>' => {
                 self.advance();
                 if self.peek() == Some(b'=') {
@@ -200,14 +200,14 @@ impl<'a> Lexer<'a> {
                         span: (start, self.pos),
                     })
                 }
-            }
+            },
             b'=' => {
                 self.advance();
                 Ok(Spanned {
                     token: Token::Eq,
                     span: (start, self.pos),
                 })
-            }
+            },
             b'!' => {
                 self.advance();
                 if self.peek() == Some(b'=') {
@@ -222,7 +222,7 @@ impl<'a> Lexer<'a> {
                         position: start,
                     })
                 }
-            }
+            },
             _ => Err(LexError {
                 message: format!("unexpected character '{}'", ch as char),
                 position: start,
@@ -282,8 +282,7 @@ impl<'a> Lexer<'a> {
             // Check if the next word is WITH
             let remaining = &self.input[peek_pos..];
             if remaining.len() >= 4 {
-                let candidate =
-                    std::str::from_utf8(&remaining[..4]).unwrap_or("");
+                let candidate = std::str::from_utf8(&remaining[..4]).unwrap_or("");
                 if candidate.eq_ignore_ascii_case("WITH")
                     && (remaining.len() == 4
                         || !remaining[4].is_ascii_alphanumeric() && remaining[4] != b'_')
@@ -326,6 +325,24 @@ impl<'a> Lexer<'a> {
             "CONTAINS" => Token::Contains,
             "SUBSCRIBE" => Token::Subscribe,
             "UNSUBSCRIBE" => Token::Unsubscribe,
+            // DDL/DML/Table keywords
+            "CREATE" => Token::Create,
+            "TABLE" => Token::Table,
+            "DROP" => Token::Drop,
+            "INSERT" => Token::Insert,
+            "INTO" => Token::Into,
+            "VALUES" => Token::Values,
+            "UPDATE" => Token::Update,
+            "SET" => Token::Set,
+            "DELETE" => Token::Delete,
+            "FROM" => Token::From,
+            "JOIN" => Token::Join,
+            "ON" => Token::On,
+            "PRIMARY" => Token::Primary,
+            "KEY" => Token::Key,
+            "UNIQUE" => Token::Unique,
+            "REFERENCES" => Token::References,
+            "GRAPH" => Token::Graph,
             _ => Token::Ident(text.to_string()),
         };
 
@@ -406,7 +423,7 @@ impl<'a> Lexer<'a> {
                         token: Token::StringLit(value),
                         span: (start, self.pos),
                     });
-                }
+                },
                 b'\\' => {
                     if self.at_end() {
                         return Err(LexError {
@@ -424,9 +441,9 @@ impl<'a> Lexer<'a> {
                         _ => {
                             value.push('\\');
                             value.push(esc as char);
-                        }
+                        },
                     }
-                }
+                },
                 _ => value.push(ch as char),
             }
         }
@@ -599,9 +616,8 @@ mod tests {
 
     #[test]
     fn test_full_query() {
-        let tokens = tok(
-            r#"MATCH (n:Person)-[r:KNOWS]->(m) WHERE n.name = "Alice" RETURN m.name LIMIT 10"#,
-        );
+        let tokens =
+            tok(r#"MATCH (n:Person)-[r:KNOWS]->(m) WHERE n.name = "Alice" RETURN m.name LIMIT 10"#);
         assert_eq!(
             tokens,
             vec![

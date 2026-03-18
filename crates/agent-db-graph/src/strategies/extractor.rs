@@ -11,8 +11,8 @@ use serde_json::json;
 use std::collections::HashMap;
 
 use super::synthesis::{
-    build_playbook, synthesize_counterfactual, synthesize_failure_modes, synthesize_strategy_summary,
-    synthesize_when_not_to_use, synthesize_when_to_use,
+    build_playbook, synthesize_counterfactual, synthesize_failure_modes,
+    synthesize_strategy_summary, synthesize_when_not_to_use, synthesize_when_to_use,
 };
 use super::types::*;
 

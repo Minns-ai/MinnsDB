@@ -34,10 +34,7 @@ pub struct DiffResult {
 /// Both old and new use the same structural RowId model:
 /// RowId is built from the executor's binding rows (entity IDs per slot),
 /// ensuring consistent identity between incremental and full-rerun modes.
-pub fn diff_outputs(
-    old: &CachedOutput,
-    new_rows: &FxHashMap<RowId, Vec<Value>>,
-) -> DiffResult {
+pub fn diff_outputs(old: &CachedOutput, new_rows: &FxHashMap<RowId, Vec<Value>>) -> DiffResult {
     let mut inserts = Vec::new();
     let mut deletes = Vec::new();
 
@@ -54,13 +51,13 @@ pub fn diff_outputs(
         match old.rows.get(new_key) {
             None => {
                 inserts.push((new_key.clone(), new_vals.clone()));
-            }
+            },
             Some(old_vals) => {
                 if old_vals != new_vals {
                     deletes.push(new_key.clone());
                     inserts.push((new_key.clone(), new_vals.clone()));
                 }
-            }
+            },
         }
     }
 
@@ -68,10 +65,7 @@ pub fn diff_outputs(
 }
 
 /// Build a CachedOutput from query results and their binding rows.
-pub fn build_cached_output(
-    output: &QueryOutput,
-    binding_rows: &[BindingRow],
-) -> CachedOutput {
+pub fn build_cached_output(output: &QueryOutput, binding_rows: &[BindingRow]) -> CachedOutput {
     let mut rows = FxHashMap::default();
 
     for (i, values) in output.rows.iter().enumerate() {

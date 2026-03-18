@@ -44,8 +44,8 @@ pub use directed::{DirectedBfsIter, DirectedDfsIter, DirectedDijkstraIter};
 
 // Spec types
 pub use spec::{
-    EdgeFilterExpr, EdgePredicate, Instruction, NodeFilterExpr, NodePredicate, TraversalRequest,
-    TraversalSpec, execute_traversal,
+    execute_traversal, EdgeFilterExpr, EdgePredicate, Instruction, NodeFilterExpr, NodePredicate,
+    TraversalRequest, TraversalSpec,
 };
 
 // Streaming

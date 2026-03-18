@@ -168,10 +168,7 @@ impl GraphEngine {
                 tracing::info!("DRIFT fact_summary: (empty)");
                 None
             } else {
-                tracing::info!(
-                    "DRIFT fact_summary:\n{}",
-                    safe_truncate(&summary, 1000)
-                );
+                tracing::info!("DRIFT fact_summary:\n{}", safe_truncate(&summary, 1000));
                 Some(summary)
             }
         } else {

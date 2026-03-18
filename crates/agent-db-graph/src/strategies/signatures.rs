@@ -48,7 +48,11 @@ impl StrategyExtractor {
         list
     }
 
-    pub(crate) fn collect_tools_from_metadata(&self, value: &MetadataValue, tools: &mut HashSet<String>) {
+    pub(crate) fn collect_tools_from_metadata(
+        &self,
+        value: &MetadataValue,
+        tools: &mut HashSet<String>,
+    ) {
         match value {
             MetadataValue::String(name) => {
                 if !name.trim().is_empty() {
@@ -62,7 +66,11 @@ impl StrategyExtractor {
         }
     }
 
-    pub(crate) fn collect_tools_from_json(&self, value: &serde_json::Value, tools: &mut HashSet<String>) {
+    pub(crate) fn collect_tools_from_json(
+        &self,
+        value: &serde_json::Value,
+        tools: &mut HashSet<String>,
+    ) {
         match value {
             serde_json::Value::String(name) => {
                 if !name.trim().is_empty() {

@@ -2,7 +2,6 @@
 ///
 /// The planner converts an AST `Query` into an `ExecutionPlan` — a sequence of
 /// physical `PlanStep`s that the executor evaluates against the graph.
-
 use std::collections::HashMap;
 
 use super::ast::*;
@@ -84,19 +83,19 @@ fn resolve_expr(expr: &Expr, vt: &VarTable) -> Result<RExpr, QueryError> {
                 QueryError::PlanError(format!("Unbound variable `{}` in expression", var))
             })?;
             Ok(RExpr::Property(slot, prop.clone()))
-        }
+        },
         Expr::Literal(lit) => Ok(RExpr::Literal(lit.clone())),
         Expr::FuncCall(name, args) => {
             let resolved_args: Result<Vec<RExpr>, QueryError> =
                 args.iter().map(|a| resolve_expr(a, vt)).collect();
             Ok(RExpr::FuncCall(name.clone(), resolved_args?))
-        }
+        },
         Expr::Var(var) => {
             let slot = vt.lookup(var).ok_or_else(|| {
                 QueryError::PlanError(format!("Unbound variable `{}` in expression", var))
             })?;
             Ok(RExpr::Var(slot))
-        }
+        },
         Expr::Star => Ok(RExpr::Star),
     }
 }
@@ -125,7 +124,7 @@ fn resolve_bool_expr(expr: &BoolExpr, vt: &VarTable) -> Result<RBoolExpr, QueryE
             let resolved: Result<Vec<RExpr>, QueryError> =
                 args.iter().map(|a| resolve_expr(a, vt)).collect();
             Ok(RBoolExpr::FuncPredicate(name.clone(), resolved?))
-        }
+        },
     }
 }
 
@@ -171,6 +170,29 @@ pub enum PlanStep {
     },
     /// Filter rows by a resolved boolean expression.
     Filter(RBoolExpr),
+    /// Scan all rows from a table (FROM table_name).
+    ScanTable { table_name: String },
+    /// Join with a table. Follows a ScanTable or graph steps.
+    JoinTable {
+        table_name: String,
+        on: JoinCondition,
+    },
+}
+
+/// Join condition for JoinTable plan step.
+#[derive(Debug, Clone)]
+pub enum JoinCondition {
+    /// table.column = other_table.column (table-to-table equi-join)
+    TableToTable {
+        left_table: String,
+        left_col: String,
+        right_col: String,
+    },
+    /// table.noderef_column = graph_var (graph-to-table join)
+    GraphToTable {
+        graph_var: SlotIdx,
+        table_col: String,
+    },
 }
 
 /// Temporal window for edge visibility.
@@ -228,9 +250,29 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
     let mut steps = Vec::new();
     let mut vt = VarTable::new();
 
-    // 1. Process MATCH patterns into scan/expand steps.
+    // 1a. Process FROM table (if present) into a ScanTable step.
+    // Register table names as pseudo-variables so property resolution works.
+    if let Some(ref table_name) = query.from_table {
+        vt.get_or_insert(table_name);
+        steps.push(PlanStep::ScanTable {
+            table_name: table_name.clone(),
+        });
+    }
+
+    // 1b. Process MATCH patterns into scan/expand steps.
     for pattern in &query.match_clauses {
         plan_pattern(pattern, &mut steps, &mut vt)?;
+    }
+
+    // 1c. Process JOIN clauses into JoinTable steps.
+    for join in &query.joins {
+        // Register joined table name as pseudo-variable for property resolution.
+        vt.get_or_insert(&join.table);
+        let on = plan_join_condition(join, &vt)?;
+        steps.push(PlanStep::JoinTable {
+            table_name: join.table.clone(),
+            on,
+        });
     }
 
     // 2. Process WHEN clause into a temporal viewport.
@@ -244,6 +286,10 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
 
     // 3. Process WHERE clause into a Filter step (resolve to RBoolExpr).
     if let Some(ref cond) = query.where_clause {
+        // For table queries, WHERE references may be table.column (Property nodes).
+        // resolve_bool_expr handles Expr::Property via VarTable, but table columns
+        // don't have slot variables. We pass them through as-is; the executor
+        // resolves table.column references at runtime.
         steps.push(PlanStep::Filter(resolve_bool_expr(cond, &vt)?));
     }
 
@@ -301,8 +347,12 @@ fn plan_pattern(
                 props: np.props.clone(),
             });
             slot
-        }
-        _ => return Err(QueryError::PlanError("Pattern must start with a node".into())),
+        },
+        _ => {
+            return Err(QueryError::PlanError(
+                "Pattern must start with a node".into(),
+            ))
+        },
     };
 
     let mut current_slot = first_slot;
@@ -345,6 +395,63 @@ fn plan_pattern(
     Ok(())
 }
 
+/// Convert an AST JoinClause into a JoinCondition.
+fn plan_join_condition(join: &JoinClause, vt: &VarTable) -> Result<JoinCondition, QueryError> {
+    match (&join.on_left, &join.on_right) {
+        // table.col = table.col (table-to-table)
+        (
+            JoinSide::TableColumn {
+                table: lt,
+                column: lc,
+            },
+            JoinSide::TableColumn {
+                table: _rt,
+                column: rc,
+            },
+        ) => Ok(JoinCondition::TableToTable {
+            left_table: lt.clone(),
+            left_col: lc.clone(),
+            right_col: rc.clone(),
+        }),
+        // table.col = graph_var
+        (
+            JoinSide::TableColumn {
+                table: _,
+                column: tc,
+            },
+            JoinSide::GraphVar(gv),
+        ) => {
+            let slot = vt.lookup(gv).ok_or_else(|| {
+                QueryError::PlanError(format!("Unbound graph variable `{}` in JOIN ON", gv))
+            })?;
+            Ok(JoinCondition::GraphToTable {
+                graph_var: slot,
+                table_col: tc.clone(),
+            })
+        },
+        // graph_var = table.col (reversed)
+        (
+            JoinSide::GraphVar(gv),
+            JoinSide::TableColumn {
+                table: _,
+                column: tc,
+            },
+        ) => {
+            let slot = vt.lookup(gv).ok_or_else(|| {
+                QueryError::PlanError(format!("Unbound graph variable `{}` in JOIN ON", gv))
+            })?;
+            Ok(JoinCondition::GraphToTable {
+                graph_var: slot,
+                table_col: tc.clone(),
+            })
+        },
+        // graph_var = graph_var (not supported)
+        (JoinSide::GraphVar(_), JoinSide::GraphVar(_)) => Err(QueryError::PlanError(
+            "JOIN ON must reference at least one table column".into(),
+        )),
+    }
+}
+
 /// Translate the optional WHEN clause into a `TemporalViewport`.
 fn plan_when(when: &Option<WhenClause>) -> Result<TemporalViewport, QueryError> {
     match when {
@@ -356,16 +463,16 @@ fn plan_when(when: &Option<WhenClause>) -> Result<TemporalViewport, QueryError> 
             })?;
             let now = now_nanos();
             Ok(TemporalViewport::Range(now.saturating_sub(nanos), now))
-        }
+        },
         Some(WhenClause::PointInTime(expr)) => {
             let ts = resolve_timestamp_expr(expr)?;
             Ok(TemporalViewport::PointInTime(ts))
-        }
+        },
         Some(WhenClause::Range(from, to)) => {
             let t1 = resolve_timestamp_expr(from)?;
             let t2 = resolve_timestamp_expr(to)?;
             Ok(TemporalViewport::Range(t1, t2))
-        }
+        },
     }
 }
 
@@ -385,7 +492,7 @@ fn resolve_timestamp_expr(expr: &Expr) -> Result<u64, QueryError> {
                     "ago() requires a duration string argument".into(),
                 ))
             }
-        }
+        },
         Expr::FuncCall(name, _) if name == "now" => Ok(now_nanos()),
         _ => Err(QueryError::PlanError(
             "Expected timestamp string or function in WHEN clause".into(),
@@ -511,9 +618,7 @@ pub fn parse_duration_nanos(s: &str) -> Result<u64, String> {
         return Err("empty duration".into());
     }
 
-    let num_end = s
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(s.len());
+    let num_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     if num_end == 0 {
         return Err(format!("no numeric value in duration '{}'", s));
     }
@@ -538,7 +643,7 @@ pub fn parse_duration_nanos(s: &str) -> Result<u64, String> {
                 "unknown duration unit '{}' (expected d, h, m, s, w, y, ms, us, ns)",
                 unit
             ))
-        }
+        },
     };
 
     Ok(value * multiplier_nanos)
@@ -623,6 +728,8 @@ mod tests {
     fn empty_query() -> Query {
         Query {
             match_clauses: vec![],
+            from_table: None,
+            joins: vec![],
             when: None,
             as_of: None,
             where_clause: None,
@@ -659,7 +766,7 @@ mod tests {
                 assert_eq!(labels, &["Person"]);
                 assert_eq!(props.len(), 1);
                 assert_eq!(props[0].0, "name");
-            }
+            },
             other => panic!("expected ScanNodes, got {:?}", other),
         }
         assert_eq!(ep.var_count, 1);
@@ -718,7 +825,7 @@ mod tests {
                 assert_eq!(edge_type.as_deref(), Some("KNOWS"));
                 assert!(matches!(direction, Direction::Out));
                 assert!(range.is_none()); // single hop uses None
-            }
+            },
             other => panic!("expected Expand, got {:?}", other),
         }
         assert_eq!(ep.var_count, 3);
@@ -757,7 +864,7 @@ mod tests {
                     diff,
                     thirty_days_nanos
                 );
-            }
+            },
             other => panic!("expected Range, got {:?}", other),
         }
     }
@@ -848,10 +955,7 @@ mod tests {
             365 * 86_400 * 1_000_000_000
         );
         assert_eq!(parse_duration_nanos("100ns").unwrap(), 100);
-        assert_eq!(
-            parse_duration_nanos("5m").unwrap(),
-            5 * 60 * 1_000_000_000
-        );
+        assert_eq!(parse_duration_nanos("5m").unwrap(), 5 * 60 * 1_000_000_000);
         assert_eq!(
             parse_duration_nanos("5min").unwrap(),
             5 * 60 * 1_000_000_000
@@ -934,7 +1038,7 @@ mod tests {
         match &ep.steps[1] {
             PlanStep::Expand { range, .. } => {
                 assert_eq!(*range, Some((1, Some(3))));
-            }
+            },
             other => panic!("expected Expand, got {:?}", other),
         }
     }
@@ -1044,7 +1148,7 @@ mod tests {
         match (&ep.steps[0], &ep.steps[2]) {
             (PlanStep::ScanNodes { var: v1, .. }, PlanStep::ScanNodes { var: v2, .. }) => {
                 assert_eq!(*v1, *v2, "shared variable 'u' should have the same slot");
-            }
+            },
             _ => panic!("expected two ScanNodes"),
         }
     }

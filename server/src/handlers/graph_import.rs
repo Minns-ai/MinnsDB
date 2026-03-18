@@ -97,10 +97,18 @@ pub struct ImportEdge {
     pub properties: HashMap<String, serde_json::Value>,
 }
 
-fn default_concept() -> String { "concept".to_string() }
-fn default_association() -> String { "association".to_string() }
-fn default_confidence() -> f32 { 0.9 }
-fn default_weight() -> f32 { 0.8 }
+fn default_concept() -> String {
+    "concept".to_string()
+}
+fn default_association() -> String {
+    "association".to_string()
+}
+fn default_confidence() -> f32 {
+    0.9
+}
+fn default_weight() -> f32 {
+    0.8
+}
 
 // ---------------------------------------------------------------------------
 // Response
@@ -129,7 +137,11 @@ pub async fn import_graph(
         return Err(ApiError::BadRequest("Too many edges (max 500,000)".into()));
     }
 
-    info!("Graph import: {} nodes, {} edges", request.nodes.len(), request.edges.len());
+    info!(
+        "Graph import: {} nodes, {} edges",
+        request.nodes.len(),
+        request.edges.len()
+    );
 
     let group_id = request.group_id.unwrap_or_default();
     let mut inference = state.engine.inference().write().await;
@@ -144,15 +156,28 @@ pub async fn import_graph(
     // Phase 1: Resolve or create nodes.
     for n in &request.nodes {
         // For Concept nodes, deduplicate by name.
-        let is_concept = matches!(n.r#type.to_lowercase().as_str(),
-            "concept" | "person" | "organization" | "org" | "company" |
-            "location" | "place" | "city" | "country" | "product" | "brand" |
-            "named_entity" | "entity" | ""
+        let is_concept = matches!(
+            n.r#type.to_lowercase().as_str(),
+            "concept"
+                | "person"
+                | "organization"
+                | "org"
+                | "company"
+                | "location"
+                | "place"
+                | "city"
+                | "country"
+                | "product"
+                | "brand"
+                | "named_entity"
+                | "entity"
+                | ""
         );
 
         if is_concept {
             let name_lower = n.name.to_lowercase();
-            if let Some(existing) = graph.get_concept_node(&name_lower)
+            if let Some(existing) = graph
+                .get_concept_node(&name_lower)
                 .or_else(|| graph.get_concept_node(&n.name))
             {
                 name_to_id.insert(n.name.clone(), existing.id);
@@ -176,7 +201,7 @@ pub async fn import_graph(
             Ok(id) => {
                 name_to_id.insert(n.name.clone(), id);
                 nodes_created += 1;
-            }
+            },
             Err(e) => errors.push(format!("Node '{}': {}", n.name, e)),
         }
     }
@@ -188,14 +213,14 @@ pub async fn import_graph(
             None => {
                 errors.push(format!("Edge source '{}' not found", e.source));
                 continue;
-            }
+            },
         };
         let target_id = match resolve_node(&e.target, &name_to_id, graph) {
             Some(id) => id,
             None => {
                 errors.push(format!("Edge target '{}' not found", e.target));
                 continue;
-            }
+            },
         };
 
         let label = e.label.clone().unwrap_or_else(|| {
@@ -232,17 +257,29 @@ pub async fn import_graph(
 
     info!(
         "Graph import done: {} created, {} reused, {} edges, {} errors",
-        nodes_created, nodes_reused, edges_created, errors.len()
+        nodes_created,
+        nodes_reused,
+        edges_created,
+        errors.len()
     );
 
-    Ok(Json(GraphImportResponse { nodes_created, nodes_reused, edges_created, errors }))
+    Ok(Json(GraphImportResponse {
+        nodes_created,
+        nodes_reused,
+        edges_created,
+        errors,
+    }))
 }
 
 // ---------------------------------------------------------------------------
 // Node type builders
 // ---------------------------------------------------------------------------
 
-fn build_node_type(name: &str, type_str: &str, props: &HashMap<String, serde_json::Value>) -> NodeType {
+fn build_node_type(
+    name: &str,
+    type_str: &str,
+    props: &HashMap<String, serde_json::Value>,
+) -> NodeType {
     match type_str.to_lowercase().as_str() {
         "agent" => NodeType::Agent {
             agent_id: prop_u64(props, "agent_id"),
@@ -375,7 +412,11 @@ fn build_edge_type(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_node(name: &str, batch_map: &HashMap<String, u64>, graph: &agent_db_graph::Graph) -> Option<u64> {
+fn resolve_node(
+    name: &str,
+    batch_map: &HashMap<String, u64>,
+    graph: &agent_db_graph::Graph,
+) -> Option<u64> {
     if let Some(&id) = batch_map.get(name) {
         return Some(id);
     }
@@ -407,11 +448,19 @@ fn map_concept_type(type_str: &str) -> ConceptType {
 }
 
 fn prop_str(props: &HashMap<String, serde_json::Value>, key: &str) -> String {
-    props.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    props
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn prop_str_or(props: &HashMap<String, serde_json::Value>, key: &str, default: &str) -> String {
-    props.get(key).and_then(|v| v.as_str()).unwrap_or(default).to_string()
+    props
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or(default)
+        .to_string()
 }
 
 fn prop_u64(props: &HashMap<String, serde_json::Value>, key: &str) -> u64 {
@@ -419,13 +468,22 @@ fn prop_u64(props: &HashMap<String, serde_json::Value>, key: &str) -> u64 {
 }
 
 fn prop_f32_or(props: &HashMap<String, serde_json::Value>, key: &str, default: f32) -> f32 {
-    props.get(key).and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default)
+    props
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .map(|f| f as f32)
+        .unwrap_or(default)
 }
 
 fn prop_str_vec(props: &HashMap<String, serde_json::Value>, key: &str) -> Vec<String> {
-    props.get(key)
+    props
+        .get(key)
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -440,7 +498,10 @@ fn is_type_specific_key(node_type: &str, key: &str) -> bool {
         "strategy" => matches!(key, "strategy_id" | "agent_id"),
         "tool" => matches!(key, "tool_type"),
         "result" => matches!(key, "result_type" | "summary"),
-        "claim" => matches!(key, "claim_id" | "claim_text" | "confidence" | "source_event_id"),
+        "claim" => matches!(
+            key,
+            "claim_id" | "claim_text" | "confidence" | "source_event_id"
+        ),
         _ => matches!(key, "concept_type" | "confidence"),
     }
 }

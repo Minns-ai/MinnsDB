@@ -1,0 +1,25 @@
+[package]
+name = "minns-wasm-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Sandboxed WASM agent runtime for MinnsDB"
+
+[dependencies]
+agent-db-core = { path = "../agent-db-core" }
+agent-db-tables = { path = "../agent-db-tables" }
+agent-db-graph = { path = "../agent-db-graph" }
+agent-db-storage = { path = "../agent-db-storage" }
+wasmtime = "29"
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+thiserror = "1.0"
+blake3 = "1.5"
+reqwest = { version = "0.11" }
+cron = "0.13"
+chrono = "0.4"
+rustc-hash = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
