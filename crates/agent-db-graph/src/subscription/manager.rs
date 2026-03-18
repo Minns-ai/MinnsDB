@@ -13,8 +13,8 @@ use crate::structures::Graph;
 use super::delta::{DeltaBatch, GraphDelta};
 use super::diff::{build_cached_output, diff_outputs, CachedOutput};
 use super::incremental::{
-    AggregationState, BoundEntityId, ExpandState, FilterState,
-    GroupedAggregationState, IncrementalPlan, MaintenanceStrategy, RowDelta, RowId, ScanState,
+    AggregationState, BoundEntityId, ExpandState, FilterState, GroupedAggregationState,
+    IncrementalPlan, MaintenanceStrategy, RowDelta, RowId, ScanState,
 };
 use super::varlength::VarLengthExpandState;
 
@@ -104,10 +104,8 @@ impl SubscriptionManager {
         let ops = init_operator_states(&plan, graph, &binding_rows);
 
         // Initialize aggregation state if aggregation present.
-        let initial_row_ids: Vec<RowId> = binding_rows
-            .iter()
-            .map(|b| RowId::new(b.clone()))
-            .collect();
+        let initial_row_ids: Vec<RowId> =
+            binding_rows.iter().map(|b| RowId::new(b.clone())).collect();
 
         let is_incremental = matches!(incremental_plan.strategy, MaintenanceStrategy::Incremental);
         let has_agg = !plan.aggregations.is_empty();
@@ -204,22 +202,23 @@ impl SubscriptionManager {
             let update = match (&sub.incremental_plan.strategy, has_gap) {
                 (MaintenanceStrategy::FullRerun { .. }, _) | (_, true) => {
                     process_full_rerun(sub, graph, ontology)
-                }
+                },
                 (MaintenanceStrategy::Incremental, false) => {
                     // Check for NodeMerged → force targeted rerun.
                     // We check unconditionally for any NodeMerged delta because
                     // the absorbed node may have already been removed from operator
                     // state by a preceding NodeRemoved batch in the same drain cycle.
-                    let has_merge = batch.deltas.iter().any(|d| {
-                        matches!(d, GraphDelta::NodeMerged { .. })
-                    });
+                    let has_merge = batch
+                        .deltas
+                        .iter()
+                        .any(|d| matches!(d, GraphDelta::NodeMerged { .. }));
 
                     if has_merge {
                         process_full_rerun(sub, graph, ontology)
                     } else {
                         process_incremental(sub, batch, graph)
                     }
-                }
+                },
             };
 
             sub.last_generation = batch.generation_range.1;
@@ -235,11 +234,7 @@ impl SubscriptionManager {
     /// Drain all pending deltas from the broadcast channel and process them.
     /// Updates are buffered per-subscription in `pending_updates`.
     /// Returns the total number of updates processed.
-    pub fn drain_and_process(
-        &mut self,
-        graph: &Graph,
-        ontology: &OntologyRegistry,
-    ) -> usize {
+    pub fn drain_and_process(&mut self, graph: &Graph, ontology: &OntologyRegistry) -> usize {
         let mut all_updates = Vec::new();
         let mut lagged = false;
 
@@ -248,7 +243,7 @@ impl SubscriptionManager {
                 Ok(batch) => {
                     let updates = self.process_batch(&batch, graph, ontology);
                     all_updates.extend(updates);
-                }
+                },
                 Err(broadcast::error::TryRecvError::Empty) => break,
                 Err(broadcast::error::TryRecvError::Closed) => break,
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
@@ -257,7 +252,7 @@ impl SubscriptionManager {
                         n
                     );
                     lagged = true;
-                }
+                },
             }
         }
 
@@ -318,7 +313,7 @@ impl SubscriptionManager {
                     MaintenanceStrategy::Incremental => "incremental".to_string(),
                     MaintenanceStrategy::FullRerun { reason } => {
                         format!("full_rerun: {}", reason)
-                    }
+                    },
                 };
                 (id, state.cached_output.rows.len(), strategy)
             })
@@ -335,7 +330,8 @@ fn process_full_rerun(
     graph: &Graph,
     ontology: &OntologyRegistry,
 ) -> Option<SubscriptionUpdate> {
-    let result = Executor::execute_with_bindings(graph, ontology, sub.incremental_plan.plan.clone());
+    let result =
+        Executor::execute_with_bindings(graph, ontology, sub.incremental_plan.plan.clone());
     let (new_output, new_bindings) = match result {
         Ok(r) => r,
         Err(_) => return None,
@@ -357,10 +353,7 @@ fn process_full_rerun(
     // Re-init aggregation state from new bindings on full rerun.
     if sub.aggregation_state.is_some() && !sub.incremental_plan.plan.aggregations.is_empty() {
         let agg = &sub.incremental_plan.plan.aggregations[0];
-        let new_row_ids: Vec<RowId> = new_bindings
-            .iter()
-            .map(|b| RowId::new(b.clone()))
-            .collect();
+        let new_row_ids: Vec<RowId> = new_bindings.iter().map(|b| RowId::new(b.clone())).collect();
         sub.aggregation_state = Some(AggregationState::init(
             &agg.function,
             &agg.input_expr,
@@ -368,13 +361,14 @@ fn process_full_rerun(
             graph,
         ));
     }
-    let count = sub.aggregation_state.as_ref().map(|agg| {
-        match agg.current_value() {
+    let count = sub
+        .aggregation_state
+        .as_ref()
+        .map(|agg| match agg.current_value() {
             Value::Int(i) => i,
             Value::Float(f) => f as i64,
             _ => 0,
-        }
-    });
+        });
 
     sub.cached_output = new_cached;
 
@@ -406,16 +400,20 @@ fn process_incremental(
         match delta {
             GraphDelta::NodeAdded { .. } | GraphDelta::NodeRemoved { .. } => {
                 node_deltas.push(delta);
-            }
+            },
             GraphDelta::EdgeAdded { .. }
             | GraphDelta::EdgeRemoved { .. }
             | GraphDelta::EdgeSuperseded { .. }
             | GraphDelta::EdgeMutated { .. } => {
                 edge_deltas.push(delta);
-            }
+            },
             GraphDelta::NodeMerged { .. } => {
                 // Should have been caught above and sent to full rerun.
-            }
+            },
+            // Table deltas are not processed by the graph subscription incremental engine.
+            GraphDelta::TableRowInserted { .. }
+            | GraphDelta::TableRowUpdated { .. }
+            | GraphDelta::TableRowDeleted { .. } => {},
         }
     }
 
@@ -431,13 +429,8 @@ fn process_incremental(
         let mut expand_deltas =
             expand_state.apply_upstream_deltas(&scan_row_deltas, graph, viewport, txn_cutoff);
         for delta in &edge_deltas {
-            let ed = expand_state.apply_edge_delta(
-                delta,
-                &sub.scan_state,
-                graph,
-                viewport,
-                txn_cutoff,
-            );
+            let ed =
+                expand_state.apply_edge_delta(delta, &sub.scan_state, graph, viewport, txn_cutoff);
             expand_deltas.extend(ed);
         }
         expand_deltas
@@ -445,13 +438,7 @@ fn process_incremental(
         let mut vl_deltas =
             vl_state.apply_upstream_deltas(&scan_row_deltas, graph, viewport, txn_cutoff);
         for delta in &edge_deltas {
-            let ed = vl_state.apply_edge_delta(
-                delta,
-                &sub.scan_state,
-                graph,
-                viewport,
-                txn_cutoff,
-            );
+            let ed = vl_state.apply_edge_delta(delta, &sub.scan_state, graph, viewport, txn_cutoff);
             vl_deltas.extend(ed);
         }
         vl_deltas
@@ -477,13 +464,15 @@ fn process_incremental(
         match delta {
             RowDelta::Insert { row_id } => {
                 let values = project_row(row_id, &sub.incremental_plan.plan, graph);
-                sub.cached_output.rows.insert(row_id.clone(), values.clone());
+                sub.cached_output
+                    .rows
+                    .insert(row_id.clone(), values.clone());
                 inserts.push((row_id.clone(), values));
-            }
+            },
             RowDelta::Delete { row_id } => {
                 sub.cached_output.rows.remove(row_id);
                 deletes.push(row_id.clone());
-            }
+            },
         }
     }
 
@@ -522,7 +511,11 @@ fn project_row(row_id: &RowId, plan: &ExecutionPlan, graph: &Graph) -> Vec<Value
 
 /// Evaluate a projection expression against a RowId's bindings.
 /// Delegates to the incremental expression evaluator.
-fn evaluate_projection_expr(expr: &crate::query_lang::planner::RExpr, row_id: &RowId, graph: &Graph) -> Value {
+fn evaluate_projection_expr(
+    expr: &crate::query_lang::planner::RExpr,
+    row_id: &RowId,
+    graph: &Graph,
+) -> Value {
     super::incremental::evaluate_expr_for_row_or_null(expr, row_id, graph)
 }
 
@@ -554,7 +547,7 @@ fn init_operator_states(
         match step {
             PlanStep::ScanNodes { var, labels, props } => {
                 scan_state = ScanState::init(*var, labels, props, graph);
-            }
+            },
             PlanStep::Expand {
                 from_var,
                 edge_var,
@@ -591,10 +584,12 @@ fn init_operator_states(
                         plan.transaction_cutoff,
                     ));
                 }
-            }
+            },
             PlanStep::Filter(expr) => {
                 filter_states.push(FilterState::init(expr.clone()));
-            }
+            },
+            // Table steps are handled separately; skip for graph subscription init.
+            PlanStep::ScanTable { .. } | PlanStep::JoinTable { .. } => {},
         }
     }
 
@@ -603,7 +598,12 @@ fn init_operator_states(
         let mut current_rows: Vec<RowId> = scan_state
             .active_nodes
             .iter()
-            .map(|&nid| RowId::new(smallvec::smallvec![(scan_state.var, BoundEntityId::Node(nid))]))
+            .map(|&nid| {
+                RowId::new(smallvec::smallvec![(
+                    scan_state.var,
+                    BoundEntityId::Node(nid)
+                )])
+            })
             .collect();
 
         if let Some(es) = &expand_state {
@@ -638,7 +638,8 @@ fn init_operator_states(
         for filter_state in &mut filter_states {
             let mut passed_rows = Vec::new();
             for row_id in &current_rows {
-                if super::incremental::evaluate_filter_for_row(&filter_state.filter, row_id, graph) {
+                if super::incremental::evaluate_filter_for_row(&filter_state.filter, row_id, graph)
+                {
                     filter_state.passed.insert(row_id.clone());
                     passed_rows.push(row_id.clone());
                 }

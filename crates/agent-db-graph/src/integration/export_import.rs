@@ -54,6 +54,11 @@ impl GraphEngine {
         Ok(())
     }
 
+    /// Get the ReDB backend, if persistent storage is configured.
+    pub fn redb_backend(&self) -> Option<&RedbBackend> {
+        self.redb_backend.as_ref().map(|arc| arc.as_ref())
+    }
+
     /// Get a reference to the redb backend for sync export operations.
     /// Call `export_prepare()` first.
     pub fn export_backend(&self) -> GraphResult<&RedbBackend> {

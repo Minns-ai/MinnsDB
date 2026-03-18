@@ -1,8 +1,6 @@
 //! Query types, result types, and constraint definitions for graph traversal.
 
-use crate::structures::{
-    Depth, Direction, EdgeId, EdgeWeight, GraphEdge, GraphNode, NodeId,
-};
+use crate::structures::{Depth, Direction, EdgeId, EdgeWeight, GraphEdge, GraphNode, NodeId};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 

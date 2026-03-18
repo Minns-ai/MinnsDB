@@ -9,6 +9,9 @@ agent-db-graph = { path = "../crates/agent-db-graph" }
 agent-db-events = { path = "../crates/agent-db-events" }
 agent-db-core = { path = "../crates/agent-db-core" }
 agent-db-planning = { path = "../ml/agent-db-planning" }
+agent-db-tables = { path = "../crates/agent-db-tables" }
+agent-db-storage = { path = "../crates/agent-db-storage" }
+minns-wasm-runtime = { path = "../crates/minns-wasm-runtime" }
 
 # Web framework
 axum = { version = "0.7", features = ["ws"] }
@@ -39,7 +42,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 axum-macros = "0.5.0"
 
+# Encoding
+base64 = "0.22"
+
 # Concurrency
 parking_lot = "0.12"
 dashmap = "6"
 num_cpus = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tower = { version = "0.4", features = ["util"] }
+hyper = "1"
+http-body-util = "0.1"
+futures = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

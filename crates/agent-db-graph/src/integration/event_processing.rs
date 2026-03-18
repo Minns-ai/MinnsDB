@@ -478,8 +478,7 @@ impl GraphEngine {
             }
 
             // Run Louvain community detection periodically
-            if self.config.enable_louvain && new_count % self.config.louvain_interval == 0
-            {
+            if self.config.enable_louvain && new_count % self.config.louvain_interval == 0 {
                 if let Err(e) = self.run_community_detection().await {
                     result.errors.push(e);
                 } else {
@@ -979,10 +978,9 @@ impl GraphEngine {
 
         // Update statistics
         {
-            self.stats.total_events_processed.fetch_add(
-                event_count,
-                AtomicOrdering::Relaxed,
-            );
+            self.stats
+                .total_events_processed
+                .fetch_add(event_count, AtomicOrdering::Relaxed);
             self.stats.total_nodes_created.fetch_add(
                 combined_result.nodes_created.len() as u64,
                 AtomicOrdering::Relaxed,

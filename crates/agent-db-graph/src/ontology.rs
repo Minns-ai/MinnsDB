@@ -1239,7 +1239,10 @@ pub(crate) mod tests {
         let reg = test_registry();
         assert!(reg.triggers_cascade("location"));
         assert!(!reg.triggers_cascade("financial"));
-        assert_eq!(reg.cascade_dependents("location"), vec!["routine", "relationship"]);
+        assert_eq!(
+            reg.cascade_dependents("location"),
+            vec!["routine", "relationship"]
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use super::adj_list::AdjList;
 use super::edge::EdgeType;
-use super::graph::{Graph, edge_text_for_bm25};
+use super::graph::{edge_text_for_bm25, Graph};
 use super::node::{GraphNode, NodeType};
 use super::types::{EdgeId, NodeId};
 use crate::subscription::delta::{DeltaBatch, GraphDelta};
@@ -24,9 +24,7 @@ fn edge_type_tag(edge_type: &EdgeType) -> String {
         EdgeType::Communication { .. } => "Communication".to_string(),
         EdgeType::DerivedFrom { .. } => "DerivedFrom".to_string(),
         EdgeType::SupportedBy { .. } => "SupportedBy".to_string(),
-        EdgeType::CodeStructure {
-            relation_kind, ..
-        } => relation_kind.clone(),
+        EdgeType::CodeStructure { relation_kind, .. } => relation_kind.clone(),
         EdgeType::About {
             predicate: Some(p), ..
         } => p.clone(),
@@ -58,10 +56,7 @@ impl Graph {
         let disc = node.node_type.discriminant();
 
         // Update type index (u8 discriminant key)
-        self.type_index
-            .entry(disc)
-            .or_default()
-            .insert(node_id);
+        self.type_index.entry(disc).or_default().insert(node_id);
 
         // Update temporal index
         self.temporal_index

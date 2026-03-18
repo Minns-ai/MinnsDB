@@ -50,12 +50,12 @@ impl Value {
             Value::Null => serde_json::Value::Null,
             Value::List(items) => {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
-            }
+            },
             Value::Map(map) => {
                 let obj: serde_json::Map<String, serde_json::Value> =
                     map.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
                 serde_json::Value::Object(obj)
-            }
+            },
         }
     }
 }
@@ -71,19 +71,23 @@ impl fmt::Display for Value {
             Value::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", item)?;
                 }
                 write!(f, "]")
-            }
+            },
             Value::Map(map) => {
                 write!(f, "{{")?;
                 for (i, (k, v)) in map.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}: {}", k, v)?;
                 }
                 write!(f, "}}")
-            }
+            },
         }
     }
 }
@@ -133,7 +137,7 @@ impl fmt::Display for QueryError {
         match self {
             QueryError::ParseError { message, position } => {
                 write!(f, "Parse error at position {}: {}", position, message)
-            }
+            },
             QueryError::PlanError(msg) => write!(f, "Plan error: {}", msg),
             QueryError::ExecutionError(msg) => write!(f, "Execution error: {}", msg),
             QueryError::Timeout => write!(f, "Query execution timed out"),

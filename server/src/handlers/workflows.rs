@@ -1192,7 +1192,7 @@ pub async fn workflow_step_transition(
                                 "Failed to create concept node for state '{}'",
                                 request.state
                             ));
-                        }
+                        },
                     };
 
                     // Create new state edge

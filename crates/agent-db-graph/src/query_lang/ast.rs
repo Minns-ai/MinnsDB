@@ -1,25 +1,106 @@
 /// AST types for MinnsQL.
 
-/// Top-level statement: a query, subscription, or unsubscription.
+/// Top-level statement: a query, subscription, DDL, or DML.
 #[derive(Debug, Clone)]
 pub enum Statement {
-    /// Regular MATCH ... RETURN query.
+    /// Regular MATCH/FROM ... RETURN query.
     Query(Query),
-    /// SUBSCRIBE MATCH ... RETURN — creates a live subscription.
+    /// SUBSCRIBE MATCH/FROM ... RETURN — creates a live subscription.
     Subscribe(Query),
     /// UNSUBSCRIBE <id> — removes a subscription.
     Unsubscribe(u64),
+    /// CREATE TABLE ...
+    CreateTable(CreateTableStmt),
+    /// DROP TABLE name
+    DropTable(String),
+    /// INSERT INTO table VALUES ...
+    InsertInto(InsertStmt),
+    /// UPDATE table SET ... WHERE ...
+    UpdateTable(UpdateStmt),
+    /// DELETE FROM table WHERE ...
+    DeleteFrom(DeleteStmt),
 }
 
 #[derive(Debug, Clone)]
 pub struct Query {
     pub match_clauses: Vec<Pattern>,
+    /// FROM table_name (driving table for table queries).
+    pub from_table: Option<String>,
+    /// JOIN clauses (zero or more).
+    pub joins: Vec<JoinClause>,
     pub when: Option<WhenClause>,
     pub as_of: Option<Expr>,
     pub where_clause: Option<BoolExpr>,
     pub returns: Vec<ReturnItem>,
     pub order_by: Vec<OrderItem>,
     pub limit: Option<u64>,
+}
+
+// -- DDL/DML AST nodes --
+
+#[derive(Debug, Clone)]
+pub struct CreateTableStmt {
+    pub name: String,
+    pub columns: Vec<ColumnDefAst>,
+    pub constraints: Vec<ConstraintAst>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnDefAst {
+    pub name: String,
+    pub col_type: String,
+    pub nullable: bool,
+    pub is_primary_key: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintAst {
+    pub kind: ConstraintKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConstraintKind {
+    PrimaryKey(Vec<String>),
+    Unique(Vec<String>),
+    NotNull(String),
+    ReferencesGraph(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct InsertStmt {
+    pub table: String,
+    pub columns: Option<Vec<String>>,
+    pub rows: Vec<Vec<Literal>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateStmt {
+    pub table: String,
+    pub assignments: Vec<(String, Expr)>,
+    pub where_clause: BoolExpr,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteStmt {
+    pub table: String,
+    pub where_clause: BoolExpr,
+}
+
+// -- JOIN AST --
+
+#[derive(Debug, Clone)]
+pub struct JoinClause {
+    pub table: String,
+    pub on_left: JoinSide,
+    pub on_right: JoinSide,
+}
+
+#[derive(Debug, Clone)]
+pub enum JoinSide {
+    /// Table column: table_name.column_name
+    TableColumn { table: String, column: String },
+    /// Graph variable (for graph-to-table joins)
+    GraphVar(String),
 }
 
 #[derive(Debug, Clone)]

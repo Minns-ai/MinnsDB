@@ -37,10 +37,7 @@ impl super::GraphEngine {
     /// Upload new ontology TTL content, register properties, and run LLM cascade inference.
     ///
     /// Returns `(properties_registered, cascade_updates)`.
-    pub async fn upload_ontology_ttl(
-        &self,
-        ttl_content: &str,
-    ) -> Result<(usize, usize), String> {
+    pub async fn upload_ontology_ttl(&self, ttl_content: &str) -> Result<(usize, usize), String> {
         // Phase 1: Parse TTL and register properties
         let before_ids: std::collections::HashSet<String> =
             self.ontology.all_property_ids().into_iter().collect();
@@ -81,14 +78,16 @@ impl super::GraphEngine {
             None => {
                 tracing::debug!("No LLM client available, skipping cascade inference");
                 return Ok(0);
-            }
+            },
         };
 
         let (system_prompt, user_prompt) =
             OntologyEvolutionEngine::build_cascade_inference_prompt(&self.ontology);
 
-        tracing::info!("Running LLM cascade inference on {} properties",
-            self.ontology.all_property_ids().len());
+        tracing::info!(
+            "Running LLM cascade inference on {} properties",
+            self.ontology.all_property_ids().len()
+        );
 
         let request = LlmRequest {
             system_prompt,
@@ -138,8 +137,11 @@ impl super::GraphEngine {
                 if has_deps || is_dep {
                     ttl.push_str(&format!("eg:{} a owl:ObjectProperty", pid));
                     if has_deps {
-                        let deps: Vec<String> =
-                            desc.cascade_dependents.iter().map(|d| format!("eg:{}", d)).collect();
+                        let deps: Vec<String> = desc
+                            .cascade_dependents
+                            .iter()
+                            .map(|d| format!("eg:{}", d))
+                            .collect();
                         ttl.push_str(&format!(" ;\n    eg:cascadeDependents {}", deps.join(", ")));
                     }
                     if is_dep {
@@ -164,21 +166,23 @@ impl super::GraphEngine {
     /// Run behavior inference + hierarchy discovery (evolution pass).
     pub async fn run_ontology_evolution_pass(&self) -> Result<Vec<u64>, String> {
         // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
-        tracing::warn!("run_ontology_evolution_pass: evolution engine not yet wired to GraphEngine");
+        tracing::warn!(
+            "run_ontology_evolution_pass: evolution engine not yet wired to GraphEngine"
+        );
         Ok(Vec::new())
     }
 
     /// Run LLM-assisted hierarchy discovery for unknown predicates.
     pub async fn run_ontology_hierarchy_discovery(&self) -> Result<Vec<u64>, String> {
         // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
-        tracing::warn!("run_ontology_hierarchy_discovery: evolution engine not yet wired to GraphEngine");
+        tracing::warn!(
+            "run_ontology_hierarchy_discovery: evolution engine not yet wired to GraphEngine"
+        );
         Ok(Vec::new())
     }
 
     /// List ontology observations from the evolution engine.
-    pub async fn list_ontology_observations(
-        &self,
-    ) -> (Vec<serde_json::Value>, serde_json::Value) {
+    pub async fn list_ontology_observations(&self) -> (Vec<serde_json::Value>, serde_json::Value) {
         // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
         (Vec::new(), serde_json::json!({"total_observations": 0}))
     }
@@ -192,10 +196,7 @@ impl super::GraphEngine {
     }
 
     /// Approve and apply a proposal.
-    pub async fn approve_and_apply_ontology_proposal(
-        &self,
-        _id: u64,
-    ) -> Result<usize, String> {
+    pub async fn approve_and_apply_ontology_proposal(&self, _id: u64) -> Result<usize, String> {
         Err("Evolution engine not yet wired to GraphEngine".into())
     }
 

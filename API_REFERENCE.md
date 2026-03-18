@@ -2,8 +2,8 @@
 
 **Complete REST API documentation for SDK integration**
 
-Version: 2.6.0
-Last Updated: 2026-03-17
+Version: 3.0.0
+Last Updated: 2026-03-18
 
 ---
 
@@ -21,19 +21,21 @@ Last Updated: 2026-03-17
 10. [Natural Language Query (NLQ)](#natural-language-query-nlq)
 11. [MinnsQL Structured Query](#minnsql-structured-query)
 12. [Reactive Subscriptions](#reactive-subscriptions)
-13. [Claims](#claims)
-14. [Structured Memory](#structured-memory)
-15. [Conversation Ingestion](#conversation-ingestion)
-16. [Single Message Ingestion](#single-message-ingestion)
-17. [Workflows](#workflows)
-18. [Agent Registry](#agent-registry)
-19. [Ontology Evolution](#ontology-evolution)
-20. [Planning & World Model](#planning--world-model)
-21. [Code Intelligence](#code-intelligence)
-22. [Admin](#admin)
-23. [Health](#health)
-24. [Error Handling](#error-handling)
-25. [Configuration](#configuration)
+13. **[Temporal Tables](#temporal-tables)** *(new in 3.0)*
+14. [Claims](#claims)
+15. [Structured Memory](#structured-memory)
+16. [Conversation Ingestion](#conversation-ingestion)
+17. [Single Message Ingestion](#single-message-ingestion)
+18. [Workflows](#workflows)
+19. [Agent Registry](#agent-registry)
+20. [Ontology Evolution](#ontology-evolution)
+21. **[WASM Agent Modules](#wasm-agent-modules)** *(new in 3.0)*
+22. [Planning & World Model](#planning--world-model)
+23. [Code Intelligence](#code-intelligence)
+24. [Admin](#admin)
+25. [Health](#health)
+26. [Error Handling](#error-handling)
+27. [Configuration](#configuration)
 
 ---
 
@@ -1027,7 +1029,9 @@ Execute structured graph queries using MinnsQL, a Cypher-inspired query language
 
 ### MinnsQL Language Reference
 
-#### Basic Syntax
+MinnsQL is a unified query language that spans both graph and table operations. It supports graph pattern matching (MATCH), table queries (FROM), table-to-table and graph-to-table JOINs, DDL (CREATE/DROP TABLE), and DML (INSERT/UPDATE/DELETE).
+
+#### Graph Query Syntax
 
 ```sql
 MATCH (variable:Label {prop: "value"})-[edge:TYPE]->(target)
@@ -1036,6 +1040,94 @@ RETURN expression AS alias
 ORDER BY alias ASC|DESC
 LIMIT n
 ```
+
+#### Table Query Syntax (FROM)
+
+```sql
+FROM table_name
+WHERE table_name.column = value
+RETURN table_name.col1, table_name.col2
+ORDER BY table_name.col1 DESC
+LIMIT n
+```
+
+Column references in FROM queries must be qualified with the table name: `table.column`.
+
+#### Table-to-Table JOIN
+
+```sql
+FROM orders
+JOIN customers ON orders.customer_id = customers.id
+WHERE customers.region = "EU"
+RETURN customers.name, orders.amount
+```
+
+Multi-way joins:
+```sql
+FROM orders
+JOIN customers ON orders.customer_id = customers.id
+JOIN shipments ON shipments.order_id = orders.id
+WHERE shipments.status = "delivered"
+RETURN customers.name, orders.amount, shipments.tracking
+```
+
+All joins are inner equi-joins. Each JOIN extends the result row with columns from the joined table.
+
+#### Graph-to-Table JOIN
+
+```sql
+MATCH (n:Person)
+JOIN orders ON orders.node = n
+RETURN n.name, orders.amount
+```
+
+The join condition links a table's NodeRef column to a graph variable.
+
+#### DDL — CREATE TABLE / DROP TABLE
+
+```sql
+CREATE TABLE orders (
+  id Int64 PRIMARY KEY,
+  customer String NOT NULL,
+  amount Float64,
+  status String,
+  node NodeRef REFERENCES GRAPH
+)
+```
+
+Column types: `String`, `Int64`, `Float64`, `Bool`, `Timestamp`, `Json`, `NodeRef`
+
+Constraints: `PRIMARY KEY`, `NOT NULL`, `UNIQUE`, `REFERENCES GRAPH` (NodeRef foreign key to graph)
+
+```sql
+DROP TABLE orders
+```
+
+#### DML — INSERT / UPDATE / DELETE
+
+**Insert** (positional or with column names):
+```sql
+INSERT INTO orders VALUES (1, "Alice", 99.99, "pending", 42)
+INSERT INTO orders (id, customer, amount) VALUES (1, "Alice", 99.99), (2, "Bob", 50.00)
+```
+
+**Update** (SET with WHERE on any column):
+```sql
+UPDATE orders SET status = "shipped", amount = 105.0 WHERE id = 1
+UPDATE orders SET status = "cancelled" WHERE status = "pending" AND amount < 10.0
+```
+
+WHERE in UPDATE supports: `=`, `!=`, `<`, `>`, `<=`, `>=`, `CONTAINS`, `STARTS WITH`, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`. Only literal values are supported in SET assignments.
+
+**Delete** (WHERE on any column):
+```sql
+DELETE FROM orders WHERE id = 1
+DELETE FROM orders WHERE status = "cancelled"
+```
+
+#### Temporal Clauses (Tables and Graph)
+
+Temporal clauses work on both graph edges and table rows. Tables use bi-temporal versioning: every UPDATE creates a new version and closes the old one.
 
 #### Temporal Clauses
 
@@ -1471,6 +1563,215 @@ UNSUBSCRIBE 7
 ```
 
 These are parsed as `Statement::Subscribe(Query)` and `Statement::Unsubscribe(id)` respectively, and can be used via `POST /api/query` when subscription support is wired through the query endpoint.
+
+---
+
+## Temporal Tables
+
+MinnsDB includes a full temporal relational table engine alongside its graph database. Tables support bi-temporal versioning, bulk import, graph linking via NodeRef columns, and full CRUD operations through both the REST API and MinnsQL.
+
+### Architecture
+
+Tables use a page-based row store with 8KB slotted pages, blake3 page checksums, custom binary row encoding with O(1) column access, and in-memory indexes rebuilt from page data on startup. Every row is bi-temporal: `valid_from`/`valid_until` (real-world validity) and `created_at` (transaction time). Updates create new versions and close old ones — no data is overwritten.
+
+### REST API Endpoints
+
+#### POST /api/tables — Create table
+
+**Request:**
+```json
+{
+  "name": "orders",
+  "columns": [
+    {"name": "id", "col_type": "Int64", "nullable": false},
+    {"name": "customer", "col_type": "String", "nullable": false},
+    {"name": "amount", "col_type": "Float64", "nullable": true},
+    {"name": "node", "col_type": "NodeRef", "nullable": true}
+  ],
+  "constraints": [
+    {"PrimaryKey": ["id"]}
+  ]
+}
+```
+
+**Response (201):**
+```json
+{"table_id": 1, "name": "orders"}
+```
+
+#### GET /api/tables — List tables
+
+**Response (200):**
+```json
+[
+  {"table_id": 1, "name": "orders", "columns": [...], "constraints": [...]},
+  {"table_id": 2, "name": "customers", "columns": [...], "constraints": [...]}
+]
+```
+
+#### GET /api/tables/:name/schema — Get schema
+
+**Response (200):**
+```json
+{"table_id": 1, "name": "orders", "columns": [...], "constraints": [...]}
+```
+
+#### DELETE /api/tables/:name — Drop table
+
+**Response (200):**
+```json
+{"table_id": 1, "dropped": true}
+```
+
+#### POST /api/tables/:name/rows — Insert row(s)
+
+**Single row:**
+```json
+{
+  "group_id": 0,
+  "values": [1, "Alice", 99.99, null]
+}
+```
+
+**Response (201):**
+```json
+{"row_id": 1, "version_id": 1}
+```
+
+**Batch (array):**
+```json
+[
+  {"group_id": 0, "values": [1, "Alice", 99.99, null]},
+  {"group_id": 0, "values": [2, "Bob", 50.00, null]}
+]
+```
+
+#### PUT /api/tables/:name/rows/:id — Update row
+
+```json
+{
+  "group_id": 0,
+  "values": [1, "Alice Updated", 105.0, null]
+}
+```
+
+**Response (200):**
+```json
+{"old_version_id": 1, "new_version_id": 2}
+```
+
+Updates create a new version. The old version's `valid_until` is set to the current timestamp. Both versions are retained for temporal queries.
+
+#### DELETE /api/tables/:name/rows/:id — Soft-delete row
+
+```json
+{"group_id": 0}
+```
+
+**Response (200):**
+```json
+{"version_id": 1}
+```
+
+Soft-deletes close the row's `valid_until`. The row remains queryable through `WHEN ALL` and `AS OF` temporal queries until removed by compaction.
+
+#### GET /api/tables/:name/rows — Scan rows
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `when` | string | `"active"` | `"active"` (current rows) or `"all"` (all versions) |
+| `as_of` | u64 | — | Point-in-time timestamp (nanoseconds) |
+| `group_id` | u64 | `0` | Multi-tenant group |
+| `limit` | usize | all | Max rows to return |
+| `offset` | usize | `0` | Skip first N rows |
+
+**Response (200):**
+```json
+{
+  "count": 5,
+  "rows": [
+    {
+      "row_id": 1, "version_id": 2, "group_id": 0,
+      "valid_from": 1710700000000000000,
+      "valid_until": null,
+      "values": [1, "Alice", 105.0, null]
+    }
+  ]
+}
+```
+
+#### GET /api/tables/:name/by-node/:node_id — Rows referencing a graph node
+
+Returns all active rows in the table where a NodeRef column points to the given graph node ID.
+
+**Query parameters:** `group_id` (optional)
+
+#### POST /api/tables/:name/compact — Trigger compaction
+
+Reclaims space from old closed versions past the retention window (default: 7 days). At least one version per row is always retained.
+
+**Response (200):**
+```json
+{"versions_removed": 42, "pages_compacted": 3}
+```
+
+#### GET /api/tables/:name/stats — Table statistics
+
+**Response (200):**
+```json
+{
+  "name": "orders",
+  "active_rows": 150,
+  "total_versions": 200,
+  "pages": 5,
+  "generation": 200
+}
+```
+
+### MinnsQL for Tables
+
+All table operations are also available through the unified `POST /api/query` endpoint using MinnsQL syntax. See the [MinnsQL Language Reference](#minnsql-language-reference) section for the full grammar including CREATE TABLE, INSERT INTO, UPDATE, DELETE FROM, FROM queries, and JOINs.
+
+### Column Types
+
+| Type | Size | Description |
+|------|------|-------------|
+| `String` | variable | UTF-8 text |
+| `Int64` | 8 bytes | 64-bit signed integer |
+| `Float64` | 8 bytes | 64-bit IEEE 754 float |
+| `Bool` | 1 byte | true/false |
+| `Timestamp` | 8 bytes | Nanoseconds since Unix epoch |
+| `Json` | variable | Arbitrary nested data (stored as MessagePack internally) |
+| `NodeRef` | 8 bytes | Reference to a graph node ID |
+
+### Multi-Tenancy
+
+Every table row has an implicit `group_id` (u64). All queries, inserts, updates, and deletes are scoped by group_id. Unique constraints are enforced within a group, not globally. Different groups can have the same primary key values.
+
+### Temporal Model
+
+| Dimension | Fields | Meaning |
+|-----------|--------|---------|
+| Transaction time | `created_at` | When the row version was written to the database |
+| Valid time | `valid_from`, `valid_until` | When the fact was true in the real world |
+
+- `valid_until = null` means the row is currently active
+- UPDATE: closes old version (`valid_until = now`), inserts new version
+- DELETE: closes the version (`valid_until = now`), no new version
+- `WHEN ALL` queries return all versions including closed ones
+- `AS OF <timestamp>` queries return the state at a specific point in time
+
+### Storage Details
+
+- **8KB slotted pages** with blake3 checksums (validated on load)
+- **Custom binary row format** with null bitmap, fixed-width inline values, variable-length offset table
+- **O(1) column access** — read any column without parsing the entire row
+- **Dead slot reuse** — deleted slots are reused for new inserts without compaction
+- **Predicate pushdown** — `WHERE id = N` on primary key uses O(1) index lookup
+- **Row size limit** — a single row must fit within one 8KB page (~8100 bytes max)
+- **Persistence** — pages stored as raw 8KB blobs in ReDB, indexes rebuilt on startup
 
 ---
 
@@ -2344,6 +2645,280 @@ Ontology evolution statistics.
   "evolution_passes": 4
 }
 ```
+
+---
+
+## WASM Agent Modules
+
+MinnsDB includes a sandboxed WASM agent runtime. Developers write agent modules in Rust (or any language that compiles to WASM), upload them to the server, and the modules execute within a strict sandbox with explicit permissions, instruction budgets, memory limits, and usage metering.
+
+### Architecture
+
+- **Runtime**: Wasmtime with Cranelift JIT compilation
+- **Sandboxing**: Per-call instruction budget ("life"), epoch-based wall-time limits, 64MB memory cap
+- **Data exchange**: MessagePack for all host-to-module communication
+- **Permissions**: Modules declare required permissions; admin approves at upload; enforced at runtime
+- **Triggers**: Modules can be invoked by HTTP, table mutations, graph deltas, or cron schedules
+- **Usage metering**: Every call records life consumed, rows read/written, HTTP requests, etc. — resettable monthly for billing
+
+### REST API Endpoints
+
+#### POST /api/modules — Upload WASM module
+
+**Request:**
+```json
+{
+  "name": "order-processor",
+  "wasm_base64": "<base64 encoded WASM bytes>",
+  "permissions": [
+    "table:orders:read",
+    "table:orders:write",
+    "table:customers:read",
+    "graph:query",
+    "http:fetch:api.stripe.com"
+  ],
+  "group_id": 0
+}
+```
+
+**Limits:** Max 5MB WASM binary, max 100 modules.
+
+**Response (201):**
+```json
+{
+  "name": "order-processor",
+  "module_id": 1,
+  "enabled": true,
+  "permissions": ["table:orders:read", "table:orders:write", ...],
+  "functions": ["process_order", "reconcile"],
+  "triggers": 2
+}
+```
+
+The module is compiled, `__minns_describe__` is called to extract the descriptor (functions, triggers, permissions), and `__minns_init__` is called if exported.
+
+#### GET /api/modules — List modules
+
+**Response (200):**
+```json
+[
+  {"name": "order-processor", "module_id": 1, "enabled": true, "group_id": 0, "uploaded_at": 1710700000000000000}
+]
+```
+
+#### GET /api/modules/:name — Module info
+
+**Response (200):**
+```json
+{
+  "name": "order-processor",
+  "module_id": 1,
+  "enabled": true,
+  "permissions": ["table:orders:read", ...],
+  "functions": ["process_order", "reconcile"],
+  "triggers": 2
+}
+```
+
+#### DELETE /api/modules/:name — Unload module
+
+Removes the module instance, its blob (if not shared), and all its schedules. Usage data is retained until the next persist.
+
+**Response (200):**
+```json
+{"deleted": true}
+```
+
+#### POST /api/modules/:name/call/:function — Call a function
+
+**Request:**
+```json
+{
+  "args_base64": "<base64 encoded MessagePack args>"
+}
+```
+
+If `args_base64` is omitted, empty args are passed. The function receives the MessagePack bytes and returns MessagePack result bytes.
+
+**Response (200):**
+```json
+{
+  "result_base64": "<base64 encoded MessagePack result>"
+}
+```
+
+**Error responses:**
+- `404` — Module or function not found
+- `403` — Permission denied (module tried to access a resource it's not permitted)
+- `408` — Life exceeded (instruction budget exhausted) or timeout (wall-time limit)
+- `400` — Execution error
+
+#### PUT /api/modules/:name/enable — Enable module
+
+Enables a disabled module. Triggers and schedules resume.
+
+#### PUT /api/modules/:name/disable — Disable module
+
+Stops triggers and schedules. Direct function calls also fail.
+
+#### GET /api/modules/:name/usage — Usage statistics
+
+**Response (200):**
+```json
+{
+  "module_name": "order-processor",
+  "total_life_consumed_lo": 450000000000,
+  "total_life_consumed_hi": 0,
+  "total_calls": 150,
+  "total_rows_read": 3000,
+  "total_rows_written": 500,
+  "total_graph_queries": 50,
+  "total_http_requests": 25,
+  "total_http_bytes": 102400,
+  "total_subscription_events": 0,
+  "period_start": 1710700000000000000,
+  "last_updated": 1710786400000000000
+}
+```
+
+`total_life_consumed` is a u128 split across `_lo` (low 64 bits) and `_hi` (high 64 bits). Default life budget is 120 trillion per call (~1 minute of WASM runtime).
+
+#### POST /api/modules/:name/usage/reset — Reset usage (billing period)
+
+Resets all counters to zero and starts a new billing period. Returns the previous period's totals before zeroing.
+
+**Response (200):**
+```json
+{
+  "previous_period": {
+    "total_calls": 150,
+    "total_rows_read": 3000,
+    ...
+  },
+  "reset": true
+}
+```
+
+#### GET /api/modules/:name/schedules — List schedules
+
+**Response (200):**
+```json
+[
+  {
+    "schedule_id": 1,
+    "cron": "0 * * * * *",
+    "function": "reconcile",
+    "enabled": true,
+    "next_run": 1710786400000000000,
+    "last_run": 1710786340000000000
+  }
+]
+```
+
+#### POST /api/modules/:name/schedules — Create schedule
+
+```json
+{
+  "cron": "0 */5 * * * *",
+  "function": "reconcile"
+}
+```
+
+Cron expressions use 6-field format (seconds, minutes, hours, day-of-month, month, day-of-week).
+
+**Response (201):**
+```json
+{"schedule_id": 1}
+```
+
+#### DELETE /api/modules/:name/schedules/:id — Delete schedule
+
+**Response (200):**
+```json
+{"deleted": true}
+```
+
+### Permission System
+
+Modules declare required permissions in their descriptor. The admin reviews and approves at upload time. Every host function checks permissions at runtime.
+
+| Permission | Meaning |
+|-----------|---------|
+| `table:<name>:read` | Read rows from a specific table |
+| `table:<name>:write` | Insert/update/delete rows in a specific table |
+| `table:*:read` | Read any table (wildcard) |
+| `table:*:write` | Write any table (wildcard) |
+| `graph:query` | Execute graph queries (MinnsQL MATCH) |
+| `graph:subscribe` | Create graph subscriptions |
+| `http:fetch:<domain>` | Make HTTP requests to a specific domain |
+| `http:fetch:*` | Make HTTP requests to any external domain |
+| `schedule` | Create/modify scheduled tasks |
+
+Wildcard matching: each colon-separated segment is matched independently. `table:*:read` matches `table:orders:read`.
+
+### Sandboxing
+
+| Resource | Limit | Mechanism |
+|----------|-------|-----------|
+| Instructions | 120T per call (configurable) | Wasmtime instruction metering ("life budget"). Resets per call. |
+| Wall time | 30s per call (configurable) | Epoch interruption (10ms ticks) |
+| Memory | 64MB linear memory | Wasmtime `StoreLimits` |
+| Result size | 1MB per result buffer | Host-side enforcement |
+| HTTP responses | 1MB, 5s timeout | Host-side enforcement |
+| HTTP domains | Explicit allowlist | Permission check + internal IP blocking |
+| Table query rows | 100K max | Host-side enforcement |
+
+**SSRF protection**: Only `http://` and `https://` URLs are allowed. Redirects are disabled. Internal network addresses (`localhost`, `127.0.0.1`, `169.254.169.254`, `10.*`, `172.16.*`, `192.168.*`) are blocked.
+
+### Module ABI
+
+Modules must export:
+- `memory` — WASM linear memory
+- `__minns_describe__() -> i32` — Returns module descriptor (MessagePack)
+- `__minns_init__() -> i32` (optional) — Called once on load
+- `__minns_call__(func_id: i32, args_ptr: i32, args_len: i32) -> i32` — Main call entry
+- `__minns_on_trigger__(trigger_id: i32, event_ptr: i32, event_len: i32) -> i32` (optional) — Trigger handler
+- `__minns_on_schedule__(schedule_id: i32) -> i32` (optional) — Schedule handler
+- `alloc(size: i32) -> i32` — Memory allocator for host→module data transfer
+
+### Host Functions
+
+Host functions available to WASM modules (imported from `minns` namespace):
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `table_get` | `(table_ptr, table_len, row_id, result_ptr) -> i32` | Get a row by ID |
+| `table_insert` | `(table_ptr, table_len, row_ptr, row_len) -> i32` | Insert a row |
+| `table_delete` | `(table_ptr, table_len, row_id) -> i32` | Delete a row |
+| `table_query` | `(query_ptr, query_len, result_ptr) -> i32` | Execute a MinnsQL FROM query |
+| `graph_query` | `(query_ptr, query_len, result_ptr) -> i32` | Execute a MinnsQL MATCH query |
+| `http_fetch` | `(req_ptr, req_len, result_ptr) -> i32` | Sandboxed HTTP request |
+| `log` | `(level, msg_ptr, msg_len)` | Write to server log |
+| `result_len` | `() -> i32` | Length of last result buffer |
+| `module_id` | `() -> i64` | Current module's ID |
+| `group_id` | `() -> i64` | Current module's group_id |
+
+All data is serialised as MessagePack. Return value `0` = success, `-1` = error (error details in `last_result`).
+
+### Trigger Types
+
+Modules register triggers in their descriptor:
+
+| Trigger Type | Fires When | Event Payload |
+|-------------|------------|---------------|
+| `table_insert` | A row is inserted into a specified table | `{type, table, row_id, version_id}` |
+| `table_update` | A row is updated in a specified table | `{type, table, row_id, old_version_id, new_version_id}` |
+| `table_delete` | A row is deleted from a specified table | `{type, table, row_id, version_id}` |
+| `graph_edge_added` | An edge of a specified type is added to the graph | `{type, source, target, edge_type}` |
+| `graph_edge_removed` | An edge of a specified type is removed | `{type, source, target, edge_type}` |
+| `graph_node_added` | A node of a specified type is added | `{type, node_id, node_type}` |
+| `schedule` | A cron expression fires | Called via `__minns_on_schedule__` |
+
+Triggers fire asynchronously after the mutation commits. All triggers for a module are serialised (one at a time).
+
+### Persistence
+
+Module records, WASM blobs (content-addressed by blake3 hash), usage counters, and schedules are persisted to ReDB. On startup, all modules are recompiled from stored blobs and usage counters are restored. Deleted modules are cleaned up from ReDB on the next persist cycle.
 
 ---
 

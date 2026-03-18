@@ -36,6 +36,18 @@ pub type ContextHash = u64;
 /// Partition identifier for storage
 pub type PartitionId = u64;
 
+/// Table identifier
+pub type TableId = u64;
+
+/// Logical row identifier (stable across versions)
+pub type RowId = u64;
+
+/// Logical row version identifier (unique per version, monotonically increasing)
+pub type RowVersionId = u64;
+
+/// Multi-tenant group identifier
+pub type GroupId = u64;
+
 pub use crate::event_time::EventTime;
 
 /// Current timestamp in nanoseconds

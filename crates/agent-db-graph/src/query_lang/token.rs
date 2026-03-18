@@ -30,6 +30,25 @@ pub enum Token {
     Subscribe,
     Unsubscribe,
 
+    // DDL/DML/Table keywords
+    Create,
+    Table,
+    Drop,
+    Insert,
+    Into,
+    Values,
+    Update,
+    Set,
+    Delete,
+    From,
+    Join,
+    On,
+    Primary,
+    Key,
+    Unique,
+    References,
+    Graph,
+
     // Literals
     Ident(String),
     StringLit(String),

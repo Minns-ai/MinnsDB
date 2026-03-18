@@ -246,7 +246,12 @@ pub struct ScanState {
 
 impl ScanState {
     /// Initialize from a ScanNodes plan step, populating active_nodes from the graph.
-    pub fn init(var: SlotIdx, labels: &[String], props: &[(String, Literal)], graph: &Graph) -> Self {
+    pub fn init(
+        var: SlotIdx,
+        labels: &[String],
+        props: &[(String, Literal)],
+        graph: &Graph,
+    ) -> Self {
         let label_discs: Vec<u8> = labels
             .iter()
             .filter_map(|l| label_to_discriminant(l))
@@ -307,7 +312,7 @@ impl ScanState {
                         out.push(RowDelta::insert(row_id));
                     }
                 }
-            }
+            },
             GraphDelta::NodeRemoved { node_id, .. } => {
                 if self.active_nodes.remove(node_id) {
                     let row_id = RowId::new(smallvec::smallvec![(
@@ -316,9 +321,9 @@ impl ScanState {
                     )]);
                     out.push(RowDelta::delete(row_id));
                 }
-            }
+            },
             // Edge deltas don't affect scan state.
-            _ => {}
+            _ => {},
         }
 
         out
@@ -447,7 +452,7 @@ impl ExpandState {
                             }
                         }
                     }
-                }
+                },
                 RowDelta::Delete { row_id } => {
                     // Remove all expansions for the deleted source node.
                     if let Some(BoundEntityId::Node(from_node)) = row_id.get(self.from_var) {
@@ -460,7 +465,7 @@ impl ExpandState {
                             }
                         }
                     }
-                }
+                },
             }
         }
 
@@ -506,7 +511,7 @@ impl ExpandState {
                         ));
                     }
                 }
-            }
+            },
             GraphDelta::EdgeRemoved {
                 edge_id,
                 source,
@@ -526,7 +531,7 @@ impl ExpandState {
                         ));
                     }
                 }
-            }
+            },
             GraphDelta::EdgeSuperseded {
                 edge_id,
                 source,
@@ -553,12 +558,12 @@ impl ExpandState {
                             let from = edge.valid_from.unwrap_or(0);
                             let old_end = *old_valid_until;
                             from <= *ts && old_end.map_or(true, |u| u > *ts)
-                        }
+                        },
                         TemporalViewport::Range(t1, t2) => {
                             let from = edge.valid_from.unwrap_or(0);
                             let old_end = *old_valid_until;
                             from <= *t2 && old_end.map_or(true, |u| u >= *t1)
-                        }
+                        },
                     }
                 } else {
                     false
@@ -591,7 +596,7 @@ impl ExpandState {
                         self.make_row_id(from_node, *edge_id, to_node),
                     ));
                 }
-            }
+            },
             GraphDelta::EdgeMutated {
                 edge_id,
                 source,
@@ -611,8 +616,8 @@ impl ExpandState {
                         out.push(RowDelta::insert(rid));
                     }
                 }
-            }
-            _ => {} // Node deltas handled by scan state.
+            },
+            _ => {}, // Node deltas handled by scan state.
         }
 
         out
@@ -653,12 +658,12 @@ impl FilterState {
                         self.passed.insert(row_id.clone());
                         out.push(RowDelta::insert(row_id.clone()));
                     }
-                }
+                },
                 RowDelta::Delete { row_id } => {
                     if self.passed.remove(row_id) {
                         out.push(RowDelta::delete(row_id.clone()));
                     }
-                }
+                },
             }
         }
 
@@ -714,7 +719,7 @@ impl AggregationState {
         match function {
             AggregateFunction::Count => {
                 AggregationState::Count(CountState::new(initial_rows.len() as i64))
-            }
+            },
             AggregateFunction::Sum => {
                 let mut sum = 0.0f64;
                 for row in initial_rows {
@@ -724,7 +729,7 @@ impl AggregationState {
                     sum,
                     input_expr: input_expr.clone(),
                 })
-            }
+            },
             AggregateFunction::Avg => {
                 let mut sum = 0.0f64;
                 for row in initial_rows {
@@ -735,7 +740,7 @@ impl AggregationState {
                     count: initial_rows.len() as i64,
                     input_expr: input_expr.clone(),
                 })
-            }
+            },
             AggregateFunction::Min => {
                 let mut values = FxHashMap::default();
                 for row in initial_rows {
@@ -749,7 +754,7 @@ impl AggregationState {
                     values,
                     current_extreme: current,
                 })
-            }
+            },
             AggregateFunction::Max => {
                 let mut values = FxHashMap::default();
                 for row in initial_rows {
@@ -763,7 +768,7 @@ impl AggregationState {
                     values,
                     current_extreme: current,
                 })
-            }
+            },
             AggregateFunction::Collect => {
                 let mut items = FxHashMap::default();
                 for row in initial_rows {
@@ -774,16 +779,14 @@ impl AggregationState {
                     input_expr: input_expr.clone(),
                     items,
                 })
-            }
+            },
         }
     }
 
     /// Apply row deltas and return the current aggregate as a Value.
     pub fn apply_deltas(&mut self, deltas: &[RowDelta], graph: &Graph) -> Value {
         match self {
-            AggregationState::Count(cs) => {
-                Value::Int(cs.apply_deltas(deltas))
-            }
+            AggregationState::Count(cs) => Value::Int(cs.apply_deltas(deltas)),
             AggregationState::Sum(s) => s.apply_deltas(deltas, graph),
             AggregationState::Avg(a) => a.apply_deltas(deltas, graph),
             AggregationState::MinMax(mm) => mm.apply_deltas(deltas, graph),
@@ -802,13 +805,9 @@ impl AggregationState {
                 } else {
                     Value::Float(a.sum / a.count as f64)
                 }
-            }
-            AggregationState::MinMax(mm) => {
-                mm.current_extreme.clone().unwrap_or(Value::Null)
-            }
-            AggregationState::Collect(c) => {
-                Value::List(c.items.values().cloned().collect())
-            }
+            },
+            AggregationState::MinMax(mm) => mm.current_extreme.clone().unwrap_or(Value::Null),
+            AggregationState::Collect(c) => Value::List(c.items.values().cloned().collect()),
         }
     }
 }
@@ -825,10 +824,10 @@ impl SumState {
             match d {
                 RowDelta::Insert { row_id } => {
                     self.sum += extract_f64(&self.input_expr, row_id, graph);
-                }
+                },
                 RowDelta::Delete { row_id } => {
                     self.sum -= extract_f64(&self.input_expr, row_id, graph);
-                }
+                },
             }
         }
         Value::Float(self.sum)
@@ -849,11 +848,11 @@ impl AvgState {
                 RowDelta::Insert { row_id } => {
                     self.sum += extract_f64(&self.input_expr, row_id, graph);
                     self.count += 1;
-                }
+                },
                 RowDelta::Delete { row_id } => {
                     self.sum -= extract_f64(&self.input_expr, row_id, graph);
                     self.count -= 1;
-                }
+                },
             }
         }
         if self.count == 0 {
@@ -896,9 +895,9 @@ impl MinMaxState {
                                     self.current_extreme.clone()
                                 }
                             }
-                        }
+                        },
                     };
-                }
+                },
                 RowDelta::Delete { row_id } => {
                     if let Some(removed_val) = self.values.remove(row_id) {
                         // If we removed the current extreme, rescan.
@@ -906,7 +905,7 @@ impl MinMaxState {
                             self.current_extreme = find_extreme(&self.values, self.is_min);
                         }
                     }
-                }
+                },
             }
         }
         self.current_extreme.clone().unwrap_or(Value::Null)
@@ -926,10 +925,10 @@ impl CollectState {
                 RowDelta::Insert { row_id } => {
                     let val = evaluate_expr_for_row_or_null(&self.input_expr, row_id, graph);
                     self.items.insert(row_id.clone(), val);
-                }
+                },
                 RowDelta::Delete { row_id } => {
                     self.items.remove(row_id);
-                }
+                },
             }
         }
         Value::List(self.items.values().cloned().collect())
@@ -954,9 +953,17 @@ fn find_extreme(values: &FxHashMap<RowId, Value>, is_min: bool) -> Option<Value>
         .reduce(|best, v| {
             let ord = v.partial_cmp(&best);
             if is_min {
-                if ord == Some(std::cmp::Ordering::Less) { v } else { best }
+                if ord == Some(std::cmp::Ordering::Less) {
+                    v
+                } else {
+                    best
+                }
             } else {
-                if ord == Some(std::cmp::Ordering::Greater) { v } else { best }
+                if ord == Some(std::cmp::Ordering::Greater) {
+                    v
+                } else {
+                    best
+                }
             }
         })
 }
@@ -975,12 +982,13 @@ impl PartialEq for GroupKey {
         if self.0.len() != other.0.len() {
             return false;
         }
-        self.0.iter().zip(other.0.iter()).all(|(a, b)| {
-            match (a, b) {
+        self.0
+            .iter()
+            .zip(other.0.iter())
+            .all(|(a, b)| match (a, b) {
                 (Value::Float(fa), Value::Float(fb)) => fa.to_bits() == fb.to_bits(),
                 _ => a == b,
-            }
-        })
+            })
     }
 }
 
@@ -1088,7 +1096,7 @@ impl GroupedAggregationState {
                     } else {
                         updated.push((gk, val));
                     }
-                }
+                },
                 RowDelta::Delete { row_id } => {
                     let gk = extract_group_key(&self.group_by_exprs, row_id, graph);
                     if let Some(entry) = self.groups.get_mut(&gk) {
@@ -1103,7 +1111,7 @@ impl GroupedAggregationState {
                             updated.push((gk, val));
                         }
                     }
-                }
+                },
             }
         }
 
@@ -1138,33 +1146,27 @@ pub(crate) fn evaluate_filter_for_row(expr: &RBoolExpr, row_id: &RowId, graph: &
     }
 }
 
-fn evaluate_bool_for_row(
-    expr: &RBoolExpr,
-    row_id: &RowId,
-    graph: &Graph,
-) -> Result<bool, ()> {
+fn evaluate_bool_for_row(expr: &RBoolExpr, row_id: &RowId, graph: &Graph) -> Result<bool, ()> {
     match expr {
         RBoolExpr::Comparison(lhs, op, rhs) => {
             let l = evaluate_expr_for_row(lhs, row_id, graph)?;
             let r = evaluate_expr_for_row(rhs, row_id, graph)?;
             Ok(compare_values_simple(&l, op, &r))
-        }
+        },
         RBoolExpr::IsNull(e) => {
             let v = evaluate_expr_for_row(e, row_id, graph)?;
             Ok(v.is_null())
-        }
+        },
         RBoolExpr::IsNotNull(e) => {
             let v = evaluate_expr_for_row(e, row_id, graph)?;
             Ok(!v.is_null())
-        }
-        RBoolExpr::And(a, b) => {
-            Ok(evaluate_bool_for_row(a, row_id, graph)?
-                && evaluate_bool_for_row(b, row_id, graph)?)
-        }
-        RBoolExpr::Or(a, b) => {
-            Ok(evaluate_bool_for_row(a, row_id, graph)?
-                || evaluate_bool_for_row(b, row_id, graph)?)
-        }
+        },
+        RBoolExpr::And(a, b) => Ok(
+            evaluate_bool_for_row(a, row_id, graph)? && evaluate_bool_for_row(b, row_id, graph)?
+        ),
+        RBoolExpr::Or(a, b) => Ok(
+            evaluate_bool_for_row(a, row_id, graph)? || evaluate_bool_for_row(b, row_id, graph)?
+        ),
         RBoolExpr::Not(inner) => Ok(!evaluate_bool_for_row(inner, row_id, graph)?),
         RBoolExpr::Paren(inner) => evaluate_bool_for_row(inner, row_id, graph),
         RBoolExpr::FuncPredicate(name, args) => {
@@ -1172,7 +1174,7 @@ fn evaluate_bool_for_row(
             // Full support would require porting all predicate functions.
             let _ = (name, args);
             Err(())
-        }
+        },
     }
 }
 
@@ -1191,14 +1193,14 @@ fn evaluate_expr_for_row(expr: &RExpr, row_id: &RowId, graph: &Graph) -> Result<
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
             Some(BoundEntityId::Edge(id)) => {
                 if let Some(edge) = graph.get_edge(*id) {
                     Ok(Value::String(format!("{:?}", edge.edge_type)))
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
             None => Ok(Value::Null),
         },
         RExpr::Property(slot, prop) => match row_id.get(*slot) {
@@ -1208,14 +1210,14 @@ fn evaluate_expr_for_row(expr: &RExpr, row_id: &RowId, graph: &Graph) -> Result<
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
             Some(BoundEntityId::Edge(id)) => {
                 if let Some(edge) = graph.get_edge(*id) {
                     Ok(edge_property_value_simple(edge, prop))
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
             None => Ok(Value::Null),
         },
         RExpr::FuncCall(..) => Err(()), // Function calls not supported in incremental filter eval
@@ -1270,13 +1272,13 @@ fn compare_values_simple(lhs: &Value, op: &CompOp, rhs: &Value) -> bool {
         CompOp::Contains => match (lhs, rhs) {
             (Value::String(haystack), Value::String(needle)) => {
                 haystack.to_lowercase().contains(&needle.to_lowercase())
-            }
+            },
             _ => false,
         },
         CompOp::StartsWith => match (lhs, rhs) {
             (Value::String(haystack), Value::String(prefix)) => {
                 haystack.to_lowercase().starts_with(&prefix.to_lowercase())
-            }
+            },
             _ => false,
         },
     }
@@ -1289,7 +1291,7 @@ fn value_eq_loose_simple(a: &Value, b: &Value) -> bool {
         (Value::Float(fa), Value::Float(fb)) => (fa - fb).abs() < f64::EPSILON,
         (Value::Int(i), Value::Float(f)) | (Value::Float(f), Value::Int(i)) => {
             (*i as f64 - f).abs() < f64::EPSILON
-        }
+        },
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Null, Value::Null) => true,
         _ => false,
@@ -1306,7 +1308,7 @@ fn contains_func_predicate(expr: &RBoolExpr) -> bool {
         RBoolExpr::FuncPredicate(_, _) => true,
         RBoolExpr::And(a, b) | RBoolExpr::Or(a, b) => {
             contains_func_predicate(a) || contains_func_predicate(b)
-        }
+        },
         RBoolExpr::Not(inner) | RBoolExpr::Paren(inner) => contains_func_predicate(inner),
         _ => false,
     }

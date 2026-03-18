@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::edge::GraphEdge;
 use super::graph::Graph;
-use super::node::{GraphNode, node_type_discriminant_from_name};
+use super::node::{node_type_discriminant_from_name, GraphNode};
 use super::types::{Direction, EdgeId, NodeId};
 
 impl Graph {

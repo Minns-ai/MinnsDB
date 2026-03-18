@@ -32,18 +32,33 @@ impl Parser {
             Ok(Statement::Subscribe(query))
         } else if parser.at(&Token::Unsubscribe) {
             parser.advance(); // consume UNSUBSCRIBE
-            // Expect an integer literal (subscription ID).
+                              // Expect an integer literal (subscription ID).
             match parser.peek() {
                 Token::IntLit(id) => {
                     let id = *id as u64;
                     parser.advance();
                     if !parser.at(&Token::Eof) {
-                        return Err(parser.error("expected end of input after UNSUBSCRIBE <id>".into()));
+                        return Err(
+                            parser.error("expected end of input after UNSUBSCRIBE <id>".into())
+                        );
                     }
                     Ok(Statement::Unsubscribe(id))
-                }
-                other => Err(parser.error(format!("expected subscription ID after UNSUBSCRIBE, got {:?}", other))),
+                },
+                other => Err(parser.error(format!(
+                    "expected subscription ID after UNSUBSCRIBE, got {:?}",
+                    other
+                ))),
             }
+        } else if parser.at(&Token::Create) {
+            parser.parse_create_table().map(Statement::CreateTable)
+        } else if parser.at(&Token::Drop) {
+            parser.parse_drop_table()
+        } else if parser.at(&Token::Insert) {
+            parser.parse_insert_into().map(Statement::InsertInto)
+        } else if parser.at(&Token::Update) {
+            parser.parse_update_table().map(Statement::UpdateTable)
+        } else if parser.at(&Token::Delete) {
+            parser.parse_delete_from().map(Statement::DeleteFrom)
         } else {
             let query = parser.parse_query()?;
             Ok(Statement::Query(query))
@@ -53,7 +68,18 @@ impl Parser {
     // ── Top-level ───────────────────────────────────────────────────────
 
     fn parse_query(&mut self) -> Result<Query, QueryError> {
-        let match_clauses = self.parse_match()?;
+        // Determine query shape: MATCH or FROM
+        let (match_clauses, from_table) = if self.at(&Token::From) {
+            self.advance(); // consume FROM
+            let table_name = self.expect_ident_or_keyword()?;
+            (Vec::new(), Some(table_name))
+        } else {
+            (self.parse_match()?, None)
+        };
+
+        // Parse zero or more JOIN clauses
+        let joins = self.parse_joins()?;
+
         let when = self.parse_when()?;
         let as_of = self.parse_as_of()?;
         let where_clause = self.parse_where()?;
@@ -67,6 +93,8 @@ impl Parser {
 
         Ok(Query {
             match_clauses,
+            from_table,
+            joins,
             when,
             as_of,
             where_clause,
@@ -543,6 +571,270 @@ impl Parser {
         }
     }
 
+    // ── JOIN ──────────────────────────────────────────────────────────
+
+    fn parse_joins(&mut self) -> Result<Vec<JoinClause>, QueryError> {
+        let mut joins = Vec::new();
+        while self.at(&Token::Join) {
+            self.advance(); // consume JOIN
+            let table = self.expect_ident_or_keyword()?;
+            self.expect(&Token::On)?;
+            let (on_left, on_right) = self.parse_join_condition()?;
+            joins.push(JoinClause {
+                table,
+                on_left,
+                on_right,
+            });
+        }
+        Ok(joins)
+    }
+
+    /// Parse: left_side = right_side
+    /// Each side is either table.column or a bare identifier (graph var).
+    fn parse_join_condition(&mut self) -> Result<(JoinSide, JoinSide), QueryError> {
+        let left = self.parse_join_side()?;
+        self.expect(&Token::Eq)?;
+        let right = self.parse_join_side()?;
+        Ok((left, right))
+    }
+
+    fn parse_join_side(&mut self) -> Result<JoinSide, QueryError> {
+        let name = self.expect_ident_or_keyword()?;
+        if self.at(&Token::Dot) {
+            self.advance();
+            let col = self.expect_ident_or_keyword()?;
+            Ok(JoinSide::TableColumn {
+                table: name,
+                column: col,
+            })
+        } else {
+            Ok(JoinSide::GraphVar(name))
+        }
+    }
+
+    // ── DDL ──────────────────────────────────────────────────────────
+
+    /// CREATE TABLE name (col_defs [, constraints])
+    fn parse_create_table(&mut self) -> Result<CreateTableStmt, QueryError> {
+        self.expect(&Token::Create)?;
+        self.expect(&Token::Table)?;
+        let name = self.expect_ident_or_keyword()?;
+        self.expect(&Token::LParen)?;
+
+        let mut columns = Vec::new();
+        let mut constraints = Vec::new();
+
+        loop {
+            if self.at(&Token::RParen) {
+                break;
+            }
+
+            // Check for table-level constraints: PRIMARY KEY(...), UNIQUE(...)
+            if self.at(&Token::Primary) {
+                self.advance();
+                self.expect(&Token::Key)?;
+                self.expect(&Token::LParen)?;
+                let cols = self.parse_ident_list()?;
+                self.expect(&Token::RParen)?;
+                constraints.push(ConstraintAst {
+                    kind: ConstraintKind::PrimaryKey(cols),
+                });
+            } else if self.at(&Token::Unique) {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let cols = self.parse_ident_list()?;
+                self.expect(&Token::RParen)?;
+                constraints.push(ConstraintAst {
+                    kind: ConstraintKind::Unique(cols),
+                });
+            } else {
+                // Column definition
+                let col = self.parse_column_def()?;
+
+                // Inline PRIMARY KEY → extract to constraint
+                if col.is_primary_key {
+                    constraints.push(ConstraintAst {
+                        kind: ConstraintKind::PrimaryKey(vec![col.name.clone()]),
+                    });
+                }
+
+                columns.push(col);
+            }
+
+            if !self.at(&Token::Comma) {
+                break;
+            }
+            self.advance(); // consume comma
+        }
+
+        self.expect(&Token::RParen)?;
+
+        Ok(CreateTableStmt {
+            name,
+            columns,
+            constraints,
+        })
+    }
+
+    /// Parse a single column def: name Type [NOT NULL] [PRIMARY KEY] [REFERENCES GRAPH]
+    fn parse_column_def(&mut self) -> Result<ColumnDefAst, QueryError> {
+        let name = self.expect_ident_or_keyword()?;
+        let col_type = self.expect_ident_or_keyword()?;
+        let mut nullable = true;
+        let mut is_primary_key = false;
+
+        // Optional modifiers
+        loop {
+            if self.at(&Token::Not) {
+                self.advance();
+                // NOT followed by NULL (as keyword)
+                self.expect(&Token::Null)?;
+                nullable = false;
+            } else if self.at(&Token::Primary) {
+                self.advance();
+                self.expect(&Token::Key)?;
+                is_primary_key = true;
+                nullable = false; // PKs are implicitly NOT NULL
+            } else if self.at(&Token::References) {
+                self.advance();
+                self.expect(&Token::Graph)?;
+                // Handled: this column references the graph (NodeRef)
+            } else {
+                break;
+            }
+        }
+
+        Ok(ColumnDefAst {
+            name,
+            col_type,
+            nullable,
+            is_primary_key,
+        })
+    }
+
+    /// DROP TABLE name
+    fn parse_drop_table(&mut self) -> Result<Statement, QueryError> {
+        self.expect(&Token::Drop)?;
+        self.expect(&Token::Table)?;
+        let name = self.expect_ident_or_keyword()?;
+        Ok(Statement::DropTable(name))
+    }
+
+    // ── DML ──────────────────────────────────────────────────────────
+
+    /// INSERT INTO table [(columns)] VALUES (vals) [, (vals)]*
+    fn parse_insert_into(&mut self) -> Result<InsertStmt, QueryError> {
+        self.expect(&Token::Insert)?;
+        self.expect(&Token::Into)?;
+        let table = self.expect_ident_or_keyword()?;
+
+        // Optional column list
+        let columns = if self.at(&Token::LParen) {
+            // Could be column list or VALUES
+            // Peek ahead: if next token after LParen is an ident (not a literal), it's columns
+            let saved = self.pos;
+            self.advance(); // consume (
+            if matches!(self.peek(), Token::Ident(_)) {
+                let cols = self.parse_ident_list()?;
+                self.expect(&Token::RParen)?;
+                Some(cols)
+            } else {
+                // Restore — it's the VALUES parens
+                self.pos = saved;
+                None
+            }
+        } else {
+            None
+        };
+
+        self.expect(&Token::Values)?;
+
+        let mut rows = Vec::new();
+        loop {
+            self.expect(&Token::LParen)?;
+            let mut vals = Vec::new();
+            if !self.at(&Token::RParen) {
+                vals.push(self.parse_literal()?);
+                while self.at(&Token::Comma) {
+                    self.advance();
+                    vals.push(self.parse_literal()?);
+                }
+            }
+            self.expect(&Token::RParen)?;
+            rows.push(vals);
+
+            if !self.at(&Token::Comma) {
+                break;
+            }
+            self.advance(); // consume comma between row groups
+        }
+
+        Ok(InsertStmt {
+            table,
+            columns,
+            rows,
+        })
+    }
+
+    /// UPDATE table SET col = expr [, col = expr]* WHERE condition
+    fn parse_update_table(&mut self) -> Result<UpdateStmt, QueryError> {
+        self.expect(&Token::Update)?;
+        let table = self.expect_ident_or_keyword()?;
+        self.expect(&Token::Set)?;
+
+        let mut assignments = Vec::new();
+        loop {
+            let col = self.expect_ident_or_keyword()?;
+            self.expect(&Token::Eq)?;
+            let val = self.parse_expr()?;
+            assignments.push((col, val));
+            if !self.at(&Token::Comma) {
+                break;
+            }
+            self.advance();
+        }
+
+        if !self.at(&Token::Where) {
+            return Err(self.error("UPDATE requires a WHERE clause".into()));
+        }
+        self.advance();
+        let where_clause = self.parse_or_expr()?;
+
+        Ok(UpdateStmt {
+            table,
+            assignments,
+            where_clause,
+        })
+    }
+
+    /// DELETE FROM table WHERE condition
+    fn parse_delete_from(&mut self) -> Result<DeleteStmt, QueryError> {
+        self.expect(&Token::Delete)?;
+        self.expect(&Token::From)?;
+        let table = self.expect_ident_or_keyword()?;
+
+        if !self.at(&Token::Where) {
+            return Err(self.error("DELETE FROM requires a WHERE clause".into()));
+        }
+        self.advance();
+        let where_clause = self.parse_or_expr()?;
+
+        Ok(DeleteStmt {
+            table,
+            where_clause,
+        })
+    }
+
+    /// Parse comma-separated identifier list.
+    fn parse_ident_list(&mut self) -> Result<Vec<String>, QueryError> {
+        let mut names = vec![self.expect_ident_or_keyword()?];
+        while self.at(&Token::Comma) {
+            self.advance();
+            names.push(self.expect_ident_or_keyword()?);
+        }
+        Ok(names)
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────
 
     fn peek(&self) -> &Token {
@@ -583,6 +875,56 @@ impl Parser {
                 let name = name.clone();
                 self.advance();
                 Ok(name)
+            },
+            other => Err(self.error(format!("expected identifier, found {:?}", other))),
+        }
+    }
+
+    /// Like expect_ident but also accepts keywords that might be used as names
+    /// (e.g. table names like "orders", column types like "String").
+    fn expect_ident_or_keyword(&mut self) -> Result<String, QueryError> {
+        match self.peek().clone() {
+            Token::Ident(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(name)
+            },
+            // Allow keywords as identifiers in DDL/DML contexts
+            Token::Table => {
+                self.advance();
+                Ok("table".into())
+            },
+            Token::Key => {
+                self.advance();
+                Ok("key".into())
+            },
+            Token::Set => {
+                self.advance();
+                Ok("set".into())
+            },
+            Token::Graph => {
+                self.advance();
+                Ok("graph".into())
+            },
+            Token::Order => {
+                self.advance();
+                Ok("order".into())
+            },
+            Token::All => {
+                self.advance();
+                Ok("all".into())
+            },
+            Token::Last => {
+                self.advance();
+                Ok("last".into())
+            },
+            Token::From => {
+                self.advance();
+                Ok("from".into())
+            },
+            Token::Values => {
+                self.advance();
+                Ok("values".into())
             },
             other => Err(self.error(format!("expected identifier, found {:?}", other))),
         }
@@ -933,5 +1275,163 @@ mod tests {
             },
             _ => panic!("expected ParseError"),
         }
+    }
+
+    // ── DDL tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_create_table() {
+        let stmt = Parser::parse_statement(
+            r#"CREATE TABLE orders (id Int64 PRIMARY KEY, customer String NOT NULL, amount Float64, node NodeRef REFERENCES GRAPH)"#,
+        ).unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.name, "orders");
+                assert_eq!(ct.columns.len(), 4);
+                assert_eq!(ct.columns[0].name, "id");
+                assert_eq!(ct.columns[0].col_type, "Int64");
+                assert!(!ct.columns[0].nullable);
+                assert!(ct.columns[0].is_primary_key);
+                assert_eq!(ct.columns[1].name, "customer");
+                assert!(!ct.columns[1].nullable);
+                assert_eq!(ct.columns[2].name, "amount");
+                assert!(ct.columns[2].nullable);
+                assert_eq!(ct.columns[3].col_type, "NodeRef");
+                // PK constraint extracted
+                assert!(ct.constraints.iter().any(
+                    |c| matches!(&c.kind, ConstraintKind::PrimaryKey(cols) if cols == &["id"])
+                ));
+            },
+            other => panic!("expected CreateTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_drop_table() {
+        let stmt = Parser::parse_statement("DROP TABLE orders").unwrap();
+        match stmt {
+            Statement::DropTable(name) => assert_eq!(name, "orders"),
+            other => panic!("expected DropTable, got {:?}", other),
+        }
+    }
+
+    // ── DML tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_insert_positional() {
+        let stmt =
+            Parser::parse_statement(r#"INSERT INTO orders VALUES (1, "Alice", 99.99)"#).unwrap();
+        match stmt {
+            Statement::InsertInto(ins) => {
+                assert_eq!(ins.table, "orders");
+                assert!(ins.columns.is_none());
+                assert_eq!(ins.rows.len(), 1);
+                assert_eq!(ins.rows[0].len(), 3);
+                assert_eq!(ins.rows[0][0], Literal::Int(1));
+                assert_eq!(ins.rows[0][1], Literal::String("Alice".into()));
+            },
+            other => panic!("expected InsertInto, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_insert_with_columns_and_multi_row() {
+        let stmt = Parser::parse_statement(
+            r#"INSERT INTO orders (id, name) VALUES (1, "Alice"), (2, "Bob")"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::InsertInto(ins) => {
+                assert_eq!(ins.columns, Some(vec!["id".into(), "name".into()]));
+                assert_eq!(ins.rows.len(), 2);
+            },
+            other => panic!("expected InsertInto, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_update() {
+        let stmt = Parser::parse_statement(
+            r#"UPDATE orders SET status = "shipped", amount = 105.0 WHERE id = 1"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::UpdateTable(upd) => {
+                assert_eq!(upd.table, "orders");
+                assert_eq!(upd.assignments.len(), 2);
+                assert_eq!(upd.assignments[0].0, "status");
+            },
+            other => panic!("expected UpdateTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_delete() {
+        let stmt = Parser::parse_statement(r#"DELETE FROM orders WHERE id = 1"#).unwrap();
+        match stmt {
+            Statement::DeleteFrom(del) => {
+                assert_eq!(del.table, "orders");
+            },
+            other => panic!("expected DeleteFrom, got {:?}", other),
+        }
+    }
+
+    // ── FROM/JOIN tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_from_table_query() {
+        let q = Parser::parse("FROM orders WHERE amount > 50 RETURN id, customer").unwrap();
+        assert_eq!(q.from_table, Some("orders".into()));
+        assert!(q.match_clauses.is_empty());
+        assert_eq!(q.returns.len(), 2);
+    }
+
+    #[test]
+    fn test_from_table_with_temporal() {
+        let q = Parser::parse("FROM orders WHEN ALL RETURN id, amount").unwrap();
+        assert_eq!(q.from_table, Some("orders".into()));
+        assert!(matches!(q.when, Some(WhenClause::All)));
+    }
+
+    #[test]
+    fn test_table_to_table_join() {
+        let q = Parser::parse(
+            "FROM orders JOIN customers ON orders.customer_id = customers.id RETURN customers.name, orders.amount",
+        ).unwrap();
+        assert_eq!(q.from_table, Some("orders".into()));
+        assert_eq!(q.joins.len(), 1);
+        assert_eq!(q.joins[0].table, "customers");
+        match &q.joins[0].on_left {
+            JoinSide::TableColumn { table, column } => {
+                assert_eq!(table, "orders");
+                assert_eq!(column, "customer_id");
+            },
+            other => panic!("expected TableColumn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_graph_to_table_join() {
+        let q = Parser::parse(
+            "MATCH (n:Person) JOIN orders ON orders.node = n RETURN n.name, orders.amount",
+        )
+        .unwrap();
+        assert_eq!(q.match_clauses.len(), 1);
+        assert_eq!(q.joins.len(), 1);
+        assert_eq!(q.joins[0].table, "orders");
+        match &q.joins[0].on_right {
+            JoinSide::GraphVar(v) => assert_eq!(v, "n"),
+            other => panic!("expected GraphVar, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_multi_way_join() {
+        let q = Parser::parse(
+            "FROM orders JOIN customers ON orders.customer_id = customers.id JOIN shipments ON shipments.order_id = orders.id RETURN customers.name",
+        ).unwrap();
+        assert_eq!(q.joins.len(), 2);
+        assert_eq!(q.joins[0].table, "customers");
+        assert_eq!(q.joins[1].table, "shipments");
     }
 }

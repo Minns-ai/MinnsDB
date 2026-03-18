@@ -39,10 +39,7 @@ struct CascadeRelationship {
     object: String,
     #[serde(default)]
     category: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "super::types::deserialize_bool_lenient"
-    )]
+    #[serde(default, deserialize_with = "super::types::deserialize_bool_lenient")]
     is_state_change: Option<bool>,
     #[serde(default)]
     temporal_hint: Option<String>,
@@ -268,47 +265,40 @@ pub(crate) async fn extract_turn_facts_cascade(
     )
     .await
     {
-        Ok(Ok(resp)) => {
-            match parse_json_from_llm(&resp.content) {
-                Some(value) => {
-                    match serde_json::from_value::<TurnResponse>(value) {
-                        Ok(parsed) => {
-                            let facts: Vec<ExtractedFact> = parsed
-                                .facts
-                                .into_iter()
-                                .filter(|f| !f.statement.is_empty() || !f.subject.is_empty())
-                                .map(|f| lenient_to_extracted(f))
-                                .collect();
-                            tracing::info!(
-                                "CASCADE call 3: produced {} structured facts",
-                                facts.len()
-                            );
-                            Some(facts)
-                        },
-                        Err(e) => {
-                            tracing::warn!(
+        Ok(Ok(resp)) => match parse_json_from_llm(&resp.content) {
+            Some(value) => match serde_json::from_value::<TurnResponse>(value) {
+                Ok(parsed) => {
+                    let facts: Vec<ExtractedFact> = parsed
+                        .facts
+                        .into_iter()
+                        .filter(|f| !f.statement.is_empty() || !f.subject.is_empty())
+                        .map(|f| lenient_to_extracted(f))
+                        .collect();
+                    tracing::info!("CASCADE call 3: produced {} structured facts", facts.len());
+                    Some(facts)
+                },
+                Err(e) => {
+                    tracing::warn!(
                                 "CASCADE call 3: deser failed ({}), converting relationships deterministically",
                                 e
                             );
-                            let facts: Vec<ExtractedFact> = relationships
-                                .iter()
-                                .map(relationship_to_basic_fact)
-                                .collect();
-                            Some(facts)
-                        },
-                    }
-                },
-                None => {
-                    tracing::warn!(
-                        "CASCADE call 3: JSON parse failed, converting relationships deterministically"
-                    );
                     let facts: Vec<ExtractedFact> = relationships
                         .iter()
                         .map(relationship_to_basic_fact)
                         .collect();
                     Some(facts)
                 },
-            }
+            },
+            None => {
+                tracing::warn!(
+                    "CASCADE call 3: JSON parse failed, converting relationships deterministically"
+                );
+                let facts: Vec<ExtractedFact> = relationships
+                    .iter()
+                    .map(relationship_to_basic_fact)
+                    .collect();
+                Some(facts)
+            },
         },
         Ok(Err(e)) => {
             tracing::warn!(

@@ -6,10 +6,8 @@ use super::edge_cost::edge_cost;
 use super::helpers::edge_type_name;
 use super::types::QueryResult;
 use super::GraphTraversal;
-use crate::structures::{
-    Depth, Direction, Graph, GraphEdge, GraphNode, NodeId,
-};
-use crate::{GraphResult};
+use crate::structures::{Depth, Direction, Graph, GraphEdge, GraphNode, NodeId};
+use crate::GraphResult;
 use ordered_float::OrderedFloat;
 use rustc_hash::FxHashMap;
 use std::collections::{BinaryHeap, HashSet, VecDeque};

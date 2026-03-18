@@ -89,13 +89,18 @@ pub async fn create_subscription(
     }
 
     // Parse and plan outside of any lock.
-    let ast = agent_db_graph::query_lang::parser::Parser::parse(&request.query)
-        .map_err(|e| match &e {
-            agent_db_graph::query_lang::QueryError::ParseError { message, position } => {
-                ApiError::BadRequest(format!("Parse error at position {}: {}", position, message))
-            }
-            _ => ApiError::BadRequest(format!("{}", e)),
-        })?;
+    let ast =
+        agent_db_graph::query_lang::parser::Parser::parse(&request.query).map_err(
+            |e| match &e {
+                agent_db_graph::query_lang::QueryError::ParseError { message, position } => {
+                    ApiError::BadRequest(format!(
+                        "Parse error at position {}: {}",
+                        position, message
+                    ))
+                },
+                _ => ApiError::BadRequest(format!("{}", e)),
+            },
+        )?;
     let plan = agent_db_graph::query_lang::planner::plan(ast)
         .map_err(|e| ApiError::BadRequest(format!("{}", e)))?;
 
@@ -113,22 +118,23 @@ pub async fn create_subscription(
 
         let mut sub_mgr = state.subscription_manager.lock().await;
 
-        let (sub_id, initial_output) = sub_mgr
-            .subscribe(plan, graph, &ontology)
-            .map_err(|e| match e {
-                agent_db_graph::query_lang::QueryError::ExecutionError(ref msg)
-                    if msg.contains("Subscription limit") =>
-                {
-                    ApiError::ServiceUnavailable(format!("{}", e))
-                }
-                _ => ApiError::Internal(format!("Subscription failed: {}", e)),
-            })?;
+        let (sub_id, initial_output) =
+            sub_mgr
+                .subscribe(plan, graph, &ontology)
+                .map_err(|e| match e {
+                    agent_db_graph::query_lang::QueryError::ExecutionError(ref msg)
+                        if msg.contains("Subscription limit") =>
+                    {
+                        ApiError::ServiceUnavailable(format!("{}", e))
+                    },
+                    _ => ApiError::Internal(format!("Subscription failed: {}", e)),
+                })?;
 
         let strategy = if let Some(sub_state) = sub_mgr.get_subscription(sub_id) {
             match &sub_state.incremental_plan.strategy {
                 agent_db_graph::subscription::incremental::MaintenanceStrategy::Incremental => {
                     "incremental".to_string()
-                }
+                },
                 agent_db_graph::subscription::incremental::MaintenanceStrategy::FullRerun {
                     reason,
                 } => format!("full_rerun: {}", reason),
@@ -178,10 +184,7 @@ pub async fn delete_subscription(
         state.subscription_queries.lock().await.remove(&id);
         Ok(Json(serde_json::json!({ "unsubscribed": id })))
     } else {
-        Err(ApiError::NotFound(format!(
-            "Subscription {} not found",
-            id
-        )))
+        Err(ApiError::NotFound(format!("Subscription {} not found", id)))
     }
 }
 
@@ -198,16 +201,15 @@ pub async fn poll_subscription(
         sub_mgr.take_pending(id)
     };
 
-    let updates: Vec<SubscriptionUpdateResponse> = pending
-        .into_iter()
-        .map(format_update)
-        .collect();
+    let updates: Vec<SubscriptionUpdateResponse> = pending.into_iter().map(format_update).collect();
 
     Ok(Json(PollResponse { updates }))
 }
 
 /// Convert an internal SubscriptionUpdate to the wire format.
-fn format_update(u: agent_db_graph::subscription::manager::SubscriptionUpdate) -> SubscriptionUpdateResponse {
+fn format_update(
+    u: agent_db_graph::subscription::manager::SubscriptionUpdate,
+) -> SubscriptionUpdateResponse {
     SubscriptionUpdateResponse {
         subscription_id: u.subscription_id,
         inserts: u
@@ -225,10 +227,10 @@ fn format_update(u: agent_db_graph::subscription::manager::SubscriptionUpdate) -
                     .map(|(slot, eid)| match eid {
                         agent_db_graph::subscription::incremental::BoundEntityId::Node(nid) => {
                             serde_json::json!({"slot": slot, "node_id": nid})
-                        }
+                        },
                         agent_db_graph::subscription::incremental::BoundEntityId::Edge(eid) => {
                             serde_json::json!({"slot": slot, "edge_id": eid})
-                        }
+                        },
                     })
                     .collect()
             })

@@ -81,13 +81,22 @@ impl BindingRow {
         let i = idx as usize;
         match &mut self.slots {
             BindingSlots::Inline(arr) => {
-                debug_assert!(i < INLINE_SLOTS, "slot index {} out of bounds for inline array", i);
+                debug_assert!(
+                    i < INLINE_SLOTS,
+                    "slot index {} out of bounds for inline array",
+                    i
+                );
                 arr[i] = Some(val);
-            }
+            },
             BindingSlots::Dynamic(vec) => {
-                debug_assert!(i < vec.len(), "slot index {} out of bounds for dynamic vec (len {})", i, vec.len());
+                debug_assert!(
+                    i < vec.len(),
+                    "slot index {} out of bounds for dynamic vec (len {})",
+                    i,
+                    vec.len()
+                );
                 vec[i] = Some(val);
-            }
+            },
         }
     }
 }
@@ -222,7 +231,7 @@ impl<'a> Executor<'a> {
         match step {
             PlanStep::ScanNodes { var, labels, props } => {
                 self.step_scan_nodes(&rows, *var, labels, props)
-            }
+            },
             PlanStep::Expand {
                 from_var,
                 edge_var,
@@ -230,8 +239,17 @@ impl<'a> Executor<'a> {
                 edge_type,
                 direction,
                 range,
-            } => self.step_expand(&rows, *from_var, *edge_var, *to_var, edge_type, direction, range),
+            } => self.step_expand(
+                &rows, *from_var, *edge_var, *to_var, edge_type, direction, range,
+            ),
             PlanStep::Filter(expr) => self.step_filter(rows, expr),
+            // Table steps are handled by the table_executor module, not the graph executor.
+            // If we reach here, it means a table query was routed to the graph executor by mistake.
+            PlanStep::ScanTable { .. } | PlanStep::JoinTable { .. } => {
+                Err(QueryError::ExecutionError(
+                    "Table scan/join steps must be executed by the table executor".into(),
+                ))
+            },
         }
     }
 
@@ -344,13 +362,14 @@ impl<'a> Executor<'a> {
                         "Variable at slot {} is not bound to a node",
                         from_var
                     )));
-                }
+                },
             };
 
             match range {
                 Some((min_hops, max_hops_opt)) => {
                     let max_hops = max_hops_opt.unwrap_or(10); // sensible default cap
-                    let reached = self.bfs_expand(from_id, edge_type, direction, *min_hops, max_hops)?;
+                    let reached =
+                        self.bfs_expand(from_id, edge_type, direction, *min_hops, max_hops)?;
                     for target_id in reached {
                         if out.len() >= MAX_INTERMEDIATE_ROWS {
                             return Err(QueryError::ExecutionError(format!(
@@ -362,7 +381,7 @@ impl<'a> Executor<'a> {
                         new_binding.set(to_var, BoundValue::Node(target_id));
                         out.push(new_binding);
                     }
-                }
+                },
                 None => {
                     // Single-hop expansion.
                     let edges = self.directed_edges(from_id, direction);
@@ -401,7 +420,7 @@ impl<'a> Executor<'a> {
                         new_binding.set(to_var, BoundValue::Node(other_id));
                         out.push(new_binding);
                     }
-                }
+                },
             }
         }
 
@@ -501,7 +520,7 @@ impl<'a> Executor<'a> {
                 Err(e) => {
                     err = Some(e);
                     false
-                }
+                },
             }
         });
         if let Some(e) = err {
@@ -520,26 +539,24 @@ impl<'a> Executor<'a> {
                 let l = self.evaluate_expr(lhs, binding)?;
                 let r = self.evaluate_expr(rhs, binding)?;
                 Ok(compare_values(&l, op, &r))
-            }
+            },
             RBoolExpr::IsNull(e) => {
                 let v = self.evaluate_expr(e, binding)?;
                 Ok(v.is_null())
-            }
+            },
             RBoolExpr::IsNotNull(e) => {
                 let v = self.evaluate_expr(e, binding)?;
                 Ok(!v.is_null())
-            }
+            },
             RBoolExpr::And(a, b) => {
                 Ok(self.evaluate_bool(a, binding)? && self.evaluate_bool(b, binding)?)
-            }
+            },
             RBoolExpr::Or(a, b) => {
                 Ok(self.evaluate_bool(a, binding)? || self.evaluate_bool(b, binding)?)
-            }
+            },
             RBoolExpr::Not(inner) => Ok(!self.evaluate_bool(inner, binding)?),
             RBoolExpr::Paren(inner) => self.evaluate_bool(inner, binding),
-            RBoolExpr::FuncPredicate(name, args) => {
-                self.evaluate_predicate(name, args, binding)
-            }
+            RBoolExpr::FuncPredicate(name, args) => self.evaluate_predicate(name, args, binding),
         }
     }
 
@@ -564,7 +581,7 @@ impl<'a> Executor<'a> {
                         name
                     ))),
                 }
-            }
+            },
         }
     }
 
@@ -583,14 +600,14 @@ impl<'a> Executor<'a> {
                     } else {
                         Ok(Value::Null)
                     }
-                }
+                },
                 Some(BoundValue::Edge(id)) => {
                     if let Some(edge) = self.graph.get_edge(*id) {
                         Ok(Value::String(edge_type_display(&edge.edge_type)))
                     } else {
                         Ok(Value::Null)
                     }
-                }
+                },
                 Some(BoundValue::Path(ids)) => {
                     let labels: Vec<Value> = ids
                         .iter()
@@ -598,7 +615,7 @@ impl<'a> Executor<'a> {
                         .map(|n| Value::String(n.label()))
                         .collect();
                     Ok(Value::List(labels))
-                }
+                },
                 None => Ok(Value::Null),
             },
 
@@ -619,17 +636,19 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, QueryError> {
         match binding.get(slot) {
             Some(BoundValue::Node(id)) => {
-                let node = self.graph.get_node(*id).ok_or_else(|| {
-                    QueryError::ExecutionError(format!("Node {} not found", id))
-                })?;
+                let node = self
+                    .graph
+                    .get_node(*id)
+                    .ok_or_else(|| QueryError::ExecutionError(format!("Node {} not found", id)))?;
                 Ok(self.node_property_value(node, prop))
-            }
+            },
             Some(BoundValue::Edge(id)) => {
-                let edge = self.graph.get_edge(*id).ok_or_else(|| {
-                    QueryError::ExecutionError(format!("Edge {} not found", id))
-                })?;
+                let edge = self
+                    .graph
+                    .get_edge(*id)
+                    .ok_or_else(|| QueryError::ExecutionError(format!("Edge {} not found", id)))?;
                 Ok(self.edge_property_value(edge, prop))
-            }
+            },
             Some(BoundValue::Path(ids)) => match prop {
                 "length" => Ok(Value::Int(ids.len() as i64)),
                 "hops" => Ok(Value::Int(ids.len().saturating_sub(1) as i64)),
@@ -653,13 +672,11 @@ impl<'a> Executor<'a> {
             "confidence" => match &node.node_type {
                 NodeType::Concept { confidence, .. } | NodeType::Claim { confidence, .. } => {
                     Value::Float(*confidence as f64)
-                }
+                },
                 _ => Value::Null,
             },
             "concept_name" => match &node.node_type {
-                NodeType::Concept { concept_name, .. } => {
-                    Value::String(concept_name.clone())
-                }
+                NodeType::Concept { concept_name, .. } => Value::String(concept_name.clone()),
                 _ => Value::Null,
             },
             "claim_text" => match &node.node_type {
@@ -684,7 +701,7 @@ impl<'a> Executor<'a> {
                     .get(prop)
                     .map(json_to_value)
                     .unwrap_or(Value::Null)
-            }
+            },
         }
     }
 
@@ -745,28 +762,26 @@ impl<'a> Executor<'a> {
                                 match binding.get(*slot) {
                                     Some(BoundValue::Node(id)) => {
                                         if let Some(node) = self.graph.get_node(*id) {
-                                            return Ok(Value::String(
-                                                node.type_name().to_string(),
-                                            ));
+                                            return Ok(Value::String(node.type_name().to_string()));
                                         }
-                                    }
+                                    },
                                     Some(BoundValue::Edge(id)) => {
                                         if let Some(edge) = self.graph.get_edge(*id) {
                                             return Ok(Value::String(edge_type_display(
                                                 &edge.edge_type,
                                             )));
                                         }
-                                    }
-                                    _ => {}
+                                    },
+                                    _ => {},
                                 }
                             }
                             Ok(Value::Null)
-                        }
+                        },
                     }
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
 
             "id" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
@@ -778,7 +793,7 @@ impl<'a> Executor<'a> {
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
 
             "labels" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
@@ -789,7 +804,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "properties" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
@@ -803,7 +818,7 @@ impl<'a> Executor<'a> {
                                     .collect();
                                 return Ok(Value::Map(map));
                             }
-                        }
+                        },
                         Some(BoundValue::Edge(id)) => {
                             if let Some(edge) = self.graph.get_edge(*id) {
                                 let map: HashMap<String, Value> = edge
@@ -813,17 +828,17 @@ impl<'a> Executor<'a> {
                                     .collect();
                                 return Ok(Value::Map(map));
                             }
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
                 Ok(Value::Map(HashMap::new()))
-            }
+            },
 
             "count" => {
                 // count(*) is handled in the aggregation phase; at row level return 1.
                 Ok(Value::Int(1))
-            }
+            },
 
             "path" => {
                 if args.len() >= 2 {
@@ -841,31 +856,27 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "hops" => {
                 if let Some(arg) = args.first() {
                     let v = self.evaluate_expr(arg, binding)?;
                     match v {
-                        Value::List(items) => {
-                            Ok(Value::Int(items.len().saturating_sub(1) as i64))
-                        }
+                        Value::List(items) => Ok(Value::Int(items.len().saturating_sub(1) as i64)),
                         _ => {
                             // Try path bound value.
                             if let RExpr::Var(slot) = arg {
                                 if let Some(BoundValue::Path(ids)) = binding.get(*slot) {
-                                    return Ok(Value::Int(
-                                        ids.len().saturating_sub(1) as i64,
-                                    ));
+                                    return Ok(Value::Int(ids.len().saturating_sub(1) as i64));
                                 }
                             }
                             Ok(Value::Int(0))
-                        }
+                        },
                     }
                 } else {
                     Ok(Value::Int(0))
                 }
-            }
+            },
 
             "now" => {
                 let ts = std::time::SystemTime::now()
@@ -873,7 +884,7 @@ impl<'a> Executor<'a> {
                     .unwrap_or_default()
                     .as_nanos() as i64;
                 Ok(Value::Int(ts))
-            }
+            },
 
             "duration" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
@@ -882,7 +893,7 @@ impl<'a> Executor<'a> {
                             match (edge.valid_from, edge.valid_until) {
                                 (Some(from), Some(until)) if until > from => {
                                     Ok(Value::Int((until - from) as i64))
-                                }
+                                },
                                 _ => Ok(Value::Null),
                             }
                         } else {
@@ -894,7 +905,7 @@ impl<'a> Executor<'a> {
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
 
             "coalesce" => {
                 for arg in args {
@@ -904,7 +915,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "toUpper" | "toupper" => {
                 if let Some(arg) = args.first() {
@@ -916,7 +927,7 @@ impl<'a> Executor<'a> {
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
 
             "toLower" | "tolower" => {
                 if let Some(arg) = args.first() {
@@ -928,10 +939,9 @@ impl<'a> Executor<'a> {
                 } else {
                     Ok(Value::Null)
                 }
-            }
+            },
 
             // ── Temporal accessor functions ──────────────────────────────
-
             "valid_from" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
                     if let Some(BoundValue::Edge(id)) = binding.get(*slot) {
@@ -944,7 +954,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "valid_until" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
@@ -958,7 +968,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "created_at" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
@@ -967,17 +977,17 @@ impl<'a> Executor<'a> {
                             if let Some(node) = self.graph.get_node(*id) {
                                 return Ok(Value::Int(node.created_at as i64));
                             }
-                        }
+                        },
                         Some(BoundValue::Edge(id)) => {
                             if let Some(edge) = self.graph.get_edge(*id) {
                                 return Ok(Value::Int(edge.created_at as i64));
                             }
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "updated_at" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
@@ -986,17 +996,17 @@ impl<'a> Executor<'a> {
                             if let Some(node) = self.graph.get_node(*id) {
                                 return Ok(Value::Int(node.updated_at as i64));
                             }
-                        }
+                        },
                         Some(BoundValue::Edge(id)) => {
                             if let Some(edge) = self.graph.get_edge(*id) {
                                 return Ok(Value::Int(edge.updated_at as i64));
                             }
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "open_ended" => {
                 if let Some(RExpr::Var(slot)) = args.first() {
@@ -1007,7 +1017,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "change_type" => {
                 // change_type(r, "t1", "t2") — returns "started", "ended", "created", or "stable"
@@ -1043,7 +1053,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             // ── Phase 1: time_bucket / date_trunc / ago ────────────────
             "time_bucket" => {
@@ -1058,7 +1068,7 @@ impl<'a> Executor<'a> {
                         return Err(QueryError::ExecutionError(
                             "time_bucket first argument must be a string".into(),
                         ))
-                    }
+                    },
                 };
                 let ts = match self.evaluate_expr(&args[1], binding)? {
                     Value::Int(i) if i >= 0 => i as u64,
@@ -1066,12 +1076,12 @@ impl<'a> Executor<'a> {
                         return Err(QueryError::ExecutionError(
                             "time_bucket timestamp must be non-negative".into(),
                         ))
-                    }
+                    },
                     _ => return Ok(Value::Null),
                 };
                 let bucket_nanos = truncate_timestamp(ts, &width_str)?;
                 Ok(Value::Int(bucket_nanos as i64))
-            }
+            },
 
             "date_trunc" => {
                 if args.len() < 2 {
@@ -1085,7 +1095,7 @@ impl<'a> Executor<'a> {
                         return Err(QueryError::ExecutionError(
                             "date_trunc first argument must be a string".into(),
                         ))
-                    }
+                    },
                 };
                 let ts = match self.evaluate_expr(&args[1], binding)? {
                     Value::Int(i) if i >= 0 => i as u64,
@@ -1093,12 +1103,12 @@ impl<'a> Executor<'a> {
                         return Err(QueryError::ExecutionError(
                             "date_trunc timestamp must be non-negative".into(),
                         ))
-                    }
+                    },
                     _ => return Ok(Value::Null),
                 };
                 let truncated = truncate_timestamp_by_unit(ts, &unit)?;
                 Ok(Value::Int(truncated as i64))
-            }
+            },
 
             "ago" => {
                 if args.is_empty() {
@@ -1112,7 +1122,7 @@ impl<'a> Executor<'a> {
                         return Err(QueryError::ExecutionError(
                             "ago argument must be a string".into(),
                         ))
-                    }
+                    },
                 };
                 // Reject calendar units that can't be subtracted as fixed nanos.
                 // parse_duration_nanos treats "1y" as 365d — wrong for ago().
@@ -1127,15 +1137,14 @@ impl<'a> Executor<'a> {
                         dur_str
                     )));
                 }
-                let dur_nanos = super::planner::parse_duration_nanos(&dur_str).map_err(|e| {
-                    QueryError::ExecutionError(format!("ago(): {}", e))
-                })?;
+                let dur_nanos = super::planner::parse_duration_nanos(&dur_str)
+                    .map_err(|e| QueryError::ExecutionError(format!("ago(): {}", e)))?;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos() as u64;
                 Ok(Value::Int(now.saturating_sub(dur_nanos) as i64))
-            }
+            },
 
             // ── Phase 2: Allen's interval algebra predicates ─────────
             "precedes" => {
@@ -1144,7 +1153,7 @@ impl<'a> Executor<'a> {
                     Some(((_, e1_end), (e2_start, _))) => e1_end <= e2_start,
                     None => false,
                 }))
-            }
+            },
 
             "meets" => {
                 let intervals = self.resolve_two_edge_intervals(args, binding)?;
@@ -1152,47 +1161,47 @@ impl<'a> Executor<'a> {
                     Some(((_, e1_end), (e2_start, _))) => e1_end == e2_start,
                     None => false,
                 }))
-            }
+            },
 
             "covers" => {
                 let intervals = self.resolve_two_edge_intervals(args, binding)?;
                 Ok(Value::Bool(match intervals {
                     Some(((e1_start, e1_end), (e2_start, e2_end))) => {
                         e1_start <= e2_start && e2_end <= e1_end
-                    }
+                    },
                     None => false,
                 }))
-            }
+            },
 
             "starts" => {
                 let intervals = self.resolve_two_edge_intervals(args, binding)?;
                 Ok(Value::Bool(match intervals {
                     Some(((e1_start, e1_end), (e2_start, e2_end))) => {
                         e1_start == e2_start && e1_end <= e2_end
-                    }
+                    },
                     None => false,
                 }))
-            }
+            },
 
             "finishes" => {
                 let intervals = self.resolve_two_edge_intervals(args, binding)?;
                 Ok(Value::Bool(match intervals {
                     Some(((e1_start, e1_end), (e2_start, e2_end))) => {
                         e1_end == e2_end && e1_start >= e2_start
-                    }
+                    },
                     None => false,
                 }))
-            }
+            },
 
             "equals" => {
                 let intervals = self.resolve_two_edge_intervals(args, binding)?;
                 Ok(Value::Bool(match intervals {
                     Some(((e1_start, e1_end), (e2_start, e2_end))) => {
                         e1_start == e2_start && e1_end == e2_end
-                    }
+                    },
                     None => false,
                 }))
-            }
+            },
 
             // ── Phase 3: TCell access functions ──────────────────────
             "confidence_at" => {
@@ -1209,7 +1218,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "weight_at" => {
                 if args.len() < 2 {
@@ -1225,12 +1234,13 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             "confidence_history" => {
-                if let Some(edge) = args.first().and_then(|a| {
-                    self.resolve_edge(a, binding).ok().flatten()
-                }) {
+                if let Some(edge) = args
+                    .first()
+                    .and_then(|a| self.resolve_edge(a, binding).ok().flatten())
+                {
                     let entries: Vec<Value> = edge
                         .confidence_history
                         .iter()
@@ -1244,12 +1254,13 @@ impl<'a> Executor<'a> {
                     return Ok(Value::List(entries));
                 }
                 Ok(Value::List(vec![]))
-            }
+            },
 
             "weight_history" => {
-                if let Some(edge) = args.first().and_then(|a| {
-                    self.resolve_edge(a, binding).ok().flatten()
-                }) {
+                if let Some(edge) = args
+                    .first()
+                    .and_then(|a| self.resolve_edge(a, binding).ok().flatten())
+                {
                     let entries: Vec<Value> = edge
                         .weight_history
                         .iter()
@@ -1263,7 +1274,7 @@ impl<'a> Executor<'a> {
                     return Ok(Value::List(entries));
                 }
                 Ok(Value::List(vec![]))
-            }
+            },
 
             "overlap" => {
                 if args.len() >= 2 {
@@ -1292,7 +1303,7 @@ impl<'a> Executor<'a> {
                     }
                 }
                 Ok(Value::Null)
-            }
+            },
 
             _ => Err(QueryError::ExecutionError(format!(
                 "Unknown function `{}`",
@@ -1311,11 +1322,7 @@ impl<'a> Executor<'a> {
     ///
     /// v1 note: this is a predicate over existing MATCH bindings, bounded by
     /// MAX_INTERMEDIATE_ROWS. Not yet a specialized temporal adjacency operator.
-    fn pred_successive(
-        &self,
-        args: &[RExpr],
-        binding: &BindingRow,
-    ) -> Result<bool, QueryError> {
+    fn pred_successive(&self, args: &[RExpr], binding: &BindingRow) -> Result<bool, QueryError> {
         if args.len() < 2 {
             return Err(QueryError::ExecutionError(
                 "SUCCESSIVE requires at least 2 arguments: SUCCESSIVE(r1, r2)".into(),
@@ -1352,18 +1359,14 @@ impl<'a> Executor<'a> {
                     start2 - end1
                 };
                 Ok(diff <= tolerance)
-            }
+            },
             _ => Ok(false),
         }
     }
 
     /// CHANGED(r, "t1", "t2") — true if the edge started, ended, or was created
     /// within [t1, t2].
-    fn pred_changed(
-        &self,
-        args: &[RExpr],
-        binding: &BindingRow,
-    ) -> Result<bool, QueryError> {
+    fn pred_changed(&self, args: &[RExpr], binding: &BindingRow) -> Result<bool, QueryError> {
         if args.len() < 3 {
             return Err(QueryError::ExecutionError(
                 "CHANGED requires 3 arguments: CHANGED(r, start, end)".into(),
@@ -1412,7 +1415,7 @@ impl<'a> Executor<'a> {
                     edge2.valid_until.unwrap_or(u64::MAX),
                 );
                 Ok(Some((i1, i2)))
-            }
+            },
             _ => Ok(None),
         }
     }
@@ -1432,22 +1435,19 @@ impl<'a> Executor<'a> {
     }
 
     /// Resolve a timestamp from an expression argument (string literal → parse).
-    fn resolve_timestamp_arg(
-        &self,
-        expr: &RExpr,
-        binding: &BindingRow,
-    ) -> Result<u64, QueryError> {
+    fn resolve_timestamp_arg(&self, expr: &RExpr, binding: &BindingRow) -> Result<u64, QueryError> {
         let val = self.evaluate_expr(expr, binding)?;
         match val {
             Value::String(s) => super::planner::parse_timestamp_str(&s),
             Value::Int(i) => {
                 if i < 0 {
-                    return Err(QueryError::ExecutionError(
-                        format!("Timestamp cannot be negative: {}", i),
-                    ));
+                    return Err(QueryError::ExecutionError(format!(
+                        "Timestamp cannot be negative: {}",
+                        i
+                    )));
                 }
                 Ok(i as u64)
-            }
+            },
             _ => Err(QueryError::ExecutionError(
                 "Expected timestamp string or integer".into(),
             )),
@@ -1471,7 +1471,7 @@ impl<'a> Executor<'a> {
                     Value::Int(i) => Ok(Some(i as NodeId)),
                     _ => Ok(None),
                 }
-            }
+            },
         }
     }
 
@@ -1537,11 +1537,11 @@ impl<'a> Executor<'a> {
                     return true;
                 }
                 false
-            }
+            },
             other => {
                 let variant_name = edge_type_variant_name(other);
                 variant_name.eq_ignore_ascii_case(filter)
-            }
+            },
         }
     }
 
@@ -1654,12 +1654,7 @@ impl<'a> Executor<'a> {
     // Ordering
     // -----------------------------------------------------------------------
 
-    fn apply_ordering(
-        &self,
-        rows: &mut [Vec<Value>],
-        columns: &[String],
-        ordering: &[OrderSpec],
-    ) {
+    fn apply_ordering(&self, rows: &mut [Vec<Value>], columns: &[String], ordering: &[OrderSpec]) {
         let col_index: HashMap<&str, usize> = columns
             .iter()
             .enumerate()
@@ -1677,7 +1672,9 @@ impl<'a> Executor<'a> {
 
         rows.sort_by(|a, b| {
             for &(ci, desc) in &specs {
-                let cmp = a[ci].partial_cmp(&b[ci]).unwrap_or(std::cmp::Ordering::Equal);
+                let cmp = a[ci]
+                    .partial_cmp(&b[ci])
+                    .unwrap_or(std::cmp::Ordering::Equal);
                 let cmp = if desc { cmp.reverse() } else { cmp };
                 if cmp != std::cmp::Ordering::Equal {
                     return cmp;
@@ -1693,7 +1690,13 @@ impl<'a> Executor<'a> {
         graph: &'a Graph,
         ontology: &'a OntologyRegistry,
         plan: ExecutionPlan,
-    ) -> Result<(QueryOutput, Vec<SmallVec<[(SlotIdx, crate::subscription::incremental::BoundEntityId); 4]>>), QueryError> {
+    ) -> Result<
+        (
+            QueryOutput,
+            Vec<SmallVec<[(SlotIdx, crate::subscription::incremental::BoundEntityId); 4]>>,
+        ),
+        QueryError,
+    > {
         let start = Instant::now();
 
         let mut executor = Executor {
@@ -1715,15 +1718,21 @@ impl<'a> Executor<'a> {
         }
 
         // Extract binding rows before projection.
-        let binding_rows: Vec<SmallVec<[(SlotIdx, crate::subscription::incremental::BoundEntityId); 4]>> = rows
+        let binding_rows: Vec<
+            SmallVec<[(SlotIdx, crate::subscription::incremental::BoundEntityId); 4]>,
+        > = rows
             .iter()
             .map(|br| {
                 let mut slots = SmallVec::new();
                 for i in 0..plan.var_count {
                     if let Some(bv) = br.get(i) {
                         let entity = match bv {
-                            BoundValue::Node(id) => crate::subscription::incremental::BoundEntityId::Node(*id),
-                            BoundValue::Edge(id) => crate::subscription::incremental::BoundEntityId::Edge(*id),
+                            BoundValue::Node(id) => {
+                                crate::subscription::incremental::BoundEntityId::Node(*id)
+                            },
+                            BoundValue::Edge(id) => {
+                                crate::subscription::incremental::BoundEntityId::Edge(*id)
+                            },
                             BoundValue::Path(_) => continue, // Paths not supported in subscriptions
                         };
                         slots.push((i, entity));
@@ -1845,11 +1854,11 @@ pub fn edge_matches_type_standalone(edge: &GraphEdge, filter: &Option<String>) -
                 return true;
             }
             false
-        }
+        },
         other => {
             let variant_name = edge_type_variant_name(other);
             variant_name.eq_ignore_ascii_case(filter)
-        }
+        },
     }
 }
 
@@ -1883,7 +1892,7 @@ pub(crate) fn node_property_value_standalone(node: &GraphNode, prop: &str) -> Va
         "confidence" => match &node.node_type {
             NodeType::Concept { confidence, .. } | NodeType::Claim { confidence, .. } => {
                 Value::Float(*confidence as f64)
-            }
+            },
             _ => Value::Null,
         },
         "concept_name" => match &node.node_type {
@@ -1922,7 +1931,7 @@ fn hash_row(row: &[Value]) -> u64 {
                         s.hash(&mut hasher);
                     }
                 }
-            }
+            },
             Value::Map(m) => m.len().hash(&mut hasher),
         }
     }
@@ -1940,7 +1949,7 @@ pub fn edge_type_display(et: &EdgeType) -> String {
         } => association_type.clone(),
         EdgeType::CodeStructure { relation_kind, .. } => {
             format!("code_structure:{}", relation_kind)
-        }
+        },
         other => edge_type_variant_name(other).to_string(),
     }
 }
@@ -1986,18 +1995,16 @@ fn json_to_value(jv: &serde_json::Value) -> Value {
             } else {
                 Value::Null
             }
-        }
+        },
         serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            Value::List(arr.iter().map(json_to_value).collect())
-        }
+        serde_json::Value::Array(arr) => Value::List(arr.iter().map(json_to_value).collect()),
         serde_json::Value::Object(map) => {
             let m: HashMap<String, Value> = map
                 .iter()
                 .map(|(k, v)| (k.clone(), json_to_value(v)))
                 .collect();
             Value::Map(m)
-        }
+        },
     }
 }
 
@@ -2009,7 +2016,7 @@ fn value_eq_loose(a: &Value, b: &Value) -> bool {
         (Value::Float(fa), Value::Float(fb)) => (fa - fb).abs() < f64::EPSILON,
         (Value::Int(i), Value::Float(f)) | (Value::Float(f), Value::Int(i)) => {
             (*i as f64 - f).abs() < f64::EPSILON
-        }
+        },
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Null, Value::Null) => true,
         _ => false,
@@ -2044,7 +2051,7 @@ fn compare_values(lhs: &Value, op: &CompOp, rhs: &Value) -> bool {
                             .zip(needle_lower.as_bytes())
                             .all(|(a, b)| a.to_ascii_lowercase() == *b)
                     })
-            }
+            },
             (Value::List(items), val) => items.iter().any(|item| value_eq_loose(item, val)),
             _ => false,
         },
@@ -2055,7 +2062,7 @@ fn compare_values(lhs: &Value, op: &CompOp, rhs: &Value) -> bool {
                         .iter()
                         .zip(prefix.as_bytes())
                         .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
-            }
+            },
             _ => false,
         },
     }
@@ -2075,7 +2082,7 @@ fn truncate_timestamp(nanos: u64, width: &str) -> Result<u64, QueryError> {
     // "1y" as 365d and "1m" as 30d, which is wrong for bucket boundaries.
     match lower.as_str() {
         "month" | "quarter" | "year" => return truncate_timestamp_by_unit_lower(nanos, &lower),
-        _ => {}
+        _ => {},
     }
     // Try parsing as a fixed-width duration string (e.g. "1d", "6h", "30m").
     if let Ok(bucket_width) = super::planner::parse_duration_nanos(width) {
@@ -2106,7 +2113,7 @@ fn truncate_timestamp_by_unit_lower(nanos: u64, unit: &str) -> Result<u64, Query
         "day" | "d" => {
             let (y, m, d) = nanos_to_civil(nanos);
             Ok(civil_to_nanos(y, m, d))
-        }
+        },
         "week" | "w" => {
             // Floor to Monday. Unix epoch (1970-01-01) was a Thursday (weekday 3, Mon=0).
             let total_days = (nanos / (86_400 * 1_000_000_000)) as i64;
@@ -2115,20 +2122,20 @@ fn truncate_timestamp_by_unit_lower(nanos: u64, unit: &str) -> Result<u64, Query
             let monday_days = total_days - dow;
             let (y, m, d) = super::planner::civil_from_days(monday_days);
             Ok(civil_to_nanos(y, m, d))
-        }
+        },
         "month" => {
             let (y, m, _) = nanos_to_civil(nanos);
             Ok(civil_to_nanos(y, m, 1))
-        }
+        },
         "quarter" => {
             let (y, m, _) = nanos_to_civil(nanos);
             let q_month = ((m - 1) / 3) * 3 + 1;
             Ok(civil_to_nanos(y, q_month, 1))
-        }
+        },
         "year" => {
             let (y, _, _) = nanos_to_civil(nanos);
             Ok(civil_to_nanos(y, 1, 1))
-        }
+        },
         _ => Err(QueryError::ExecutionError(format!(
             "unknown time unit: {}",
             unit
@@ -2155,7 +2162,7 @@ fn compute_aggregate(func: &AggregateFunction, values: &[Value]) -> Value {
             } else {
                 Value::Null
             }
-        }
+        },
 
         AggregateFunction::Avg => {
             let mut sum = 0.0_f64;
@@ -2171,25 +2178,21 @@ fn compute_aggregate(func: &AggregateFunction, values: &[Value]) -> Value {
             } else {
                 Value::Null
             }
-        }
+        },
 
-        AggregateFunction::Min => {
-            values
-                .iter()
-                .filter(|v| !v.is_null())
-                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .cloned()
-                .unwrap_or(Value::Null)
-        }
+        AggregateFunction::Min => values
+            .iter()
+            .filter(|v| !v.is_null())
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .cloned()
+            .unwrap_or(Value::Null),
 
-        AggregateFunction::Max => {
-            values
-                .iter()
-                .filter(|v| !v.is_null())
-                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .cloned()
-                .unwrap_or(Value::Null)
-        }
+        AggregateFunction::Max => values
+            .iter()
+            .filter(|v| !v.is_null())
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .cloned()
+            .unwrap_or(Value::Null),
 
         AggregateFunction::Collect => Value::List(values.to_vec()),
     }
@@ -2201,8 +2204,8 @@ fn compute_aggregate(func: &AggregateFunction, values: &[Value]) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ast::WhenClause;
+    use super::*;
     use agent_db_core::types::Timestamp;
 
     // -----------------------------------------------------------------------
@@ -2416,7 +2419,10 @@ mod tests {
     #[test]
     fn test_aggregate_count() {
         let vals = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
-        assert_eq!(compute_aggregate(&AggregateFunction::Count, &vals), Value::Int(3));
+        assert_eq!(
+            compute_aggregate(&AggregateFunction::Count, &vals),
+            Value::Int(3)
+        );
     }
 
     #[test]
@@ -2442,13 +2448,19 @@ mod tests {
     #[test]
     fn test_aggregate_min() {
         let vals = vec![Value::Int(5), Value::Int(2), Value::Int(8)];
-        assert_eq!(compute_aggregate(&AggregateFunction::Min, &vals), Value::Int(2));
+        assert_eq!(
+            compute_aggregate(&AggregateFunction::Min, &vals),
+            Value::Int(2)
+        );
     }
 
     #[test]
     fn test_aggregate_max() {
         let vals = vec![Value::Int(5), Value::Int(2), Value::Int(8)];
-        assert_eq!(compute_aggregate(&AggregateFunction::Max, &vals), Value::Int(8));
+        assert_eq!(
+            compute_aggregate(&AggregateFunction::Max, &vals),
+            Value::Int(8)
+        );
     }
 
     #[test]
@@ -2464,7 +2476,10 @@ mod tests {
     #[test]
     fn test_aggregate_sum_no_numeric() {
         let vals = vec![Value::String("x".into()), Value::Null];
-        assert_eq!(compute_aggregate(&AggregateFunction::Sum, &vals), Value::Null);
+        assert_eq!(
+            compute_aggregate(&AggregateFunction::Sum, &vals),
+            Value::Null
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2533,8 +2548,14 @@ mod tests {
         let active = make_test_edge(Some(100), None);
         let expired = make_test_edge(Some(100), Some(200));
 
-        assert!(edge_visible_with_viewport(&active, &TemporalViewport::ActiveOnly));
-        assert!(!edge_visible_with_viewport(&expired, &TemporalViewport::ActiveOnly));
+        assert!(edge_visible_with_viewport(
+            &active,
+            &TemporalViewport::ActiveOnly
+        ));
+        assert!(!edge_visible_with_viewport(
+            &expired,
+            &TemporalViewport::ActiveOnly
+        ));
     }
 
     #[test]
@@ -2543,8 +2564,14 @@ mod tests {
         let vp = TemporalViewport::PointInTime(200);
 
         assert!(edge_visible_with_viewport(&edge, &vp));
-        assert!(!edge_visible_with_viewport(&edge, &TemporalViewport::PointInTime(50)));
-        assert!(!edge_visible_with_viewport(&edge, &TemporalViewport::PointInTime(300)));
+        assert!(!edge_visible_with_viewport(
+            &edge,
+            &TemporalViewport::PointInTime(50)
+        ));
+        assert!(!edge_visible_with_viewport(
+            &edge,
+            &TemporalViewport::PointInTime(300)
+        ));
     }
 
     #[test]
@@ -2552,11 +2579,20 @@ mod tests {
         let edge = make_test_edge(Some(100), Some(300));
 
         // Overlapping range.
-        assert!(edge_visible_with_viewport(&edge, &TemporalViewport::Range(200, 400)));
+        assert!(edge_visible_with_viewport(
+            &edge,
+            &TemporalViewport::Range(200, 400)
+        ));
         // Non-overlapping range (entirely before).
-        assert!(!edge_visible_with_viewport(&edge, &TemporalViewport::Range(0, 50)));
+        assert!(!edge_visible_with_viewport(
+            &edge,
+            &TemporalViewport::Range(0, 50)
+        ));
         // Non-overlapping range (entirely after).
-        assert!(!edge_visible_with_viewport(&edge, &TemporalViewport::Range(300, 500)));
+        assert!(!edge_visible_with_viewport(
+            &edge,
+            &TemporalViewport::Range(300, 500)
+        ));
     }
 
     #[test]
@@ -2594,7 +2630,10 @@ mod tests {
             statistical_significance: 1.0,
         };
         assert!(matches_type_helper(&edge, &Some("location".to_string())));
-        assert!(!matches_type_helper(&edge, &Some("relationship".to_string())));
+        assert!(!matches_type_helper(
+            &edge,
+            &Some("relationship".to_string())
+        ));
     }
 
     #[test]
@@ -2632,11 +2671,11 @@ mod tests {
                     return true;
                 }
                 false
-            }
+            },
             other => {
                 let name = edge_type_variant_name(other);
                 name.eq_ignore_ascii_case(filter)
-            }
+            },
         }
     }
 
@@ -2674,7 +2713,11 @@ mod tests {
         // Create nodes
         let n_alice = GraphNode {
             id: 0,
-            node_type: NodeType::Concept { concept_name: "alice".to_string(), concept_type: ConceptType::Person, confidence: 1.0 },
+            node_type: NodeType::Concept {
+                concept_name: "alice".to_string(),
+                concept_type: ConceptType::Person,
+                confidence: 1.0,
+            },
             created_at: 100,
             updated_at: 100,
             properties: HashMap::new(),
@@ -2687,7 +2730,11 @@ mod tests {
 
         let n_london = GraphNode {
             id: 0,
-            node_type: NodeType::Concept { concept_name: "london".to_string(), concept_type: ConceptType::Location, confidence: 1.0 },
+            node_type: NodeType::Concept {
+                concept_name: "london".to_string(),
+                concept_type: ConceptType::Location,
+                confidence: 1.0,
+            },
             created_at: 100,
             updated_at: 100,
             properties: HashMap::new(),
@@ -2700,7 +2747,11 @@ mod tests {
 
         let n_berlin = GraphNode {
             id: 0,
-            node_type: NodeType::Concept { concept_name: "berlin".to_string(), concept_type: ConceptType::Location, confidence: 1.0 },
+            node_type: NodeType::Concept {
+                concept_name: "berlin".to_string(),
+                concept_type: ConceptType::Location,
+                confidence: 1.0,
+            },
             created_at: 200,
             updated_at: 200,
             properties: HashMap::new(),
@@ -2713,7 +2764,11 @@ mod tests {
 
         let n_tokyo = GraphNode {
             id: 0,
-            node_type: NodeType::Concept { concept_name: "tokyo".to_string(), concept_type: ConceptType::Location, confidence: 1.0 },
+            node_type: NodeType::Concept {
+                concept_name: "tokyo".to_string(),
+                concept_type: ConceptType::Location,
+                confidence: 1.0,
+            },
             created_at: 300,
             updated_at: 300,
             properties: HashMap::new(),
@@ -2813,7 +2868,8 @@ mod tests {
         // AS OF 150: only alice and london (created_at<=150), only edge1 (created_at=100)
         let result = exec_temporal(
             r#"MATCH (u {name: "alice"})-[r:location]->(p) WHEN ALL AS OF 150 RETURN p"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 1); // only london edge visible
     }
 
@@ -2822,7 +2878,8 @@ mod tests {
         // AS OF 999: everything visible
         let result = exec_temporal(
             r#"MATCH (u {name: "alice"})-[r:location]->(p) WHEN ALL AS OF 999 RETURN p"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 3);
     }
 
@@ -2831,7 +2888,8 @@ mod tests {
         // AS OF 50: nothing created yet
         let result = exec_temporal(
             r#"MATCH (u {name: "alice"})-[r:location]->(p) WHEN ALL AS OF 50 RETURN p"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 0);
     }
 
@@ -2858,9 +2916,7 @@ mod tests {
 
     #[test]
     fn test_created_at_function() {
-        let result = exec_temporal(
-            r#"MATCH (u {name: "alice"}) RETURN created_at(u)"#,
-        ).unwrap();
+        let result = exec_temporal(r#"MATCH (u {name: "alice"}) RETURN created_at(u)"#).unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::Int(100));
     }
@@ -2868,9 +2924,9 @@ mod tests {
     #[test]
     fn test_open_ended_function() {
         // Default viewport = ActiveOnly, so only tokyo edge (open-ended)
-        let result = exec_temporal(
-            r#"MATCH (u {name: "alice"})-[r:location]->(p) RETURN open_ended(r)"#,
-        ).unwrap();
+        let result =
+            exec_temporal(r#"MATCH (u {name: "alice"})-[r:location]->(p) RETURN open_ended(r)"#)
+                .unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::Bool(true));
     }
@@ -2887,9 +2943,9 @@ mod tests {
     #[test]
     fn test_duration_null_for_open_ended() {
         // Tokyo edge has no valid_until → duration returns Null
-        let result = exec_temporal(
-            r#"MATCH (u {name: "alice"})-[r:location]->(p) RETURN duration(r)"#,
-        ).unwrap();
+        let result =
+            exec_temporal(r#"MATCH (u {name: "alice"})-[r:location]->(p) RETURN duration(r)"#)
+                .unwrap();
         // ActiveOnly → only tokyo
         assert_eq!(result.rows[0][0], Value::Null);
     }
@@ -2999,9 +3055,8 @@ mod tests {
     fn test_parse_as_of() {
         use super::super::ast::BoolExpr;
         use super::super::ast::Expr;
-        let q = super::super::parser::Parser::parse(
-            r#"MATCH (n) AS OF "2024-06-15" RETURN n"#,
-        ).unwrap();
+        let q = super::super::parser::Parser::parse(r#"MATCH (n) AS OF "2024-06-15" RETURN n"#)
+            .unwrap();
         assert!(q.as_of.is_some());
         match &q.as_of.unwrap() {
             Expr::Literal(Literal::String(s)) => assert_eq!(s, "2024-06-15"),
@@ -3013,7 +3068,8 @@ mod tests {
     fn test_parse_as_of_with_when() {
         let q = super::super::parser::Parser::parse(
             r#"MATCH (n) WHEN ALL AS OF "2024-06-15" RETURN n"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(q.when, Some(WhenClause::All)));
         assert!(q.as_of.is_some());
     }
@@ -3023,7 +3079,8 @@ mod tests {
         use super::super::ast::{BoolExpr, Expr};
         let q = super::super::parser::Parser::parse(
             r#"MATCH (n)-[r1]->(m), (n)-[r2]->(o) WHERE SUCCESSIVE(r1, r2) RETURN n"#,
-        ).unwrap();
+        )
+        .unwrap();
         match &q.where_clause {
             Some(BoolExpr::FuncPredicate(name, args)) => {
                 assert!(name == "SUCCESSIVE");
@@ -3038,7 +3095,8 @@ mod tests {
         use super::super::ast::BoolExpr;
         let q = super::super::parser::Parser::parse(
             r#"MATCH (n)-[r]->(m) WHEN ALL WHERE CHANGED(r, "2024-01", "2024-12") RETURN n"#,
-        ).unwrap();
+        )
+        .unwrap();
         match &q.where_clause {
             Some(BoolExpr::FuncPredicate(name, args)) => {
                 assert!(name == "CHANGED");
@@ -3050,9 +3108,7 @@ mod tests {
 
     #[test]
     fn test_as_alias_still_works() {
-        let q = super::super::parser::Parser::parse(
-            r#"MATCH (n) RETURN n.name AS label"#,
-        ).unwrap();
+        let q = super::super::parser::Parser::parse(r#"MATCH (n) RETURN n.name AS label"#).unwrap();
         assert_eq!(q.returns[0].alias.as_deref(), Some("label"));
         assert!(q.as_of.is_none());
     }
@@ -3116,9 +3172,7 @@ mod tests {
     #[test]
     fn test_ago_returns_near_now() {
         // ago("0s") should be approximately now
-        let result = exec_temporal(
-            r#"MATCH (u {name: "alice"}) RETURN ago("0s")"#,
-        ).unwrap();
+        let result = exec_temporal(r#"MATCH (u {name: "alice"}) RETURN ago("0s")"#).unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -3126,8 +3180,12 @@ mod tests {
         match &result.rows[0][0] {
             Value::Int(v) => {
                 let diff = (now - v).abs();
-                assert!(diff < 2_000_000_000, "ago(0s) too far from now: diff={}", diff);
-            }
+                assert!(
+                    diff < 2_000_000_000,
+                    "ago(0s) too far from now: diff={}",
+                    diff
+                );
+            },
             other => panic!("expected Int, got {:?}", other),
         }
     }
@@ -3224,7 +3282,8 @@ mod tests {
         // All test edges have TCell::Empty confidence_history
         let result = exec_temporal(
             r#"MATCH (u {name: "alice"})-[r:location]->(p) RETURN confidence_history(r)"#,
-        ).unwrap();
+        )
+        .unwrap();
         // ActiveOnly → tokyo only
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::List(vec![]));
@@ -3234,7 +3293,8 @@ mod tests {
     fn test_confidence_at_empty() {
         let result = exec_temporal(
             r#"MATCH (u {name: "alice"})-[r:location]->(p) RETURN confidence_at(r, 500)"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::Null);
     }
@@ -3243,7 +3303,8 @@ mod tests {
     fn test_weight_history_empty() {
         let result = exec_temporal(
             r#"MATCH (u {name: "alice"})-[r:location]->(p) RETURN weight_history(r)"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::List(vec![]));
     }
@@ -3258,7 +3319,8 @@ mod tests {
         if let Some(edge) = graph.edges.get_mut(edge_ids[0]) {
             edge.confidence_history.set(EventTime::from_nanos(100), 0.5);
             edge.confidence_history.set(EventTime::from_nanos(200), 0.8);
-            edge.confidence_history.set(EventTime::from_nanos(300), 0.95);
+            edge.confidence_history
+                .set(EventTime::from_nanos(300), 0.95);
         }
         // Query confidence_at at timestamp 250 → should get 0.8 (last at or before 250)
         let result = crate::query_lang::execute_query(
@@ -3300,10 +3362,10 @@ mod tests {
                             Value::Float(f) => assert!((*f - 0.5).abs() < 0.01),
                             other => panic!("expected Float, got {:?}", other),
                         }
-                    }
+                    },
                     other => panic!("expected List pair, got {:?}", other),
                 }
-            }
+            },
             other => panic!("expected List, got {:?}", other),
         }
     }
@@ -3329,7 +3391,8 @@ mod tests {
         // WHEN ALL: no valid-time filter
         let result = exec_temporal(
             r#"MATCH (u {name: "alice"})-[r:location]->(p) WHEN ALL AS OF 150 RETURN p"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 1); // only london
     }
 
@@ -3339,7 +3402,8 @@ mod tests {
         // WHEN 250 TO 350: edge2[200,300) overlaps, edge3[300,∞) overlaps
         let result = exec_temporal(
             r#"MATCH (u {name: "alice"})-[r:location]->(p) WHEN 250 TO 350 RETURN p"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.rows.len(), 2); // berlin + tokyo
     }
 
@@ -3349,7 +3413,9 @@ mod tests {
 
     #[test]
     fn test_civil_roundtrip() {
-        use super::super::planner::{civil_from_days, civil_to_nanos, days_from_civil, nanos_to_civil};
+        use super::super::planner::{
+            civil_from_days, civil_to_nanos, days_from_civil, nanos_to_civil,
+        };
         // 2024-06-15 roundtrip
         let days = days_from_civil(2024, 6, 15);
         let (y, m, d) = civil_from_days(days);

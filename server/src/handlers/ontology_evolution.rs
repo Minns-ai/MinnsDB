@@ -30,15 +30,16 @@ pub async fn upload_ontology(
 }
 
 /// POST /api/ontology/cascade-inference — Run LLM cascade inference on current ontology.
-pub async fn run_cascade_inference(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn run_cascade_inference(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     match state.engine.run_ontology_cascade_inference().await {
         Ok(updated) => Ok(Json(json!({
             "status": "ok",
             "properties_updated": updated,
         }))),
-        Err(e) => Err(ApiError::Internal(format!("Cascade inference failed: {}", e))),
+        Err(e) => Err(ApiError::Internal(format!(
+            "Cascade inference failed: {}",
+            e
+        ))),
     }
 }
 
@@ -48,7 +49,9 @@ pub async fn list_ontology_properties(
 ) -> Result<Json<Value>, ApiError> {
     let ids = state.engine.list_ontology_property_ids();
     let properties = state.engine.list_ontology_properties_json();
-    Ok(Json(json!({ "properties": properties, "count": ids.len() })))
+    Ok(Json(
+        json!({ "properties": properties, "count": ids.len() }),
+    ))
 }
 
 /// GET /api/ontology/observations — List tracked predicate observations.
@@ -63,9 +66,7 @@ pub async fn list_ontology_observations(
 }
 
 /// POST /api/ontology/discover — Trigger behavior inference + hierarchy discovery + cascade inference.
-pub async fn discover_ontology(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn discover_ontology(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // Phase 1: Behavior inference
     let inference_ids = state
         .engine

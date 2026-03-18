@@ -86,10 +86,7 @@ struct WsResultSet {
 // ---------------------------------------------------------------------------
 
 /// GET /api/subscriptions/ws — upgrade to WebSocket.
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -195,7 +192,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         for sub_id in &my_subs {
             mgr.unsubscribe(*sub_id);
         }
-        info!("WebSocket disconnected, cleaned up {} subscriptions", my_subs.len());
+        info!(
+            "WebSocket disconnected, cleaned up {} subscriptions",
+            my_subs.len()
+        );
     } else {
         debug!("WebSocket disconnected (no active subscriptions)");
     }
@@ -213,7 +213,7 @@ async fn handle_client_message(
                 message: format!("Invalid message: {}", e),
                 request_id: None,
             });
-        }
+        },
     };
 
     match msg {
@@ -233,7 +233,7 @@ async fn handle_client_message(
                         message: format!("{}", e),
                         request_id,
                     });
-                }
+                },
             };
             let plan = match agent_db_graph::query_lang::planner::plan(ast) {
                 Ok(p) => p,
@@ -242,7 +242,7 @@ async fn handle_client_message(
                         message: format!("{}", e),
                         request_id,
                     });
-                }
+                },
             };
 
             // Subscribe under locks.
@@ -276,13 +276,13 @@ async fn handle_client_message(
                                 .collect(),
                         },
                     })
-                }
+                },
                 Err(e) => Some(ServerMessage::Error {
                     message: format!("{}", e),
                     request_id,
                 }),
             }
-        }
+        },
         ClientMessage::Unsubscribe { subscription_id } => {
             let removed = {
                 let mut mgr = state.subscription_manager.lock().await;
@@ -302,7 +302,7 @@ async fn handle_client_message(
                     request_id: None,
                 })
             }
-        }
+        },
         ClientMessage::Ping => Some(ServerMessage::Pong),
     }
 }

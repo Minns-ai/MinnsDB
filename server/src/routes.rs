@@ -4,7 +4,7 @@ use crate::handlers;
 use crate::state::AppState;
 use axum::http::Method;
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
@@ -191,16 +191,40 @@ pub fn create_router(state: AppState) -> Router {
             post(handlers::ingest_conversation),
         )
         // Ontology
-        .route("/api/ontology/properties", get(handlers::list_ontology_properties))
+        .route(
+            "/api/ontology/properties",
+            get(handlers::list_ontology_properties),
+        )
         .route("/api/ontology/upload", post(handlers::upload_ontology))
         .route("/api/ontology/discover", post(handlers::discover_ontology))
-        .route("/api/ontology/cascade-inference", post(handlers::run_cascade_inference))
-        .route("/api/ontology/observations", get(handlers::list_ontology_observations))
-        .route("/api/ontology/proposals", get(handlers::list_ontology_proposals))
-        .route("/api/ontology/proposals/:id", get(handlers::get_ontology_proposal))
-        .route("/api/ontology/proposals/:id/approve", post(handlers::approve_ontology_proposal))
-        .route("/api/ontology/proposals/:id/reject", post(handlers::reject_ontology_proposal))
-        .route("/api/ontology/stats", get(handlers::ontology_evolution_stats))
+        .route(
+            "/api/ontology/cascade-inference",
+            post(handlers::run_cascade_inference),
+        )
+        .route(
+            "/api/ontology/observations",
+            get(handlers::list_ontology_observations),
+        )
+        .route(
+            "/api/ontology/proposals",
+            get(handlers::list_ontology_proposals),
+        )
+        .route(
+            "/api/ontology/proposals/:id",
+            get(handlers::get_ontology_proposal),
+        )
+        .route(
+            "/api/ontology/proposals/:id/approve",
+            post(handlers::approve_ontology_proposal),
+        )
+        .route(
+            "/api/ontology/proposals/:id/reject",
+            post(handlers::reject_ontology_proposal),
+        )
+        .route(
+            "/api/ontology/stats",
+            get(handlers::ontology_evolution_stats),
+        )
         // Subscriptions (live queries)
         .route(
             "/api/subscriptions",
@@ -214,12 +238,76 @@ pub fn create_router(state: AppState) -> Router {
             "/api/subscriptions/:id/poll",
             get(handlers::poll_subscription),
         )
-        .route(
-            "/api/subscriptions/ws",
-            get(handlers::ws_handler),
-        )
+        .route("/api/subscriptions/ws", get(handlers::ws_handler))
         // Graph import (bulk knowledge graph)
         .route("/api/graph/import", post(handlers::import_graph))
+        // Temporal Tables
+        .route(
+            "/api/tables",
+            post(handlers::tables::create_table).get(handlers::tables::list_tables),
+        )
+        .route("/api/tables/:name", delete(handlers::tables::drop_table))
+        .route(
+            "/api/tables/:name/schema",
+            get(handlers::tables::get_schema),
+        )
+        .route(
+            "/api/tables/:name/rows",
+            post(handlers::tables::insert_rows).get(handlers::tables::scan_rows),
+        )
+        .route(
+            "/api/tables/:name/rows/:id",
+            put(handlers::tables::update_row).delete(handlers::tables::delete_row),
+        )
+        .route(
+            "/api/tables/:name/by-node/:node_id",
+            get(handlers::tables::rows_by_node),
+        )
+        .route(
+            "/api/tables/:name/compact",
+            post(handlers::tables::compact_table),
+        )
+        .route(
+            "/api/tables/:name/stats",
+            get(handlers::tables::table_stats),
+        )
+        // WASM Agent Modules
+        .route(
+            "/api/modules",
+            post(handlers::modules::upload_module).get(handlers::modules::list_modules),
+        )
+        .route(
+            "/api/modules/:name",
+            get(handlers::modules::get_module).delete(handlers::modules::delete_module),
+        )
+        .route(
+            "/api/modules/:name/call/:function",
+            post(handlers::modules::call_function),
+        )
+        .route(
+            "/api/modules/:name/enable",
+            put(handlers::modules::enable_module),
+        )
+        .route(
+            "/api/modules/:name/disable",
+            put(handlers::modules::disable_module),
+        )
+        .route(
+            "/api/modules/:name/usage",
+            get(handlers::modules::get_usage),
+        )
+        .route(
+            "/api/modules/:name/usage/reset",
+            post(handlers::modules::reset_usage),
+        )
+        .route(
+            "/api/modules/:name/schedules",
+            get(handlers::modules::list_schedules).post(handlers::modules::create_schedule),
+        )
+        .route(
+            "/api/modules/:name/schedules/:id",
+            delete(handlers::modules::delete_schedule),
+        )
         // Admin: Export/Import
         .route("/api/admin/export", post(handlers::export_handler))
         .route("/api/admin/import", post(handlers::import_handler))

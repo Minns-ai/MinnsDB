@@ -53,6 +53,26 @@ pub enum GraphDelta {
         absorbed_id: NodeId,
         generation: u64,
     },
+    // -- Table deltas --
+    TableRowInserted {
+        table_id: u64,
+        row_id: u64,
+        version_id: u64,
+        generation: u64,
+    },
+    TableRowUpdated {
+        table_id: u64,
+        row_id: u64,
+        old_version_id: u64,
+        new_version_id: u64,
+        generation: u64,
+    },
+    TableRowDeleted {
+        table_id: u64,
+        row_id: u64,
+        version_id: u64,
+        generation: u64,
+    },
 }
 
 impl GraphDelta {
@@ -61,24 +81,32 @@ impl GraphDelta {
         match self {
             GraphDelta::NodeAdded { node_id, .. } | GraphDelta::NodeRemoved { node_id, .. } => {
                 smallvec::smallvec![*node_id]
-            }
-            GraphDelta::EdgeAdded {
-                source, target, ..
-            }
-            | GraphDelta::EdgeRemoved {
-                source, target, ..
-            }
-            | GraphDelta::EdgeSuperseded {
-                source, target, ..
-            }
-            | GraphDelta::EdgeMutated {
-                source, target, ..
-            } => smallvec::smallvec![*source, *target],
+            },
+            GraphDelta::EdgeAdded { source, target, .. }
+            | GraphDelta::EdgeRemoved { source, target, .. }
+            | GraphDelta::EdgeSuperseded { source, target, .. }
+            | GraphDelta::EdgeMutated { source, target, .. } => {
+                smallvec::smallvec![*source, *target]
+            },
             GraphDelta::NodeMerged {
                 survivor_id,
                 absorbed_id,
                 ..
             } => smallvec::smallvec![*survivor_id, *absorbed_id],
+            // Table deltas don't touch graph nodes
+            GraphDelta::TableRowInserted { .. }
+            | GraphDelta::TableRowUpdated { .. }
+            | GraphDelta::TableRowDeleted { .. } => SmallVec::new(),
+        }
+    }
+
+    /// Table ID if this is a table delta, else None.
+    pub fn table_id(&self) -> Option<u64> {
+        match self {
+            GraphDelta::TableRowInserted { table_id, .. }
+            | GraphDelta::TableRowUpdated { table_id, .. }
+            | GraphDelta::TableRowDeleted { table_id, .. } => Some(*table_id),
+            _ => None,
         }
     }
 
@@ -90,7 +118,10 @@ impl GraphDelta {
             | GraphDelta::EdgeRemoved { generation, .. }
             | GraphDelta::EdgeSuperseded { generation, .. }
             | GraphDelta::EdgeMutated { generation, .. }
-            | GraphDelta::NodeMerged { generation, .. } => *generation,
+            | GraphDelta::NodeMerged { generation, .. }
+            | GraphDelta::TableRowInserted { generation, .. }
+            | GraphDelta::TableRowUpdated { generation, .. }
+            | GraphDelta::TableRowDeleted { generation, .. } => *generation,
         }
     }
 }

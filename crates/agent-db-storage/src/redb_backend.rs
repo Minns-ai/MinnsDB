@@ -87,6 +87,22 @@ mod table_defs {
 
     // World model (Phase 3)
     pub const WORLD_MODEL: TableDefinition<&[u8], &[u8]> = TableDefinition::new("world_model");
+
+    // Temporal tables
+    /// Key: [table_id: 8B BE] -> msgpack(TableSchema)
+    pub const TABLE_SCHEMAS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("table_schemas");
+    /// Key: [table_id: 8B BE][page_id: 4B BE] -> raw [u8; 8192]
+    pub const TABLE_PAGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("table_pages");
+    /// Key: [table_id: 8B BE] -> msgpack(TableMeta)
+    pub const TABLE_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("table_meta");
+
+    // WASM agent modules
+    pub const MODULE_REGISTRY: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("module_registry");
+    pub const MODULE_BLOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("module_blobs");
+    pub const MODULE_USAGE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("module_usage");
+    pub const MODULE_SCHEDULES: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("module_schedules");
 }
 
 /// Table names (for string-based access)
@@ -112,6 +128,13 @@ pub mod table_names {
     pub const GRAPH_ADJACENCY: &str = "graph_adjacency";
     pub const GRAPH_EDGES: &str = "graph_edges";
     pub const WORLD_MODEL: &str = "world_model";
+    pub const TABLE_SCHEMAS: &str = "table_schemas";
+    pub const TABLE_PAGES: &str = "table_pages";
+    pub const TABLE_META: &str = "table_meta";
+    pub const MODULE_REGISTRY: &str = "module_registry";
+    pub const MODULE_BLOBS: &str = "module_blobs";
+    pub const MODULE_USAGE: &str = "module_usage";
+    pub const MODULE_SCHEDULES: &str = "module_schedules";
 }
 
 /// redb backend configuration
@@ -250,6 +273,31 @@ impl RedbBackend {
             // World model (Phase 3)
             let _ = write_txn
                 .open_table(table_defs::WORLD_MODEL)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+            // WASM agent modules
+            let _ = write_txn
+                .open_table(table_defs::MODULE_REGISTRY)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+            let _ = write_txn
+                .open_table(table_defs::MODULE_BLOBS)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+            let _ = write_txn
+                .open_table(table_defs::MODULE_USAGE)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+            let _ = write_txn
+                .open_table(table_defs::MODULE_SCHEDULES)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+
+            // Temporal tables
+            let _ = write_txn
+                .open_table(table_defs::TABLE_SCHEMAS)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+            let _ = write_txn
+                .open_table(table_defs::TABLE_PAGES)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+            let _ = write_txn
+                .open_table(table_defs::TABLE_META)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
 

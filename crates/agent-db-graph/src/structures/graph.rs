@@ -121,7 +121,8 @@ pub struct Graph {
     pub(crate) total_degree: u64,
 
     /// Broadcast channel for subscription deltas. None = no subscribers, negligible overhead.
-    pub(crate) delta_tx: Option<tokio::sync::broadcast::Sender<crate::subscription::delta::DeltaBatch>>,
+    pub(crate) delta_tx:
+        Option<tokio::sync::broadcast::Sender<crate::subscription::delta::DeltaBatch>>,
 }
 
 /// Graph statistics for monitoring and optimization

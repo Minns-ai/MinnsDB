@@ -4,8 +4,8 @@
 //! subscriptions, and buffers results in the manager's `pending_updates`.
 //! This decouples delta processing from poll/WebSocket request latency.
 
-use agent_db_graph::GraphEngine;
 use agent_db_graph::subscription::manager::SubscriptionManager;
+use agent_db_graph::GraphEngine;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
