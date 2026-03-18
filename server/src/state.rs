@@ -9,6 +9,7 @@ use agent_db_tables::catalog::TableCatalog;
 use minns_wasm_runtime::registry::ModuleRegistry;
 use minns_wasm_runtime::runtime::WasmRuntime;
 use minns_wasm_runtime::scheduler::ScheduleRunner;
+use minns_auth::store::KeyStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -34,4 +35,8 @@ pub struct AppState {
     pub module_registry: Arc<tokio::sync::RwLock<ModuleRegistry>>,
     /// WASM schedule runner.
     pub schedule_runner: Arc<tokio::sync::RwLock<ScheduleRunner>>,
+    /// API key store for authentication.
+    pub key_store: Arc<tokio::sync::RwLock<KeyStore>>,
+    /// Whether auth is enabled (can be disabled via MINNS_AUTH_DISABLED=true for development).
+    pub auth_enabled: bool,
 }

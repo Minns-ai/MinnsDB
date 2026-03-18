@@ -1897,6 +1897,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "minns-auth"
+version = "0.1.0"
+dependencies = [
+ "agent-db-core",
+ "agent-db-storage",
+ "blake3",
+ "rand 0.8.5",
+ "rmp-serde",
+ "rustc-hash",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "minns-cli"
 version = "0.1.0"
 dependencies = [
@@ -1953,6 +1969,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "hyper 1.8.1",
+ "minns-auth",
  "minns-wasm-runtime",
  "num_cpus",
  "parking_lot",

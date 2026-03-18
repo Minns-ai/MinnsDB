@@ -69,6 +69,8 @@ async fn build_test_app() -> Router {
         wasm_runtime,
         module_registry,
         schedule_runner,
+        key_store: Arc::new(tokio::sync::RwLock::new(minns_auth::store::KeyStore::new())),
+        auth_enabled: false, // Disable auth for tests
     };
 
     minnsdb_server::routes::create_router(state)

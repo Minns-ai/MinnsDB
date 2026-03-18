@@ -1,0 +1,20 @@
+[package]
+name = "minns-auth"
+version = "0.1.0"
+edition = "2021"
+description = "API key authentication for MinnsDB"
+
+[dependencies]
+agent-db-core = { path = "../agent-db-core" }
+agent-db-storage = { path = "../agent-db-storage" }
+blake3 = "1.5"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+tracing = "0.1"
+thiserror = "1.0"
+rustc-hash = "2"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

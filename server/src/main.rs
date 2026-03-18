@@ -19,6 +19,7 @@ use agent_db_tables::catalog::TableCatalog;
 use minns_wasm_runtime::registry::ModuleRegistry;
 use minns_wasm_runtime::runtime::{RuntimeConfig, WasmRuntime};
 use minns_wasm_runtime::scheduler::ScheduleRunner;
+use minns_auth::store::KeyStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -138,6 +139,35 @@ async fn main() -> anyhow::Result<()> {
     let schedule_runner = Arc::new(tokio::sync::RwLock::new(ScheduleRunner::new()));
     info!("WASM agent runtime initialized");
 
+    // ── Authentication ─────────────────────────────────────────────────
+    let auth_disabled = std::env::var("MINNS_AUTH_DISABLED")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    let mut key_store = if let Some(backend) = engine.redb_backend() {
+        KeyStore::load(backend).unwrap_or_else(|e| {
+            tracing::warn!("Failed to load API keys: {} — starting fresh", e);
+            KeyStore::new()
+        })
+    } else {
+        KeyStore::new()
+    };
+
+    if let Some(root_key) = key_store.init_root_key_if_empty() {
+        info!("========================================");
+        info!("  ROOT API KEY (save this — shown once):");
+        info!("  {}", root_key);
+        info!("========================================");
+    } else {
+        info!("API keys loaded: {} keys", key_store.count());
+    }
+
+    if auth_disabled {
+        tracing::warn!("Authentication DISABLED (MINNS_AUTH_DISABLED=true) — all requests accepted without API key");
+    }
+
+    let key_store = Arc::new(tokio::sync::RwLock::new(key_store));
+
     // Create application state
     let state = state::AppState {
         engine: engine.clone(),
@@ -151,6 +181,8 @@ async fn main() -> anyhow::Result<()> {
         wasm_runtime: wasm_runtime.clone(),
         module_registry: module_registry.clone(),
         schedule_runner: schedule_runner.clone(),
+        key_store: key_store.clone(),
+        auth_enabled: !auth_disabled,
     };
 
     // Build router
@@ -195,6 +227,16 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("Failed to persist WASM registry: {}", e);
         } else {
             info!("WASM module registry persisted");
+        }
+    }
+
+    // Persist API keys
+    if let Some(backend) = engine.redb_backend() {
+        let store = key_store.read().await;
+        if let Err(e) = store.persist(backend) {
+            tracing::error!("Failed to persist API keys: {}", e);
+        } else {
+            info!("API keys persisted");
         }
     }
 
