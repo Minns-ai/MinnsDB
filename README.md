@@ -10,7 +10,18 @@
 </p>
 
 <p align="center">
-  Pure Rust &middot; Single binary &middot; Embedded storage &middot; No GPU &middot; 1,100+ tests
+  <a href="https://github.com/Minns-ai/EventGraphDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/EventGraphDB/ci.yml?branch=main&style=flat-square&label=build%20%2B%20clippy%20%2B%20tests" alt="CI"></a>
+  <a href="https://github.com/Minns-ai/EventGraphDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/EventGraphDB/ci.yml?branch=main&style=flat-square&label=security%20audit" alt="Security Audit"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSL--1.1-blue?style=flat-square" alt="License: BSL 1.1"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.83%2B-orange?style=flat-square&logo=rust" alt="Rust"></a>
+  <a href="https://discord.gg/6a2cCRPwUR"><img src="https://img.shields.io/discord/1472727097368641720?style=flat-square&logo=discord&label=discord&color=5865F2" alt="Discord"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="API_REFERENCE.md">API Reference</a> &middot;
+  <a href="https://discord.gg/6a2cCRPwUR">Discord</a> &middot;
+  <a href="https://minns.ai">Website</a>
 </p>
 
 ---
@@ -488,4 +499,13 @@ Tests 15 scenarios: table CRUD, MinnsQL queries, JOINs, temporal history, graph 
 
 ## License
 
-MinnsDB is licensed under the **Business Source License 1.1 (BSL)**. It converts to the **AGPL v3.0 with a linking exception** after a few years. The linking exception means you are not required to open-source your own code if you use MinnsDB. You only need to contribute back changes to MinnsDB itself.
+MinnsDB is licensed under the **Business Source License 1.1 (BSL)**.
+
+- **Free for non-production use** and single-instance production use
+- **Not permitted** for hosted services or competitive offerings without a commercial license
+- **Converts to AGPL v3.0 with linking exception** on 2030-03-18
+- The linking exception means you do not need to open-source your own code — only changes to MinnsDB itself
+
+See [LICENSE](LICENSE) for the full text.
+
+Copyright (c) 2026 Journey Into Product Ltd

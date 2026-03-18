@@ -2,7 +2,7 @@
 
 **Complete REST API documentation for SDK integration**
 
-Version: 3.0.0
+Version: 0.5.0
 Last Updated: 2026-03-18
 
 ---
@@ -21,7 +21,7 @@ Last Updated: 2026-03-18
 10. [Natural Language Query (NLQ)](#natural-language-query-nlq)
 11. [MinnsQL Structured Query](#minnsql-structured-query)
 12. [Reactive Subscriptions](#reactive-subscriptions)
-13. **[Temporal Tables](#temporal-tables)** *(new in 3.0)*
+13. **[Temporal Tables](#temporal-tables)** *(new in 0.5)*
 14. [Claims](#claims)
 15. [Structured Memory](#structured-memory)
 16. [Conversation Ingestion](#conversation-ingestion)
@@ -29,7 +29,7 @@ Last Updated: 2026-03-18
 18. [Workflows](#workflows)
 19. [Agent Registry](#agent-registry)
 20. [Ontology Evolution](#ontology-evolution)
-21. **[WASM Agent Modules](#wasm-agent-modules)** *(new in 3.0)*
+21. **[WASM Agent Modules](#wasm-agent-modules)** *(new in 0.5)*
 22. [Planning & World Model](#planning--world-model)
 23. [Code Intelligence](#code-intelligence)
 24. [Admin](#admin)
