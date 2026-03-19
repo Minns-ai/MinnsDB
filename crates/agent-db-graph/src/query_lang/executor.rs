@@ -125,6 +125,19 @@ pub struct Executor<'a> {
     deadline: Instant,
 }
 
+/// If the plan is a simple scan (no Expand, no aggregation), the LIMIT
+/// can be pushed into the scan step to avoid collecting millions of nodes.
+fn compute_scan_limit(plan: &ExecutionPlan) -> Option<usize> {
+    let limit = plan.limit?;
+    // Only push limit if there's no Expand (join) or aggregation
+    let has_expand = plan.steps.iter().any(|s| matches!(s, PlanStep::Expand { .. }));
+    let has_aggregation = !plan.aggregations.is_empty();
+    if has_expand || has_aggregation {
+        return None;
+    }
+    Some(limit as usize)
+}
+
 impl<'a> Executor<'a> {
     // -----------------------------------------------------------------------
     // Public entry point
@@ -150,12 +163,17 @@ impl<'a> Executor<'a> {
             deadline: start + QUERY_TIMEOUT,
         };
 
+        // Compute an early scan limit: if the plan is scan-only (no Expand, no
+        // aggregation), push the LIMIT into the scan to avoid collecting millions
+        // of nodes just to return a few.
+        let scan_limit = compute_scan_limit(&plan);
+
         // Start with a single empty binding row.
         let mut rows: Vec<BindingRow> = vec![BindingRow::new(plan.var_count)];
 
         // Execute each plan step in sequence.
         for step in &plan.steps {
-            rows = executor.execute_step(step, rows)?;
+            rows = executor.execute_step_with_limit(step, rows, scan_limit)?;
         }
 
         // ----- Projection -----
@@ -223,14 +241,15 @@ impl<'a> Executor<'a> {
     // Plan step dispatch
     // -----------------------------------------------------------------------
 
-    fn execute_step(
+    fn execute_step_with_limit(
         &mut self,
         step: &PlanStep,
         rows: Vec<BindingRow>,
+        scan_limit: Option<usize>,
     ) -> Result<Vec<BindingRow>, QueryError> {
         match step {
             PlanStep::ScanNodes { var, labels, props } => {
-                self.step_scan_nodes(&rows, *var, labels, props)
+                self.step_scan_nodes(&rows, *var, labels, props, scan_limit)
             },
             PlanStep::Expand {
                 from_var,
@@ -263,23 +282,21 @@ impl<'a> Executor<'a> {
         var: SlotIdx,
         labels: &[String],
         props: &[(String, Literal)],
+        scan_limit: Option<usize>,
     ) -> Result<Vec<BindingRow>, QueryError> {
         // Collect candidate nodes.
         let candidates: Vec<&GraphNode> = self.collect_scan_candidates(labels, props);
         self.stats.nodes_scanned += candidates.len() as u64;
 
+        // Effective cap: either the scan_limit (from LIMIT pushdown) or MAX_INTERMEDIATE_ROWS.
+        let cap = scan_limit.unwrap_or(MAX_INTERMEDIATE_ROWS);
+
         // Cross-product with existing binding rows.
-        let mut out = Vec::with_capacity(std::cmp::min(
-            rows.len() * candidates.len(),
-            MAX_INTERMEDIATE_ROWS,
-        ));
-        for binding in rows {
+        let mut out = Vec::with_capacity(std::cmp::min(rows.len() * candidates.len(), cap));
+        'outer: for binding in rows {
             for node in &candidates {
-                if out.len() >= MAX_INTERMEDIATE_ROWS {
-                    return Err(QueryError::ExecutionError(format!(
-                        "Result set exceeded {} rows — add filters or LIMIT to narrow the query",
-                        MAX_INTERMEDIATE_ROWS
-                    )));
+                if out.len() >= cap {
+                    break 'outer;
                 }
                 if self.node_visible_txn(node) && self.node_matches_props(node, props) {
                     let mut new_binding = binding.clone();
@@ -1707,10 +1724,11 @@ impl<'a> Executor<'a> {
             deadline: start + QUERY_TIMEOUT,
         };
 
+        let scan_limit = compute_scan_limit(&plan);
         let mut rows: Vec<BindingRow> = vec![BindingRow::new(plan.var_count)];
 
         for step in &plan.steps {
-            rows = executor.execute_step(step, rows)?;
+            rows = executor.execute_step_with_limit(step, rows, scan_limit)?;
         }
 
         // Extract binding rows before projection.
