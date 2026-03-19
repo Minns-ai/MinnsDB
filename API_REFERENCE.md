@@ -721,6 +721,95 @@ Force flush in-memory graph state to ReDB.
 }
 ```
 
+### POST /api/graph/import
+
+Bulk import nodes and edges directly into the knowledge graph. Concept nodes are deduplicated by name. Other node types are always created fresh.
+
+**Request:**
+```json
+{
+  "nodes": [
+    {
+      "name": "Nike",
+      "type": "concept",
+      "properties": {"concept_type": "brand", "confidence": 0.95}
+    },
+    {
+      "name": "Just Do It",
+      "type": "concept",
+      "properties": {"concept_type": "campaign"}
+    },
+    {
+      "name": "Air Max 90",
+      "type": "concept",
+      "properties": {"concept_type": "product"}
+    }
+  ],
+  "edges": [
+    {
+      "source": "Nike",
+      "target": "Just Do It",
+      "type": "association",
+      "label": "runs_campaign",
+      "weight": 0.9,
+      "confidence": 0.95
+    },
+    {
+      "source": "Just Do It",
+      "target": "Air Max 90",
+      "type": "association",
+      "label": "promotes",
+      "valid_from": 1735689600000000000,
+      "valid_until": 1743465600000000000
+    }
+  ],
+  "group_id": "tenant-1"
+}
+```
+
+**Node types:** `concept` (default), `agent`, `event`, `context`, `goal`, `episode`, `memory`, `strategy`, `tool`, `result`, `claim`
+
+Each type has type-specific properties:
+
+| Node Type | Key Properties |
+|-----------|---------------|
+| `concept` | `concept_type` (string), `confidence` (f64) |
+| `agent` | `agent_id` (u64), `agent_type` (string), `capabilities` (string[]) |
+| `event` | `event_id` (u64), `event_type` (string), `significance` (f64) |
+| `goal` | `goal_id` (u64), `description` (string), `priority` (f64), `status` (string) |
+| `claim` | `claim_id` (u64), `claim_text` (string), `confidence` (f64), `source_event_id` (u64) |
+
+**Edge types:** `association` (default), `causality`, `temporal`, `contextual`, `interaction`, `goal_relation`, `communication`, `derived_from`, `supported_by`, `code_structure`, `about`
+
+| Edge Field | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `source` | string | required | Source node name (references `name` in nodes array, or existing Concept) |
+| `target` | string | required | Target node name |
+| `type` | string | `"association"` | Edge type |
+| `label` | string | — | Relationship name (used as `association_type` for Association edges) |
+| `weight` | f32 | `0.8` | Edge weight |
+| `confidence` | f32 | `0.9` | Confidence score |
+| `valid_from` | u64 | — | Temporal validity start (nanoseconds since epoch) |
+| `valid_until` | u64 | — | Temporal validity end (null = currently active) |
+| `properties` | object | `{}` | Additional edge properties |
+
+**Response (200):**
+```json
+{
+  "nodes_created": 3,
+  "edges_created": 2,
+  "nodes_deduplicated": 0,
+  "errors": []
+}
+```
+
+**Notes:**
+- Concept nodes are deduplicated by `name` — importing "Nike" twice reuses the same node.
+- Other node types (Agent, Event, etc.) are always created fresh with new IDs.
+- Source/target in edges can reference nodes in the same batch by `name`, or existing Concept nodes already in the graph.
+- Edges with `valid_from`/`valid_until` support temporal queries via MinnsQL `WHEN` clauses.
+- This endpoint writes directly to the graph — it does NOT run the LLM compaction, NER, or claims pipeline. For fact extraction from text, use conversation ingestion instead.
+
 ### GET /api/stats
 
 **Response (200):**
