@@ -130,7 +130,10 @@ pub struct Executor<'a> {
 fn compute_scan_limit(plan: &ExecutionPlan) -> Option<usize> {
     let limit = plan.limit?;
     // Only push limit if there's no Expand (join) or aggregation
-    let has_expand = plan.steps.iter().any(|s| matches!(s, PlanStep::Expand { .. }));
+    let has_expand = plan
+        .steps
+        .iter()
+        .any(|s| matches!(s, PlanStep::Expand { .. }));
     let has_aggregation = !plan.aggregations.is_empty();
     if has_expand || has_aggregation {
         return None;
