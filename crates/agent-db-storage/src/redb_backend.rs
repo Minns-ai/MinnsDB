@@ -359,6 +359,14 @@ impl RedbBackend {
             table_names::GRAPH_ADJACENCY => table_defs::GRAPH_ADJACENCY,
             table_names::GRAPH_EDGES => table_defs::GRAPH_EDGES,
             table_names::WORLD_MODEL => table_defs::WORLD_MODEL,
+            table_names::TABLE_SCHEMAS => table_defs::TABLE_SCHEMAS,
+            table_names::TABLE_PAGES => table_defs::TABLE_PAGES,
+            table_names::TABLE_META => table_defs::TABLE_META,
+            table_names::MODULE_REGISTRY => table_defs::MODULE_REGISTRY,
+            table_names::MODULE_BLOBS => table_defs::MODULE_BLOBS,
+            table_names::MODULE_USAGE => table_defs::MODULE_USAGE,
+            table_names::MODULE_SCHEDULES => table_defs::MODULE_SCHEDULES,
+            table_names::API_KEYS => table_defs::API_KEYS,
             _ => {
                 return Err(StorageError::DatabaseError(format!(
                     "Unknown table: {}",
