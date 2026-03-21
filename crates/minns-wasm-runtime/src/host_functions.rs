@@ -76,6 +76,8 @@ pub struct HostEnv {
     pub http_client: Option<reqwest::Client>,
     /// Store limits for memory enforcement.
     pub limiter: wasmtime::StoreLimits,
+    /// WASI preview 1 context for modules that need std (fd_write, etc.)
+    pub wasi_p1: wasmtime_wasi::p1::WasiP1Ctx,
 }
 
 impl HostEnv {
@@ -104,7 +106,14 @@ impl HostEnv {
             limiter: wasmtime::StoreLimitsBuilder::new()
                 .memory_size(64 * 1024 * 1024) // 64MB max WASM memory
                 .build(),
+            wasi_p1: wasmtime_wasi::WasiCtxBuilder::new().build_p1(),
         }
+    }
+}
+
+impl wasmtime_wasi::WasiView for HostEnv {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        self.wasi_p1.ctx()
     }
 }
 
@@ -113,7 +122,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     // -- Logging --
     linker
         .func_wrap(
-            "minns",
+            "env",
             "log",
             |mut caller: Caller<'_, HostEnv>, level: i32, msg_ptr: i32, msg_len: i32| {
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
@@ -136,16 +145,13 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     // -- Result length (module calls this to know how much to read) --
     linker
         .func_wrap(
-            "minns",
+            "env",
             "result_len",
             |caller: Caller<'_, HostEnv>| -> i32 { caller.data().last_result.len() as i32 },
         )
         .map_err(|e| WasmError::HostError(format!("link result_len: {}", e)))?;
 
     // -- Result write (module pushes result bytes to host) --
-    // Registered in both "minns" and "env" namespaces so modules compiled
-    // with plain `extern "C"` (which defaults to "env") work without
-    // needing custom import annotations.
     let result_write_fn = |mut caller: Caller<'_, HostEnv>, ptr: i32, len: i32| {
         let memory = caller.get_export("memory").and_then(|e| e.into_memory());
         if let Some(mem) = memory {
@@ -155,21 +161,18 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
         }
     };
     linker
-        .func_wrap("minns", "result_write", result_write_fn)
-        .map_err(|e| WasmError::HostError(format!("link result_write: {}", e)))?;
-    linker
         .func_wrap("env", "result_write", result_write_fn)
-        .map_err(|e| WasmError::HostError(format!("link env::result_write: {}", e)))?;
+        .map_err(|e| WasmError::HostError(format!("link result_write: {}", e)))?;
 
     // -- Module identity --
     linker
-        .func_wrap("minns", "module_id", |caller: Caller<'_, HostEnv>| -> i64 {
+        .func_wrap("env", "module_id", |caller: Caller<'_, HostEnv>| -> i64 {
             caller.data().module_id as i64
         })
         .map_err(|e| WasmError::HostError(format!("link module_id: {}", e)))?;
 
     linker
-        .func_wrap("minns", "group_id", |caller: Caller<'_, HostEnv>| -> i64 {
+        .func_wrap("env", "group_id", |caller: Caller<'_, HostEnv>| -> i64 {
             caller.data().group_id as i64
         })
         .map_err(|e| WasmError::HostError(format!("link group_id: {}", e)))?;
@@ -177,7 +180,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     // -- Table: get row by ID --
     linker
         .func_wrap(
-            "minns",
+            "env",
             "table_get",
             |mut caller: Caller<'_, HostEnv>,
              table_ptr: i32,
@@ -233,7 +236,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     // -- Table: insert --
     linker
         .func_wrap(
-            "minns",
+            "env",
             "table_insert",
             |mut caller: Caller<'_, HostEnv>,
              table_ptr: i32,
@@ -298,7 +301,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     // -- Table: delete --
     linker
         .func_wrap(
-            "minns",
+            "env",
             "table_delete",
             |mut caller: Caller<'_, HostEnv>, table_ptr: i32, table_len: i32, row_id: i64| -> i32 {
                 let result = (|| -> Result<Vec<u8>, WasmError> {
@@ -349,7 +352,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     // -- Table: query (MinnsQL FROM query) --
     linker
         .func_wrap(
-            "minns",
+            "env",
             "table_query",
             |mut caller: Caller<'_, HostEnv>,
              query_ptr: i32,
@@ -421,7 +424,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     // -- Graph: query (MinnsQL MATCH query) --
     linker
         .func_wrap(
-            "minns",
+            "env",
             "graph_query",
             |mut caller: Caller<'_, HostEnv>,
              query_ptr: i32,
@@ -465,7 +468,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     // -- HTTP: fetch (sandboxed) --
     linker
         .func_wrap(
-            "minns",
+            "env",
             "http_fetch",
             |mut caller: Caller<'_, HostEnv>,
              req_ptr: i32,
