@@ -142,6 +142,25 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
         )
         .map_err(|e| WasmError::HostError(format!("link result_len: {}", e)))?;
 
+    // -- Result write (module pushes result bytes to host) --
+    // Registered in both "minns" and "env" namespaces so modules compiled
+    // with plain `extern "C"` (which defaults to "env") work without
+    // needing custom import annotations.
+    let result_write_fn = |mut caller: Caller<'_, HostEnv>, ptr: i32, len: i32| {
+        let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+        if let Some(mem) = memory {
+            if let Ok(bytes) = abi::read_from_wasm(&mem, &caller, ptr, len) {
+                caller.data_mut().last_result = bytes;
+            }
+        }
+    };
+    linker
+        .func_wrap("minns", "result_write", result_write_fn)
+        .map_err(|e| WasmError::HostError(format!("link result_write: {}", e)))?;
+    linker
+        .func_wrap("env", "result_write", result_write_fn)
+        .map_err(|e| WasmError::HostError(format!("link env::result_write: {}", e)))?;
+
     // -- Module identity --
     linker
         .func_wrap("minns", "module_id", |caller: Caller<'_, HostEnv>| -> i64 {

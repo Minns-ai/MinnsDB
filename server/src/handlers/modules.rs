@@ -128,7 +128,10 @@ pub async fn upload_module(
                 ),
             )
         },
-        Err(e) => wasm_err(e),
+        Err(e) => {
+            tracing::error!("Module upload failed for '{}': {}", req.name, e);
+            wasm_err(e)
+        },
     }
 }
 

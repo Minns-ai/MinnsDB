@@ -116,6 +116,10 @@ impl ModuleInstance {
     }
 
     /// Call __minns_describe__ to extract the module descriptor.
+    ///
+    /// ABI: __minns_describe__() returns a pointer to MessagePack bytes in WASM memory.
+    /// __minns_describe_len__() returns the length. If describe_len is not exported,
+    /// falls back to reading from the host env's last_result buffer.
     fn call_describe(&self, runtime: &WasmRuntime) -> Result<ModuleDescriptor, WasmError> {
         let (mut store, instance) = self.create_store_and_instance(runtime)?;
 
@@ -123,19 +127,39 @@ impl ModuleInstance {
             .get_typed_func::<(), i32>(&mut store, "__minns_describe__")
             .map_err(|_| WasmError::InvalidModule("missing __minns_describe__ export".into()))?;
 
-        let result_code = describe_fn.call(&mut store, ()).map_err(WasmError::from)?;
+        let result_ptr = describe_fn.call(&mut store, ()).map_err(WasmError::from)?;
 
-        if result_code < 0 {
+        if result_ptr < 0 {
             return Err(WasmError::InvalidModule(
                 "__minns_describe__ returned error".into(),
             ));
         }
 
-        // Read the result from the host env's last_result buffer
-        let result_bytes = store.data().last_result.clone();
+        // Try to get the length from __minns_describe_len__ export
+        let result_bytes = if let Ok(len_fn) =
+            instance.get_typed_func::<(), i32>(&mut store, "__minns_describe_len__")
+        {
+            let len = len_fn.call(&mut store, ()).map_err(WasmError::from)?;
+            if len > 0 && result_ptr > 0 {
+                // Read directly from WASM memory
+                let memory = instance
+                    .get_memory(&mut store, "memory")
+                    .ok_or_else(|| WasmError::AbiError("no memory export".into()))?;
+                abi::read_from_wasm(&memory, &store, result_ptr, len)?
+            } else {
+                store.data().last_result.clone()
+            }
+        } else {
+            // Fallback: read from host env's last_result buffer
+            store.data().last_result.clone()
+        };
+
         if result_bytes.is_empty() {
             return Err(WasmError::InvalidModule(
-                "__minns_describe__ returned empty descriptor".into(),
+                "__minns_describe__ returned empty descriptor. The module must export \
+                 __minns_describe__() returning a pointer to MessagePack bytes and \
+                 __minns_describe_len__() returning the byte length."
+                    .into(),
             ));
         }
 
