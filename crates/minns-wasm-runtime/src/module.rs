@@ -104,8 +104,10 @@ impl ModuleInstance {
             .map_err(|e| WasmError::ExecutionError(format!("set life budget: {}", e)))?;
         store.set_epoch_deadline(EPOCH_TICKS_PER_SECOND * runtime.config().wall_time_limit_secs);
 
-        // Link host functions
+        // Link host functions + WASI
         let mut linker = Linker::new(runtime.engine());
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |env: &mut HostEnv| &mut env.wasi_p1)
+            .map_err(|e| WasmError::InstantiationError(format!("WASI link: {}", e)))?;
         host_functions::register_host_functions(&mut linker)?;
 
         let instance = linker
