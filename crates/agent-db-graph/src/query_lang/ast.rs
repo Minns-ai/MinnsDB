@@ -19,21 +19,42 @@ pub enum Statement {
     UpdateTable(UpdateStmt),
     /// DELETE FROM table WHERE ...
     DeleteFrom(DeleteStmt),
+    /// CREATE INDEX name ON table (columns)
+    CreateIndex(CreateIndexStmt),
+    /// ALTER TABLE name ADD COLUMN col_def [, col_def ...]
+    AlterTable(AlterTableStmt),
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterTableStmt {
+    pub table: String,
+    pub add_columns: Vec<ColumnDefAst>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Query {
     pub match_clauses: Vec<Pattern>,
-    /// FROM table_name (driving table for table queries).
-    pub from_table: Option<String>,
+    /// FROM table_name [AS alias] (driving table for table queries).
+    pub from_table: Option<TableRef>,
     /// JOIN clauses (zero or more).
     pub joins: Vec<JoinClause>,
     pub when: Option<WhenClause>,
     pub as_of: Option<Expr>,
     pub where_clause: Option<BoolExpr>,
+    /// GROUP BY expressions.
+    pub group_by: Vec<Expr>,
+    /// HAVING (post-aggregation filter).
+    pub having: Option<BoolExpr>,
     pub returns: Vec<ReturnItem>,
     pub order_by: Vec<OrderItem>,
     pub limit: Option<u64>,
+}
+
+/// A table reference with optional alias: `table_name [AS alias]`.
+#[derive(Debug, Clone)]
+pub struct TableRef {
+    pub name: String,
+    pub alias: Option<String>,
 }
 
 // -- DDL/DML AST nodes --
@@ -51,6 +72,8 @@ pub struct ColumnDefAst {
     pub col_type: String,
     pub nullable: bool,
     pub is_primary_key: bool,
+    pub default_value: Option<Literal>,
+    pub autoincrement: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -86,11 +109,27 @@ pub struct DeleteStmt {
     pub where_clause: BoolExpr,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateIndexStmt {
+    pub index_name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
 // -- JOIN AST --
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinType {
+    Inner,
+    Left,
+}
 
 #[derive(Debug, Clone)]
 pub struct JoinClause {
+    pub join_type: JoinType,
     pub table: String,
+    pub alias: Option<String>,
     pub on_left: JoinSide,
     pub on_right: JoinSide,
 }
@@ -142,6 +181,14 @@ pub enum BoolExpr {
     Comparison(Expr, CompOp, Expr),
     IsNull(Expr),
     IsNotNull(Expr),
+    /// expr IN (val1, val2, ...)
+    In(Expr, Vec<Expr>),
+    /// expr NOT IN (val1, val2, ...)
+    NotIn(Expr, Vec<Expr>),
+    /// expr BETWEEN low AND high
+    Between(Expr, Expr, Expr),
+    /// expr LIKE pattern
+    Like(Expr, String),
     And(Box<BoolExpr>, Box<BoolExpr>),
     Or(Box<BoolExpr>, Box<BoolExpr>),
     Not(Box<BoolExpr>),
@@ -168,7 +215,22 @@ pub enum Literal {
     Null,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl Eq for Literal {}
+
+impl std::hash::Hash for Literal {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Literal::String(s) => s.hash(state),
+            Literal::Int(i) => i.hash(state),
+            Literal::Float(f) => f.to_bits().hash(state),
+            Literal::Bool(b) => b.hash(state),
+            Literal::Null => {},
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CompOp {
     Eq,
     Neq,

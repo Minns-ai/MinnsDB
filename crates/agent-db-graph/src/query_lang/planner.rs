@@ -8,6 +8,9 @@ use super::ast::*;
 use super::types::QueryError;
 use agent_db_core::types::Timestamp;
 
+// Re-export JoinType for use in executor
+pub use super::ast::JoinType;
+
 // ---------------------------------------------------------------------------
 // Slot-based variable table
 // ---------------------------------------------------------------------------
@@ -59,7 +62,7 @@ impl VarTable {
 // ---------------------------------------------------------------------------
 
 /// Expression with variable references resolved to slot indices.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RExpr {
     Property(SlotIdx, String),
     Literal(Literal),
@@ -69,11 +72,15 @@ pub enum RExpr {
 }
 
 /// Boolean expression with resolved variable references.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RBoolExpr {
     Comparison(RExpr, CompOp, RExpr),
     IsNull(RExpr),
     IsNotNull(RExpr),
+    In(RExpr, Vec<RExpr>),
+    NotIn(RExpr, Vec<RExpr>),
+    Between(RExpr, RExpr, RExpr),
+    Like(RExpr, String),
     And(Box<RBoolExpr>, Box<RBoolExpr>),
     Or(Box<RBoolExpr>, Box<RBoolExpr>),
     Not(Box<RBoolExpr>),
@@ -116,6 +123,22 @@ fn resolve_bool_expr(expr: &BoolExpr, vt: &VarTable) -> Result<RBoolExpr, QueryE
         )),
         BoolExpr::IsNull(e) => Ok(RBoolExpr::IsNull(resolve_expr(e, vt)?)),
         BoolExpr::IsNotNull(e) => Ok(RBoolExpr::IsNotNull(resolve_expr(e, vt)?)),
+        BoolExpr::In(e, vals) => {
+            let resolved_vals: Result<Vec<RExpr>, QueryError> =
+                vals.iter().map(|v| resolve_expr(v, vt)).collect();
+            Ok(RBoolExpr::In(resolve_expr(e, vt)?, resolved_vals?))
+        },
+        BoolExpr::NotIn(e, vals) => {
+            let resolved_vals: Result<Vec<RExpr>, QueryError> =
+                vals.iter().map(|v| resolve_expr(v, vt)).collect();
+            Ok(RBoolExpr::NotIn(resolve_expr(e, vt)?, resolved_vals?))
+        },
+        BoolExpr::Between(e, low, high) => Ok(RBoolExpr::Between(
+            resolve_expr(e, vt)?,
+            resolve_expr(low, vt)?,
+            resolve_expr(high, vt)?,
+        )),
+        BoolExpr::Like(e, pattern) => Ok(RBoolExpr::Like(resolve_expr(e, vt)?, pattern.clone())),
         BoolExpr::And(a, b) => Ok(RBoolExpr::And(
             Box::new(resolve_bool_expr(a, vt)?),
             Box::new(resolve_bool_expr(b, vt)?),
@@ -145,6 +168,8 @@ pub struct ExecutionPlan {
     pub projections: Vec<Projection>,
     pub aggregations: Vec<Aggregation>,
     pub group_by_keys: Vec<String>,
+    /// HAVING clause: post-aggregation filter.
+    pub having: Option<RBoolExpr>,
     pub ordering: Vec<OrderSpec>,
     pub limit: Option<u64>,
     pub temporal_viewport: TemporalViewport,
@@ -153,6 +178,8 @@ pub struct ExecutionPlan {
     pub transaction_cutoff: Option<Timestamp>,
     /// Number of variable slots needed by the executor.
     pub var_count: u8,
+    /// Maps slot indices to table names (for optimizer predicate pushdown).
+    pub slot_to_table: Vec<Option<String>>,
 }
 
 /// A single physical operation in the plan.
@@ -176,12 +203,36 @@ pub enum PlanStep {
     },
     /// Filter rows by a resolved boolean expression.
     Filter(RBoolExpr),
-    /// Scan all rows from a table (FROM table_name).
-    ScanTable { table_name: String },
+    /// Scan all rows from a table (FROM table_name [AS alias]).
+    ScanTable {
+        table_name: String,
+        alias: Option<String>,
+        scan_limit: Option<usize>,
+    },
     /// Join with a table. Follows a ScanTable or graph steps.
     JoinTable {
         table_name: String,
+        alias: Option<String>,
+        join_type: JoinType,
         on: JoinCondition,
+    },
+    /// Index-based point or range lookup on a table.
+    IndexScan {
+        table_name: String,
+        alias: Option<String>,
+        index_columns: Vec<String>,
+        key_values: Vec<super::ast::Literal>,
+        is_point: bool,
+        scan_limit: Option<usize>,
+    },
+    /// Index-based join: probe right table's index per left row.
+    IndexJoin {
+        table_name: String,
+        alias: Option<String>,
+        join_type: JoinType,
+        index_column: String,
+        left_table: String,
+        left_col: String,
     },
 }
 
@@ -257,11 +308,19 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
     let mut vt = VarTable::new();
 
     // 1a. Process FROM table (if present) into a ScanTable step.
-    // Register table names as pseudo-variables so property resolution works.
-    if let Some(ref table_name) = query.from_table {
-        vt.get_or_insert(table_name);
+    // Register table names (or aliases) as pseudo-variables so property resolution works.
+    if let Some(ref table_ref) = query.from_table {
+        // Register alias (or table name) as the variable for qualified column references
+        let var_name = table_ref.alias.as_ref().unwrap_or(&table_ref.name);
+        vt.get_or_insert(var_name);
+        // Also register the real table name if alias differs (so both resolve)
+        if table_ref.alias.is_some() {
+            vt.get_or_insert(&table_ref.name);
+        }
         steps.push(PlanStep::ScanTable {
-            table_name: table_name.clone(),
+            table_name: table_ref.name.clone(),
+            alias: table_ref.alias.clone(),
+            scan_limit: None,
         });
     }
 
@@ -272,11 +331,17 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
 
     // 1c. Process JOIN clauses into JoinTable steps.
     for join in &query.joins {
-        // Register joined table name as pseudo-variable for property resolution.
-        vt.get_or_insert(&join.table);
+        // Register alias (or table name) as pseudo-variable for property resolution.
+        let var_name = join.alias.as_ref().unwrap_or(&join.table);
+        vt.get_or_insert(var_name);
+        if join.alias.is_some() {
+            vt.get_or_insert(&join.table);
+        }
         let on = plan_join_condition(join, &vt)?;
         steps.push(PlanStep::JoinTable {
             table_name: join.table.clone(),
+            alias: join.alias.clone(),
+            join_type: join.join_type.clone(),
             on,
         });
     }
@@ -300,7 +365,15 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
     }
 
     // 4. Process RETURN into projections, aggregations, and group-by keys.
-    let (projections, aggregations, group_by_keys) = plan_return(&query.returns, &vt)?;
+    let (projections, aggregations, mut group_by_keys) = plan_return(&query.returns, &vt)?;
+
+    // 4b. Merge explicit GROUP BY expressions into group_by_keys.
+    for gb_expr in &query.group_by {
+        let alias = expr_to_alias(gb_expr, 0);
+        if !group_by_keys.contains(&alias) {
+            group_by_keys.push(alias);
+        }
+    }
 
     // 5. ORDER BY
     let ordering: Vec<OrderSpec> = query
@@ -312,6 +385,12 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
         })
         .collect();
 
+    // 6. HAVING clause (resolved against the same variable table)
+    let having = match &query.having {
+        Some(expr) => Some(resolve_bool_expr(expr, &vt)?),
+        None => None,
+    };
+
     Ok(ExecutionPlan {
         steps,
         temporal_viewport,
@@ -321,7 +400,9 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
         limit: query.limit,
         aggregations,
         group_by_keys,
+        having,
         var_count: vt.count,
+        slot_to_table: Vec::new(),
     })
 }
 
@@ -739,6 +820,8 @@ mod tests {
             when: None,
             as_of: None,
             where_clause: None,
+            group_by: vec![],
+            having: None,
             returns: vec![],
             order_by: vec![],
             limit: None,

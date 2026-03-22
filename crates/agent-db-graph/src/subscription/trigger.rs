@@ -151,10 +151,16 @@ pub fn compile_trigger_set(plan: &ExecutionPlan) -> TriggerSet {
             PlanStep::Filter(_) => {
                 // Filters don't change what we watch, they narrow results.
             },
-            PlanStep::ScanTable { table_name } => {
+            PlanStep::ScanTable { table_name, .. } => {
                 table_ids.insert(table_name_to_id(table_name));
             },
             PlanStep::JoinTable { table_name, .. } => {
+                table_ids.insert(table_name_to_id(table_name));
+            },
+            PlanStep::IndexScan { table_name, .. } => {
+                table_ids.insert(table_name_to_id(table_name));
+            },
+            PlanStep::IndexJoin { table_name, .. } => {
                 table_ids.insert(table_name_to_id(table_name));
             },
         }

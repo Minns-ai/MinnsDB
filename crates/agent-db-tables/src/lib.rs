@@ -7,5 +7,6 @@ pub mod page_store;
 pub mod persistence;
 pub mod row_codec;
 pub mod schema;
+pub mod stats;
 pub mod table;
 pub mod types;

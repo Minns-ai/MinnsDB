@@ -149,6 +149,14 @@ impl IncrementalPlan {
             };
         }
 
+        // Check if this is a table query (starts with ScanTable or IndexScan)
+        if matches!(
+            plan.steps[0],
+            PlanStep::ScanTable { .. } | PlanStep::IndexScan { .. }
+        ) {
+            return Self::classify_table_plan(plan);
+        }
+
         // Step 0 must be ScanNodes.
         if !matches!(plan.steps[0], PlanStep::ScanNodes { .. }) {
             return MaintenanceStrategy::FullRerun {
@@ -225,6 +233,36 @@ impl IncrementalPlan {
         // PointInTime/Range: edge visibility is checked via edge_visible_standalone
         // which already handles these viewports. EdgeSuperseded deltas carry
         // old/new valid_until so we can determine if an edge enters/exits the viewport.
+
+        MaintenanceStrategy::Incremental
+    }
+
+    /// Classify a table query plan for incremental maintenance.
+    /// Supported shape: ScanTable/IndexScan -> [Filter]* (no aggregation).
+    fn classify_table_plan(plan: &ExecutionPlan) -> MaintenanceStrategy {
+        // After the initial scan, all remaining steps must be Filters
+        for step in &plan.steps[1..] {
+            match step {
+                PlanStep::Filter(_) => {},
+                PlanStep::JoinTable { .. } | PlanStep::IndexJoin { .. } => {
+                    return MaintenanceStrategy::FullRerun {
+                        reason: "table joins not yet incrementally supported".to_string(),
+                    };
+                },
+                _ => {
+                    return MaintenanceStrategy::FullRerun {
+                        reason: "unsupported step in table plan".to_string(),
+                    };
+                },
+            }
+        }
+
+        // Aggregations force full rerun for table queries (for now)
+        if !plan.aggregations.is_empty() {
+            return MaintenanceStrategy::FullRerun {
+                reason: "table query with aggregation".to_string(),
+            };
+        }
 
         MaintenanceStrategy::Incremental
     }
@@ -1151,6 +1189,41 @@ fn evaluate_bool_for_row(expr: &RBoolExpr, row_id: &RowId, graph: &Graph) -> Res
         RBoolExpr::IsNotNull(e) => {
             let v = evaluate_expr_for_row(e, row_id, graph)?;
             Ok(!v.is_null())
+        },
+        RBoolExpr::In(e, vals) => {
+            let v = evaluate_expr_for_row(e, row_id, graph)?;
+            for candidate in vals {
+                let c = evaluate_expr_for_row(candidate, row_id, graph)?;
+                if compare_values_simple(&v, &CompOp::Eq, &c) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        },
+        RBoolExpr::NotIn(e, vals) => {
+            let v = evaluate_expr_for_row(e, row_id, graph)?;
+            for candidate in vals {
+                let c = evaluate_expr_for_row(candidate, row_id, graph)?;
+                if compare_values_simple(&v, &CompOp::Eq, &c) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+        RBoolExpr::Between(e, low, high) => {
+            let v = evaluate_expr_for_row(e, row_id, graph)?;
+            let lo = evaluate_expr_for_row(low, row_id, graph)?;
+            let hi = evaluate_expr_for_row(high, row_id, graph)?;
+            Ok(compare_values_simple(&v, &CompOp::Gte, &lo)
+                && compare_values_simple(&v, &CompOp::Lte, &hi))
+        },
+        RBoolExpr::Like(e, pattern) => {
+            let v = evaluate_expr_for_row(e, row_id, graph)?;
+            if let Value::String(s) = v {
+                Ok(crate::query_lang::table_executor::like_match(&s, pattern))
+            } else {
+                Ok(false)
+            }
         },
         RBoolExpr::And(a, b) => Ok(
             evaluate_bool_for_row(a, row_id, graph)? && evaluate_bool_for_row(b, row_id, graph)?

@@ -1,0 +1,12 @@
+[package]
+name = "hello-agent"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+minns-sdk = { path = "../../crates/minns-sdk" }
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"

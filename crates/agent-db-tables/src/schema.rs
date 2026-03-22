@@ -19,6 +19,9 @@ pub struct ColumnDef {
     pub col_type: ColumnType,
     pub nullable: bool,
     pub default_value: Option<CellValue>,
+    /// Column auto-increments on insert when the value is NULL or omitted.
+    #[serde(default)]
+    pub autoincrement: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +31,8 @@ pub enum Constraint {
     NotNull(String),
     /// Column references a graph node.
     ForeignKeyGraph(String),
+    /// Non-unique secondary index (persisted for rebuild on restart).
+    Index(Vec<String>),
 }
 
 impl TableSchema {
@@ -59,7 +64,9 @@ impl TableSchema {
         // Validate constraints reference real columns
         for constraint in &self.constraints {
             let cols = match constraint {
-                Constraint::PrimaryKey(cols) | Constraint::Unique(cols) => cols,
+                Constraint::PrimaryKey(cols)
+                | Constraint::Unique(cols)
+                | Constraint::Index(cols) => cols,
                 Constraint::NotNull(col) | Constraint::ForeignKeyGraph(col) => {
                     // Single column check
                     if !self.columns.iter().any(|c| &c.name == col) {
@@ -212,6 +219,7 @@ mod tests {
             col_type,
             nullable: true,
             default_value: None,
+            autoincrement: false,
         }
     }
 

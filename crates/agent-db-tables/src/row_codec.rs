@@ -354,6 +354,7 @@ mod tests {
             col_type,
             nullable: true,
             default_value: None,
+            autoincrement: false,
         }
     }
 

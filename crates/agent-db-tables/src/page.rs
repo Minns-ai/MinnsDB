@@ -47,6 +47,13 @@ impl Page {
         Page { data }
     }
 
+    /// Reset this page to an empty state for reuse from the pool.
+    pub fn reset(&mut self) {
+        // Clear all slots and data, keeping the page_id
+        let page_id = self.page_id();
+        *self = Page::new(page_id);
+    }
+
     pub fn page_id(&self) -> u32 {
         u32::from_le_bytes(self.data[HDR_PAGE_ID..HDR_PAGE_ID + 4].try_into().unwrap())
     }

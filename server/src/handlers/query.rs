@@ -115,6 +115,17 @@ pub async fn minnsql_query(
             } else if agent_db_graph::query_lang::table_executor::is_table_query(&plan) {
                 // Pure table query — execute against table catalog only.
                 let catalog = state.table_catalog.read().await;
+
+                // Run optimizer on table queries
+                let mut plan = plan;
+                let catalog_stats = catalog.collect_stats();
+                let opt_stats = agent_db_graph::query_lang::CatalogStatsAdapter {
+                    stats: &catalog_stats,
+                    catalog: &catalog,
+                    group_id,
+                };
+                let _trace = agent_db_graph::query_lang::optimizer::optimize(&mut plan, &opt_stats);
+
                 let result = agent_db_graph::query_lang::table_executor::execute_table_query(
                     &catalog, &plan, group_id,
                 )
@@ -259,11 +270,14 @@ pub async fn minnsql_query(
         Statement::CreateTable(ct) => {
             let mut columns: Vec<agent_db_tables::schema::ColumnDef> = Vec::new();
             for c in &ct.columns {
+                let col_type = parse_column_type(&c.col_type)?;
+                let default_value = c.default_value.as_ref().map(literal_to_cell_value);
                 columns.push(agent_db_tables::schema::ColumnDef {
                     name: c.name.clone(),
-                    col_type: parse_column_type(&c.col_type)?,
+                    col_type,
                     nullable: c.nullable,
-                    default_value: None,
+                    default_value,
+                    autoincrement: c.autoincrement,
                 });
             }
 
@@ -316,6 +330,77 @@ pub async fn minnsql_query(
             Ok(Json(QueryResponse {
                 columns: vec!["dropped".into()],
                 rows: vec![vec![serde_json::Value::Bool(true)]],
+                stats: None,
+                subscription_id: None,
+                strategy: None,
+                unsubscribed: None,
+            }))
+        },
+        Statement::AlterTable(alt) => {
+            let mut catalog = state.table_catalog.write().await;
+            let table = catalog
+                .get_table_mut(&alt.table)
+                .ok_or_else(|| ApiError::NotFound(format!("table not found: {}", alt.table)))?;
+
+            let mut added = Vec::new();
+            for c in &alt.add_columns {
+                let col_type = parse_column_type(&c.col_type)?;
+                let default_value = c.default_value.as_ref().map(literal_to_cell_value);
+                let col = agent_db_tables::schema::ColumnDef {
+                    name: c.name.clone(),
+                    col_type,
+                    nullable: c.nullable,
+                    default_value,
+                    autoincrement: c.autoincrement,
+                };
+                table
+                    .add_column(col)
+                    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                added.push(c.name.clone());
+            }
+
+            info!(
+                "ALTER TABLE '{}': added columns [{}]",
+                alt.table,
+                added.join(", ")
+            );
+
+            Ok(Json(QueryResponse {
+                columns: vec!["table".into(), "added_columns".into()],
+                rows: vec![vec![
+                    serde_json::Value::String(alt.table),
+                    serde_json::Value::String(added.join(", ")),
+                ]],
+                stats: None,
+                subscription_id: None,
+                strategy: None,
+                unsubscribed: None,
+            }))
+        },
+        Statement::CreateIndex(ci) => {
+            let mut catalog = state.table_catalog.write().await;
+            let table = catalog
+                .get_table_mut(&ci.table)
+                .ok_or_else(|| ApiError::NotFound(format!("table not found: {}", ci.table)))?;
+
+            table
+                .add_secondary_index(&ci.index_name, &ci.columns, ci.unique)
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+            info!(
+                "Created {}index '{}' on '{}' ({})",
+                if ci.unique { "unique " } else { "" },
+                ci.index_name,
+                ci.table,
+                ci.columns.join(", ")
+            );
+
+            Ok(Json(QueryResponse {
+                columns: vec!["index_name".into(), "table".into()],
+                rows: vec![vec![
+                    serde_json::Value::String(ci.index_name),
+                    serde_json::Value::String(ci.table),
+                ]],
                 stats: None,
                 subscription_id: None,
                 strategy: None,
@@ -577,6 +662,35 @@ fn eval_where_on_row(
             eval_expr_on_row(e, row, schema),
             agent_db_tables::types::CellValue::Null
         ),
+        BoolExpr::In(e, vals) => {
+            let v = eval_expr_on_row(e, row, schema);
+            vals.iter().any(|candidate| {
+                let c = eval_expr_on_row(candidate, row, schema);
+                cell_values_cmp(&v, &c) == Some(std::cmp::Ordering::Equal)
+            })
+        },
+        BoolExpr::NotIn(e, vals) => {
+            let v = eval_expr_on_row(e, row, schema);
+            !vals.iter().any(|candidate| {
+                let c = eval_expr_on_row(candidate, row, schema);
+                cell_values_cmp(&v, &c) == Some(std::cmp::Ordering::Equal)
+            })
+        },
+        BoolExpr::Between(e, low, high) => {
+            let v = eval_expr_on_row(e, row, schema);
+            let lo = eval_expr_on_row(low, row, schema);
+            let hi = eval_expr_on_row(high, row, schema);
+            cell_values_cmp(&v, &lo).is_some_and(|o| o != std::cmp::Ordering::Less)
+                && cell_values_cmp(&v, &hi).is_some_and(|o| o != std::cmp::Ordering::Greater)
+        },
+        BoolExpr::Like(e, pattern) => {
+            let v = eval_expr_on_row(e, row, schema);
+            if let agent_db_tables::types::CellValue::String(s) = v {
+                agent_db_graph::query_lang::table_executor::like_match(&s, pattern)
+            } else {
+                false
+            }
+        },
         BoolExpr::FuncPredicate(_, _) => false,
     }
 }
