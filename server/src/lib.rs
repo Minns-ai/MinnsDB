@@ -1,5 +1,6 @@
 // MinnsDB Server library — re-exports for integration tests.
 
+pub mod auth_middleware;
 pub mod config;
 pub mod errors;
 pub mod handlers;
