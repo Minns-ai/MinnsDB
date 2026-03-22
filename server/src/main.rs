@@ -2,6 +2,7 @@
 //
 // Provides HTTP endpoints for the self-evolving agent database
 
+mod auth_middleware;
 mod config;
 mod errors;
 mod handlers;
@@ -140,7 +141,8 @@ async fn main() -> anyhow::Result<()> {
     info!("WASM agent runtime initialized");
 
     // ── Authentication ─────────────────────────────────────────────────
-    let auth_disabled = std::env::var("MINNS_AUTH_DISABLED")
+    // Auth is OFF by default. Set MINNS_AUTH_ENABLED=true to require API keys.
+    let auth_enabled = std::env::var("MINNS_AUTH_ENABLED")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
@@ -162,8 +164,10 @@ async fn main() -> anyhow::Result<()> {
         info!("API keys loaded: {} keys", key_store.count());
     }
 
-    if auth_disabled {
-        tracing::warn!("Authentication DISABLED (MINNS_AUTH_DISABLED=true) — all requests accepted without API key");
+    if auth_enabled {
+        info!("Authentication ENABLED (MINNS_AUTH_ENABLED=true) — API key required on all endpoints except /api/health");
+    } else {
+        info!("Authentication disabled (default) — set MINNS_AUTH_ENABLED=true to require API keys");
     }
 
     let key_store = Arc::new(tokio::sync::RwLock::new(key_store));
@@ -182,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
         module_registry: module_registry.clone(),
         schedule_runner: schedule_runner.clone(),
         key_store: key_store.clone(),
-        auth_enabled: !auth_disabled,
+        auth_enabled,
     };
 
     // Build router

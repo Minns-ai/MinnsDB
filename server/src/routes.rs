@@ -318,6 +318,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/admin/export", post(handlers::export_handler))
         .route("/api/admin/import", post(handlers::import_handler))
         // Apply middleware
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth_middleware::auth_layer,
+        ))
         .layer(build_cors_layer())
         .with_state(state)
 }
