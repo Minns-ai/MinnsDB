@@ -117,7 +117,8 @@ async fn main() -> anyhow::Result<()> {
     let module_registry = if let Some(backend) = engine.redb_backend() {
         match minns_wasm_runtime::persistence::load_registry(backend) {
             Ok(mut reg) => {
-                let errors = reg.recompile_all(&wasm_runtime, table_catalog.clone(), Some(engine.clone()));
+                let errors =
+                    reg.recompile_all(&wasm_runtime, table_catalog.clone(), Some(engine.clone()));
                 for (name, err) in &errors {
                     tracing::warn!("Failed to load WASM module '{}': {}", name, err);
                 }
@@ -146,10 +147,10 @@ async fn main() -> anyhow::Result<()> {
                 if count > 0 {
                     info!("Loaded {} schedules from ReDB", count);
                 }
-            }
+            },
             Err(e) => {
                 tracing::warn!("Failed to load schedules: {}", e);
-            }
+            },
         }
     }
     let schedule_runner = Arc::new(tokio::sync::RwLock::new(schedule_runner_inner));
@@ -182,7 +183,9 @@ async fn main() -> anyhow::Result<()> {
     if auth_enabled {
         info!("Authentication ENABLED (MINNS_AUTH_ENABLED=true) — API key required on all endpoints except /api/health");
     } else {
-        info!("Authentication disabled (default) — set MINNS_AUTH_ENABLED=true to require API keys");
+        info!(
+            "Authentication disabled (default) — set MINNS_AUTH_ENABLED=true to require API keys"
+        );
     }
 
     let key_store = Arc::new(tokio::sync::RwLock::new(key_store));

@@ -148,11 +148,9 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
 
     // -- Result length (module calls this to know how much to read) --
     linker
-        .func_wrap(
-            "env",
-            "result_len",
-            |caller: Caller<'_, HostEnv>| -> i32 { caller.data().last_result.len() as i32 },
-        )
+        .func_wrap("env", "result_len", |caller: Caller<'_, HostEnv>| -> i32 {
+            caller.data().last_result.len() as i32
+        })
         .map_err(|e| WasmError::HostError(format!("link result_len: {}", e)))?;
 
     // -- Result write (module pushes result bytes to host) --
@@ -460,11 +458,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
                             let inference = engine.inference().read().await;
                             let graph = inference.graph();
                             let ontology = engine.ontology();
-                            agent_db_graph::query_lang::execute_query(
-                                &query_str,
-                                graph,
-                                ontology,
-                            )
+                            agent_db_graph::query_lang::execute_query(&query_str, graph, ontology)
                         })
                     })
                     .map_err(|e| WasmError::HostError(e.to_string()))?;

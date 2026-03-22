@@ -66,8 +66,8 @@ pub fn persist_schedules(
     // Write current schedules
     for schedule in runner.list_all() {
         let key = schedule.schedule_id.to_be_bytes();
-        let value = rmp_serde::to_vec(schedule)
-            .map_err(|e| WasmError::PersistenceError(e.to_string()))?;
+        let value =
+            rmp_serde::to_vec(schedule).map_err(|e| WasmError::PersistenceError(e.to_string()))?;
         backend
             .put_raw(MODULE_SCHEDULES, &key[..], &value)
             .map_err(|e| WasmError::PersistenceError(e.to_string()))?;
@@ -93,10 +93,7 @@ pub fn load_schedules(
     Ok(schedules)
 }
 
-fn persist_usage(
-    backend: &RedbBackend,
-    registry: &ModuleRegistry,
-) -> Result<(), WasmError> {
+fn persist_usage(backend: &RedbBackend, registry: &ModuleRegistry) -> Result<(), WasmError> {
     // Persist usage
     for usage in registry.all_usage() {
         let key = usage.module_name.as_bytes();
