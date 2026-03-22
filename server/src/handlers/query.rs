@@ -78,8 +78,42 @@ pub async fn minnsql_query(
             let plan = agent_db_graph::query_lang::planner::plan(query.clone())
                 .map_err(|e| map_query_error(&e))?;
 
-            if agent_db_graph::query_lang::table_executor::is_table_query(&plan) {
-                // Table query — execute against table catalog.
+            if agent_db_graph::query_lang::table_executor::is_mixed_query(&plan) {
+                // Mixed query (MATCH...JOIN table) — two-phase execution.
+                let _permit = state
+                    .read_gate
+                    .acquire()
+                    .await
+                    .map_err(ApiError::ServiceUnavailable)?;
+
+                let inference = state.engine.inference().read().await;
+                let graph = inference.graph();
+                let ontology = state.engine.ontology();
+                let catalog = state.table_catalog.read().await;
+
+                let result = agent_db_graph::query_lang::table_executor::execute_mixed_query(
+                    &catalog, &plan, group_id, graph, ontology,
+                )
+                .map_err(|e| map_query_error(&e))?;
+
+                Ok(Json(QueryResponse {
+                    columns: result.columns,
+                    rows: result
+                        .rows
+                        .into_iter()
+                        .map(|row| row.into_iter().map(|v| v.to_json()).collect())
+                        .collect(),
+                    stats: Some(QueryStatsResponse {
+                        nodes_scanned: result.stats.nodes_scanned,
+                        edges_traversed: result.stats.edges_traversed,
+                        execution_time_ms: result.stats.execution_time_ms,
+                    }),
+                    subscription_id: None,
+                    strategy: None,
+                    unsubscribed: None,
+                }))
+            } else if agent_db_graph::query_lang::table_executor::is_table_query(&plan) {
+                // Pure table query — execute against table catalog only.
                 let catalog = state.table_catalog.read().await;
                 let result = agent_db_graph::query_lang::table_executor::execute_table_query(
                     &catalog, &plan, group_id,

@@ -117,19 +117,14 @@ pub fn execute_table_query(
             PlanStep::Filter(expr) => {
                 rows.retain(|row| eval_filter(expr, row));
             },
-            // Graph steps in a mixed query — skip them here.
-            // The query handler should have pre-executed graph steps and
-            // injected graph node IDs into the row map before calling us.
+            // Graph steps should not reach the table executor.
+            // Mixed queries (MATCH...JOIN) go through execute_mixed_query().
             PlanStep::ScanNodes { .. } | PlanStep::Expand { .. } => {
-                // If rows are empty (no pre-populated graph results), this is an error.
-                if rows.is_empty() {
-                    return Err(QueryError::ExecutionError(
-                        "Mixed MATCH+JOIN query requires graph results to be pre-populated. \
-                         Use separate MATCH and FROM queries, or use /api/tables/:name/by-node/:id."
-                            .into(),
-                    ));
-                }
-                // Otherwise, skip — graph steps were already handled
+                return Err(QueryError::ExecutionError(
+                    "Graph steps in table executor. Mixed MATCH+JOIN queries \
+                     must be routed through execute_mixed_query()."
+                        .into(),
+                ));
             },
         }
     }
@@ -304,30 +299,16 @@ fn execute_join_lookup(
 
             Ok(matches)
         },
-        JoinCondition::GraphToTable {
-            graph_var: _,
-            table_col: _,
-        } => {
-            // Graph-to-table join: look up matching rows via the NodeRef index.
-            // The left_row should contain a graph node ID from a prior MATCH step,
-            // stored as "n.id" or similar property.
-
-            // Find the node_id from the left row — try known patterns
-            let node_id: Option<u64> = left_row
-                .values()
-                .find_map(|v| match v {
-                    Value::Int(id) if *id > 0 => Some(*id as u64),
-                    _ => None,
-                });
-
-            let node_id = match node_id {
-                Some(id) => id,
-                None => return Ok(Vec::new()), // No node ID in left row, no matches
-            };
-
-            // Use the NodeRef reverse index to find rows
-            let matches = right_table.rows_by_node(group_id, node_id);
-            Ok(matches)
+        JoinCondition::GraphToTable { graph_var: _, table_col: _ } => {
+            // Graph-to-table joins in pure table queries are not valid — they
+            // require graph binding rows. Mixed queries (MATCH...JOIN) go through
+            // execute_mixed_query() which handles this correctly.
+            Err(QueryError::ExecutionError(
+                "Graph-to-table JOIN requires a MATCH clause. \
+                 This query was routed to the table executor without graph bindings. \
+                 Use execute_mixed_query() for MATCH...JOIN queries."
+                    .into(),
+            ))
         },
     }
 }
@@ -598,4 +579,211 @@ pub fn is_table_query(plan: &ExecutionPlan) -> bool {
     plan.steps
         .iter()
         .any(|s| matches!(s, PlanStep::ScanTable { .. } | PlanStep::JoinTable { .. }))
+}
+
+/// Check if a plan has both graph steps (ScanNodes/Expand) and table steps (JoinTable).
+/// This requires two-phase execution: graph first, then table join.
+pub fn is_mixed_query(plan: &ExecutionPlan) -> bool {
+    let has_graph = plan
+        .steps
+        .iter()
+        .any(|s| matches!(s, PlanStep::ScanNodes { .. } | PlanStep::Expand { .. }));
+    let has_table_join = plan
+        .steps
+        .iter()
+        .any(|s| matches!(s, PlanStep::JoinTable { .. }));
+    has_graph && has_table_join
+}
+
+/// Execute a mixed MATCH...JOIN query.
+///
+/// Phase 1: Run graph steps (ScanNodes, Expand, Filter) through the graph executor
+///          to produce binding rows with node IDs.
+/// Phase 2: For each graph result row, execute the JoinTable step by looking up
+///          matching table rows via the NodeRef index.
+/// Phase 3: Project, aggregate, order, limit as normal.
+pub fn execute_mixed_query(
+    catalog: &TableCatalog,
+    plan: &ExecutionPlan,
+    group_id: GroupId,
+    graph: &crate::structures::Graph,
+    ontology: &crate::ontology::OntologyRegistry,
+) -> Result<QueryOutput, QueryError> {
+    let start = std::time::Instant::now();
+
+    // Phase 1: Build a graph-only plan from the graph steps
+    let graph_steps: Vec<PlanStep> = plan
+        .steps
+        .iter()
+        .filter(|s| matches!(s, PlanStep::ScanNodes { .. } | PlanStep::Expand { .. } | PlanStep::Filter(_)))
+        .cloned()
+        .collect();
+
+    // Find the JoinTable steps and their conditions
+    let join_steps: Vec<&PlanStep> = plan
+        .steps
+        .iter()
+        .filter(|s| matches!(s, PlanStep::JoinTable { .. }))
+        .collect();
+
+    // Execute graph steps to get binding rows with node IDs
+    let graph_plan = ExecutionPlan {
+        steps: graph_steps,
+        projections: vec![], // We'll project later
+        aggregations: vec![],
+        group_by_keys: vec![],
+        ordering: vec![],
+        limit: plan.limit, // Push limit to graph phase
+        temporal_viewport: plan.temporal_viewport.clone(),
+        transaction_cutoff: plan.transaction_cutoff,
+        var_count: plan.var_count,
+    };
+
+    // Execute graph plan — returns QueryOutput with node IDs
+    // We need the raw binding rows, not projected output.
+    // Use execute_with_bindings to get the slot bindings.
+    let (graph_output, graph_bindings) =
+        super::executor::Executor::execute_with_bindings(graph, ontology, graph_plan)
+            .map_err(|e| QueryError::ExecutionError(format!("graph phase: {}", e)))?;
+
+    if graph_bindings.is_empty() {
+        return Ok(QueryOutput {
+            columns: plan.projections.iter().map(|p| p.alias.clone()).collect(),
+            rows: vec![],
+            stats: QueryStats {
+                nodes_scanned: graph_output.stats.nodes_scanned,
+                edges_traversed: graph_output.stats.edges_traversed,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+            },
+        });
+    }
+
+    // Phase 2: For each graph binding, execute table joins
+    let mut result_rows: Vec<HashMap<String, Value>> = Vec::new();
+
+    for binding in &graph_bindings {
+        // Build a row map from the graph binding
+        let mut row: HashMap<String, Value> = HashMap::new();
+
+        // Extract node properties from each bound entity
+        for (slot_idx, entity) in binding.iter() {
+            match entity {
+                crate::subscription::incremental::BoundEntityId::Node(node_id) => {
+                    // Find the variable name for this slot from the plan
+                    // We store it as the graph variable with its properties
+                    if let Some(node) = graph.get_node(*node_id) {
+                        // Use a helper to get common properties
+                        let var_name = format!("_slot_{}", slot_idx);
+                        row.insert(format!("{}.id", var_name), Value::Int(*node_id as i64));
+                        row.insert(format!("{}.type", var_name), Value::String(format!("{:?}", node.node_type)));
+                        // Store the raw node ID keyed by slot for join lookup
+                        row.insert(format!("__slot_{}_node_id", slot_idx), Value::Int(*node_id as i64));
+                    }
+                }
+                crate::subscription::incremental::BoundEntityId::Edge(edge_id) => {
+                    row.insert(format!("__slot_{}_edge_id", slot_idx), Value::Int(*edge_id as i64));
+                }
+            }
+        }
+
+        // Execute each JoinTable step
+        for join_step in &join_steps {
+            if let PlanStep::JoinTable { table_name, on } = join_step {
+                let table = catalog.get_table(table_name).ok_or_else(|| {
+                    QueryError::ExecutionError(format!("table not found: {}", table_name))
+                })?;
+
+                match on {
+                    JoinCondition::GraphToTable { graph_var, table_col: _ } => {
+                        // Extract the node ID from the specific graph variable slot
+                        let node_id_key = format!("__slot_{}_node_id", graph_var);
+                        let node_id = match row.get(&node_id_key) {
+                            Some(Value::Int(id)) => *id as u64,
+                            _ => continue, // No node ID for this slot, skip
+                        };
+
+                        // Look up table rows via NodeRef index
+                        let matching_rows = table.rows_by_node(group_id, node_id);
+
+                        for decoded in matching_rows {
+                            let mut joined_row = row.clone();
+                            let table_map = decoded_row_to_map(
+                                table_name,
+                                &table.schema.columns,
+                                &decoded,
+                            );
+                            joined_row.extend(table_map);
+                            result_rows.push(joined_row);
+                        }
+                    }
+                    JoinCondition::TableToTable { .. } => {
+                        // Table-to-table join in a mixed query (unusual but possible)
+                        let matches = execute_join_lookup(
+                            catalog, table_name, on, &row, group_id,
+                            &plan.temporal_viewport,
+                        )?;
+                        let table = catalog.get_table(table_name).unwrap();
+                        for decoded in matches {
+                            let mut joined_row = row.clone();
+                            let table_map = decoded_row_to_map(
+                                table_name,
+                                &table.schema.columns,
+                                &decoded,
+                            );
+                            joined_row.extend(table_map);
+                            result_rows.push(joined_row);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Cap result size
+    if result_rows.len() > MAX_TABLE_ROWS {
+        return Err(QueryError::ExecutionError(format!(
+            "mixed query produced {} rows, exceeding {} limit",
+            result_rows.len(),
+            MAX_TABLE_ROWS
+        )));
+    }
+
+    // Phase 3: Project
+    let columns: Vec<String> = plan.projections.iter().map(|p| p.alias.clone()).collect();
+
+    let mut projected: Vec<Vec<Value>> = Vec::new();
+    for row in &result_rows {
+        let mut out = Vec::with_capacity(plan.projections.len());
+        for proj in &plan.projections {
+            out.push(eval_projection(&proj.expr, row));
+        }
+        projected.push(out);
+    }
+
+    // Aggregation
+    if !plan.aggregations.is_empty() {
+        projected = apply_aggregations(&projected, &plan.aggregations, &columns);
+    }
+
+    // Ordering
+    if !plan.ordering.is_empty() {
+        apply_ordering(&mut projected, &plan.ordering, &columns);
+    }
+
+    // Limit
+    if let Some(limit) = plan.limit {
+        projected.truncate(limit as usize);
+    }
+
+    let elapsed = start.elapsed();
+
+    Ok(QueryOutput {
+        columns,
+        rows: projected,
+        stats: QueryStats {
+            nodes_scanned: graph_output.stats.nodes_scanned,
+            edges_traversed: graph_output.stats.edges_traversed,
+            execution_time_ms: elapsed.as_millis() as u64,
+        },
+    })
 }
