@@ -299,7 +299,10 @@ fn execute_join_lookup(
 
             Ok(matches)
         },
-        JoinCondition::GraphToTable { graph_var: _, table_col: _ } => {
+        JoinCondition::GraphToTable {
+            graph_var: _,
+            table_col: _,
+        } => {
             // Graph-to-table joins in pure table queries are not valid — they
             // require graph binding rows. Mixed queries (MATCH...JOIN) go through
             // execute_mixed_query() which handles this correctly.
@@ -615,7 +618,12 @@ pub fn execute_mixed_query(
     let graph_steps: Vec<PlanStep> = plan
         .steps
         .iter()
-        .filter(|s| matches!(s, PlanStep::ScanNodes { .. } | PlanStep::Expand { .. } | PlanStep::Filter(_)))
+        .filter(|s| {
+            matches!(
+                s,
+                PlanStep::ScanNodes { .. } | PlanStep::Expand { .. } | PlanStep::Filter(_)
+            )
+        })
         .cloned()
         .collect();
 
@@ -675,14 +683,23 @@ pub fn execute_mixed_query(
                         // Use a helper to get common properties
                         let var_name = format!("_slot_{}", slot_idx);
                         row.insert(format!("{}.id", var_name), Value::Int(*node_id as i64));
-                        row.insert(format!("{}.type", var_name), Value::String(format!("{:?}", node.node_type)));
+                        row.insert(
+                            format!("{}.type", var_name),
+                            Value::String(format!("{:?}", node.node_type)),
+                        );
                         // Store the raw node ID keyed by slot for join lookup
-                        row.insert(format!("__slot_{}_node_id", slot_idx), Value::Int(*node_id as i64));
+                        row.insert(
+                            format!("__slot_{}_node_id", slot_idx),
+                            Value::Int(*node_id as i64),
+                        );
                     }
-                }
+                },
                 crate::subscription::incremental::BoundEntityId::Edge(edge_id) => {
-                    row.insert(format!("__slot_{}_edge_id", slot_idx), Value::Int(*edge_id as i64));
-                }
+                    row.insert(
+                        format!("__slot_{}_edge_id", slot_idx),
+                        Value::Int(*edge_id as i64),
+                    );
+                },
             }
         }
 
@@ -694,7 +711,10 @@ pub fn execute_mixed_query(
                 })?;
 
                 match on {
-                    JoinCondition::GraphToTable { graph_var, table_col: _ } => {
+                    JoinCondition::GraphToTable {
+                        graph_var,
+                        table_col: _,
+                    } => {
                         // Extract the node ID from the specific graph variable slot
                         let node_id_key = format!("__slot_{}_node_id", graph_var);
                         let node_id = match row.get(&node_id_key) {
@@ -707,33 +727,31 @@ pub fn execute_mixed_query(
 
                         for decoded in matching_rows {
                             let mut joined_row = row.clone();
-                            let table_map = decoded_row_to_map(
-                                table_name,
-                                &table.schema.columns,
-                                &decoded,
-                            );
+                            let table_map =
+                                decoded_row_to_map(table_name, &table.schema.columns, &decoded);
                             joined_row.extend(table_map);
                             result_rows.push(joined_row);
                         }
-                    }
+                    },
                     JoinCondition::TableToTable { .. } => {
                         // Table-to-table join in a mixed query (unusual but possible)
                         let matches = execute_join_lookup(
-                            catalog, table_name, on, &row, group_id,
+                            catalog,
+                            table_name,
+                            on,
+                            &row,
+                            group_id,
                             &plan.temporal_viewport,
                         )?;
                         let table = catalog.get_table(table_name).unwrap();
                         for decoded in matches {
                             let mut joined_row = row.clone();
-                            let table_map = decoded_row_to_map(
-                                table_name,
-                                &table.schema.columns,
-                                &decoded,
-                            );
+                            let table_map =
+                                decoded_row_to_map(table_name, &table.schema.columns, &decoded);
                             joined_row.extend(table_map);
                             result_rows.push(joined_row);
                         }
-                    }
+                    },
                 }
             }
         }

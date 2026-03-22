@@ -49,6 +49,6 @@ pub async fn auth_layer(
             };
             tracing::warn!("Auth rejected: {} (path: {})", e, path);
             Err(status)
-        }
+        },
     }
 }
