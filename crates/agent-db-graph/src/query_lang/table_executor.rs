@@ -117,11 +117,19 @@ pub fn execute_table_query(
             PlanStep::Filter(expr) => {
                 rows.retain(|row| eval_filter(expr, row));
             },
-            // Graph steps shouldn't appear in table queries
+            // Graph steps in a mixed query — skip them here.
+            // The query handler should have pre-executed graph steps and
+            // injected graph node IDs into the row map before calling us.
             PlanStep::ScanNodes { .. } | PlanStep::Expand { .. } => {
-                return Err(QueryError::ExecutionError(
-                    "Graph scan/expand steps in table query".into(),
-                ));
+                // If rows are empty (no pre-populated graph results), this is an error.
+                if rows.is_empty() {
+                    return Err(QueryError::ExecutionError(
+                        "Mixed MATCH+JOIN query requires graph results to be pre-populated. \
+                         Use separate MATCH and FROM queries, or use /api/tables/:name/by-node/:id."
+                            .into(),
+                    ));
+                }
+                // Otherwise, skip — graph steps were already handled
             },
         }
     }
@@ -298,27 +306,28 @@ fn execute_join_lookup(
         },
         JoinCondition::GraphToTable {
             graph_var: _,
-            table_col,
+            table_col: _,
         } => {
-            // Graph-to-table join: the left row should have a node_id from graph traversal.
-            // For now, this path requires the left side to provide a node ID.
-            // The node_id is looked up via the NodeRef index.
-            let _col_idx = right_table.schema.column_index(table_col).ok_or_else(|| {
-                QueryError::ExecutionError(format!(
-                    "column '{}' not found in table '{}'",
-                    table_col, right_table_name
-                ))
-            })?;
+            // Graph-to-table join: look up matching rows via the NodeRef index.
+            // The left_row should contain a graph node ID from a prior MATCH step,
+            // stored as "n.id" or similar property.
 
-            // Graph-to-table joins require the graph executor to provide node IDs.
-            // This codepath is reached only when a mixed MATCH...JOIN query routes
-            // to the table executor instead of the graph executor.
-            Err(QueryError::ExecutionError(
-                "Graph-to-table JOIN (MATCH ... JOIN table ON table.col = graph_var) \
-                 is not yet supported. Use the REST API /api/tables/:name/by-node/:node_id \
-                 for NodeRef lookups."
-                    .into(),
-            ))
+            // Find the node_id from the left row — try known patterns
+            let node_id: Option<u64> = left_row
+                .values()
+                .find_map(|v| match v {
+                    Value::Int(id) if *id > 0 => Some(*id as u64),
+                    _ => None,
+                });
+
+            let node_id = match node_id {
+                Some(id) => id,
+                None => return Ok(Vec::new()), // No node ID in left row, no matches
+            };
+
+            // Use the NodeRef reverse index to find rows
+            let matches = right_table.rows_by_node(group_id, node_id);
+            Ok(matches)
         },
     }
 }

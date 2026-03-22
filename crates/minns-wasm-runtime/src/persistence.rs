@@ -9,7 +9,6 @@ use crate::usage::ModuleUsage;
 const MODULE_REGISTRY: &str = "module_registry";
 const MODULE_BLOBS: &str = "module_blobs";
 const MODULE_USAGE: &str = "module_usage";
-#[allow(dead_code)]
 const MODULE_SCHEDULES: &str = "module_schedules";
 
 /// Persist all module records, blobs, and usage to ReDB.
@@ -46,6 +45,58 @@ pub fn persist_registry(backend: &RedbBackend, registry: &ModuleRegistry) -> Res
             .map_err(|e| WasmError::PersistenceError(e.to_string()))?;
     }
 
+    persist_usage(backend, registry)?;
+
+    Ok(())
+}
+
+/// Persist schedules to ReDB.
+pub fn persist_schedules(
+    backend: &RedbBackend,
+    runner: &crate::scheduler::ScheduleRunner,
+) -> Result<(), WasmError> {
+    // Delete old schedules first
+    let existing = backend
+        .scan_all_raw(MODULE_SCHEDULES)
+        .map_err(|e| WasmError::PersistenceError(e.to_string()))?;
+    for (key, _) in &existing {
+        let _ = backend.delete(MODULE_SCHEDULES, key.as_slice());
+    }
+
+    // Write current schedules
+    for schedule in runner.list_all() {
+        let key = schedule.schedule_id.to_be_bytes();
+        let value = rmp_serde::to_vec(schedule)
+            .map_err(|e| WasmError::PersistenceError(e.to_string()))?;
+        backend
+            .put_raw(MODULE_SCHEDULES, &key[..], &value)
+            .map_err(|e| WasmError::PersistenceError(e.to_string()))?;
+    }
+
+    Ok(())
+}
+
+/// Load schedules from ReDB.
+pub fn load_schedules(
+    backend: &RedbBackend,
+) -> Result<Vec<crate::scheduler::ScheduleRecord>, WasmError> {
+    let entries = backend
+        .scan_all_raw(MODULE_SCHEDULES)
+        .map_err(|e| WasmError::PersistenceError(e.to_string()))?;
+
+    let mut schedules = Vec::new();
+    for (_key, value) in &entries {
+        if let Ok(record) = rmp_serde::from_slice::<crate::scheduler::ScheduleRecord>(value) {
+            schedules.push(record);
+        }
+    }
+    Ok(schedules)
+}
+
+fn persist_usage(
+    backend: &RedbBackend,
+    registry: &ModuleRegistry,
+) -> Result<(), WasmError> {
     // Persist usage
     for usage in registry.all_usage() {
         let key = usage.module_name.as_bytes();

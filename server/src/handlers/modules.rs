@@ -105,6 +105,7 @@ pub async fn upload_module(
         req.permissions,
         group_id,
         state.table_catalog.clone(),
+        Some(state.engine.clone()),
     ) {
         Ok(instance) => {
             let info = ModuleInfoResponse {

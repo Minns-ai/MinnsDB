@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
     let module_registry = if let Some(backend) = engine.redb_backend() {
         match minns_wasm_runtime::persistence::load_registry(backend) {
             Ok(mut reg) => {
-                let errors = reg.recompile_all(&wasm_runtime, table_catalog.clone());
+                let errors = reg.recompile_all(&wasm_runtime, table_catalog.clone(), Some(engine.clone()));
                 for (name, err) in &errors {
                     tracing::warn!("Failed to load WASM module '{}': {}", name, err);
                 }
@@ -137,7 +137,22 @@ async fn main() -> anyhow::Result<()> {
         ModuleRegistry::new()
     };
     let module_registry = Arc::new(tokio::sync::RwLock::new(module_registry));
-    let schedule_runner = Arc::new(tokio::sync::RwLock::new(ScheduleRunner::new()));
+    let mut schedule_runner_inner = ScheduleRunner::new();
+    if let Some(backend) = engine.redb_backend() {
+        match minns_wasm_runtime::persistence::load_schedules(backend) {
+            Ok(schedules) => {
+                let count = schedules.len();
+                schedule_runner_inner.restore(schedules);
+                if count > 0 {
+                    info!("Loaded {} schedules from ReDB", count);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load schedules: {}", e);
+            }
+        }
+    }
+    let schedule_runner = Arc::new(tokio::sync::RwLock::new(schedule_runner_inner));
     info!("WASM agent runtime initialized");
 
     // ── Authentication ─────────────────────────────────────────────────
@@ -231,6 +246,16 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("Failed to persist WASM registry: {}", e);
         } else {
             info!("WASM module registry persisted");
+        }
+    }
+
+    // Persist schedules
+    if let Some(backend) = engine.redb_backend() {
+        let runner = schedule_runner.read().await;
+        if let Err(e) = minns_wasm_runtime::persistence::persist_schedules(backend, &runner) {
+            tracing::error!("Failed to persist schedules: {}", e);
+        } else {
+            info!("Schedules persisted");
         }
     }
 
