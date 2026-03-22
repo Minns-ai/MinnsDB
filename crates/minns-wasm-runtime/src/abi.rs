@@ -124,3 +124,59 @@ pub fn to_msgpack<T: Serialize>(value: &T) -> Result<Vec<u8>, WasmError> {
 pub fn from_msgpack<T: for<'de> Deserialize<'de>>(data: &[u8]) -> Result<T, WasmError> {
     rmp_serde::from_slice(data).map_err(|e| WasmError::AbiError(format!("msgpack decode: {}", e)))
 }
+
+/// Pool of host-side buffers for zero-copy data exchange.
+/// Instead of copying large results into WASM linear memory, host functions
+/// can write to a buffer and return a buffer ID. The module then reads
+/// incrementally via buffer_read.
+#[derive(Debug, Default)]
+pub struct BufferPool {
+    buffers: Vec<Vec<u8>>,
+}
+
+impl BufferPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Allocate a new buffer with the given data. Returns buffer ID.
+    pub fn alloc(&mut self, data: Vec<u8>) -> u32 {
+        let id = self.buffers.len() as u32;
+        self.buffers.push(data);
+        id
+    }
+
+    /// Get the length of a buffer.
+    pub fn len(&self, id: u32) -> Option<usize> {
+        self.buffers.get(id as usize).map(|b| b.len())
+    }
+
+    /// Read bytes from a buffer at an offset.
+    pub fn read(&self, id: u32, offset: usize, len: usize) -> Option<&[u8]> {
+        let buf = self.buffers.get(id as usize)?;
+        if offset + len > buf.len() {
+            return None;
+        }
+        Some(&buf[offset..offset + len])
+    }
+
+    /// Write bytes into a buffer (append or overwrite).
+    pub fn write(&mut self, id: u32, data: &[u8]) -> bool {
+        if let Some(buf) = self.buffers.get_mut(id as usize) {
+            buf.extend_from_slice(data);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear all buffers (between calls).
+    pub fn clear(&mut self) {
+        self.buffers.clear();
+    }
+
+    /// Number of active buffers.
+    pub fn count(&self) -> usize {
+        self.buffers.len()
+    }
+}

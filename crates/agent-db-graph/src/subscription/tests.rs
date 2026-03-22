@@ -348,11 +348,13 @@ fn test_compile_trigger_set_label_scan() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
     let ts = compile_trigger_set(&plan);
     match ts {
@@ -385,11 +387,13 @@ fn test_compile_trigger_set_edge_type() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 3,
+        slot_to_table: Vec::new(),
     };
     let ts = compile_trigger_set(&plan);
     match ts {
@@ -426,11 +430,13 @@ fn test_compile_trigger_set_unfiltered_fallback() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 2,
+        slot_to_table: Vec::new(),
     };
     let ts = compile_trigger_set(&plan);
     assert!(matches!(ts, TriggerSet::Any));
@@ -451,11 +457,13 @@ fn test_max_pattern_radius_single_hop() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 2,
+        slot_to_table: Vec::new(),
     };
     assert_eq!(compute_max_pattern_radius(&plan), 1);
 }
@@ -475,11 +483,13 @@ fn test_max_pattern_radius_bounded() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 2,
+        slot_to_table: Vec::new(),
     };
     assert_eq!(compute_max_pattern_radius(&plan), 3);
 }
@@ -499,11 +509,13 @@ fn test_max_pattern_radius_unbounded() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 2,
+        slot_to_table: Vec::new(),
     };
     assert_eq!(compute_max_pattern_radius(&plan), u32::MAX);
 }
@@ -582,11 +594,13 @@ fn test_plan_classification_simple_scan() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
     let ip = IncrementalPlan::analyze(plan);
     assert!(matches!(ip.strategy, MaintenanceStrategy::Incremental));
@@ -614,11 +628,13 @@ fn test_plan_classification_scan_expand() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 3,
+        slot_to_table: Vec::new(),
     };
     let ip = IncrementalPlan::analyze(plan);
     assert!(matches!(ip.strategy, MaintenanceStrategy::Incremental));
@@ -646,11 +662,13 @@ fn test_plan_classification_variable_length_incremental() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 2,
+        slot_to_table: Vec::new(),
     };
     let ip = IncrementalPlan::analyze(plan);
     // Variable-length paths now supported incrementally (Feature 6).
@@ -673,11 +691,13 @@ fn test_plan_classification_ungrouped_count_incremental() {
             output_alias: "count".to_string(),
         }],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
     let ip = IncrementalPlan::analyze(plan);
     assert!(matches!(ip.strategy, MaintenanceStrategy::Incremental));
@@ -699,11 +719,13 @@ fn test_plan_classification_grouped_count_incremental() {
             output_alias: "count".to_string(),
         }],
         group_by_keys: vec!["type".to_string()],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
     let ip = IncrementalPlan::analyze(plan);
     // Grouped aggregation now supported incrementally (Feature 5).
@@ -726,11 +748,13 @@ fn test_plan_classification_sum_incremental() {
             output_alias: "total".to_string(),
         }],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
     let ip = IncrementalPlan::analyze(plan);
     // Sum is now supported as incremental (Feature 4).
@@ -749,11 +773,13 @@ fn test_plan_classification_point_in_time_incremental() {
         projections: vec![],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::PointInTime(12345),
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
     let ip = IncrementalPlan::analyze(plan);
     // PointInTime now supported incrementally (Feature 7).
@@ -1018,11 +1044,13 @@ fn test_manager_subscribe_scan_only() {
         }],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
 
     let mut mgr = SubscriptionManager::new(rx);
@@ -1089,11 +1117,13 @@ fn test_manager_subscribe_scan_expand() {
         ],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 3,
+        slot_to_table: Vec::new(),
     };
 
     let mut mgr = SubscriptionManager::new(rx);
@@ -1158,11 +1188,13 @@ fn test_manager_edge_remove_propagates() {
         ],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 3,
+        slot_to_table: Vec::new(),
     };
 
     let mut mgr = SubscriptionManager::new(rx);
@@ -1207,11 +1239,13 @@ fn test_manager_count_aggregation() {
             output_alias: "count".to_string(),
         }],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
 
     let mut mgr = SubscriptionManager::new(rx);
@@ -1260,11 +1294,13 @@ fn test_manager_no_update_when_irrelevant() {
         }],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 3,
+        slot_to_table: Vec::new(),
     };
 
     let mut mgr = SubscriptionManager::new(rx);
@@ -1315,11 +1351,13 @@ fn test_manager_node_merge_forces_rerun() {
         }],
         aggregations: vec![],
         group_by_keys: vec![],
+        having: None,
         ordering: vec![],
         limit: None,
         temporal_viewport: TemporalViewport::ActiveOnly,
         transaction_cutoff: None,
         var_count: 1,
+        slot_to_table: Vec::new(),
     };
 
     let mut mgr = SubscriptionManager::new(rx);

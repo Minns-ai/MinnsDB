@@ -133,6 +133,17 @@ impl TableCatalog {
     pub fn tables_mut(&mut self) -> impl Iterator<Item = &mut Table> {
         self.tables.values_mut()
     }
+
+    /// Collect aggregated statistics across all tables.
+    pub fn collect_stats(&self) -> crate::stats::CatalogStats {
+        let mut catalog_stats = crate::stats::CatalogStats::default();
+        for table in self.tables.values() {
+            catalog_stats
+                .table_stats
+                .insert(table.schema.name.clone(), table.stats().clone());
+        }
+        catalog_stats
+    }
 }
 
 #[cfg(test)]
@@ -147,6 +158,7 @@ mod tests {
             col_type: ct,
             nullable: true,
             default_value: None,
+            autoincrement: false,
         }
     }
 

@@ -50,7 +50,16 @@ impl Parser {
                 ))),
             }
         } else if parser.at(&Token::Create) {
-            parser.parse_create_table().map(Statement::CreateTable)
+            // Peek next token to distinguish CREATE TABLE vs CREATE [UNIQUE] INDEX
+            let next = parser.tokens.get(parser.pos + 1).map(|s| &s.token);
+            let next2 = parser.tokens.get(parser.pos + 2).map(|s| &s.token);
+            if next == Some(&Token::Index)
+                || (next == Some(&Token::Unique) && next2 == Some(&Token::Index))
+            {
+                parser.parse_create_index().map(Statement::CreateIndex)
+            } else {
+                parser.parse_create_table().map(Statement::CreateTable)
+            }
         } else if parser.at(&Token::Drop) {
             parser.parse_drop_table()
         } else if parser.at(&Token::Insert) {
@@ -59,6 +68,8 @@ impl Parser {
             parser.parse_update_table().map(Statement::UpdateTable)
         } else if parser.at(&Token::Delete) {
             parser.parse_delete_from().map(Statement::DeleteFrom)
+        } else if parser.at(&Token::Alter) {
+            parser.parse_alter_table().map(Statement::AlterTable)
         } else {
             let query = parser.parse_query()?;
             Ok(Statement::Query(query))
@@ -72,7 +83,32 @@ impl Parser {
         let (match_clauses, from_table) = if self.at(&Token::From) {
             self.advance(); // consume FROM
             let table_name = self.expect_ident_or_keyword()?;
-            (Vec::new(), Some(table_name))
+            // Optional alias: FROM table AS alias, or FROM table alias
+            let alias = if self.at(&Token::As) {
+                self.advance();
+                Some(self.expect_ident_or_keyword()?)
+            } else if matches!(self.peek(), Token::Ident(_))
+                && !self.at(&Token::Join)
+                && !self.at(&Token::Left)
+                && !self.at(&Token::Inner)
+                && !self.at(&Token::Where)
+                && !self.at(&Token::Return)
+                && !self.at(&Token::When)
+                && !self.at(&Token::Order)
+                && !self.at(&Token::Group)
+                && !self.at(&Token::Limit)
+            {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            (
+                Vec::new(),
+                Some(TableRef {
+                    name: table_name,
+                    alias,
+                }),
+            )
         } else {
             (self.parse_match()?, None)
         };
@@ -83,6 +119,18 @@ impl Parser {
         let when = self.parse_when()?;
         let as_of = self.parse_as_of()?;
         let where_clause = self.parse_where()?;
+
+        // Parse optional GROUP BY
+        let group_by = self.parse_group_by()?;
+
+        // Parse optional HAVING (post-aggregation filter)
+        let having = if self.at(&Token::Having) {
+            self.advance();
+            Some(self.parse_or_expr()?)
+        } else {
+            None
+        };
+
         let returns = self.parse_return()?;
         let order_by = self.parse_order_by()?;
         let limit = self.parse_limit()?;
@@ -98,6 +146,8 @@ impl Parser {
             when,
             as_of,
             where_clause,
+            group_by,
+            having,
             returns,
             order_by,
             limit,
@@ -290,6 +340,23 @@ impl Parser {
         Ok(Some(expr))
     }
 
+    // ── GROUP BY ────────────────────────────────────────────────────────
+
+    fn parse_group_by(&mut self) -> Result<Vec<Expr>, QueryError> {
+        if !self.at(&Token::Group) {
+            return Ok(Vec::new());
+        }
+        self.advance(); // consume GROUP
+        self.expect(&Token::By)?;
+
+        let mut exprs = vec![self.parse_expr()?];
+        while self.at(&Token::Comma) {
+            self.advance();
+            exprs.push(self.parse_expr()?);
+        }
+        Ok(exprs)
+    }
+
     fn parse_or_expr(&mut self) -> Result<BoolExpr, QueryError> {
         let mut left = self.parse_and_expr()?;
         while self.at(&Token::Or) {
@@ -340,6 +407,46 @@ impl Parser {
             return Ok(BoolExpr::IsNull(left));
         }
 
+        // NOT IN (...)
+        if self.at(&Token::Not) {
+            let next = self.tokens.get(self.pos + 1).map(|s| &s.token);
+            if next == Some(&Token::In) {
+                self.advance(); // consume NOT
+                self.advance(); // consume IN
+                let values = self.parse_expr_list()?;
+                return Ok(BoolExpr::NotIn(left, values));
+            }
+        }
+
+        // IN (...)
+        if self.at(&Token::In) {
+            self.advance();
+            let values = self.parse_expr_list()?;
+            return Ok(BoolExpr::In(left, values));
+        }
+
+        // BETWEEN low AND high
+        if self.at(&Token::Between) {
+            self.advance();
+            let low = self.parse_expr()?;
+            self.expect(&Token::And)?;
+            let high = self.parse_expr()?;
+            return Ok(BoolExpr::Between(left, low, high));
+        }
+
+        // LIKE "pattern"
+        if self.at(&Token::Like) {
+            self.advance();
+            match self.peek().clone() {
+                Token::StringLit(s) => {
+                    let pattern = s.clone();
+                    self.advance();
+                    return Ok(BoolExpr::Like(left, pattern));
+                },
+                _ => return Err(self.error("expected string literal after LIKE".into())),
+            }
+        }
+
         let op = match self.peek() {
             Token::Eq => CompOp::Eq,
             Token::Neq => CompOp::Neq,
@@ -364,6 +471,18 @@ impl Parser {
         self.advance();
         let right = self.parse_expr()?;
         Ok(BoolExpr::Comparison(left, op, right))
+    }
+
+    /// Parse parenthesized expression list: (expr, expr, ...)
+    fn parse_expr_list(&mut self) -> Result<Vec<Expr>, QueryError> {
+        self.expect(&Token::LParen)?;
+        let mut exprs = vec![self.parse_expr()?];
+        while self.at(&Token::Comma) {
+            self.advance();
+            exprs.push(self.parse_expr()?);
+        }
+        self.expect(&Token::RParen)?;
+        Ok(exprs)
     }
 
     // ── RETURN ──────────────────────────────────────────────────────────
@@ -575,13 +694,45 @@ impl Parser {
 
     fn parse_joins(&mut self) -> Result<Vec<JoinClause>, QueryError> {
         let mut joins = Vec::new();
-        while self.at(&Token::Join) {
-            self.advance(); // consume JOIN
+        loop {
+            // Determine join type: LEFT [JOIN], INNER [JOIN], or bare JOIN
+            let join_type = if self.at(&Token::Left) {
+                self.advance();
+                if self.at(&Token::Join) {
+                    self.advance();
+                }
+                JoinType::Left
+            } else if self.at(&Token::Inner) {
+                self.advance();
+                if self.at(&Token::Join) {
+                    self.advance();
+                }
+                JoinType::Inner
+            } else if self.at(&Token::Join) {
+                self.advance();
+                JoinType::Inner // bare JOIN is INNER
+            } else {
+                break;
+            };
+
             let table = self.expect_ident_or_keyword()?;
+
+            // Optional alias: JOIN table AS alias, or JOIN table alias
+            let alias = if self.at(&Token::As) {
+                self.advance();
+                Some(self.expect_ident_or_keyword()?)
+            } else if matches!(self.peek(), Token::Ident(_)) && !self.at(&Token::On) {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+
             self.expect(&Token::On)?;
             let (on_left, on_right) = self.parse_join_condition()?;
             joins.push(JoinClause {
+                join_type,
                 table,
+                alias,
                 on_left,
                 on_right,
             });
@@ -676,18 +827,19 @@ impl Parser {
         })
     }
 
-    /// Parse a single column def: name Type [NOT NULL] [PRIMARY KEY] [REFERENCES GRAPH]
+    /// Parse a single column def: name Type [NOT NULL] [PRIMARY KEY] [DEFAULT literal] [AUTOINCREMENT] [REFERENCES GRAPH]
     fn parse_column_def(&mut self) -> Result<ColumnDefAst, QueryError> {
         let name = self.expect_ident_or_keyword()?;
         let col_type = self.expect_ident_or_keyword()?;
         let mut nullable = true;
         let mut is_primary_key = false;
+        let mut default_value = None;
+        let mut autoincrement = false;
 
-        // Optional modifiers
+        // Optional modifiers (any order)
         loop {
             if self.at(&Token::Not) {
                 self.advance();
-                // NOT followed by NULL (as keyword)
                 self.expect(&Token::Null)?;
                 nullable = false;
             } else if self.at(&Token::Primary) {
@@ -695,10 +847,16 @@ impl Parser {
                 self.expect(&Token::Key)?;
                 is_primary_key = true;
                 nullable = false; // PKs are implicitly NOT NULL
+            } else if self.at(&Token::Default) {
+                self.advance();
+                default_value = Some(self.parse_literal()?);
+            } else if self.at(&Token::Autoincrement) {
+                self.advance();
+                autoincrement = true;
+                nullable = false; // auto-increment columns are implicitly NOT NULL
             } else if self.at(&Token::References) {
                 self.advance();
                 self.expect(&Token::Graph)?;
-                // Handled: this column references the graph (NodeRef)
             } else {
                 break;
             }
@@ -709,6 +867,32 @@ impl Parser {
             col_type,
             nullable,
             is_primary_key,
+            default_value,
+            autoincrement,
+        })
+    }
+
+    /// CREATE [UNIQUE] INDEX name ON table (col1, col2, ...)
+    fn parse_create_index(&mut self) -> Result<CreateIndexStmt, QueryError> {
+        self.expect(&Token::Create)?;
+        let unique = if self.at(&Token::Unique) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        self.expect(&Token::Index)?;
+        let index_name = self.expect_ident_or_keyword()?;
+        self.expect(&Token::On)?;
+        let table = self.expect_ident_or_keyword()?;
+        self.expect(&Token::LParen)?;
+        let columns = self.parse_ident_list()?;
+        self.expect(&Token::RParen)?;
+        Ok(CreateIndexStmt {
+            index_name,
+            table,
+            columns,
+            unique,
         })
     }
 
@@ -718,6 +902,29 @@ impl Parser {
         self.expect(&Token::Table)?;
         let name = self.expect_ident_or_keyword()?;
         Ok(Statement::DropTable(name))
+    }
+
+    /// ALTER TABLE name ADD [COLUMN] col_def [, ADD [COLUMN] col_def ...]
+    fn parse_alter_table(&mut self) -> Result<AlterTableStmt, QueryError> {
+        self.expect(&Token::Alter)?;
+        self.expect(&Token::Table)?;
+        let table = self.expect_ident_or_keyword()?;
+
+        let mut add_columns = Vec::new();
+        loop {
+            self.expect(&Token::Add)?;
+            // Optional COLUMN keyword
+            if self.at(&Token::Column) {
+                self.advance();
+            }
+            add_columns.push(self.parse_column_def()?);
+            if !self.at(&Token::Comma) {
+                break;
+            }
+            self.advance();
+        }
+
+        Ok(AlterTableStmt { table, add_columns })
     }
 
     // ── DML ──────────────────────────────────────────────────────────
@@ -1381,7 +1588,8 @@ mod tests {
     #[test]
     fn test_from_table_query() {
         let q = Parser::parse("FROM orders WHERE amount > 50 RETURN id, customer").unwrap();
-        assert_eq!(q.from_table, Some("orders".into()));
+        assert_eq!(q.from_table.as_ref().unwrap().name, "orders");
+        assert!(q.from_table.as_ref().unwrap().alias.is_none());
         assert!(q.match_clauses.is_empty());
         assert_eq!(q.returns.len(), 2);
     }
@@ -1389,7 +1597,7 @@ mod tests {
     #[test]
     fn test_from_table_with_temporal() {
         let q = Parser::parse("FROM orders WHEN ALL RETURN id, amount").unwrap();
-        assert_eq!(q.from_table, Some("orders".into()));
+        assert_eq!(q.from_table.as_ref().unwrap().name, "orders");
         assert!(matches!(q.when, Some(WhenClause::All)));
     }
 
@@ -1398,7 +1606,7 @@ mod tests {
         let q = Parser::parse(
             "FROM orders JOIN customers ON orders.customer_id = customers.id RETURN customers.name, orders.amount",
         ).unwrap();
-        assert_eq!(q.from_table, Some("orders".into()));
+        assert_eq!(q.from_table.as_ref().unwrap().name, "orders");
         assert_eq!(q.joins.len(), 1);
         assert_eq!(q.joins[0].table, "customers");
         match &q.joins[0].on_left {
@@ -1433,5 +1641,147 @@ mod tests {
         assert_eq!(q.joins.len(), 2);
         assert_eq!(q.joins[0].table, "customers");
         assert_eq!(q.joins[1].table, "shipments");
+    }
+
+    #[test]
+    fn test_left_join() {
+        let q = Parser::parse(
+            "FROM orders LEFT JOIN returns ON orders.id = returns.order_id RETURN orders.id, returns.reason",
+        ).unwrap();
+        assert_eq!(q.joins.len(), 1);
+        assert_eq!(q.joins[0].join_type, JoinType::Left);
+        assert_eq!(q.joins[0].table, "returns");
+    }
+
+    #[test]
+    fn test_table_alias() {
+        let q = Parser::parse(
+            "FROM orders AS o JOIN customers c ON o.customer_id = c.id RETURN o.id, c.name",
+        )
+        .unwrap();
+        assert_eq!(q.from_table.as_ref().unwrap().name, "orders");
+        assert_eq!(q.from_table.as_ref().unwrap().alias.as_deref(), Some("o"));
+        assert_eq!(q.joins[0].table, "customers");
+        assert_eq!(q.joins[0].alias.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn test_group_by() {
+        let q = Parser::parse(
+            "FROM orders GROUP BY orders.status RETURN orders.status, count(orders.id) AS cnt",
+        )
+        .unwrap();
+        assert_eq!(q.group_by.len(), 1);
+        assert_eq!(q.returns.len(), 2);
+    }
+
+    #[test]
+    fn test_column_default_and_autoincrement() {
+        let stmt = Parser::parse_statement(
+            "CREATE TABLE items (id INT AUTOINCREMENT PRIMARY KEY, name STRING NOT NULL, qty INT DEFAULT 0)",
+        ).unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.columns.len(), 3);
+                assert!(ct.columns[0].autoincrement);
+                assert!(ct.columns[0].is_primary_key);
+                assert_eq!(ct.columns[2].default_value, Some(Literal::Int(0)));
+            },
+            other => panic!("expected CreateTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_create_index() {
+        let stmt =
+            Parser::parse_statement("CREATE INDEX idx_customer ON orders (customer_id)").unwrap();
+        match stmt {
+            Statement::CreateIndex(ci) => {
+                assert_eq!(ci.index_name, "idx_customer");
+                assert_eq!(ci.table, "orders");
+                assert_eq!(ci.columns, vec!["customer_id"]);
+                assert!(!ci.unique);
+            },
+            other => panic!("expected CreateIndex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_create_unique_index() {
+        let stmt =
+            Parser::parse_statement("CREATE UNIQUE INDEX idx_email ON users (email)").unwrap();
+        match stmt {
+            Statement::CreateIndex(ci) => {
+                assert!(ci.unique);
+                assert_eq!(ci.columns, vec!["email"]);
+            },
+            other => panic!("expected CreateIndex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_in_operator() {
+        let q = Parser::parse(r#"FROM orders WHERE status IN ("pending", "shipped") RETURN id"#)
+            .unwrap();
+        assert!(matches!(q.where_clause, Some(BoolExpr::In(..))));
+    }
+
+    #[test]
+    fn test_not_in_operator() {
+        let q =
+            Parser::parse(r#"FROM orders WHERE status NOT IN ("cancelled") RETURN id"#).unwrap();
+        assert!(matches!(q.where_clause, Some(BoolExpr::NotIn(..))));
+    }
+
+    #[test]
+    fn test_between_operator() {
+        let q = Parser::parse("FROM orders WHERE amount BETWEEN 10 AND 100 RETURN id").unwrap();
+        assert!(matches!(q.where_clause, Some(BoolExpr::Between(..))));
+    }
+
+    #[test]
+    fn test_like_operator() {
+        let q = Parser::parse(r#"FROM users WHERE name LIKE "John%" RETURN id"#).unwrap();
+        assert!(matches!(q.where_clause, Some(BoolExpr::Like(..))));
+    }
+
+    #[test]
+    fn test_having_clause() {
+        let q = Parser::parse(
+            "FROM orders GROUP BY orders.status HAVING count(orders.id) > 5 RETURN orders.status, count(orders.id) AS cnt",
+        ).unwrap();
+        assert_eq!(q.group_by.len(), 1);
+        assert!(q.having.is_some());
+    }
+
+    #[test]
+    fn test_alter_table_add_column() {
+        let stmt =
+            Parser::parse_statement(r#"ALTER TABLE orders ADD COLUMN notes STRING DEFAULT """#)
+                .unwrap();
+        match stmt {
+            Statement::AlterTable(alt) => {
+                assert_eq!(alt.table, "orders");
+                assert_eq!(alt.add_columns.len(), 1);
+                assert_eq!(alt.add_columns[0].name, "notes");
+            },
+            other => panic!("expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_alter_table_add_multiple() {
+        let stmt = Parser::parse_statement(
+            "ALTER TABLE orders ADD COLUMN priority INT DEFAULT 0, ADD weight FLOAT",
+        )
+        .unwrap();
+        match stmt {
+            Statement::AlterTable(alt) => {
+                assert_eq!(alt.add_columns.len(), 2);
+                assert_eq!(alt.add_columns[0].name, "priority");
+                assert_eq!(alt.add_columns[1].name, "weight");
+            },
+            other => panic!("expected AlterTable, got {:?}", other),
+        }
     }
 }

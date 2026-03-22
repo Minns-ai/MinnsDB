@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["modules/hello-agent"]
 members = [
     "crates/agent-db-ast",
     "crates/agent-db-core",
@@ -15,6 +16,8 @@ members = [
     "examples",
     "server",
     "crates/minns-cli",
+    "crates/minns-sdk",
+    "crates/minns-sdk-macros",
 ]
 
 [workspace.dependencies]

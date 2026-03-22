@@ -40,6 +40,7 @@ pub struct Table {
     next_row_id: RowId,
     generation: u64,
     active_row_count: usize,
+    stats: crate::stats::TableStats,
 
     /// Column indices for NodeRef columns (cached from schema).
     node_ref_col_indices: Vec<usize>,
@@ -57,11 +58,13 @@ impl Table {
         let layout = RowLayout::from_schema(&schema);
         let node_ref_col_indices = schema.node_ref_columns();
 
-        // Build unique indexes from constraints
+        // Build indexes from constraints (unique, PK, and secondary)
         let mut unique_indexes = Vec::new();
         for constraint in &schema.constraints {
             match constraint {
-                Constraint::Unique(cols) | Constraint::PrimaryKey(cols) => {
+                Constraint::Unique(cols)
+                | Constraint::PrimaryKey(cols)
+                | Constraint::Index(cols) => {
                     let indices: Vec<usize> = cols
                         .iter()
                         .filter_map(|name| schema.column_index(name))
@@ -91,6 +94,7 @@ impl Table {
             next_row_id: 1,
             generation: 0,
             active_row_count: 0,
+            stats: crate::stats::TableStats::new(),
             node_ref_col_indices,
         })
     }
@@ -171,16 +175,53 @@ impl Table {
                     .unwrap_or(0)
             });
         }
+
+        // Recompute stats from rebuilt indexes
+        self.stats.per_group_counts.clear();
+        for (&(group_id, _), active_ptr) in &self.pk_index {
+            if active_ptr.is_some() {
+                *self.stats.per_group_counts.entry(group_id).or_insert(0) += 1;
+            }
+        }
+        self.stats.index_cardinalities = self
+            .unique_indexes
+            .iter()
+            .map(|idx| idx.entries.len())
+            .collect();
     }
 
     // -- Mutations --
+
+    /// Apply default values and auto-increment to a row before insertion.
+    /// Extends the vector with defaults if fewer values than columns are provided,
+    /// then replaces remaining NULLs with defaults or auto-increment values.
+    fn apply_defaults_and_autoincrement(&self, values: &mut Vec<CellValue>) {
+        // Pad with Null if fewer values than columns (allows omitting trailing defaults)
+        while values.len() < self.schema.columns.len() {
+            values.push(CellValue::Null);
+        }
+
+        for (i, col) in self.schema.columns.iter().enumerate() {
+            if i >= values.len() {
+                break;
+            }
+            if matches!(values[i], CellValue::Null) {
+                if col.autoincrement {
+                    values[i] = CellValue::Int64(self.next_row_id as i64);
+                } else if let Some(ref default) = col.default_value {
+                    values[i] = default.clone();
+                }
+            }
+        }
+    }
 
     /// Insert one row.
     pub fn insert(
         &mut self,
         group_id: GroupId,
-        values: Vec<CellValue>,
+        mut values: Vec<CellValue>,
     ) -> Result<(RowId, RowVersionId), TableError> {
+        self.apply_defaults_and_autoincrement(&mut values);
         self.validate_values(&values)?;
 
         let row_id = self.next_row_id;
@@ -230,6 +271,73 @@ impl Table {
         self.next_version_id += 1;
         self.generation += 1;
         self.active_row_count += 1;
+        self.stats.on_insert(group_id, self.unique_indexes.len());
+
+        Ok((row_id, vid))
+    }
+
+    /// Optimistic insert: write row first, then check constraints.
+    /// Faster common path since constraint checks happen after the cheap write.
+    pub fn insert_optimistic(
+        &mut self,
+        group_id: GroupId,
+        mut values: Vec<CellValue>,
+    ) -> Result<(RowId, RowVersionId), TableError> {
+        self.apply_defaults_and_autoincrement(&mut values);
+        self.validate_values(&values)?;
+
+        let row_id = self.next_row_id;
+        let vid = self.next_version_id;
+        let key = (group_id, row_id);
+        let now = current_timestamp();
+
+        // Step 1: Write row (uncommitted)
+        let bytes = row_codec::encode_row(
+            &self.layout,
+            vid,
+            row_id,
+            group_id,
+            now,
+            None,
+            now,
+            0, // uncommitted
+            &values,
+            &self.schema.columns,
+        );
+
+        if bytes.len() > MAX_ROW_PAYLOAD {
+            return Err(TableError::RowTooLarge {
+                size: bytes.len(),
+                max: MAX_ROW_PAYLOAD,
+            });
+        }
+
+        let ptr = self.store.insert(&bytes);
+
+        // Step 2: Check constraints
+        if let Err(e) = self.check_unique_constraints(group_id, &values, None) {
+            // Rollback: mark the row dead
+            self.store.mark_dead(ptr);
+            return Err(e);
+        }
+
+        // Step 3: Commit
+        let row_bytes = self.store.read_mut(ptr).unwrap();
+        row_codec::set_committed(row_bytes);
+
+        // Step 4: Update indexes
+        self.pk_index.insert(key, Some(ptr));
+        self.history_index.entry(key).or_default().push(ptr);
+        self.version_index.insert(vid, ptr);
+        self.temporal_index.entry(now).or_default().push(ptr);
+        self.insert_unique_entries(group_id, row_id, &values);
+        self.insert_node_ref_entries(group_id, row_id, &values);
+
+        self.next_row_id += 1;
+        self.next_version_id += 1;
+        self.generation += 1;
+        self.active_row_count += 1;
+        self.stats.on_insert(group_id, self.unique_indexes.len());
 
         Ok((row_id, vid))
     }
@@ -324,6 +432,7 @@ impl Table {
 
         self.pk_index.insert(key, None);
         self.active_row_count -= 1;
+        self.stats.on_delete(group_id);
         self.generation += 1;
 
         Ok(vid)
@@ -476,6 +585,58 @@ impl Table {
         ))
     }
 
+    /// Return the column name lists for all indexes on this table.
+    pub fn index_columns(&self) -> Vec<Vec<String>> {
+        self.unique_indexes
+            .iter()
+            .map(|idx| {
+                idx.columns
+                    .iter()
+                    .map(|&col_idx| self.schema.columns[col_idx].name.clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Look up a RowId by index key. Returns None if no matching index exists or key not found.
+    pub fn lookup_by_index(
+        &self,
+        group_id: GroupId,
+        column_names: &[String],
+        key: &[CellValue],
+    ) -> Option<RowId> {
+        // Find matching index
+        let idx = self.unique_indexes.iter().find(|ui| {
+            if ui.columns.len() != column_names.len() {
+                return false;
+            }
+            ui.columns
+                .iter()
+                .zip(column_names)
+                .all(|(&col_idx, name)| self.schema.columns[col_idx].name == *name)
+        })?;
+
+        // Build index key
+        let index_key = if key.len() == 1 {
+            IndexKey::from_cell(&key[0])
+        } else {
+            IndexKey::Composite(key.iter().map(IndexKey::from_cell).collect())
+        };
+
+        idx.entries.get(&(group_id, index_key)).copied()
+    }
+
+    /// Look up and decode a row by index key. Combines lookup_by_index + get_active.
+    pub fn get_by_index(
+        &self,
+        group_id: GroupId,
+        column_names: &[String],
+        key: &[CellValue],
+    ) -> Option<DecodedRow> {
+        let row_id = self.lookup_by_index(group_id, column_names, key)?;
+        self.get_active(group_id, row_id)
+    }
+
     /// Read a single column from a row without decoding the full row.
     pub fn read_column(&self, ptr: RowPointer, col_idx: usize) -> Option<CellValue> {
         if col_idx >= self.schema.columns.len() {
@@ -559,6 +720,10 @@ impl Table {
 
     pub fn store_mut(&mut self) -> &mut PageStore {
         &mut self.store
+    }
+
+    pub fn stats(&self) -> &crate::stats::TableStats {
+        &self.stats
     }
 
     /// Remove stale entries from history_index, version_index, and temporal_index
@@ -727,6 +892,109 @@ impl Table {
         }
         values
     }
+
+    /// Add a secondary index on the given columns. Populates it from existing rows.
+    pub fn add_secondary_index(
+        &mut self,
+        _name: &str,
+        column_names: &[String],
+        unique: bool,
+    ) -> Result<(), TableError> {
+        let col_indices: Vec<usize> = column_names
+            .iter()
+            .map(|name| {
+                self.schema.column_index(name).ok_or_else(|| {
+                    TableError::SchemaInvalid(format!("column '{}' not found", name))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut idx = UniqueIndex {
+            columns: col_indices.clone(),
+            entries: FxHashMap::default(),
+        };
+
+        // Populate index from existing active rows
+        for (&(group_id, row_id), ptr_opt) in &self.pk_index {
+            if let Some(ptr) = ptr_opt {
+                if let Some(row_bytes) = self.store.read(*ptr) {
+                    if !row_codec::is_committed(row_bytes) {
+                        continue;
+                    }
+                    let header = row_codec::read_header(row_bytes);
+                    if header.valid_until.is_some() {
+                        continue; // not active
+                    }
+                    let values = self.decode_values(row_bytes);
+                    let key = self.build_index_key(&col_indices, &values);
+
+                    if unique && idx.entries.contains_key(&(group_id, key.clone())) {
+                        return Err(TableError::UniqueConstraintViolation(column_names.to_vec()));
+                    }
+                    idx.entries.insert((group_id, key), row_id);
+                }
+            }
+        }
+
+        self.unique_indexes.push(idx);
+
+        // Also add a Unique or non-unique constraint to the schema so it persists
+        if unique {
+            self.schema
+                .constraints
+                .push(Constraint::Unique(column_names.to_vec()));
+        } else {
+            self.schema
+                .constraints
+                .push(Constraint::Index(column_names.to_vec()));
+        }
+
+        Ok(())
+    }
+
+    /// Add a new column to the schema. Existing rows will return the default value
+    /// (or NULL if no default) for this column on read, since decoded rows pad
+    /// missing columns with Null when schema has more columns than stored data.
+    pub fn add_column(&mut self, col: crate::schema::ColumnDef) -> Result<(), TableError> {
+        // Validate: no duplicate name
+        if self.schema.columns.iter().any(|c| c.name == col.name) {
+            return Err(TableError::SchemaInvalid(format!(
+                "column '{}' already exists",
+                col.name
+            )));
+        }
+
+        // Non-nullable columns without a default can't be added to non-empty tables
+        if !col.nullable
+            && col.default_value.is_none()
+            && !col.autoincrement
+            && self.active_row_count > 0
+        {
+            return Err(TableError::SchemaInvalid(format!(
+                "cannot add NOT NULL column '{}' without DEFAULT to a non-empty table",
+                col.name
+            )));
+        }
+
+        // Update NodeRef tracking if needed
+        if col.col_type == ColumnType::NodeRef {
+            self.node_ref_col_indices.push(self.schema.columns.len());
+        }
+
+        self.schema.columns.push(col);
+        self.layout = RowLayout::from_schema(&self.schema);
+        self.schema.schema_version += 1;
+
+        Ok(())
+    }
+
+    /// Get the number of active rows for a specific group (for COUNT(*) optimization).
+    pub fn active_row_count_for_group(&self, group_id: GroupId) -> usize {
+        self.pk_index
+            .iter()
+            .filter(|(&(gid, _), ptr)| gid == group_id && ptr.is_some())
+            .count()
+    }
 }
 
 #[cfg(test)]
@@ -740,6 +1008,7 @@ mod tests {
             col_type,
             nullable: true,
             default_value: None,
+            autoincrement: false,
         }
     }
 
@@ -749,6 +1018,7 @@ mod tests {
             col_type,
             nullable: false,
             default_value: None,
+            autoincrement: false,
         }
     }
 
@@ -996,9 +1266,33 @@ mod tests {
     }
 
     #[test]
-    fn test_column_count_mismatch() {
+    fn test_short_insert_padded_with_defaults() {
+        // Inserting fewer values than columns should pad with Null (for nullable columns).
         let mut table = Table::new(test_schema()).unwrap();
         let result = table.insert(0, vec![CellValue::Int64(1)]);
+        // customer, amount, node are all nullable — should succeed
+        assert!(result.is_ok());
+        let (row_id, _vid) = result.unwrap();
+        let row = table.get_active(0, row_id).unwrap();
+        assert!(matches!(row.values[0], CellValue::Int64(1)));
+        assert!(matches!(row.values[1], CellValue::Null));
+        assert!(matches!(row.values[2], CellValue::Null));
+    }
+
+    #[test]
+    fn test_too_many_columns_rejected() {
+        // Inserting more values than columns should still fail
+        let mut table = Table::new(test_schema()).unwrap();
+        let result = table.insert(
+            0,
+            vec![
+                CellValue::Int64(1),
+                CellValue::String("a".into()),
+                CellValue::Float64(1.0),
+                CellValue::Null,
+                CellValue::String("extra".into()), // 5th column doesn't exist
+            ],
+        );
         assert!(matches!(
             result,
             Err(TableError::ColumnCountMismatch { .. })

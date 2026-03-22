@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use wasmtime::{Instance, Linker, Module, Store};
+use wasmtime::{Instance, InstancePre, Linker, Module, Store};
 
 use agent_db_tables::catalog::TableCatalog;
 
@@ -15,9 +15,14 @@ use crate::runtime::{WasmRuntime, EPOCH_TICKS_PER_SECOND};
 use crate::usage::ModuleUsageCounters;
 
 /// A loaded WASM module instance with its environment.
+///
+/// Pre-links the compiled module with the host function Linker once at load time,
+/// caching an `InstancePre` so that each call only needs to create a Store and
+/// instantiate — no re-linking overhead.
 pub struct ModuleInstance {
-    /// Compiled module (reusable across instantiations).
-    compiled: Module,
+    /// Pre-linked instance ready for fast instantiation on each call.
+    /// Holds the compiled Module internally — no separate field needed.
+    instance_pre: InstancePre<HostEnv>,
     /// Module descriptor (cached from __minns_describe__).
     pub descriptor: ModuleDescriptor,
     /// Content-addressed hash of the WASM bytes.
@@ -57,8 +62,12 @@ impl ModuleInstance {
         let usage = Arc::new(ModuleUsageCounters::new());
         let life_budget = runtime.config().default_life_budget;
 
+        // Build the Linker once and pre-link with the compiled module.
+        // This avoids re-registering host functions + WASI on every call.
+        let instance_pre = Self::build_instance_pre(runtime, &compiled)?;
+
         let mut instance = ModuleInstance {
-            compiled,
+            instance_pre,
             descriptor: ModuleDescriptor {
                 name: String::new(),
                 version: String::new(),
@@ -86,7 +95,27 @@ impl ModuleInstance {
         Ok(instance)
     }
 
+    /// Build a Linker with all host functions and WASI, then pre-link it with
+    /// the compiled module. The resulting `InstancePre` can instantiate new
+    /// Store+Instance pairs without any linking overhead.
+    fn build_instance_pre(
+        runtime: &WasmRuntime,
+        compiled: &Module,
+    ) -> Result<InstancePre<HostEnv>, WasmError> {
+        let mut linker = Linker::new(runtime.engine());
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |env: &mut HostEnv| &mut env.wasi_p1)
+            .map_err(|e| WasmError::InstantiationError(format!("WASI link: {}", e)))?;
+        host_functions::register_host_functions(&mut linker)?;
+
+        linker
+            .instantiate_pre(compiled)
+            .map_err(|e| WasmError::InstantiationError(format!("pre-link: {}", e)))
+    }
+
     /// Create a fresh Store + Instance for a single call.
+    ///
+    /// Uses the cached `InstancePre` so that no host function registration or
+    /// WASI linking happens here — only Store creation and instantiation.
     fn create_store_and_instance(
         &self,
         runtime: &WasmRuntime,
@@ -109,14 +138,10 @@ impl ModuleInstance {
             .map_err(|e| WasmError::ExecutionError(format!("set life budget: {}", e)))?;
         store.set_epoch_deadline(EPOCH_TICKS_PER_SECOND * runtime.config().wall_time_limit_secs);
 
-        // Link host functions + WASI
-        let mut linker = Linker::new(runtime.engine());
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |env: &mut HostEnv| &mut env.wasi_p1)
-            .map_err(|e| WasmError::InstantiationError(format!("WASI link: {}", e)))?;
-        host_functions::register_host_functions(&mut linker)?;
-
-        let instance = linker
-            .instantiate(&mut store, &self.compiled)
+        // Instantiate from cached pre-linked module — no re-linking needed
+        let instance = self
+            .instance_pre
+            .instantiate(&mut store)
             .map_err(|e| WasmError::InstantiationError(e.to_string()))?;
 
         Ok((store, instance))
@@ -220,6 +245,9 @@ impl ModuleInstance {
             })? as i32;
 
         let (mut store, instance) = self.create_store_and_instance(runtime)?;
+
+        // Clear buffer pool at the start of each call
+        store.data_mut().buffer_pool.clear();
 
         let call_fn = instance
             .get_typed_func::<(i32, i32, i32), i32>(&mut store, "__minns_call__")

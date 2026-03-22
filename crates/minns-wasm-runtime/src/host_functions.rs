@@ -78,6 +78,8 @@ pub struct HostEnv {
     pub http_client: Option<reqwest::Client>,
     /// Store limits for memory enforcement.
     pub limiter: wasmtime::StoreLimits,
+    /// Buffer pool for zero-copy data exchange.
+    pub buffer_pool: crate::abi::BufferPool,
     /// WASI preview 1 context for modules that need std (fd_write, etc.)
     pub wasi_p1: wasmtime_wasi::p1::WasiP1Ctx,
 }
@@ -110,6 +112,7 @@ impl HostEnv {
             limiter: wasmtime::StoreLimitsBuilder::new()
                 .memory_size(64 * 1024 * 1024) // 64MB max WASM memory
                 .build(),
+            buffer_pool: crate::abi::BufferPool::new(),
             wasi_p1: wasmtime_wasi::WasiCtxBuilder::new().build_p1(),
         }
     }
@@ -127,7 +130,7 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     linker
         .func_wrap(
             "env",
-            "log",
+            "minns_log",
             |mut caller: Caller<'_, HostEnv>, level: i32, msg_ptr: i32, msg_len: i32| {
                 let memory = caller.get_export("memory").and_then(|e| e.into_memory());
                 if let Some(mem) = memory {
@@ -165,6 +168,31 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
     linker
         .func_wrap("env", "result_write", result_write_fn)
         .map_err(|e| WasmError::HostError(format!("link result_write: {}", e)))?;
+
+    // -- Result read (module pulls result bytes from host into WASM memory) --
+    linker
+        .func_wrap(
+            "env",
+            "result_read",
+            |mut caller: Caller<'_, HostEnv>, dst_ptr: i32, max_len: i32| -> i32 {
+                let data = caller.data().last_result.clone();
+                let copy_len = (data.len() as i32).min(max_len);
+                if copy_len <= 0 {
+                    return 0;
+                }
+                let memory = caller.get_export("memory").and_then(|e| e.into_memory());
+                if let Some(mem) = memory {
+                    if mem
+                        .write(&mut caller, dst_ptr as usize, &data[..copy_len as usize])
+                        .is_ok()
+                    {
+                        return copy_len;
+                    }
+                }
+                -1
+            },
+        )
+        .map_err(|e| WasmError::HostError(format!("link result_read: {}", e)))?;
 
     // -- Module identity --
     linker
@@ -648,6 +676,61 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
             },
         )
         .map_err(|e| WasmError::HostError(format!("link http_fetch: {}", e)))?;
+
+    // -- Buffer pool: get length --
+    linker
+        .func_wrap(
+            "env",
+            "__minns_buffer_len",
+            |caller: Caller<'_, HostEnv>, id: i32| -> i32 {
+                if id < 0 {
+                    return -1;
+                }
+                let env = caller.data();
+                env.buffer_pool
+                    .len(id as u32)
+                    .and_then(|l| i32::try_from(l).ok())
+                    .unwrap_or(-1)
+            },
+        )
+        .map_err(|e| WasmError::HostError(format!("link __minns_buffer_len: {}", e)))?;
+
+    // -- Buffer pool: read bytes --
+    linker
+        .func_wrap(
+            "env",
+            "__minns_buffer_read",
+            |mut caller: Caller<'_, HostEnv>,
+             id: i32,
+             dst_ptr: i32,
+             offset: i32,
+             len: i32|
+             -> i32 {
+                // Validate non-negative parameters to prevent wrapping casts
+                if id < 0 || dst_ptr < 0 || offset < 0 || len < 0 {
+                    return -1;
+                }
+                let data = {
+                    let env = caller.data();
+                    match env
+                        .buffer_pool
+                        .read(id as u32, offset as usize, len as usize)
+                    {
+                        Some(bytes) => bytes.to_vec(),
+                        None => return -1,
+                    }
+                };
+                let memory = match caller.get_export("memory") {
+                    Some(wasmtime::Extern::Memory(m)) => m,
+                    _ => return -1,
+                };
+                if memory.write(&mut caller, dst_ptr as usize, &data).is_err() {
+                    return -1;
+                }
+                len
+            },
+        )
+        .map_err(|e| WasmError::HostError(format!("link __minns_buffer_read: {}", e)))?;
 
     Ok(())
 }

@@ -1,0 +1,17 @@
+[package]
+name = "minns-sdk-macros"
+version = "0.1.0"
+edition = "2021"
+description = "Proc macros for the MinnsDB WASM module SDK"
+license = "Apache-2.0"
+repository = "https://github.com/journeyintoai/minnsdb"
+keywords = ["database", "wasm", "agent", "graph"]
+categories = ["database", "wasm"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

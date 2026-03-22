@@ -129,6 +129,7 @@ mod tests {
             col_type: ct,
             nullable: true,
             default_value: None,
+            autoincrement: false,
         }
     }
 
@@ -142,6 +143,7 @@ mod tests {
                     col_type: ColumnType::Int64,
                     nullable: false,
                     default_value: None,
+                    autoincrement: false,
                 },
                 col("val", ColumnType::String),
             ],

@@ -1,3 +1,14 @@
+/// Error categories for instance lifecycle management.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    /// User error (permission denied, bad args): instance is reusable.
+    User,
+    /// Recoverable error (life exceeded, timeout): instance reusable after reset.
+    Recoverable,
+    /// Fatal trap (WASM trap, stack overflow, OOB): instance must be discarded.
+    Trap,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WasmError {
     #[error("compilation error: {0}")]
@@ -28,16 +39,43 @@ pub enum WasmError {
     ScheduleError(String),
 }
 
+impl WasmError {
+    /// Classify this error for instance lifecycle decisions.
+    pub fn category(&self) -> ErrorCategory {
+        match self {
+            WasmError::PermissionDenied(_)
+            | WasmError::ModuleNotFound(_)
+            | WasmError::ModuleAlreadyExists(_)
+            | WasmError::InvalidModule(_)
+            | WasmError::AbiError(_)
+            | WasmError::HostError(_)
+            | WasmError::PersistenceError(_)
+            | WasmError::ScheduleError(_) => ErrorCategory::User,
+
+            WasmError::LifeExceeded | WasmError::Timeout => ErrorCategory::Recoverable,
+
+            WasmError::CompilationError(_)
+            | WasmError::InstantiationError(_)
+            | WasmError::ExecutionError(_) => ErrorCategory::Trap,
+        }
+    }
+}
+
 impl From<wasmtime::Error> for WasmError {
     fn from(e: wasmtime::Error) -> Self {
         let msg = e.to_string();
-        // Detect life budget exhaustion from wasmtime error messages
+        // Detect life budget exhaustion
         if msg.contains("fuel") || msg.contains("all fuel consumed") {
-            WasmError::LifeExceeded
-        } else if msg.contains("epoch") {
-            WasmError::Timeout
-        } else {
-            WasmError::ExecutionError(msg)
+            return WasmError::LifeExceeded;
         }
+        // Detect epoch-based timeout
+        if msg.contains("epoch") {
+            return WasmError::Timeout;
+        }
+        // Detect WASM traps via downcast
+        if e.downcast_ref::<wasmtime::Trap>().is_some() {
+            return WasmError::ExecutionError(format!("trap: {}", msg));
+        }
+        WasmError::ExecutionError(msg)
     }
 }

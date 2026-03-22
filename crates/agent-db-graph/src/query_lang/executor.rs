@@ -267,11 +267,12 @@ impl<'a> Executor<'a> {
             PlanStep::Filter(expr) => self.step_filter(rows, expr),
             // Table steps are handled by the table_executor module, not the graph executor.
             // If we reach here, it means a table query was routed to the graph executor by mistake.
-            PlanStep::ScanTable { .. } | PlanStep::JoinTable { .. } => {
-                Err(QueryError::ExecutionError(
-                    "Table scan/join steps must be executed by the table executor".into(),
-                ))
-            },
+            PlanStep::ScanTable { .. }
+            | PlanStep::JoinTable { .. }
+            | PlanStep::IndexScan { .. }
+            | PlanStep::IndexJoin { .. } => Err(QueryError::ExecutionError(
+                "Table scan/join steps must be executed by the table executor".into(),
+            )),
         }
     }
 
@@ -567,6 +568,40 @@ impl<'a> Executor<'a> {
             RBoolExpr::IsNotNull(e) => {
                 let v = self.evaluate_expr(e, binding)?;
                 Ok(!v.is_null())
+            },
+            RBoolExpr::In(e, vals) => {
+                let v = self.evaluate_expr(e, binding)?;
+                for candidate in vals {
+                    let c = self.evaluate_expr(candidate, binding)?;
+                    if compare_values(&v, &CompOp::Eq, &c) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            },
+            RBoolExpr::NotIn(e, vals) => {
+                let v = self.evaluate_expr(e, binding)?;
+                for candidate in vals {
+                    let c = self.evaluate_expr(candidate, binding)?;
+                    if compare_values(&v, &CompOp::Eq, &c) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            },
+            RBoolExpr::Between(e, low, high) => {
+                let v = self.evaluate_expr(e, binding)?;
+                let lo = self.evaluate_expr(low, binding)?;
+                let hi = self.evaluate_expr(high, binding)?;
+                Ok(compare_values(&v, &CompOp::Gte, &lo) && compare_values(&v, &CompOp::Lte, &hi))
+            },
+            RBoolExpr::Like(e, pattern) => {
+                let v = self.evaluate_expr(e, binding)?;
+                if let Value::String(s) = v {
+                    Ok(super::table_executor::like_match(&s, pattern))
+                } else {
+                    Ok(false)
+                }
             },
             RBoolExpr::And(a, b) => {
                 Ok(self.evaluate_bool(a, binding)? && self.evaluate_bool(b, binding)?)

@@ -589,7 +589,10 @@ fn init_operator_states(
                 filter_states.push(FilterState::init(expr.clone()));
             },
             // Table steps are handled separately; skip for graph subscription init.
-            PlanStep::ScanTable { .. } | PlanStep::JoinTable { .. } => {},
+            PlanStep::ScanTable { .. }
+            | PlanStep::JoinTable { .. }
+            | PlanStep::IndexScan { .. }
+            | PlanStep::IndexJoin { .. } => {},
         }
     }
 
