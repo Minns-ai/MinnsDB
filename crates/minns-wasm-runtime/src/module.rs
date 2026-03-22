@@ -34,6 +34,8 @@ pub struct ModuleInstance {
     pub enabled: bool,
     /// Shared references needed for creating stores.
     table_catalog: Arc<RwLock<TableCatalog>>,
+    /// Graph engine for graph queries.
+    graph_engine: Option<Arc<agent_db_graph::GraphEngine>>,
     /// Life budget per call.
     life_budget: u64,
 }
@@ -48,6 +50,7 @@ impl ModuleInstance {
         group_id: u64,
         module_id: u64,
         table_catalog: Arc<RwLock<TableCatalog>>,
+        graph_engine: Option<Arc<agent_db_graph::GraphEngine>>,
     ) -> Result<Self, WasmError> {
         let blob_hash = WasmRuntime::hash_module(wasm_bytes);
         let compiled = runtime.compile(wasm_bytes)?;
@@ -70,6 +73,7 @@ impl ModuleInstance {
             module_id,
             enabled: true,
             table_catalog,
+            graph_engine,
             life_budget,
         };
 
@@ -93,6 +97,7 @@ impl ModuleInstance {
             self.group_id,
             self.module_id,
             self.table_catalog.clone(),
+            self.graph_engine.clone(),
         );
 
         let mut store = Store::new(runtime.engine(), env);

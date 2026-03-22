@@ -70,6 +70,8 @@ pub struct HostEnv {
     pub caller_id: String,
     /// Shared table catalog.
     pub table_catalog: Arc<RwLock<TableCatalog>>,
+    /// Shared graph engine for graph queries.
+    pub graph_engine: Option<Arc<agent_db_graph::GraphEngine>>,
     /// Last result buffer (host writes here, module reads via result_len + alloc).
     pub last_result: Vec<u8>,
     /// HTTP client for sandboxed fetch (shared, has timeout configured).
@@ -87,6 +89,7 @@ impl HostEnv {
         group_id: u64,
         module_id: u64,
         table_catalog: Arc<RwLock<TableCatalog>>,
+        graph_engine: Option<Arc<agent_db_graph::GraphEngine>>,
     ) -> Self {
         HostEnv {
             permissions,
@@ -95,6 +98,7 @@ impl HostEnv {
             module_id,
             caller_id: String::new(),
             table_catalog,
+            graph_engine,
             last_result: Vec::new(),
             http_client: Some(
                 reqwest::Client::builder()
@@ -440,14 +444,42 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
                     caller.data().permissions.check_graph_query()?;
 
                     let query_bytes = abi::read_from_wasm(&memory, &caller, query_ptr, query_len)?;
-                    let _query_str = String::from_utf8_lossy(&query_bytes).to_string();
+                    let query_str = String::from_utf8_lossy(&query_bytes).to_string();
 
-                    // Graph query execution requires access to the GraphEngine,
-                    // which is not available in the HostEnv yet.
-                    Err(WasmError::HostError(
-                        "graph_query not yet available — use table_query for table operations"
-                            .into(),
-                    ))
+                    let engine = caller
+                        .data()
+                        .graph_engine
+                        .as_ref()
+                        .ok_or_else(|| WasmError::HostError("graph engine not available".into()))?
+                        .clone();
+
+                    // Execute graph query — need to block on async from sync context
+                    let output = tokio::task::block_in_place(|| {
+                        let rt = tokio::runtime::Handle::current();
+                        rt.block_on(async {
+                            let inference = engine.inference().read().await;
+                            let graph = inference.graph();
+                            let ontology = engine.ontology();
+                            agent_db_graph::query_lang::execute_query(
+                                &query_str,
+                                graph,
+                                ontology,
+                            )
+                        })
+                    })
+                    .map_err(|e| WasmError::HostError(e.to_string()))?;
+
+                    caller.data().usage.record_graph_query();
+
+                    let result = QueryResultMsg {
+                        columns: output.columns,
+                        rows: output
+                            .rows
+                            .into_iter()
+                            .map(|row| row.into_iter().map(value_to_msgpack_value).collect())
+                            .collect(),
+                    };
+                    abi::to_msgpack(&result)
                 })();
 
                 match result {

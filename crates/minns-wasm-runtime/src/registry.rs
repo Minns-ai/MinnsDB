@@ -63,6 +63,7 @@ impl ModuleRegistry {
     }
 
     /// Upload and register a new module.
+    #[allow(clippy::too_many_arguments)]
     pub fn upload(
         &mut self,
         runtime: &WasmRuntime,
@@ -71,6 +72,7 @@ impl ModuleRegistry {
         permissions: Vec<String>,
         group_id: u64,
         table_catalog: Arc<RwLock<TableCatalog>>,
+        graph_engine: Option<Arc<agent_db_graph::GraphEngine>>,
     ) -> Result<&ModuleInstance, WasmError> {
         if self.modules.contains_key(&name) {
             return Err(WasmError::ModuleAlreadyExists(name));
@@ -87,6 +89,7 @@ impl ModuleRegistry {
             group_id,
             module_id,
             table_catalog,
+            graph_engine,
         )?;
 
         let blob_hash = instance.blob_hash;
@@ -239,6 +242,7 @@ impl ModuleRegistry {
         &mut self,
         runtime: &WasmRuntime,
         table_catalog: Arc<RwLock<TableCatalog>>,
+        graph_engine: Option<Arc<agent_db_graph::GraphEngine>>,
     ) -> Vec<(String, WasmError)> {
         let mut errors = Vec::new();
         let records: Vec<ModuleRecord> = self.records.values().cloned().collect();
@@ -253,6 +257,7 @@ impl ModuleRegistry {
                     record.group_id,
                     record.module_id,
                     table_catalog.clone(),
+                    graph_engine.clone(),
                 ) {
                     Ok(mut instance) => {
                         instance.enabled = record.enabled;
