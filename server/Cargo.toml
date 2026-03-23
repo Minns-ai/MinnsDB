@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Local dependencies
-agent-db-graph = { path = "../crates/agent-db-graph" }
+agent-db-graph = { path = "../crates/agent-db-graph", features = [] }
 agent-db-events = { path = "../crates/agent-db-events" }
 agent-db-core = { path = "../crates/agent-db-core" }
 agent-db-planning = { path = "../ml/agent-db-planning" }
@@ -50,6 +50,10 @@ base64 = "0.22"
 parking_lot = "0.12"
 dashmap = "6"
 num_cpus = "1"
+
+[features]
+default = []
+code = ["agent-db-graph/code-intelligence"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

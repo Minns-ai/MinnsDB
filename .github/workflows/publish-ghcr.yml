@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [normal, free]
+        profile: [normal, free, code]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,7 +35,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ghcr.io/${{ github.repository_owner }}/minnsdb${{ matrix.profile == 'free' && '-free' || '' }}
+            ghcr.io/${{ github.repository_owner }}/minnsdb${{ matrix.profile != 'normal' && format('-{0}', matrix.profile) || '' }}
           tags: |
             type=raw,value=latest,enable=true
             type=semver,pattern={{version}}
