@@ -23,8 +23,13 @@ COPY ml ./ml
 COPY server ./server
 COPY examples ./examples
 
-# Build release binary with optimizations
-RUN cargo build --release --package minnsdb-server
+# Service profile determines cargo features
+ARG SERVICE_PROFILE=normal
+RUN if [ "$SERVICE_PROFILE" = "code" ]; then \
+      cargo build --release --package minnsdb-server --features code; \
+    else \
+      cargo build --release --package minnsdb-server; \
+    fi
 
 # Verify binary exists
 RUN ls -lh /build/target/release/minnsdb-server
@@ -90,6 +95,7 @@ ENV NER_REQUEST_TIMEOUT_MS=5000
 # NOTE: Cache sizes and limits are set in server config based on SERVICE_PROFILE
 # FREE profile: 64MB cache, 1K memories, 500 strategies, 50K max nodes, no Louvain
 # NORMAL profile: 256MB cache, 10K memories, 5K strategies, 1M max nodes, Louvain enabled
+# CODE profile: same as NORMAL + AST/code intelligence (tree-sitter)
 
 # Volume for persistent data
 VOLUME ["/data"]
