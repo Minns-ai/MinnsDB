@@ -1,8 +1,11 @@
 [package]
 name = "agent-db-core"
-version = "0.1.0"
-edition = "2021"
-description = "Core traits, types, and error handling for Agentic Database"
+description = "Core traits, types, and error handling for MinnsDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

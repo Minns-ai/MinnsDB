@@ -1,8 +1,11 @@
 [package]
 name = "minns-wasm-runtime"
-version = "0.1.0"
-edition = "2021"
 description = "Sandboxed WASM agent runtime for MinnsDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 agent-db-core = { path = "../agent-db-core" }

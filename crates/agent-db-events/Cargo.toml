@@ -1,8 +1,11 @@
 [package]
 name = "agent-db-events"
-version = "0.1.0"
-edition = "2021"
-description = "Event system for Agentic Database"
+description = "Event ingestion and processing for MinnsDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 agent-db-core = { path = "../agent-db-core" }

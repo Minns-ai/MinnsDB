@@ -20,6 +20,14 @@ members = [
     "crates/minns-sdk-macros",
 ]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BSL-1.1"
+repository = "https://github.com/Minns-ai/MinnsDB"
+homepage = "https://minns.ai"
+authors = ["Minns AI <hello@minns.ai>"]
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.28", features = ["full"] }

@@ -1,7 +1,11 @@
 [package]
 name = "minnsdb-server"
-version = "0.1.0"
-edition = "2021"
+description = "HTTP API server for MinnsDB — the agentic database"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 # Local dependencies

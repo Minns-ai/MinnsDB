@@ -1,0 +1,4143 @@
+openapi: 3.1.0
+info:
+  title: MinnsDB API
+  description: REST API for MinnsDB — the agentic database
+  version: 0.1.0
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Health
+    description: Health checks and server info
+  - name: Events
+    description: Event ingestion and retrieval
+  - name: CodeIntelligence
+    description: Code review, file, and search operations
+  - name: Episodes
+    description: Episode detection and listing
+  - name: Memories
+    description: Agent memory retrieval
+  - name: Strategies
+    description: Strategy extraction and similarity search
+  - name: Graph
+    description: Graph operations, import, and persistence
+  - name: Analytics
+    description: Graph analytics, centrality, communities, and paths
+  - name: MinnsQL
+    description: MinnsQL query execution
+  - name: NLQ
+    description: Natural language query interface
+  - name: Search
+    description: Keyword, semantic, and hybrid search
+  - name: Claims
+    description: Claim extraction and search
+  - name: StructuredMemory
+    description: Ledgers, state machines, trees, and preference lists
+  - name: Workflows
+    description: Workflow creation and management
+  - name: Agents
+    description: Agent registration and listing
+  - name: Messages
+    description: Single message ingestion
+  - name: Conversations
+    description: Batch conversation ingestion
+  - name: Ontology
+    description: OWL/RDFS ontology management
+  - name: Subscriptions
+    description: Reactive query subscriptions
+  - name: Tables
+    description: Relational table operations
+  - name: WASM
+    description: WebAssembly module management
+  - name: Auth
+    description: API key management
+  - name: Admin
+    description: Database export and import
+  - name: Planning
+    description: Strategy and action planning
+
+paths:
+  /:
+    get:
+      operationId: getRootInfo
+      tags: [Health]
+      summary: Root info page
+      security: []
+      responses:
+        "200":
+          description: HTML info page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /docs:
+    get:
+      operationId: getDocsPage
+      tags: [Health]
+      summary: API documentation page
+      security: []
+      responses:
+        "200":
+          description: HTML documentation page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /api/health:
+    get:
+      operationId: getHealth
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/events:
+    post:
+      operationId: processEvent
+      tags: [Events]
+      summary: Process a full event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event]
+              properties:
+                event:
+                  $ref: "#/components/schemas/Event"
+                enable_semantic:
+                  type: boolean
+      responses:
+        "200":
+          description: Event processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    get:
+      operationId: getEvents
+      tags: [Events]
+      summary: Get events
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Event"
+
+  /api/events/simple:
+    post:
+      operationId: processSimpleEvent
+      tags: [Events]
+      summary: Process a simple event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimpleEventRequest"
+      responses:
+        "200":
+          description: Event processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/events/state-change:
+    post:
+      operationId: processStateChangeEvent
+      tags: [Events]
+      summary: Process a state change event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StateChangeEventRequest"
+      responses:
+        "200":
+          description: Event processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/events/transaction:
+    post:
+      operationId: processTransactionEvent
+      tags: [Events]
+      summary: Process a transaction event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionEventRequest"
+      responses:
+        "200":
+          description: Event processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/events/code-review:
+    post:
+      operationId: processCodeReviewEvent
+      tags: [CodeIntelligence]
+      summary: Process a code review event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeReviewEventRequest"
+      responses:
+        "200":
+          description: Event processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/events/code-file:
+    post:
+      operationId: processCodeFileEvent
+      tags: [CodeIntelligence]
+      summary: Process a code file snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeFileEventRequest"
+      responses:
+        "200":
+          description: Event processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/code/search:
+    post:
+      operationId: searchCode
+      tags: [CodeIntelligence]
+      summary: Search code entities
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeSearchRequest"
+      responses:
+        "200":
+          description: Code search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeSearchResponse"
+
+  /api/episodes:
+    get:
+      operationId: getEpisodes
+      tags: [Episodes]
+      summary: List episodes
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of episodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Episode"
+
+  /api/memories/agent/{agent_id}:
+    get:
+      operationId: getAgentMemories
+      tags: [Memories]
+      summary: Get agent memories
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of memories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Memory"
+
+  /api/memories/context:
+    post:
+      operationId: getMemoriesByContext
+      tags: [Memories]
+      summary: Get memories by context
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [context]
+              properties:
+                context:
+                  $ref: "#/components/schemas/EventContext"
+                limit:
+                  type: integer
+                min_similarity:
+                  type: number
+                  format: double
+                agent_id:
+                  type: integer
+                session_id:
+                  type: integer
+      responses:
+        "200":
+          description: Matching memories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Memory"
+
+  /api/strategies/agent/{agent_id}:
+    get:
+      operationId: getAgentStrategies
+      tags: [Strategies]
+      summary: Get agent strategies
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of strategies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Strategy"
+
+  /api/strategies/similar:
+    post:
+      operationId: findSimilarStrategies
+      tags: [Strategies]
+      summary: Find similar strategies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                goal_ids:
+                  type: array
+                  items:
+                    type: integer
+                tool_names:
+                  type: array
+                  items:
+                    type: string
+                result_types:
+                  type: array
+                  items:
+                    type: string
+                context_hash:
+                  type: string
+                agent_id:
+                  type: integer
+                limit:
+                  type: integer
+                min_score:
+                  type: number
+                  format: double
+      responses:
+        "200":
+          description: Similar strategies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Strategy"
+
+  /api/suggestions:
+    get:
+      operationId: getSuggestions
+      tags: [Strategies]
+      summary: Get action suggestions
+      parameters:
+        - name: context_hash
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: last_action_node
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Action suggestions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/graph:
+    get:
+      operationId: getGraph
+      tags: [Graph]
+      summary: Get graph nodes and edges
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: session_id
+          in: query
+          schema:
+            type: integer
+        - name: agent_type
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Graph data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphResponse"
+
+  /api/graph/context:
+    get:
+      operationId: getGraphForContext
+      tags: [Graph]
+      summary: Get graph for a specific context
+      parameters:
+        - name: context_hash
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: session_id
+          in: query
+          schema:
+            type: integer
+        - name: agent_type
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Graph data for context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphResponse"
+
+  /api/graph/persist:
+    post:
+      operationId: persistGraph
+      tags: [Graph]
+      summary: Persist graph to disk
+      responses:
+        "200":
+          description: Persistence result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, nodes_persisted, edges_persisted]
+                properties:
+                  success:
+                    type: boolean
+                  nodes_persisted:
+                    type: integer
+                  edges_persisted:
+                    type: integer
+
+  /api/graph/import:
+    post:
+      operationId: importGraph
+      tags: [Graph]
+      summary: Bulk import nodes and edges
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GraphImportRequest"
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphImportResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/stats:
+    get:
+      operationId: getStats
+      tags: [Graph]
+      summary: Get processing stats
+      responses:
+        "200":
+          description: Processing statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+
+  /api/world-model/stats:
+    get:
+      operationId: getWorldModelStats
+      tags: [Graph]
+      summary: Get world model stats
+      responses:
+        "200":
+          description: World model statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldModelStatsResponse"
+
+  /api/analytics:
+    get:
+      operationId: getAnalytics
+      tags: [Analytics]
+      summary: Get graph analytics
+      responses:
+        "200":
+          description: Graph analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsResponse"
+
+  /api/indexes:
+    get:
+      operationId: getIndexes
+      tags: [Analytics]
+      summary: Get index stats
+      responses:
+        "200":
+          description: Index statistics
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/communities:
+    get:
+      operationId: getCommunities
+      tags: [Analytics]
+      summary: Community detection
+      parameters:
+        - name: algorithm
+          in: query
+          schema:
+            type: string
+            enum: [louvain, label_propagation]
+      responses:
+        "200":
+          description: Community detection results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommunitiesResponse"
+
+  /api/centrality:
+    get:
+      operationId: getCentrality
+      tags: [Analytics]
+      summary: Centrality scores
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Centrality scores
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CentralityScore"
+
+  /api/ppr:
+    get:
+      operationId: getPersonalizedPageRank
+      tags: [Analytics]
+      summary: Personalized PageRank
+      parameters:
+        - name: source_node_id
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: min_score
+          in: query
+          schema:
+            type: number
+            format: double
+      responses:
+        "200":
+          description: Personalized PageRank scores
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PPRResponse"
+
+  /api/reachability:
+    get:
+      operationId: getReachability
+      tags: [Analytics]
+      summary: Temporal reachability
+      parameters:
+        - name: source
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: max_hops
+          in: query
+          schema:
+            type: integer
+        - name: max_results
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Reachability results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReachabilityResponse"
+
+  /api/causal-path:
+    get:
+      operationId: getCausalPath
+      tags: [Analytics]
+      summary: Find causal path between nodes
+      parameters:
+        - name: source
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: target
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Causal path result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CausalPathResponse"
+
+  /api/query:
+    post:
+      operationId: executeQuery
+      tags: [MinnsQL]
+      summary: Execute a MinnsQL query
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                group_id:
+                  type: string
+      responses:
+        "200":
+          description: Query results (standard or subscription)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/QueryResponse"
+                  - $ref: "#/components/schemas/SubscriptionCreatedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/nlq:
+    post:
+      operationId: naturalLanguageQuery
+      tags: [NLQ]
+      summary: Natural language query
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NLQRequest"
+      responses:
+        "200":
+          description: NLQ result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NLQResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/search:
+    post:
+      operationId: search
+      tags: [Search]
+      summary: Search nodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+
+  /api/claims:
+    get:
+      operationId: listClaims
+      tags: [Claims]
+      summary: List claims
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: event_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of claims
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Claim"
+
+  /api/claims/{id}:
+    get:
+      operationId: getClaimById
+      tags: [Claims]
+      summary: Get claim by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Claim details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Claim"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/claims/search:
+    post:
+      operationId: searchClaims
+      tags: [Claims]
+      summary: Search claims
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query_text]
+              properties:
+                query_text:
+                  type: string
+                top_k:
+                  type: integer
+                min_similarity:
+                  type: number
+                  format: double
+      responses:
+        "200":
+          description: Claim search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClaimSearchResponse"
+
+  /api/embeddings/process:
+    post:
+      operationId: processEmbeddings
+      tags: [Claims]
+      summary: Process embeddings for claims
+      responses:
+        "200":
+          description: Embeddings processed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [claims_processed, success]
+                properties:
+                  claims_processed:
+                    type: integer
+                  success:
+                    type: boolean
+
+  /api/structured-memory:
+    post:
+      operationId: upsertStructuredMemory
+      tags: [StructuredMemory]
+      summary: Upsert structured memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StructuredMemoryUpsertRequest"
+      responses:
+        "204":
+          description: Upserted successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    get:
+      operationId: listStructuredMemoryKeys
+      tags: [StructuredMemory]
+      summary: List structured memory keys
+      parameters:
+        - name: prefix
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of keys
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys, count]
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: string
+                  count:
+                    type: integer
+
+  /api/structured-memory/{key}:
+    get:
+      operationId: getStructuredMemory
+      tags: [StructuredMemory]
+      summary: Get structured memory value
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Structured memory value
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, template]
+                properties:
+                  key:
+                    type: string
+                  template:
+                    $ref: "#/components/schemas/StructuredMemoryTemplate"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteStructuredMemory
+      tags: [StructuredMemory]
+      summary: Delete structured memory
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, key]
+                properties:
+                  success:
+                    type: boolean
+                  key:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/structured-memory/ledger/{key}/append:
+    post:
+      operationId: appendLedgerEntry
+      tags: [StructuredMemory]
+      summary: Append ledger entry
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, description, direction]
+              properties:
+                amount:
+                  type: number
+                  format: double
+                description:
+                  type: string
+                direction:
+                  type: string
+                  enum: [Credit, Debit]
+      responses:
+        "200":
+          description: Entry appended
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, balance]
+                properties:
+                  success:
+                    type: boolean
+                  balance:
+                    type: number
+                    format: double
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/structured-memory/ledger/{key}/balance:
+    get:
+      operationId: getLedgerBalance
+      tags: [StructuredMemory]
+      summary: Get ledger balance
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Balance
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, balance]
+                properties:
+                  key:
+                    type: string
+                  balance:
+                    type: number
+                    format: double
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/structured-memory/state/{key}/transition:
+    post:
+      operationId: stateTransition
+      tags: [StructuredMemory]
+      summary: Transition state machine
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_state, trigger]
+              properties:
+                new_state:
+                  type: string
+                trigger:
+                  type: string
+      responses:
+        "200":
+          description: Transition applied
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, new_state]
+                properties:
+                  success:
+                    type: boolean
+                  new_state:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/structured-memory/state/{key}/current:
+    get:
+      operationId: getCurrentState
+      tags: [StructuredMemory]
+      summary: Get current state
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, current_state]
+                properties:
+                  key:
+                    type: string
+                  current_state:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/structured-memory/preference/{key}/update:
+    post:
+      operationId: updatePreference
+      tags: [StructuredMemory]
+      summary: Update preference list
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [item, rank]
+              properties:
+                item:
+                  type: string
+                rank:
+                  type: integer
+                score:
+                  type: number
+                  format: double
+      responses:
+        "200":
+          description: Preference updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/structured-memory/tree/{key}/add-child:
+    post:
+      operationId: addTreeChild
+      tags: [StructuredMemory]
+      summary: Add child to tree
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent, child]
+              properties:
+                parent:
+                  type: string
+                child:
+                  type: string
+      responses:
+        "200":
+          description: Child added
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/workflows:
+    post:
+      operationId: createWorkflow
+      tags: [Workflows]
+      summary: Create workflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkflowRequest"
+      responses:
+        "200":
+          description: Workflow created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateWorkflowResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    get:
+      operationId: listWorkflows
+      tags: [Workflows]
+      summary: List workflows
+      parameters:
+        - name: group_id
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of workflows
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListWorkflowsResponse"
+
+  /api/workflows/{id}:
+    get:
+      operationId: getWorkflow
+      tags: [Workflows]
+      summary: Get workflow by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Workflow details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateWorkflow
+      tags: [Workflows]
+      summary: Update workflow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWorkflowRequest"
+      responses:
+        "200":
+          description: Workflow updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateWorkflowResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteWorkflow
+      tags: [Workflows]
+      summary: Delete workflow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Workflow deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/workflows/{id}/steps/{step_id}/transition:
+    post:
+      operationId: transitionWorkflowStep
+      tags: [Workflows]
+      summary: Transition workflow step state
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: step_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state]
+              properties:
+                state:
+                  type: string
+                result:
+                  type: object
+      responses:
+        "200":
+          description: Step transitioned
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/workflows/{id}/feedback:
+    post:
+      operationId: workflowFeedback
+      tags: [Workflows]
+      summary: Submit workflow feedback
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Feedback accepted
+
+  /api/agents/register:
+    post:
+      operationId: registerAgent
+      tags: [Agents]
+      summary: Register an agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, group_id]
+              properties:
+                agent_id:
+                  type: string
+                group_id:
+                  type: string
+                repository:
+                  type: string
+                capabilities:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Agent registered
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent_node_id, status]
+                properties:
+                  agent_node_id:
+                    type: integer
+                  repo_node_id:
+                    type: integer
+                  status:
+                    type: string
+
+  /api/agents:
+    get:
+      operationId: listAgents
+      tags: [Agents]
+      summary: List agents
+      parameters:
+        - name: group_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agents]
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Agent"
+
+  /api/messages:
+    post:
+      operationId: acceptMessage
+      tags: [Messages]
+      summary: Accept a single message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageRequest"
+      responses:
+        "200":
+          description: Message accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/conversations/ingest:
+    post:
+      operationId: ingestConversation
+      tags: [Conversations]
+      summary: Batch ingest conversations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationIngestRequest"
+      responses:
+        "200":
+          description: Conversation ingested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationIngestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/ontology/properties:
+    get:
+      operationId: listOntologyProperties
+      tags: [Ontology]
+      summary: List ontology properties
+      responses:
+        "200":
+          description: Ontology properties
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [properties, count]
+                properties:
+                  properties:
+                    type: array
+                    items:
+                      type: object
+                  count:
+                    type: integer
+
+  /api/ontology/upload:
+    post:
+      operationId: uploadOntologyTTL
+      tags: [Ontology]
+      summary: Upload TTL ontology definition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ttl]
+              properties:
+                ttl:
+                  type: string
+      responses:
+        "200":
+          description: TTL uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, properties_registered, cascade_properties_updated]
+                properties:
+                  status:
+                    type: string
+                  properties_registered:
+                    type: integer
+                  cascade_properties_updated:
+                    type: integer
+
+  /api/ontology/discover:
+    post:
+      operationId: discoverOntology
+      tags: [Ontology]
+      summary: Auto-discover ontology from graph
+      responses:
+        "200":
+          description: Discovery result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposals_created, proposal_ids, cascade_properties_updated]
+                properties:
+                  proposals_created:
+                    type: integer
+                  proposal_ids:
+                    type: array
+                    items:
+                      type: string
+                  cascade_properties_updated:
+                    type: integer
+
+  /api/ontology/cascade-inference:
+    post:
+      operationId: runCascadeInference
+      tags: [Ontology]
+      summary: Run cascade inference
+      responses:
+        "200":
+          description: Cascade inference result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, properties_updated]
+                properties:
+                  status:
+                    type: string
+                  properties_updated:
+                    type: integer
+
+  /api/ontology/observations:
+    get:
+      operationId: listOntologyObservations
+      tags: [Ontology]
+      summary: List ontology observations
+      responses:
+        "200":
+          description: Observations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [observations, stats]
+                properties:
+                  observations:
+                    type: array
+                    items:
+                      type: object
+                  stats:
+                    type: object
+
+  /api/ontology/proposals:
+    get:
+      operationId: listOntologyProposals
+      tags: [Ontology]
+      summary: List ontology proposals
+      responses:
+        "200":
+          description: Proposals
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposals, count]
+                properties:
+                  proposals:
+                    type: array
+                    items:
+                      type: object
+                  count:
+                    type: integer
+
+  /api/ontology/proposals/{id}:
+    get:
+      operationId: getOntologyProposal
+      tags: [Ontology]
+      summary: Get ontology proposal by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Proposal details
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/ontology/proposals/{id}/approve:
+    post:
+      operationId: approveOntologyProposal
+      tags: [Ontology]
+      summary: Approve ontology proposal
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Proposal approved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, properties_registered]
+                properties:
+                  status:
+                    type: string
+                  properties_registered:
+                    type: integer
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/ontology/proposals/{id}/reject:
+    post:
+      operationId: rejectOntologyProposal
+      tags: [Ontology]
+      summary: Reject ontology proposal
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Proposal rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/ontology/stats:
+    get:
+      operationId: getOntologyStats
+      tags: [Ontology]
+      summary: Get ontology statistics
+      responses:
+        "200":
+          description: Ontology stats
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, total_observations, pending_proposals]
+                properties:
+                  status:
+                    type: string
+                  total_observations:
+                    type: integer
+                  pending_proposals:
+                    type: integer
+
+  /api/subscriptions:
+    post:
+      operationId: createSubscription
+      tags: [Subscriptions]
+      summary: Create a reactive subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                group_id:
+                  type: string
+      responses:
+        "200":
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionCreatedResponse"
+    get:
+      operationId: listSubscriptions
+      tags: [Subscriptions]
+      summary: List subscriptions
+      responses:
+        "200":
+          description: List of subscriptions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subscriptions]
+                properties:
+                  subscriptions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SubscriptionInfo"
+
+  /api/subscriptions/{id}:
+    delete:
+      operationId: deleteSubscription
+      tags: [Subscriptions]
+      summary: Unsubscribe
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Unsubscribed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unsubscribed]
+                properties:
+                  unsubscribed:
+                    type: boolean
+
+  /api/subscriptions/{id}/poll:
+    get:
+      operationId: pollSubscription
+      tags: [Subscriptions]
+      summary: Poll subscription for updates
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Subscription updates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updates]
+                properties:
+                  updates:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SubscriptionUpdate"
+
+  /api/subscriptions/ws:
+    get:
+      operationId: subscriptionWebSocket
+      tags: [Subscriptions]
+      summary: WebSocket upgrade for real-time subscription updates
+      description: >
+        Upgrades the connection to a WebSocket for real-time subscription updates.
+        Send subscription IDs to receive live update notifications.
+      responses:
+        "101":
+          description: Switching Protocols (WebSocket upgrade)
+
+  /api/tables:
+    post:
+      operationId: createTable
+      tags: [Tables]
+      summary: Create a table
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTableRequest"
+      responses:
+        "201":
+          description: Table created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [table_id, name]
+                properties:
+                  table_id:
+                    type: integer
+                  name:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+    get:
+      operationId: listTables
+      tags: [Tables]
+      summary: List tables
+      responses:
+        "200":
+          description: List of table schemas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TableSchema"
+
+  /api/tables/{name}:
+    delete:
+      operationId: dropTable
+      tags: [Tables]
+      summary: Drop a table
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Table dropped
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [table_id, dropped]
+                properties:
+                  table_id:
+                    type: integer
+                  dropped:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/tables/{name}/schema:
+    get:
+      operationId: getTableSchema
+      tags: [Tables]
+      summary: Get table schema
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Table schema
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TableSchema"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/tables/{name}/rows:
+    post:
+      operationId: insertRows
+      tags: [Tables]
+      summary: Insert rows
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/InsertRowRequest"
+                - type: array
+                  items:
+                    $ref: "#/components/schemas/InsertRowRequest"
+      responses:
+        "201":
+          description: Rows inserted
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/InsertRowResponse"
+                  - type: array
+                    items:
+                      $ref: "#/components/schemas/InsertRowResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    get:
+      operationId: scanRows
+      tags: [Tables]
+      summary: Scan rows
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: group_id
+          in: query
+          schema:
+            type: string
+        - name: when
+          in: query
+          schema:
+            type: string
+            enum: [active, all]
+        - name: as_of
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Row scan results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanRowsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/tables/{name}/rows/{id}:
+    put:
+      operationId: updateRow
+      tags: [Tables]
+      summary: Update a row
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [values]
+              properties:
+                values:
+                  type: array
+                  items: {}
+                group_id:
+                  type: string
+      responses:
+        "200":
+          description: Row updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [old_version_id, new_version_id]
+                properties:
+                  old_version_id:
+                    type: integer
+                  new_version_id:
+                    type: integer
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteRow
+      tags: [Tables]
+      summary: Delete a row
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Row deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version_id]
+                properties:
+                  version_id:
+                    type: integer
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/tables/{name}/by-node/{node_id}:
+    get:
+      operationId: getRowsByNodeRef
+      tags: [Tables]
+      summary: Get rows by NodeRef
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: node_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Rows referencing node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanRowsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/tables/{name}/compact:
+    post:
+      operationId: compactTable
+      tags: [Tables]
+      summary: Compact table
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Compaction result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions_removed, pages_compacted]
+                properties:
+                  versions_removed:
+                    type: integer
+                  pages_compacted:
+                    type: integer
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/tables/{name}/stats:
+    get:
+      operationId: getTableStats
+      tags: [Tables]
+      summary: Get table stats
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Table statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, active_rows, total_versions, pages, generation]
+                properties:
+                  name:
+                    type: string
+                  active_rows:
+                    type: integer
+                  total_versions:
+                    type: integer
+                  pages:
+                    type: integer
+                  generation:
+                    type: integer
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/modules:
+    post:
+      operationId: uploadModule
+      tags: [WASM]
+      summary: Upload a WASM module
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadModuleRequest"
+      responses:
+        "201":
+          description: Module uploaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModuleInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+    get:
+      operationId: listModules
+      tags: [WASM]
+      summary: List WASM modules
+      responses:
+        "200":
+          description: List of modules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModuleInfo"
+
+  /api/modules/{name}:
+    get:
+      operationId: getModule
+      tags: [WASM]
+      summary: Get module info
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Module info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModuleInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteModule
+      tags: [WASM]
+      summary: Delete a WASM module
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Module deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/modules/{name}/call/{function}:
+    post:
+      operationId: callModuleFunction
+      tags: [WASM]
+      summary: Call a WASM module function
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: function
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                args_base64:
+                  type: string
+      responses:
+        "200":
+          description: Function result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result_base64]
+                properties:
+                  result_base64:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/modules/{name}/enable:
+    put:
+      operationId: enableModule
+      tags: [WASM]
+      summary: Enable a WASM module
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Module enabled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled]
+                properties:
+                  enabled:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/modules/{name}/disable:
+    put:
+      operationId: disableModule
+      tags: [WASM]
+      summary: Disable a WASM module
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Module disabled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled]
+                properties:
+                  enabled:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/modules/{name}/usage:
+    get:
+      operationId: getModuleUsage
+      tags: [WASM]
+      summary: Get module usage stats
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Usage stats
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/modules/{name}/usage/reset:
+    post:
+      operationId: resetModuleUsage
+      tags: [WASM]
+      summary: Reset module usage stats
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Usage reset
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [previous_period, reset]
+                properties:
+                  previous_period:
+                    type: object
+                  reset:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/modules/{name}/schedules:
+    get:
+      operationId: listModuleSchedules
+      tags: [WASM]
+      summary: List module schedules
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of schedules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createModuleSchedule
+      tags: [WASM]
+      summary: Create a module schedule
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cron, function]
+              properties:
+                cron:
+                  type: string
+                function:
+                  type: string
+      responses:
+        "201":
+          description: Schedule created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schedule_id]
+                properties:
+                  schedule_id:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/modules/{name}/schedules/{id}:
+    delete:
+      operationId: deleteModuleSchedule
+      tags: [WASM]
+      summary: Delete a module schedule
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Schedule deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/keys:
+    post:
+      operationId: createApiKey
+      tags: [Auth]
+      summary: Create API key (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                group_id:
+                  type: string
+                permissions:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: API key created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, name, permissions, warning]
+                properties:
+                  key:
+                    type: string
+                    description: "API key with mndb_ prefix"
+                  name:
+                    type: string
+                  group_id:
+                    type: string
+                  permissions:
+                    type: array
+                    items:
+                      type: string
+                  warning:
+                    type: string
+    get:
+      operationId: listApiKeys
+      tags: [Auth]
+      summary: List API keys
+      responses:
+        "200":
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ApiKeyInfo"
+
+  /api/keys/{name}:
+    delete:
+      operationId: deleteApiKey
+      tags: [Auth]
+      summary: Delete API key
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Key deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: boolean
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/admin/export:
+    post:
+      operationId: exportDatabase
+      tags: [Admin]
+      summary: Export database
+      responses:
+        "200":
+          description: Database export
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /api/admin/import:
+    post:
+      operationId: importDatabase
+      tags: [Admin]
+      summary: Import database
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [replace, merge]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResponse"
+
+  /api/planning/strategies:
+    post:
+      operationId: generateStrategies
+      tags: [Planning]
+      summary: Generate strategies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Strategies generated
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/planning/actions:
+    post:
+      operationId: generateActions
+      tags: [Planning]
+      summary: Generate actions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Actions generated
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/planning/plan:
+    post:
+      operationId: planForGoal
+      tags: [Planning]
+      summary: Plan for a goal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Plan generated
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/planning/execute:
+    post:
+      operationId: startExecution
+      tags: [Planning]
+      summary: Start plan execution
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Execution started
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /api/planning/validate:
+    post:
+      operationId: validateExecution
+      tags: [Planning]
+      summary: Validate execution event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: "API key with mndb_ prefix. Pass as Bearer token in Authorization header."
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        details:
+          type: string
+
+    Event:
+      type: object
+      description: A full event object with context and data
+
+    EventContext:
+      type: object
+      description: Context object for event correlation
+
+    EventResponse:
+      type: object
+      required: [success, event_id, nodes_created, patterns_detected, processing_time_ms]
+      properties:
+        success:
+          type: boolean
+        event_id:
+          type: integer
+        nodes_created:
+          type: integer
+        patterns_detected:
+          type: integer
+        processing_time_ms:
+          type: number
+          format: double
+
+    SimpleEventRequest:
+      type: object
+      required: [agent_id, agent_type, session_id, action, data]
+      properties:
+        agent_id:
+          type: integer
+        agent_type:
+          type: string
+        session_id:
+          type: integer
+        action:
+          type: string
+        data:
+          type: object
+        success:
+          type: boolean
+        enable_semantic:
+          type: boolean
+
+    StateChangeEventRequest:
+      type: object
+      required: [agent_id, agent_type, session_id, entity, new_state]
+      properties:
+        agent_id:
+          type: integer
+        agent_type:
+          type: string
+        session_id:
+          type: integer
+        entity:
+          type: string
+        new_state:
+          type: string
+        old_state:
+          type: string
+        trigger:
+          type: string
+        extra_metadata:
+          type: object
+        enable_semantic:
+          type: boolean
+
+    TransactionEventRequest:
+      type: object
+      required: [agent_id, agent_type, session_id, from, to, amount]
+      properties:
+        agent_id:
+          type: integer
+        agent_type:
+          type: string
+        session_id:
+          type: integer
+        from:
+          type: string
+        to:
+          type: string
+        amount:
+          type: number
+          format: double
+        direction:
+          type: string
+        description:
+          type: string
+        extra_metadata:
+          type: object
+        enable_semantic:
+          type: boolean
+
+    CodeReviewEventRequest:
+      type: object
+      required: [agent_id, agent_type, session_id, review_id, action, body, repository]
+      properties:
+        agent_id:
+          type: integer
+        agent_type:
+          type: string
+        session_id:
+          type: integer
+        review_id:
+          type: string
+        action:
+          type: string
+        body:
+          type: string
+        file_path:
+          type: string
+        line_range:
+          type: array
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+        repository:
+          type: string
+        title:
+          type: string
+        enable_semantic:
+          type: boolean
+
+    CodeFileEventRequest:
+      type: object
+      required: [agent_id, agent_type, session_id, file_path, content]
+      properties:
+        agent_id:
+          type: integer
+        agent_type:
+          type: string
+        session_id:
+          type: integer
+        file_path:
+          type: string
+        content:
+          type: string
+        language:
+          type: string
+        repository:
+          type: string
+        git_ref:
+          type: string
+        enable_ast:
+          type: boolean
+        enable_semantic:
+          type: boolean
+
+    CodeSearchRequest:
+      type: object
+      properties:
+        name_pattern:
+          type: string
+        kind:
+          type: string
+        language:
+          type: string
+        file_pattern:
+          type: string
+        limit:
+          type: integer
+
+    CodeSearchResponse:
+      type: object
+      required: [entities, total_matches]
+      properties:
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/CodeEntity"
+        total_matches:
+          type: integer
+
+    CodeEntity:
+      type: object
+      required: [name, qualified_name, kind, file_path, language]
+      properties:
+        name:
+          type: string
+        qualified_name:
+          type: string
+        kind:
+          type: string
+        file_path:
+          type: string
+        language:
+          type: string
+        line_range:
+          type: array
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+        signature:
+          type: string
+        doc_comment:
+          type: string
+        visibility:
+          type: string
+
+    Episode:
+      type: object
+      required: [id, agent_id, event_count, significance]
+      properties:
+        id:
+          type: integer
+        agent_id:
+          type: integer
+        event_count:
+          type: integer
+        significance:
+          type: number
+          format: double
+        outcome:
+          type: string
+
+    Memory:
+      type: object
+      description: A memory object formed from observed patterns
+
+    Strategy:
+      type: object
+      description: A strategy extracted from agent behavior patterns
+
+    GraphResponse:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+
+    GraphNode:
+      type: object
+      required: [id, label, node_type, created_at, properties]
+      properties:
+        id:
+          type: integer
+        label:
+          type: string
+        node_type:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        properties:
+          type: object
+
+    GraphEdge:
+      type: object
+      required: [id, from, to, edge_type, weight, confidence]
+      properties:
+        id:
+          type: integer
+        from:
+          type: integer
+        to:
+          type: integer
+        edge_type:
+          type: string
+        weight:
+          type: number
+          format: double
+        confidence:
+          type: number
+          format: double
+
+    GraphImportRequest:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [name]
+            properties:
+              name:
+                type: string
+              type:
+                type: string
+              properties:
+                type: object
+        edges:
+          type: array
+          items:
+            type: object
+            required: [source, target]
+            properties:
+              source:
+                type: string
+              target:
+                type: string
+              type:
+                type: string
+              label:
+                type: string
+              weight:
+                type: number
+                format: double
+              confidence:
+                type: number
+                format: double
+              valid_from:
+                type: string
+                format: date-time
+              valid_until:
+                type: string
+                format: date-time
+              properties:
+                type: object
+        group_id:
+          type: string
+
+    GraphImportResponse:
+      type: object
+      required: [nodes_created, nodes_reused, edges_created, errors]
+      properties:
+        nodes_created:
+          type: integer
+        nodes_reused:
+          type: integer
+        edges_created:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+
+    StatsResponse:
+      type: object
+      required:
+        - total_events_processed
+        - total_nodes_created
+        - total_episodes_detected
+        - total_memories_formed
+        - total_strategies_extracted
+        - total_reinforcements_applied
+        - average_processing_time_ms
+        - stores
+      properties:
+        total_events_processed:
+          type: integer
+        total_nodes_created:
+          type: integer
+        total_episodes_detected:
+          type: integer
+        total_memories_formed:
+          type: integer
+        total_strategies_extracted:
+          type: integer
+        total_reinforcements_applied:
+          type: integer
+        average_processing_time_ms:
+          type: number
+          format: double
+        stores:
+          type: object
+
+    WorldModelStatsResponse:
+      type: object
+      required: [enabled, mode, planning]
+      properties:
+        enabled:
+          type: boolean
+        mode:
+          type: string
+        planning:
+          type: object
+          required: [strategy_generation_enabled, action_generation_enabled]
+          properties:
+            strategy_generation_enabled:
+              type: boolean
+            action_generation_enabled:
+              type: boolean
+
+    AnalyticsResponse:
+      type: object
+      required:
+        - node_count
+        - edge_count
+        - connected_components
+        - largest_component_size
+        - average_path_length
+        - diameter
+        - clustering_coefficient
+        - average_clustering
+        - modularity
+        - community_count
+        - learning_metrics
+      properties:
+        node_count:
+          type: integer
+        edge_count:
+          type: integer
+        connected_components:
+          type: integer
+        largest_component_size:
+          type: integer
+        average_path_length:
+          type: number
+          format: double
+        diameter:
+          type: integer
+        clustering_coefficient:
+          type: number
+          format: double
+        average_clustering:
+          type: number
+          format: double
+        modularity:
+          type: number
+          format: double
+        community_count:
+          type: integer
+        learning_metrics:
+          $ref: "#/components/schemas/LearningMetrics"
+
+    LearningMetrics:
+      type: object
+      required:
+        - total_events
+        - unique_contexts
+        - learned_patterns
+        - strong_memories
+        - overall_success_rate
+        - average_edge_weight
+      properties:
+        total_events:
+          type: integer
+        unique_contexts:
+          type: integer
+        learned_patterns:
+          type: integer
+        strong_memories:
+          type: integer
+        overall_success_rate:
+          type: number
+          format: double
+        average_edge_weight:
+          type: number
+          format: double
+
+    CommunitiesResponse:
+      type: object
+      required: [communities, modularity, iterations, community_count, algorithm]
+      properties:
+        communities:
+          type: array
+          items:
+            type: object
+            required: [community_id, node_ids, size]
+            properties:
+              community_id:
+                type: integer
+              node_ids:
+                type: array
+                items:
+                  type: integer
+              size:
+                type: integer
+        modularity:
+          type: number
+          format: double
+        iterations:
+          type: integer
+        community_count:
+          type: integer
+        algorithm:
+          type: string
+
+    CentralityScore:
+      type: object
+      required: [node_id, degree, betweenness, closeness, eigenvector, pagerank, combined]
+      properties:
+        node_id:
+          type: integer
+        degree:
+          type: number
+          format: double
+        betweenness:
+          type: number
+          format: double
+        closeness:
+          type: number
+          format: double
+        eigenvector:
+          type: number
+          format: double
+        pagerank:
+          type: number
+          format: double
+        combined:
+          type: number
+          format: double
+
+    PPRResponse:
+      type: object
+      required: [source_node_id, algorithm, scores]
+      properties:
+        source_node_id:
+          type: integer
+        algorithm:
+          type: string
+        scores:
+          type: array
+          items:
+            type: object
+            required: [node_id, score]
+            properties:
+              node_id:
+                type: integer
+              score:
+                type: number
+                format: double
+
+    ReachabilityResponse:
+      type: object
+      required: [source_node_id, reachable_count, max_depth, edges_traversed, reachable]
+      properties:
+        source_node_id:
+          type: integer
+        reachable_count:
+          type: integer
+        max_depth:
+          type: integer
+        edges_traversed:
+          type: integer
+        reachable:
+          type: array
+          items:
+            type: object
+            required: [node_id, origin, arrival_time, hops]
+            properties:
+              node_id:
+                type: integer
+              origin:
+                type: string
+              arrival_time:
+                type: string
+                format: date-time
+              hops:
+                type: integer
+              predecessor:
+                type: integer
+
+    CausalPathResponse:
+      type: object
+      required: [source, target, found]
+      properties:
+        source:
+          type: integer
+        target:
+          type: integer
+        found:
+          type: boolean
+        path:
+          type: array
+          items:
+            type: integer
+
+    QueryResponse:
+      type: object
+      required: [columns, rows]
+      properties:
+        columns:
+          type: array
+          items:
+            type: string
+        rows:
+          type: array
+          items:
+            type: array
+            items: {}
+        stats:
+          type: object
+          properties:
+            nodes_scanned:
+              type: integer
+            edges_traversed:
+              type: integer
+            execution_time_ms:
+              type: number
+              format: double
+
+    SubscriptionCreatedResponse:
+      type: object
+      required: [subscription_id, initial, strategy]
+      properties:
+        subscription_id:
+          type: string
+        initial:
+          type: object
+          required: [columns, rows]
+          properties:
+            columns:
+              type: array
+              items:
+                type: string
+            rows:
+              type: array
+              items:
+                type: array
+                items: {}
+        strategy:
+          type: string
+
+    SubscriptionInfo:
+      type: object
+      required: [subscription_id, query, strategy, cached_row_count]
+      properties:
+        subscription_id:
+          type: string
+        query:
+          type: string
+        strategy:
+          type: string
+        cached_row_count:
+          type: integer
+
+    SubscriptionUpdate:
+      type: object
+      required: [subscription_id, inserts, deletes, was_full_rerun]
+      properties:
+        subscription_id:
+          type: string
+        inserts:
+          type: array
+          items:
+            type: array
+            items: {}
+        deletes:
+          type: array
+          items:
+            type: array
+            items: {}
+        count:
+          type: integer
+        was_full_rerun:
+          type: boolean
+
+    NLQRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+        group_id:
+          type: string
+        limit:
+          type: integer
+        offset:
+          type: integer
+        session_id:
+          type: integer
+        include_context:
+          type: boolean
+        metadata:
+          type: object
+
+    NLQResponse:
+      type: object
+      required:
+        - answer
+        - intent
+        - entities_resolved
+        - confidence
+        - result_count
+        - execution_time_ms
+        - query_used
+        - explanation
+        - total_count
+      properties:
+        answer:
+          type: string
+        intent:
+          type: string
+        entities_resolved:
+          type: array
+          items:
+            type: object
+            required: [text, node_id, node_type, confidence]
+            properties:
+              text:
+                type: string
+              node_id:
+                type: integer
+              node_type:
+                type: string
+              confidence:
+                type: number
+                format: double
+        confidence:
+          type: number
+          format: double
+        result_count:
+          type: integer
+        execution_time_ms:
+          type: number
+          format: double
+        query_used:
+          type: string
+        explanation:
+          type: array
+          items:
+            type: string
+        total_count:
+          type: integer
+
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        mode:
+          type: string
+          enum: [keyword, semantic, hybrid]
+        limit:
+          type: integer
+        fusion_strategy:
+          type: string
+
+    SearchResponse:
+      type: object
+      required: [results, mode, total]
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            required: [node_id, score, node_type, properties]
+            properties:
+              node_id:
+                type: integer
+              score:
+                type: number
+                format: double
+              node_type:
+                type: string
+              properties:
+                type: object
+        mode:
+          type: string
+        total:
+          type: integer
+
+    Claim:
+      type: object
+      description: A claim extracted from events
+
+    ClaimSearchResponse:
+      type: object
+      required: [groups, ungrouped, total_results]
+      properties:
+        groups:
+          type: array
+          items:
+            type: object
+            required: [subject, claims]
+            properties:
+              subject:
+                type: string
+              claims:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Claim"
+        ungrouped:
+          type: array
+          items:
+            $ref: "#/components/schemas/Claim"
+        total_results:
+          type: integer
+
+    StructuredMemoryUpsertRequest:
+      type: object
+      required: [key, template]
+      properties:
+        key:
+          type: string
+        template:
+          $ref: "#/components/schemas/StructuredMemoryTemplate"
+
+    StructuredMemoryTemplate:
+      oneOf:
+        - type: object
+          required: [Ledger]
+          properties:
+            Ledger:
+              type: object
+              required: [entity_pair, entries, balance, provenance]
+              properties:
+                entity_pair:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 2
+                  maxItems: 2
+                entries:
+                  type: array
+                  items:
+                    type: object
+                balance:
+                  type: number
+                  format: double
+                provenance:
+                  type: string
+        - type: object
+          required: [StateMachine]
+          properties:
+            StateMachine:
+              type: object
+              required: [entity, current_state, history, provenance]
+              properties:
+                entity:
+                  type: string
+                current_state:
+                  type: string
+                history:
+                  type: array
+                  items:
+                    type: object
+                provenance:
+                  type: string
+        - type: object
+          required: [Tree]
+          properties:
+            Tree:
+              type: object
+              required: [root, children, provenance]
+              properties:
+                root:
+                  type: string
+                children:
+                  type: object
+                  additionalProperties:
+                    type: array
+                    items:
+                      type: string
+                provenance:
+                  type: string
+        - type: object
+          required: [PreferenceList]
+          properties:
+            PreferenceList:
+              type: object
+              required: [entity, ranked_items, provenance]
+              properties:
+                entity:
+                  type: string
+                ranked_items:
+                  type: array
+                  items:
+                    type: object
+                provenance:
+                  type: string
+
+    HealthResponse:
+      type: object
+      required: [status, version, uptime_seconds, is_healthy, node_count, edge_count, processing_rate, write_lanes, read_gate, sequence_tracker]
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        uptime_seconds:
+          type: number
+          format: double
+        is_healthy:
+          type: boolean
+        node_count:
+          type: integer
+        edge_count:
+          type: integer
+        processing_rate:
+          type: number
+          format: double
+        write_lanes:
+          $ref: "#/components/schemas/WriteLanes"
+        read_gate:
+          $ref: "#/components/schemas/ReadGate"
+        sequence_tracker:
+          type: object
+          required: [tracked_domains]
+          properties:
+            tracked_domains:
+              type: integer
+
+    WriteLanes:
+      type: object
+      required:
+        - num_lanes
+        - lanes
+        - total_submitted
+        - total_completed
+        - total_rejected
+        - write_p50_ms
+        - write_p95_ms
+        - write_p99_ms
+      properties:
+        num_lanes:
+          type: integer
+        lanes:
+          type: array
+          items:
+            $ref: "#/components/schemas/WriteLane"
+        total_submitted:
+          type: integer
+        total_completed:
+          type: integer
+        total_rejected:
+          type: integer
+        write_p50_ms:
+          type: number
+          format: double
+        write_p95_ms:
+          type: number
+          format: double
+        write_p99_ms:
+          type: number
+          format: double
+
+    WriteLane:
+      type: object
+      required: [lane_id, depth, in_flight, completed, rejected]
+      properties:
+        lane_id:
+          type: integer
+        depth:
+          type: integer
+        in_flight:
+          type: integer
+        completed:
+          type: integer
+        rejected:
+          type: integer
+
+    ReadGate:
+      type: object
+      required:
+        - permits_total
+        - in_flight
+        - completed
+        - rejected
+        - read_p50_ms
+        - read_p95_ms
+        - read_p99_ms
+      properties:
+        permits_total:
+          type: integer
+        in_flight:
+          type: integer
+        completed:
+          type: integer
+        rejected:
+          type: integer
+        read_p50_ms:
+          type: number
+          format: double
+        read_p95_ms:
+          type: number
+          format: double
+        read_p99_ms:
+          type: number
+          format: double
+
+    CreateTableRequest:
+      type: object
+      required: [name, columns]
+      properties:
+        name:
+          type: string
+        columns:
+          type: array
+          items:
+            $ref: "#/components/schemas/ColumnDefinition"
+        constraints:
+          type: array
+          items:
+            type: object
+
+    ColumnDefinition:
+      type: object
+      required: [name, col_type]
+      properties:
+        name:
+          type: string
+        col_type:
+          type: string
+          enum: [Int64, Float64, String, Bool, Timestamp, Json, NodeRef]
+        primary_key:
+          type: boolean
+        nullable:
+          type: boolean
+        autoincrement:
+          type: boolean
+        default_value: {}
+
+    TableSchema:
+      type: object
+      required: [table_id, name, columns, constraints]
+      properties:
+        table_id:
+          type: integer
+        name:
+          type: string
+        columns:
+          type: array
+          items:
+            type: object
+            required: [name, col_type, nullable, autoincrement]
+            properties:
+              name:
+                type: string
+              col_type:
+                type: string
+              nullable:
+                type: boolean
+              autoincrement:
+                type: boolean
+              default_value: {}
+        constraints:
+          type: array
+          items:
+            type: object
+
+    InsertRowRequest:
+      type: object
+      required: [values]
+      properties:
+        values:
+          type: array
+          items: {}
+        group_id:
+          type: string
+
+    InsertRowResponse:
+      type: object
+      required: [row_id, version_id]
+      properties:
+        row_id:
+          type: integer
+        version_id:
+          type: integer
+
+    ScanRowsResponse:
+      type: object
+      required: [rows, count]
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            required: [row_id, version_id, group_id, valid_from, valid_until, values]
+            properties:
+              row_id:
+                type: integer
+              version_id:
+                type: integer
+              group_id:
+                type: string
+              valid_from:
+                type: string
+                format: date-time
+              valid_until:
+                type: string
+                format: date-time
+              values:
+                type: array
+                items: {}
+        count:
+          type: integer
+
+    UploadModuleRequest:
+      type: object
+      required: [name, wasm_base64, permissions]
+      properties:
+        name:
+          type: string
+        wasm_base64:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        group_id:
+          type: string
+
+    ModuleInfo:
+      type: object
+      required: [name, module_id, enabled, permissions, functions, triggers]
+      properties:
+        name:
+          type: string
+        module_id:
+          type: string
+        enabled:
+          type: boolean
+        permissions:
+          type: array
+          items:
+            type: string
+        functions:
+          type: array
+          items:
+            type: string
+        triggers:
+          type: array
+          items:
+            type: object
+
+    ApiKeyInfo:
+      type: object
+      required: [name, permissions, enabled, created_at]
+      properties:
+        name:
+          type: string
+        group_id:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    ImportResponse:
+      type: object
+      required:
+        - success
+        - memories_imported
+        - strategies_imported
+        - graph_nodes_imported
+        - graph_edges_imported
+        - total_records
+        - mode
+      properties:
+        success:
+          type: boolean
+        memories_imported:
+          type: integer
+        strategies_imported:
+          type: integer
+        graph_nodes_imported:
+          type: integer
+        graph_edges_imported:
+          type: integer
+        total_records:
+          type: integer
+        mode:
+          type: string
+
+    Agent:
+      type: object
+      required: [node_id, agent_id, group_id, repositories, capabilities]
+      properties:
+        node_id:
+          type: integer
+        agent_id:
+          type: string
+        group_id:
+          type: string
+        repositories:
+          type: array
+          items:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        last_seen:
+          type: string
+          format: date-time
+
+    MessageRequest:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+        content:
+          type: string
+        session_id:
+          type: string
+        case_id:
+          type: string
+        include_assistant_facts:
+          type: boolean
+
+    MessageResponse:
+      type: object
+      required: [case_id, session_id, messages_processed, events_submitted, buffered, buffer_size]
+      properties:
+        case_id:
+          type: string
+        session_id:
+          type: string
+        messages_processed:
+          type: integer
+        events_submitted:
+          type: integer
+        buffered:
+          type: boolean
+        buffer_size:
+          type: integer
+        compaction:
+          type: object
+
+    ConversationIngestRequest:
+      type: object
+      required: [sessions]
+      properties:
+        case_id:
+          type: string
+        sessions:
+          type: array
+          items:
+            type: object
+            required: [session_id, messages]
+            properties:
+              session_id:
+                type: string
+              topic:
+                type: string
+              messages:
+                type: array
+                items:
+                  type: object
+                  required: [role, content]
+                  properties:
+                    role:
+                      type: string
+                    content:
+                      type: string
+                    metadata:
+                      type: object
+              contains_fact:
+                type: boolean
+              fact_id:
+                type: string
+              fact_quote:
+                type: string
+        include_assistant_facts:
+          type: boolean
+        group_id:
+          type: string
+        metadata:
+          type: object
+
+    ConversationIngestResponse:
+      type: object
+      required: [case_id, messages_processed, events_submitted]
+      properties:
+        case_id:
+          type: string
+        messages_processed:
+          type: integer
+        events_submitted:
+          type: integer
+        compaction:
+          type: object
+          properties:
+            facts_extracted:
+              type: integer
+            goals_extracted:
+              type: integer
+            goals_deduplicated:
+              type: integer
+            procedural_steps:
+              type: integer
+            memories_created:
+              type: integer
+            memories_updated:
+              type: integer
+            memories_deleted:
+              type: integer
+            playbooks_extracted:
+              type: integer
+            llm_success:
+              type: boolean
+        rolling_summary_started:
+          type: boolean
+
+    CreateWorkflowRequest:
+      type: object
+      required: [name, steps]
+      properties:
+        name:
+          type: string
+        intent:
+          type: string
+        description:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowStepInput"
+        group_id:
+          type: string
+        metadata:
+          type: object
+
+    WorkflowStepInput:
+      type: object
+      required: [id, role, task]
+      properties:
+        id:
+          type: string
+        role:
+          type: string
+        task:
+          type: string
+        depends_on:
+          type: array
+          items:
+            type: string
+        inputs:
+          type: object
+        outputs:
+          type: object
+        metadata:
+          type: object
+
+    CreateWorkflowResponse:
+      type: object
+      required: [success, workflow_id, workflow_name, nodes_created, edges_created, step_node_ids]
+      properties:
+        success:
+          type: boolean
+        workflow_id:
+          type: string
+        workflow_name:
+          type: string
+        nodes_created:
+          type: integer
+        edges_created:
+          type: integer
+        step_node_ids:
+          type: object
+          additionalProperties:
+            type: integer
+
+    ListWorkflowsResponse:
+      type: object
+      required: [workflows, count]
+      properties:
+        workflows:
+          type: array
+          items:
+            type: object
+            required: [workflow_id, name, step_count, group_id, created_at, active]
+            properties:
+              workflow_id:
+                type: string
+              name:
+                type: string
+              intent:
+                type: string
+              step_count:
+                type: integer
+              group_id:
+                type: string
+              created_at:
+                type: string
+                format: date-time
+              active:
+                type: boolean
+        count:
+          type: integer
+
+    WorkflowDetail:
+      type: object
+      required: [workflow_id, name, group_id, created_at, steps]
+      properties:
+        workflow_id:
+          type: string
+        name:
+          type: string
+        intent:
+          type: string
+        description:
+          type: string
+        group_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        steps:
+          type: array
+          items:
+            type: object
+            required: [node_id, id, role, task, depends_on, inputs, outputs]
+            properties:
+              node_id:
+                type: integer
+              id:
+                type: string
+              role:
+                type: string
+              task:
+                type: string
+              depends_on:
+                type: array
+                items:
+                  type: string
+              inputs:
+                type: object
+              outputs:
+                type: object
+              state:
+                type: string
+              metadata:
+                type: object
+        metadata:
+          type: object
+
+    UpdateWorkflowRequest:
+      type: object
+      required: [steps]
+      properties:
+        name:
+          type: string
+        intent:
+          type: string
+        description:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowStepInput"
+
+    UpdateWorkflowResponse:
+      type: object
+      required: [success, workflow_id, nodes_created, nodes_superseded, edges_created, edges_superseded, step_node_ids]
+      properties:
+        success:
+          type: boolean
+        workflow_id:
+          type: string
+        nodes_created:
+          type: integer
+        nodes_superseded:
+          type: integer
+        edges_created:
+          type: integer
+        edges_superseded:
+          type: integer
+        step_node_ids:
+          type: object
+          additionalProperties:
+            type: integer

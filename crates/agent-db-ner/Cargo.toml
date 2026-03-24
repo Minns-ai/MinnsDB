@@ -1,7 +1,11 @@
 [package]
 name = "agent-db-ner"
-version = "0.1.0"
-edition = "2021"
+description = "Named entity recognition client for MinnsDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 # Local dependencies

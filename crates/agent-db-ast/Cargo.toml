@@ -1,7 +1,11 @@
 [package]
 name = "agent-db-ast"
-version = "0.1.0"
-edition = "2021"
+description = "Tree-sitter AST analysis for MinnsDB code intelligence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 serde = { workspace = true }

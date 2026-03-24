@@ -19,6 +19,7 @@ Thumbs.db
 agent_db_data/
 test_data/
 *.db
+*.redb
 *.wal
 *.log
 

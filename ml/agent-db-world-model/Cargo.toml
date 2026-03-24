@@ -1,8 +1,11 @@
 [package]
 name = "agent-db-world-model"
-version = "0.1.0"
-edition = "2021"
 description = "Energy-based predictive coding world model (Critic) for MinnsDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 agent-db-core = { path = "../../crates/agent-db-core" }
