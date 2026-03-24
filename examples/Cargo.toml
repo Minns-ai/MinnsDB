@@ -1,7 +1,11 @@
 [package]
 name = "agent-db-examples"
-version = "0.1.0"
-edition = "2021"
+description = "Example programs for MinnsDB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [[bin]]
 name = "basic_pipeline"

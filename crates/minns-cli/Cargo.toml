@@ -1,8 +1,11 @@
 [package]
 name = "minns-cli"
-version = "0.1.0"
-edition = "2021"
 description = "CLI tool for MinnsDB — cross-session memory and workflow orchestration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [[bin]]
 name = "minns"

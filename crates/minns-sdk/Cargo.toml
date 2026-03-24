@@ -1,10 +1,11 @@
 [package]
 name = "minns-sdk"
-version = "0.1.0"
-edition = "2021"
 description = "SDK for building MinnsDB WASM agent modules"
+version.workspace = true
+edition.workspace = true
 license = "Apache-2.0"
-repository = "https://github.com/journeyintoai/minnsdb"
+repository.workspace = true
+homepage.workspace = true
 keywords = ["database", "wasm", "agent", "graph"]
 categories = ["database", "wasm"]
 

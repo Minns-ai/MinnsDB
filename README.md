@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Minns-ai/EventGraphDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/EventGraphDB/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/Minns-ai/MinnsDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/MinnsDB/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSL--1.1-blue?style=flat-square" alt="License: BSL 1.1"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.83%2B-orange?style=flat-square&logo=rust" alt="Rust"></a>
   <a href="https://discord.gg/6a2cCRPwUR"><img src="https://img.shields.io/discord/1472727097368641720?style=flat-square&logo=discord&label=discord&color=5865F2" alt="Discord"></a>
@@ -19,6 +19,7 @@
 <p align="center">
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="API_REFERENCE.md">API Reference</a> &middot;
+  <a href="CONTRIBUTING.md">Contributing</a> &middot;
   <a href="https://discord.gg/6a2cCRPwUR">Discord</a> &middot;
   <a href="https://minns.ai">Website</a>
 </p>
@@ -45,11 +46,20 @@ MinnsDB is a database purpose-built for AI agent workloads. It combines a tempor
 
 ## Quick start
 
+### From source
+
 ```bash
-git clone https://github.com/Minns-ai/EventGraphDB.git
-cd EventGraphDB
+git clone https://github.com/Minns-ai/MinnsDB.git
+cd MinnsDB
 cargo build --release
 cargo run --release -p minnsdb-server
+```
+
+### With Docker
+
+```bash
+docker pull ghcr.io/minns-ai/minnsdb:latest
+docker run -p 3000:3000 -v minns-data:/data ghcr.io/minns-ai/minnsdb:latest
 ```
 
 On first boot, the server generates a root API key and prints it once:
@@ -452,6 +462,30 @@ Tests 15 scenarios: table CRUD, MinnsQL queries, JOINs, temporal history, graph 
 | Strategy extraction (RL on edge weights) | **WIP** |
 | Energy-based world model | **WIP** |
 | LLM planning pipeline | **WIP** |
+
+---
+
+## Roadmap
+
+MinnsDB is under active development. Here's what's coming next:
+
+- **Memory formation** — automatic consolidation of graph knowledge into tiered memory structures
+- **Strategy extraction** — reinforcement learning on edge weights for agent decision-making
+- **Energy-based world model** — predictive coding critic for validating agent actions
+- **LLM planning pipeline** — generative strategy and action planning
+- **Distributed mode** — horizontal scaling across multiple nodes
+- **crates.io publish** — SDK crates available on the Rust package registry
+
+Have a feature request? [Open an issue](https://github.com/Minns-ai/MinnsDB/issues) or discuss it on [Discord](https://discord.gg/6a2cCRPwUR).
+
+---
+
+## Community
+
+- **Discord** — [Join the server](https://discord.gg/6a2cCRPwUR) for questions, discussion, and support
+- **GitHub Issues** — [Report bugs](https://github.com/Minns-ai/MinnsDB/issues) or request features
+- **Contributing** — See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
+- **Security** — See [SECURITY.md](SECURITY.md) for reporting vulnerabilities
 
 ---
 
