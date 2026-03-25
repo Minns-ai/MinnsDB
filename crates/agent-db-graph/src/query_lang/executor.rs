@@ -181,16 +181,11 @@ impl<'a> Executor<'a> {
 
         // ----- Projection -----
         let columns: Vec<String> = plan.projections.iter().map(|p| p.alias.clone()).collect();
-
-        let mut result_rows: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
-        for binding in &rows {
-            let mut row = Vec::with_capacity(plan.projections.len());
-            for proj in &plan.projections {
-                let val = executor.evaluate_expr(&proj.expr, binding)?;
-                row.push(val);
-            }
-            result_rows.push(row);
-        }
+        let mut result_rows = executor.project_bindings(
+            &rows,
+            &plan.projections,
+            &plan.aggregations,
+        )?;
 
         // ----- Aggregation -----
         if !plan.aggregations.is_empty() {
@@ -890,10 +885,8 @@ impl<'a> Executor<'a> {
                 Ok(Value::Map(HashMap::new()))
             },
 
-            "count" => {
-                // count(*) is handled in the aggregation phase; at row level return 1.
-                Ok(Value::Int(1))
-            },
+            // Aggregate functions (count, sum, avg, min, max, collect) are
+            // handled in project_bindings() — they never reach evaluate_func.
 
             "path" => {
                 if args.len() >= 2 {
@@ -1597,6 +1590,44 @@ impl<'a> Executor<'a> {
     }
 
     // -----------------------------------------------------------------------
+    // Projection (aggregate-aware)
+    // -----------------------------------------------------------------------
+
+    /// Project binding rows into value rows, using `agg.input_expr` for
+    /// aggregate columns instead of the full FuncCall expression.
+    fn project_bindings(
+        &self,
+        bindings: &[BindingRow],
+        projections: &[Projection],
+        aggregations: &[Aggregation],
+    ) -> Result<Vec<Vec<Value>>, QueryError> {
+        let agg_input: HashMap<&str, &Aggregation> = aggregations
+            .iter()
+            .map(|a| (a.output_alias.as_str(), a))
+            .collect();
+
+        let mut result_rows = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            let mut row = Vec::with_capacity(projections.len());
+            for proj in projections {
+                if let Some(agg) = agg_input.get(proj.alias.as_str()) {
+                    if matches!(agg.function, AggregateFunction::Count)
+                        && matches!(agg.input_expr, RExpr::Star)
+                    {
+                        row.push(Value::Int(1));
+                    } else {
+                        row.push(self.evaluate_expr(&agg.input_expr, binding)?);
+                    }
+                } else {
+                    row.push(self.evaluate_expr(&proj.expr, binding)?);
+                }
+            }
+            result_rows.push(row);
+        }
+        Ok(result_rows)
+    }
+
+    // -----------------------------------------------------------------------
     // Aggregation
     // -----------------------------------------------------------------------
 
@@ -1646,6 +1677,27 @@ impl<'a> Executor<'a> {
         // If no group-by keys, treat all rows as one group.
         if group_col_indices.is_empty() && groups.is_empty() && !result_rows.is_empty() {
             groups.insert(0, (0..result_rows.len()).collect());
+        }
+
+        // SQL: aggregation over an empty set with no GROUP BY returns one row
+        // (count → 0, others → Null).
+        if group_col_indices.is_empty() && result_rows.is_empty() && !aggregations.is_empty() {
+            let out_row: Vec<Value> = projections
+                .iter()
+                .map(|proj| {
+                    if let Some(agg) =
+                        aggregations.iter().find(|a| a.output_alias == proj.alias)
+                    {
+                        match agg.function {
+                            AggregateFunction::Count => Value::Int(0),
+                            _ => Value::Null,
+                        }
+                    } else {
+                        Value::Null
+                    }
+                })
+                .collect();
+            return Ok(vec![out_row]);
         }
 
         let mut output = Vec::with_capacity(groups.len());
@@ -1794,17 +1846,13 @@ impl<'a> Executor<'a> {
             })
             .collect();
 
-        // Projection.
+        // Projection — use input_expr for aggregate columns (same as primary path).
         let columns: Vec<String> = plan.projections.iter().map(|p| p.alias.clone()).collect();
-        let mut result_rows: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
-        for binding in &rows {
-            let mut row = Vec::with_capacity(plan.projections.len());
-            for proj in &plan.projections {
-                let val = executor.evaluate_expr(&proj.expr, binding)?;
-                row.push(val);
-            }
-            result_rows.push(row);
-        }
+        let mut result_rows = executor.project_bindings(
+            &rows,
+            &plan.projections,
+            &plan.aggregations,
+        )?;
 
         // Aggregation.
         if !plan.aggregations.is_empty() {
@@ -2198,19 +2246,44 @@ fn truncate_timestamp_by_unit_lower(nanos: u64, unit: &str) -> Result<u64, Query
 /// Compute an aggregate over a slice of values.
 fn compute_aggregate(func: &AggregateFunction, values: &[Value]) -> Value {
     match func {
-        AggregateFunction::Count => Value::Int(values.len() as i64),
+        AggregateFunction::Count => {
+            Value::Int(values.iter().filter(|v| !v.is_null()).count() as i64)
+        },
 
         AggregateFunction::Sum => {
-            let mut sum = 0.0_f64;
+            // Preserve integer type when all inputs are Int; promote to
+            // Float on overflow or if any input is Float.
+            let mut int_sum: i64 = 0;
+            let mut overflowed = false;
+            let mut has_float = false;
             let mut has_value = false;
             for v in values {
-                if let Some(f) = v.as_f64() {
-                    sum += f;
-                    has_value = true;
+                match v {
+                    Value::Int(i) => {
+                        has_value = true;
+                        match int_sum.checked_add(*i) {
+                            Some(s) => int_sum = s,
+                            None => {
+                                overflowed = true;
+                                break;
+                            },
+                        }
+                    },
+                    Value::Float(_) => {
+                        has_float = true;
+                        break;
+                    },
+                    _ => {},
                 }
             }
-            if has_value {
+            if has_float || overflowed {
+                let sum: f64 = values
+                    .iter()
+                    .filter_map(|v| v.as_f64())
+                    .sum();
                 Value::Float(sum)
+            } else if has_value {
+                Value::Int(int_sum)
             } else {
                 Value::Null
             }
@@ -2531,6 +2604,43 @@ mod tests {
         assert_eq!(
             compute_aggregate(&AggregateFunction::Sum, &vals),
             Value::Null
+        );
+    }
+
+    #[test]
+    fn test_aggregate_sum_int_preserves_type() {
+        let vals = vec![Value::Int(10), Value::Int(20), Value::Int(30)];
+        assert_eq!(
+            compute_aggregate(&AggregateFunction::Sum, &vals),
+            Value::Int(60)
+        );
+    }
+
+    #[test]
+    fn test_aggregate_sum_overflow_promotes_to_float() {
+        let vals = vec![Value::Int(i64::MAX), Value::Int(1)];
+        match compute_aggregate(&AggregateFunction::Sum, &vals) {
+            Value::Float(_) => {},
+            other => panic!("expected Float on overflow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_count_filters_nulls() {
+        let vals = vec![Value::Int(1), Value::Null, Value::Int(3)];
+        assert_eq!(
+            compute_aggregate(&AggregateFunction::Count, &vals),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn test_aggregate_count_star_sentinel() {
+        // count(*) uses Int(1) sentinels — none are null, so count = len
+        let vals = vec![Value::Int(1), Value::Int(1), Value::Int(1)];
+        assert_eq!(
+            compute_aggregate(&AggregateFunction::Count, &vals),
+            Value::Int(3)
         );
     }
 
