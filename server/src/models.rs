@@ -16,6 +16,10 @@ pub struct ProcessEventRequest {
     /// Enable semantic memory processing (NER + claim extraction + embeddings)
     #[serde(default)]
     pub enable_semantic: bool,
+    /// Partition key for multi-tenant isolation.
+    /// All nodes/edges created from this event are tagged with this group_id.
+    #[serde(default)]
+    pub group_id: String,
 }
 
 /// Simplified event request for easy integration
@@ -41,6 +45,10 @@ pub struct SimpleEventRequest {
     /// Optional: enable semantic processing
     #[serde(default)]
     pub enable_semantic: bool,
+    /// Partition key for multi-tenant isolation.
+    /// All nodes/edges created from this event are tagged with this group_id.
+    #[serde(default)]
+    pub group_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -907,6 +915,9 @@ pub struct StateChangeEventRequest {
     pub extra_metadata: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub enable_semantic: bool,
+    /// Partition key for multi-tenant isolation.
+    #[serde(default)]
+    pub group_id: String,
 }
 
 /// POST /api/events/transaction — typed transaction event submission
@@ -929,4 +940,7 @@ pub struct TransactionEventRequest {
     pub extra_metadata: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub enable_semantic: bool,
+    /// Partition key for multi-tenant isolation.
+    #[serde(default)]
+    pub group_id: String,
 }

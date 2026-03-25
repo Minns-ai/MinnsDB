@@ -53,6 +53,14 @@ pub async fn process_event(
         event.context.fingerprint = event.context.compute_fingerprint();
     }
 
+    // Inject group_id into event metadata for multi-tenant isolation
+    if !payload.group_id.is_empty() {
+        event.metadata.insert(
+            "group_id".to_string(),
+            MetadataValue::String(payload.group_id),
+        );
+    }
+
     let session_id = event.session_id;
     let result = state
         .write_lanes
@@ -98,6 +106,15 @@ pub async fn process_simple_event(
         payload.agent_id, payload.action, payload.session_id
     );
 
+    // Build metadata with optional group_id
+    let mut metadata: std::collections::HashMap<String, MetadataValue> = Default::default();
+    if !payload.group_id.is_empty() {
+        metadata.insert(
+            "group_id".to_string(),
+            MetadataValue::String(payload.group_id),
+        );
+    }
+
     // Convert simple request to full Event with defaults
     let event = Event {
         id: Default::default(),        // Will be auto-generated
@@ -122,7 +139,7 @@ pub async fn process_simple_event(
         },
         causality_chain: Vec::new(),
         context: Default::default(), // Use minimal defaults
-        metadata: Default::default(),
+        metadata,
         context_size_bytes: 0,
         segment_pointer: None,
         is_code: false,
@@ -237,6 +254,12 @@ pub async fn process_state_change_event(
     );
 
     let mut metadata = std::collections::HashMap::new();
+    if !payload.group_id.is_empty() {
+        metadata.insert(
+            "group_id".to_string(),
+            MetadataValue::String(payload.group_id),
+        );
+    }
     metadata.insert("entity".to_string(), MetadataValue::String(payload.entity));
     metadata.insert(
         "new_state".to_string(),
@@ -334,6 +357,12 @@ pub async fn process_transaction_event(
     }
 
     let mut metadata = std::collections::HashMap::new();
+    if !payload.group_id.is_empty() {
+        metadata.insert(
+            "group_id".to_string(),
+            MetadataValue::String(payload.group_id),
+        );
+    }
     metadata.insert("from".to_string(), MetadataValue::String(payload.from));
     metadata.insert("to".to_string(), MetadataValue::String(payload.to));
     metadata.insert("amount".to_string(), MetadataValue::Float(payload.amount));
