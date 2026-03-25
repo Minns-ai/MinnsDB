@@ -181,11 +181,8 @@ impl<'a> Executor<'a> {
 
         // ----- Projection -----
         let columns: Vec<String> = plan.projections.iter().map(|p| p.alias.clone()).collect();
-        let mut result_rows = executor.project_bindings(
-            &rows,
-            &plan.projections,
-            &plan.aggregations,
-        )?;
+        let mut result_rows =
+            executor.project_bindings(&rows, &plan.projections, &plan.aggregations)?;
 
         // ----- Aggregation -----
         if !plan.aggregations.is_empty() {
@@ -887,7 +884,6 @@ impl<'a> Executor<'a> {
 
             // Aggregate functions (count, sum, avg, min, max, collect) are
             // handled in project_bindings() — they never reach evaluate_func.
-
             "path" => {
                 if args.len() >= 2 {
                     let a_id = self.resolve_node_id(&args[0], binding)?;
@@ -1685,9 +1681,7 @@ impl<'a> Executor<'a> {
             let out_row: Vec<Value> = projections
                 .iter()
                 .map(|proj| {
-                    if let Some(agg) =
-                        aggregations.iter().find(|a| a.output_alias == proj.alias)
-                    {
+                    if let Some(agg) = aggregations.iter().find(|a| a.output_alias == proj.alias) {
                         match agg.function {
                             AggregateFunction::Count => Value::Int(0),
                             _ => Value::Null,
@@ -1848,11 +1842,8 @@ impl<'a> Executor<'a> {
 
         // Projection — use input_expr for aggregate columns (same as primary path).
         let columns: Vec<String> = plan.projections.iter().map(|p| p.alias.clone()).collect();
-        let mut result_rows = executor.project_bindings(
-            &rows,
-            &plan.projections,
-            &plan.aggregations,
-        )?;
+        let mut result_rows =
+            executor.project_bindings(&rows, &plan.projections, &plan.aggregations)?;
 
         // Aggregation.
         if !plan.aggregations.is_empty() {
@@ -2277,10 +2268,7 @@ fn compute_aggregate(func: &AggregateFunction, values: &[Value]) -> Value {
                 }
             }
             if has_float || overflowed {
-                let sum: f64 = values
-                    .iter()
-                    .filter_map(|v| v.as_f64())
-                    .sum();
+                let sum: f64 = values.iter().filter_map(|v| v.as_f64()).sum();
                 Value::Float(sum)
             } else if has_value {
                 Value::Int(int_sum)

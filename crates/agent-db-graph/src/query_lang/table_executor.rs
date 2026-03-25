@@ -956,7 +956,14 @@ fn apply_aggregations(
     groups
         .iter()
         .map(|(key_vals, row_indices)| {
-            build_group_row(rows, columns, &group_by_set, &agg_map, key_vals, row_indices)
+            build_group_row(
+                rows,
+                columns,
+                &group_by_set,
+                &agg_map,
+                key_vals,
+                row_indices,
+            )
         })
         .collect()
 }
@@ -1418,13 +1425,22 @@ mod tests {
             .unwrap();
         let table = catalog.get_table_mut("items").unwrap();
         table
-            .insert(0, vec![CellValue::Int64(100), CellValue::String("A".into())])
+            .insert(
+                0,
+                vec![CellValue::Int64(100), CellValue::String("A".into())],
+            )
             .unwrap();
         table
-            .insert(0, vec![CellValue::Int64(200), CellValue::String("A".into())])
+            .insert(
+                0,
+                vec![CellValue::Int64(200), CellValue::String("A".into())],
+            )
             .unwrap();
         table
-            .insert(0, vec![CellValue::Int64(150), CellValue::String("B".into())])
+            .insert(
+                0,
+                vec![CellValue::Int64(150), CellValue::String("B".into())],
+            )
             .unwrap();
 
         exec(query, &catalog)
@@ -1464,9 +1480,7 @@ mod tests {
 
     #[test]
     fn test_table_group_by_sum() {
-        let out = run_table_query(
-            "FROM items RETURN items.category, sum(items.price)",
-        );
+        let out = run_table_query("FROM items RETURN items.category, sum(items.price)");
         assert_eq!(out.rows.len(), 2);
         for row in &out.rows {
             match row[0].as_str() {
