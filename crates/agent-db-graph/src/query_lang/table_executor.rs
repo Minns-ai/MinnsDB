@@ -4,7 +4,8 @@
 //! CellValue and query_lang Value, resolves table.column property references,
 //! and integrates with the existing projection/aggregation/ordering pipeline.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use agent_db_tables::catalog::TableCatalog;
 use agent_db_tables::row_codec::DecodedRow;
@@ -12,8 +13,8 @@ use agent_db_tables::types::{CellValue, GroupId};
 
 use super::ast::Literal;
 use super::planner::{
-    Aggregation, ExecutionPlan, JoinCondition, JoinType, OrderSpec, PlanStep, RExpr,
-    TemporalViewport,
+    AggregateFunction, Aggregation, ExecutionPlan, JoinCondition, JoinType, OrderSpec, PlanStep,
+    Projection, RExpr, TemporalViewport,
 };
 use super::types::{QueryError, QueryOutput, QueryStats, Value};
 
@@ -303,15 +304,24 @@ pub fn execute_table_query(
     }
 
     // Phase 2: Project rows into output columns.
+    // For aggregate columns, evaluate the aggregate's input expression (e.g. the
+    // `price` in `sum(price)`) rather than the full FuncCall.  Phase 3 applies
+    // the actual aggregate function over the collected per-row values.
     let columns: Vec<String> = plan.projections.iter().map(|p| p.alias.clone()).collect();
+
+    let agg_input: HashMap<&str, &Aggregation> = plan
+        .aggregations
+        .iter()
+        .map(|a| (a.output_alias.as_str(), a))
+        .collect();
 
     let mut result_rows: Vec<Vec<Value>> = Vec::new();
     for row in &rows {
-        let mut out = Vec::with_capacity(plan.projections.len());
-        for proj in &plan.projections {
-            out.push(eval_projection(&proj.expr, row));
-        }
-        result_rows.push(out);
+        result_rows.push(project_row_for_aggregation(
+            &plan.projections,
+            &agg_input,
+            row,
+        ));
     }
 
     // Phase 3: Aggregation (if any).
@@ -718,7 +728,8 @@ fn literal_to_value(lit: &super::ast::Literal) -> Value {
 
 fn eval_builtin_func(name: &str, args: &[Value]) -> Value {
     match name.to_lowercase().as_str() {
-        "count" => Value::Int(1), // Per-row count; actual aggregation happens later
+        // Aggregate functions (count, sum, avg, min, max, collect) are handled
+        // in project_row_for_aggregation() — they never reach this function.
         "coalesce" => args
             .iter()
             .find(|v| !v.is_null())
@@ -739,6 +750,34 @@ fn eval_builtin_func(name: &str, args: &[Value]) -> Value {
 /// Evaluate a projection expression for output.
 fn eval_projection(expr: &RExpr, row: &HashMap<String, Value>) -> Value {
     eval_rexpr(expr, row)
+}
+
+/// Project a single row, using `agg.input_expr` for aggregate columns.
+///
+/// For aggregate projections (sum, avg, min, max, collect), Phase 2 must
+/// produce the raw input value — the aggregate function is applied later in
+/// Phase 3 by `compute_aggregate`.  `count(*)` is special-cased to a
+/// non-null sentinel so the null-filtering count works correctly.
+fn project_row_for_aggregation(
+    projections: &[Projection],
+    agg_input: &HashMap<&str, &Aggregation>,
+    row: &HashMap<String, Value>,
+) -> Vec<Value> {
+    let mut out = Vec::with_capacity(projections.len());
+    for proj in projections {
+        if let Some(agg) = agg_input.get(proj.alias.as_str()) {
+            if matches!(agg.function, AggregateFunction::Count)
+                && matches!(agg.input_expr, RExpr::Star)
+            {
+                out.push(Value::Int(1));
+            } else {
+                out.push(eval_projection(&agg.input_expr, row));
+            }
+        } else {
+            out.push(eval_projection(&proj.expr, row));
+        }
+    }
+    out
 }
 
 /// Compare two Values for equality (used in join matching).
@@ -763,15 +802,46 @@ fn compute_aggregate(vals: &[&Value], function: &super::planner::AggregateFuncti
             Value::Int(vals.iter().filter(|v| !v.is_null()).count() as i64)
         },
         super::planner::AggregateFunction::Sum => {
-            let sum: f64 = vals
-                .iter()
-                .filter_map(|v| match v {
-                    Value::Int(i) => Some(*i as f64),
-                    Value::Float(f) => Some(*f),
-                    _ => None,
-                })
-                .sum();
-            Value::Float(sum)
+            // Preserve integer type when all inputs are Int; promote to
+            // Float on overflow or if any input is Float.
+            let mut int_sum: i64 = 0;
+            let mut overflowed = false;
+            let mut has_float = false;
+            let mut has_value = false;
+            for v in vals.iter() {
+                match *v {
+                    Value::Int(i) => {
+                        has_value = true;
+                        match int_sum.checked_add(*i) {
+                            Some(s) => int_sum = s,
+                            None => {
+                                overflowed = true;
+                                break;
+                            },
+                        }
+                    },
+                    Value::Float(_) => {
+                        has_float = true;
+                        break;
+                    },
+                    _ => {},
+                }
+            }
+            if has_float || overflowed {
+                let sum: f64 = vals
+                    .iter()
+                    .filter_map(|v| match *v {
+                        Value::Int(i) => Some(*i as f64),
+                        Value::Float(f) => Some(*f),
+                        _ => None,
+                    })
+                    .sum();
+                Value::Float(sum)
+            } else if has_value {
+                Value::Int(int_sum)
+            } else {
+                Value::Null
+            }
         },
         super::planner::AggregateFunction::Avg => {
             let nums: Vec<f64> = vals
@@ -842,32 +912,42 @@ fn apply_aggregations(
         .map(|a| (a.output_alias.as_str(), a))
         .collect();
 
+    let group_by_set: HashSet<&str> = group_by_keys.iter().map(|s| s.as_str()).collect();
+
     if key_indices.is_empty() {
         // Single group — all rows aggregated together.
-        // Match aggregations by output_alias against column names.
         let all_indices: Vec<usize> = (0..rows.len()).collect();
-        let out_row = build_group_row(rows, columns, group_by_keys, &agg_map, &[], &all_indices);
+        let out_row = build_group_row(rows, columns, &group_by_set, &agg_map, &[], &all_indices);
         return vec![out_row];
     }
 
-    // Hash-based grouping: partition rows by group key values using
-    // stable, canonical string keys (not Debug format).
+    // Hash-based grouping: partition rows by hashing group key columns
+    // in-place (no String allocation per row).
     let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
-    let mut key_to_group: HashMap<String, usize> = HashMap::new();
+    let mut key_to_group: HashMap<u64, usize> = HashMap::new();
 
     for (row_idx, row) in rows.iter().enumerate() {
-        let key_vals: Vec<Value> = key_indices.iter().map(|&i| row[i].clone()).collect();
-        let hash_key: String = key_vals
-            .iter()
-            .map(value_hash_key)
-            .collect::<Vec<_>>()
-            .join("|");
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for &ci in &key_indices {
+            std::mem::discriminant(&row[ci]).hash(&mut hasher);
+            match &row[ci] {
+                Value::String(s) => s.hash(&mut hasher),
+                Value::Int(v) => v.hash(&mut hasher),
+                Value::Float(f) => f.to_bits().hash(&mut hasher),
+                Value::Bool(b) => b.hash(&mut hasher),
+                Value::Null => 0u8.hash(&mut hasher),
+                Value::List(items) => items.len().hash(&mut hasher),
+                Value::Map(m) => m.len().hash(&mut hasher),
+            }
+        }
+        let hash_key = hasher.finish();
 
         if let Some(&group_idx) = key_to_group.get(&hash_key) {
             groups[group_idx].1.push(row_idx);
         } else {
             let group_idx = groups.len();
             key_to_group.insert(hash_key, group_idx);
+            let key_vals: Vec<Value> = key_indices.iter().map(|&i| row[i].clone()).collect();
             groups.push((key_vals, vec![row_idx]));
         }
     }
@@ -876,14 +956,7 @@ fn apply_aggregations(
     groups
         .iter()
         .map(|(key_vals, row_indices)| {
-            build_group_row(
-                rows,
-                columns,
-                group_by_keys,
-                &agg_map,
-                key_vals,
-                row_indices,
-            )
+            build_group_row(rows, columns, &group_by_set, &agg_map, key_vals, row_indices)
         })
         .collect()
 }
@@ -893,7 +966,7 @@ fn apply_aggregations(
 fn build_group_row(
     rows: &[Vec<Value>],
     columns: &[String],
-    group_by_keys: &[String],
+    group_by_set: &HashSet<&str>,
     agg_map: &HashMap<&str, &Aggregation>,
     key_vals: &[Value],
     row_indices: &[usize],
@@ -902,7 +975,7 @@ fn build_group_row(
     let mut key_idx = 0;
 
     for (col_idx, col_name) in columns.iter().enumerate() {
-        if group_by_keys.contains(col_name) {
+        if group_by_set.contains(col_name.as_str()) {
             // Group-by key — emit its value
             if key_idx < key_vals.len() {
                 out_row.push(key_vals[key_idx].clone());
@@ -1244,16 +1317,21 @@ pub fn execute_mixed_query(
         )));
     }
 
-    // Phase 3: Project
+    // Phase 3: Project — use input_expr for aggregate columns (same as table query).
     let columns: Vec<String> = plan.projections.iter().map(|p| p.alias.clone()).collect();
+    let agg_input: HashMap<&str, &Aggregation> = plan
+        .aggregations
+        .iter()
+        .map(|a| (a.output_alias.as_str(), a))
+        .collect();
 
     let mut projected: Vec<Vec<Value>> = Vec::new();
     for row in &result_rows {
-        let mut out = Vec::with_capacity(plan.projections.len());
-        for proj in &plan.projections {
-            out.push(eval_projection(&proj.expr, row));
-        }
-        projected.push(out);
+        projected.push(project_row_for_aggregation(
+            &plan.projections,
+            &agg_input,
+            row,
+        ));
     }
 
     // Aggregation
@@ -1299,4 +1377,114 @@ pub fn execute_mixed_query(
             execution_time_ms: elapsed.as_millis() as u64,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_db_tables::catalog::TableCatalog;
+    use agent_db_tables::schema::ColumnDef;
+    use agent_db_tables::types::ColumnType;
+
+    fn col(name: &str, col_type: ColumnType) -> ColumnDef {
+        ColumnDef {
+            name: name.into(),
+            col_type,
+            nullable: true,
+            default_value: None,
+            autoincrement: false,
+        }
+    }
+
+    /// Parse a MinnsQL query and execute it against the table catalog.
+    fn exec(query: &str, catalog: &TableCatalog) -> QueryOutput {
+        let ast = crate::query_lang::parser::Parser::parse(query).unwrap();
+        let plan = crate::query_lang::planner::plan(ast).unwrap();
+        execute_table_query(catalog, &plan, 0).unwrap()
+    }
+
+    /// Helper: create a table with 3 rows, run a query, return the result.
+    fn run_table_query(query: &str) -> QueryOutput {
+        let mut catalog = TableCatalog::new();
+        catalog
+            .create_table(
+                "items".into(),
+                vec![
+                    col("price", ColumnType::Int64),
+                    col("category", ColumnType::String),
+                ],
+                vec![],
+            )
+            .unwrap();
+        let table = catalog.get_table_mut("items").unwrap();
+        table
+            .insert(0, vec![CellValue::Int64(100), CellValue::String("A".into())])
+            .unwrap();
+        table
+            .insert(0, vec![CellValue::Int64(200), CellValue::String("A".into())])
+            .unwrap();
+        table
+            .insert(0, vec![CellValue::Int64(150), CellValue::String("B".into())])
+            .unwrap();
+
+        exec(query, &catalog)
+    }
+
+    #[test]
+    fn test_table_count_star() {
+        let out = run_table_query("FROM items RETURN count(*)");
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!(out.rows[0][0], Value::Int(3));
+    }
+
+    #[test]
+    fn test_table_sum_int64_returns_int() {
+        let out = run_table_query("FROM items RETURN sum(items.price)");
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!(out.rows[0][0], Value::Int(450));
+    }
+
+    #[test]
+    fn test_table_avg() {
+        let out = run_table_query("FROM items RETURN avg(items.price)");
+        assert_eq!(out.rows.len(), 1);
+        match &out.rows[0][0] {
+            Value::Float(f) => assert!((f - 150.0).abs() < 0.001),
+            other => panic!("expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_table_min_max() {
+        let out = run_table_query("FROM items RETURN min(items.price), max(items.price)");
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!(out.rows[0][0], Value::Int(100));
+        assert_eq!(out.rows[0][1], Value::Int(200));
+    }
+
+    #[test]
+    fn test_table_group_by_sum() {
+        let out = run_table_query(
+            "FROM items RETURN items.category, sum(items.price)",
+        );
+        assert_eq!(out.rows.len(), 2);
+        for row in &out.rows {
+            match row[0].as_str() {
+                Some("A") => assert_eq!(row[1], Value::Int(300)),
+                Some("B") => assert_eq!(row[1], Value::Int(150)),
+                other => panic!("unexpected category: {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_table_count_empty() {
+        let mut catalog = TableCatalog::new();
+        catalog
+            .create_table("empty".into(), vec![col("x", ColumnType::Int64)], vec![])
+            .unwrap();
+        let out = exec("FROM empty RETURN count(*)", &catalog);
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!(out.rows[0][0], Value::Int(0));
+    }
 }
