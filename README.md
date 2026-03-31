@@ -34,13 +34,15 @@
 
 MinnsDB is a database purpose-built for AI agent workloads. It combines a temporal knowledge graph, a relational table engine, and a sandboxed WASM agent runtime into a single Rust binary.
 
-**Graph** — send in conversations, get typed knowledge edges with temporal validity. Every fact has a `valid_from` and `valid_until`. Nothing is deleted, only superseded.
+**Conversation ingestion** — send in raw chat transcripts. A 3-call LLM cascade extracts entities, discovers relationships, and produces structured facts. Facts are written to the graph as temporal edges with automatic supersession, cascade invalidation, and ontology-driven property behaviors. No extraction code to write.
 
-**Tables** — a full bi-temporal row store with page-based storage, blake3 checksums, SQL-style CRUD, JOINs, and bulk import. Tables and graph are co-equal — connected via NodeRef columns.
+**Temporal knowledge graph** — every edge carries `valid_from` and `valid_until`. Nothing is deleted, only superseded. Query what is true now, what was true at any point in the past, or what the database believed at any historical moment (bi-temporal). Traverse relationships with multi-hop graph patterns, reason about time with Allen's Interval Algebra, and subscribe to live changes.
 
-**WASM Agents** — upload sandboxed modules that read/write tables, query the graph, call external APIs, and trigger on events. Instruction-metered, memory-capped, permission-controlled.
+**Tables** — a bi-temporal row store with page-based storage, blake3 checksums, SQL-style CRUD, JOINs, and graph-to-table joins via `NodeRef` columns. Tables and graph are co-equal and queryable in the same language.
 
-**MinnsQL** — one query language for everything: graph pattern matching (`MATCH`), table queries (`FROM`), DDL (`CREATE TABLE`), DML (`INSERT`/`UPDATE`/`DELETE`), and JOINs across tables and graph.
+**MinnsQL** — one query language for everything: graph pattern matching (`MATCH`), table queries (`FROM`), DDL (`CREATE TABLE`), DML (`INSERT`/`UPDATE`/`DELETE`), temporal clauses (`WHEN`, `AS OF`), reactive subscriptions (`SUBSCRIBE`), and JOINs across tables and graph.
+
+**WASM agents** — upload sandboxed modules that read/write tables, query the graph, call external APIs, and trigger on events. Instruction-metered, memory-capped, permission-controlled.
 
 ---
 
@@ -129,19 +131,23 @@ curl -X POST http://localhost:3000/api/query \
 
 ---
 
-## Why MinnsDB?
+## Benchmarks
 
-| | Vector DB | Graph DB (external graph backend) | KV + embeddings | **MinnsDB** |
-|---|---|---|---|---|
-| Tracks relationships | No | Yes | No | **Yes** — typed edges with temporal validity |
-| Relational tables | No | No | No | **Yes** — bi-temporal row store with JOINs |
-| Handles contradictions | Last write wins | Last write wins | Last write wins | **Confidence scoring** — claims compete |
-| Understands time | No | Manual | No | **Built-in** — every edge and row has `valid_from`/`valid_until` |
-| Runs agent code | No | No | No | **Yes** — sandboxed WASM with permissions + metering |
-| Accepts raw conversation | No | No | No | **Yes** — LLM compaction extracts facts automatically |
-| Reactive live queries | No | No | No | **Yes** — incremental updates via REST or WebSocket |
-| Auth built in | Varies | Bolt auth | Varies | **Yes** — API keys with group scoping + permissions |
-| External deps | Vector service | JVM + Cypher | Redis/Postgres | **None** — single binary, embedded ReDB |
+Evaluated on [StructMemEval](https://arxiv.org/abs/2602.11243), a benchmark designed to test structured memory in LLM agents across accounting (financial tracking), state tracking (entity state changes over time), tree-based (hierarchical relationship queries), and recommendation tasks.
+
+| System | StructMemEval Score |
+|--------|:-------------------:|
+| **MinnsDB** | **70%** |
+| Next best | 27% |
+
+StructMemEval tests the capabilities that flat memory stores lack: tracking state changes over time, maintaining financial ledgers across conversations, resolving multi-hop relationship queries, and handling contradictions when facts are superseded. MinnsDB's temporal graph and bi-temporal storage handle these natively.
+
+The benchmark suite is available at [`ref/benchmark/StructMemEval`](ref/benchmark/StructMemEval). To run it against your own MinnsDB instance:
+
+```bash
+cd ref/benchmark
+python run_eventgraph_bench.py --host http://localhost:3000 --key $MINNS_KEY
+```
 
 ---
 
