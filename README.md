@@ -324,6 +324,189 @@ ws.send(JSON.stringify({ type: "subscribe", query: "MATCH (n) RETURN n.name" }))
 ws.onmessage = (msg) => console.log(JSON.parse(msg.data));
 ```
 
+### 7. Conversation Ingestion Pipeline
+
+The ingestion pipeline converts raw chat messages into structured temporal knowledge through a multi-stage process. This is the primary way data enters the graph.
+
+```
+POST /api/conversations/ingest
+         |
+         v
+┌─────────────────────────────────────────────────────┐
+│  Stage 1: Bridge                                    │
+│  Raw messages → Conversation events                 │
+│  Collect participants, assign stable IDs,           │
+│  generate monotonic timestamps                      │
+│  Append session_complete sentinel per session       │
+└─────────────────┬───────────────────────────────────┘
+                  v
+┌─────────────────────────────────────────────────────┐
+│  Stage 2: Event Pipeline (per event, via write lane)│
+│  Event ordering → Graph node creation               │
+│  → Episode detection → Memory formation             │
+│  Routed by case_id hash for sequential consistency  │
+└─────────────────┬───────────────────────────────────┘
+                  v
+┌─────────────────────────────────────────────────────┐
+│  Stage 3: LLM Compaction (3-call cascade per batch) │
+│                                                     │
+│  For each batch of 2 turns:                         │
+│    Call 1: Entity extraction                        │
+│    Call 2: Relationship discovery                   │
+│    Call 3: Structured fact formation                 │
+│    + Financial NER (parallel with Call 3)            │
+│                                                     │
+│  Dedup financial + cascade facts                    │
+│  Two-phase graph write:                             │
+│    Phase A: single-valued facts (state)             │
+│    Phase B: stamp depends_on for multi-valued       │
+│    Phase C: write multi-valued facts                │
+│  Rolling context (last 30 facts) for coreference    │
+└─────────────────┬───────────────────────────────────┘
+                  v
+┌─────────────────────────────────────────────────────┐
+│  Stage 4: Goals + Procedural Summary                │
+│  Full transcript → LLM extraction                   │
+│  Goal deduplication + classification                │
+│  Procedural memory creation/update                  │
+│  Goals converted to Cognitive events → pipeline     │
+└─────────────────┬───────────────────────────────────┘
+                  v
+┌─────────────────────────────────────────────────────┐
+│  Stage 5: Post-Processing                           │
+│  Community detection (Louvain, if enabled)          │
+│  Embed concept nodes + create claims                │
+│  Active retrieval testing (background)              │
+└─────────────────────────────────────────────────────┘
+```
+
+**Single message mode** (`POST /api/messages`) buffers messages in a `ConversationState` and triggers compaction when the buffer reaches `compaction_buffer_size` (default: 6 messages). A rolling summary maintains coreference context between compaction runs.
+
+**The 3-call cascade** is the core extraction strategy. Rather than a single monolithic LLM call, the cascade breaks extraction into focused steps: entities first, then relationships between those entities, then structured facts from those relationships. Each step builds on the output of the previous one. If any step fails, the pipeline falls back to a simpler single-call extraction.
+
+**Two-phase graph writes** ensure temporal consistency. Single-valued facts (like location) are written first to establish entity state. Then `depends_on` metadata is stamped on multi-valued facts using the updated graph state. This enables automatic cascade invalidation when a parent fact changes (e.g., Alice's gym membership in London is invalidated when she moves to Berlin).
+
+**Fact structure:**
+```rust
+ExtractedFact {
+    statement: String,         // self-contained proposition
+    subject: String,
+    predicate: String,
+    object: String,
+    confidence: f32,           // 0.0-1.0
+    category: Option<String>,  // location, work, financial, preference, ...
+    amount: Option<f64>,       // for financial transactions
+    temporal_signal: Option<String>,  // "recently", "used to", "since last week"
+    depends_on: Option<String>,      // cascade dependency context
+    is_update: Option<bool>,         // explicit state change marker
+}
+```
+
+### 8. Code Ingestion Pipeline
+
+Code events flow through the same event pipeline as conversations but with code-aware processing.
+
+```bash
+# Submit a code review
+curl -X POST http://localhost:3000/api/events/code-review \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"review_id": "pr-42", "repository": "myapp", "action": "request_changes", "body": "Race condition in the connection pool", "file_path": "src/pool.rs", "line_range": [120, 135]}'
+
+# Submit a code file snapshot
+curl -X POST http://localhost:3000/api/events/code-file \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"file_path": "src/pool.rs", "content": "...", "language": "rust", "repository": "myapp"}'
+
+# Search code entities
+curl -X POST http://localhost:3000/api/code/search \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name_pattern": "ConnectionPool", "kind": "struct", "language": "rust"}'
+```
+
+Code reviews create `CodeReview` events with action mapping (approve, request_changes, comment). Code file snapshots create `CodeFile` events with language tagging. Both route through the standard event pipeline: event ordering, graph node creation, episode detection, and memory formation. The code search endpoint uses code-aware tokenization with camelCase/snake_case splitting for structural search.
+
+### 9. Ontology Discovery
+
+The ontology evolution system automatically discovers property behaviors from observed graph data. Instead of manually defining every property type in Turtle files, the system infers behaviors from usage patterns.
+
+```
+Graph edges accumulate
+         |
+         v
+┌──────────────────────────────────────┐
+│  Observation Tracking                │
+│  Every edge creation records:        │
+│  predicate, category, subject/object │
+│  types, frequencies, timestamps      │
+└────────────┬─────────────────────────┘
+             v
+┌──────────────────────────────────────┐
+│  Behavior Inference                  │
+│  Scan graph for each predicate:      │
+│                                      │
+│  Symmetry: A→B and B→A exist?        │
+│    ratio >= 0.85 → symmetric         │
+│                                      │
+│  Functionality: most subjects have   │
+│    exactly one active edge?          │
+│    ratio >= 0.90 → functional        │
+│                                      │
+│  Supersession: edges with valid_until│
+│    set? ratio >= 0.70 → supersedes   │
+│                                      │
+│  Append-only: many edges, none       │
+│    superseded? → append_only         │
+│                                      │
+│  Confidence: edges / (edges + 10)    │
+└────────────┬─────────────────────────┘
+             v
+┌──────────────────────────────────────┐
+│  Proposal Creation                   │
+│  Generate OWL/RDFS properties        │
+│  with inferred characteristics       │
+│  TTL preview for review              │
+│  Cascade dependency inference (LLM)  │
+│  Hierarchy discovery (LLM)           │
+└────────────┬─────────────────────────┘
+             v
+┌──────────────────────────────────────┐
+│  Approval + Application              │
+│  Auto-apply if confidence > 0.85     │
+│  Or manual approve via API           │
+│  Registers properties in ontology    │
+└──────────────────────────────────────┘
+```
+
+```bash
+# Trigger discovery pass
+curl -X POST http://localhost:3000/api/ontology/discover \
+  -H "Authorization: Bearer $MINNS_KEY"
+# → {"proposal_ids": [1, 2], "cascade_properties_updated": 3}
+
+# Review proposals
+curl -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/ontology/proposals
+
+# Approve a proposal
+curl -X POST http://localhost:3000/api/ontology/proposals/1/approve \
+  -H "Authorization: Bearer $MINNS_KEY"
+
+# View observations (transparency)
+curl -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/ontology/observations
+
+# Upload custom TTL
+curl -X POST http://localhost:3000/api/ontology/upload \
+  -H "Authorization: Bearer $MINNS_KEY" \
+  -H 'Content-Type: text/turtle' \
+  -d '@data/ontology/custom.ttl'
+```
+
+The discovery pass runs three phases: behavior inference from edge statistics, hierarchy clustering via LLM (grouping related predicates under parent categories), and cascade dependency inference via LLM (determining which properties should invalidate dependents when they change). Proposals above the auto-apply confidence threshold (default: 0.85) are applied immediately. Others are held for manual review.
+
+This means the ontology grows with your data. The first few conversations may use generic edge types. As the graph accumulates enough examples, the system discovers that `location:lives_in` is functional (single-valued), that `relationship:friend` is symmetric, and that `financial:payment` is append-only. These behaviors are proposed, reviewed, and applied without editing Turtle files by hand.
+
 ---
 
 ## Architecture
