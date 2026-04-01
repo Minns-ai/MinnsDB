@@ -7,7 +7,7 @@ use agent_db_graph::{ConversationIngest, GraphEngine, GraphEngineConfig, IngestO
 use serial_test::serial;
 
 /// Base path for benchmark data (relative to crate root).
-const BENCH_BASE: &str = "../../ref/bench/bench/dataset/benchmark";
+const BENCH_BASE: &str = "../../benchmark/dataset";
 
 /// Helper: load a benchmark JSON file and deserialize as ConversationIngest.
 /// Returns `None` when the file does not exist (e.g. in CI), so tests can skip.
