@@ -142,11 +142,9 @@ Evaluated on [StructMemEval](https://arxiv.org/abs/2602.11243), a benchmark desi
 
 StructMemEval tests the capabilities that flat memory stores lack: tracking state changes over time, maintaining financial ledgers across conversations, resolving multi-hop relationship queries, and handling contradictions when facts are superseded. MinnsDB's temporal graph and bi-temporal storage handle these natively.
 
-The benchmark suite is available at [`ref/benchmark/StructMemEval`](ref/benchmark/StructMemEval). To run it against your own MinnsDB instance:
+The benchmark is based on [StructMemEval](https://arxiv.org/abs/2602.11243). See the benchmark runner in the repository for reproduction details.
 
 ```bash
-cd ref/benchmark
-python run_eventgraph_bench.py --host http://localhost:3000 --key $MINNS_KEY
 ```
 
 ---
