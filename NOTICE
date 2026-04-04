@@ -1,0 +1,18 @@
+MinnsDB
+Copyright (C) 2026 Journey Into Product Ltd
+
+This project contains code derived from or inspired by the following
+open-source projects:
+
+1. Raphtory (https://github.com/Pometry/Raphtory)
+   Copyright Pometry Ltd
+   Licensed under GPL-3.0
+   - TCell temporal property container (crates/agent-db-graph/src/tcell.rs)
+     derived from Raphtory's TCell data structure
+   - Temporal view API (.at(), .rolling(), .window() methods)
+     in crates/agent-db-graph/src/temporal_view.rs
+
+2. Dgraph (https://github.com/hypermode-ai/dgraph)
+   Licensed under Apache-2.0
+   - Hierarchical key design in persistent graph storage
+     (crates/agent-db-graph/src/redb_graph_store.rs)
