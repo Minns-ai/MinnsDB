@@ -363,7 +363,9 @@ impl<'a> Executor<'a> {
         direction: &AstDirection,
         range: &Option<(u32, Option<u32>)>,
     ) -> Result<Vec<BindingRow>, QueryError> {
-        let mut out = Vec::new();
+        // Pre-allocate: estimate avg 4 edges per node, capped at MAX_INTERMEDIATE_ROWS
+        let estimated = (rows.len() * 4).min(MAX_INTERMEDIATE_ROWS);
+        let mut out = Vec::with_capacity(estimated);
 
         for binding in rows {
             self.check_deadline()?;
@@ -461,13 +463,13 @@ impl<'a> Executor<'a> {
         min_hops: u32,
         max_hops: u32,
     ) -> Result<Vec<NodeId>, QueryError> {
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::with_capacity(256);
         visited.insert(start);
 
-        let mut queue: VecDeque<(NodeId, u32)> = VecDeque::new();
+        let mut queue: VecDeque<(NodeId, u32)> = VecDeque::with_capacity(256);
         queue.push_back((start, 0));
 
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(64);
 
         while let Some((current, depth)) = queue.pop_front() {
             if depth >= max_hops {

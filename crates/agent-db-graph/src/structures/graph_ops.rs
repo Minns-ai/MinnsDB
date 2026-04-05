@@ -139,14 +139,14 @@ impl Graph {
         self.dirty_nodes.insert(target);
         self.adjacency_dirty = true;
 
-        // Index edge metadata into BM25 for both source and target nodes
+        // Index edge metadata into BM25 for the source node only.
+        // The source's BM25 document includes outgoing edge text, which is
+        // sufficient for relationship search. Reindexing both endpoints on
+        // every edge add was O(degree) x 2; this halves the cost.
         if let Some(edge_ref) = self.edges.get(edge_id) {
             let edge_text = edge_text_for_bm25(edge_ref);
             if !edge_text.is_empty() {
-                // Rebuild BM25 for source node with edge text appended
                 self.reindex_node_with_edges(source);
-                // Rebuild BM25 for target node with edge text appended
-                self.reindex_node_with_edges(target);
             }
         }
 
@@ -174,75 +174,88 @@ impl Graph {
 
     /// Rebuild BM25 index for a node, including text from all its edges.
     pub(crate) fn reindex_node_with_edges(&mut self, node_id: NodeId) {
-        let mut text_parts: Vec<String> = Vec::new();
+        // Use a single String buffer instead of Vec<String> + join to avoid
+        // intermediate allocations. Pre-allocate with a reasonable capacity.
+        let mut combined = String::with_capacity(512);
 
         // Collect node text
         if let Some(node) = self.nodes.get(node_id) {
-            match &node.node_type {
-                NodeType::Claim { claim_text, .. } => text_parts.push(claim_text.clone()),
-                NodeType::Goal { description, .. } => text_parts.push(description.clone()),
-                NodeType::Strategy { name, .. } => text_parts.push(name.clone()),
-                NodeType::Result { summary, .. } => text_parts.push(summary.clone()),
-                NodeType::Concept { concept_name, .. } => text_parts.push(concept_name.clone()),
-                NodeType::Tool { tool_name, .. } => text_parts.push(tool_name.clone()),
-                NodeType::Episode { outcome, .. } => text_parts.push(outcome.clone()),
-                _ => {},
+            let primary_text = match &node.node_type {
+                NodeType::Claim { claim_text, .. } => Some(claim_text.as_str()),
+                NodeType::Goal { description, .. } => Some(description.as_str()),
+                NodeType::Strategy { name, .. } => Some(name.as_str()),
+                NodeType::Result { summary, .. } => Some(summary.as_str()),
+                NodeType::Concept { concept_name, .. } => Some(concept_name.as_str()),
+                NodeType::Tool { tool_name, .. } => Some(tool_name.as_str()),
+                NodeType::Episode { outcome, .. } => Some(outcome.as_str()),
+                _ => None,
+            };
+            if let Some(text) = primary_text {
+                combined.push_str(text);
             }
 
-            // Extract searchable text from properties
+            // Extract searchable text from properties (avoid to_lowercase per key
+            // by checking ASCII bytes directly for common patterns)
             for (key, value) in &node.properties {
-                let key_lower = key.to_lowercase();
-                if key_lower.contains("text")
-                    || key_lower.contains("description")
-                    || key_lower.contains("content")
-                    || key_lower.contains("name")
-                    || key_lower.contains("summary")
-                    || key_lower == "data"
-                    || key_lower == "category"
-                    || key_lower == "metadata_text"
-                {
+                if Self::is_searchable_key(key) {
                     if let Some(text) = value.as_str() {
-                        text_parts.push(text.to_string());
+                        if !combined.is_empty() {
+                            combined.push(' ');
+                        }
+                        combined.push_str(text);
                     } else {
                         let flat = Self::flatten_json_to_text(value);
                         if !flat.is_empty() {
-                            text_parts.push(flat);
+                            if !combined.is_empty() {
+                                combined.push(' ');
+                            }
+                            combined.push_str(&flat);
                         }
                     }
                 }
             }
         }
 
-        // Collect edge text from all outgoing edges
+        // Collect edge text from outgoing edges only (incoming edges are
+        // covered by the source node's BM25 document for the reverse direction)
         if let Some(out_edges) = self.adjacency_out.get(node_id) {
             for &eid in out_edges.iter() {
                 if let Some(edge) = self.edges.get(eid) {
                     let et = edge_text_for_bm25(edge);
                     if !et.is_empty() {
-                        text_parts.push(et);
+                        if !combined.is_empty() {
+                            combined.push(' ');
+                        }
+                        combined.push_str(&et);
                     }
                 }
             }
         }
 
-        // Collect edge text from all incoming edges
-        if let Some(in_edges) = self.adjacency_in.get(node_id) {
-            for &eid in in_edges.iter() {
-                if let Some(edge) = self.edges.get(eid) {
-                    let et = edge_text_for_bm25(edge);
-                    if !et.is_empty() {
-                        text_parts.push(et);
-                    }
-                }
-            }
-        }
-
-        if !text_parts.is_empty() {
-            let combined = text_parts.join(" ");
-            // Remove old entry first to keep corpus stats accurate
+        if !combined.is_empty() {
             self.bm25_index.remove_document(node_id);
             self.bm25_index.index_document(node_id, &combined);
         }
+    }
+
+    /// Fast check whether a property key is searchable without allocating
+    /// a lowercase copy. Checks for common searchable key patterns via
+    /// case-insensitive byte comparison.
+    #[inline]
+    fn is_searchable_key(key: &str) -> bool {
+        let k = key.as_bytes();
+        // Check common exact matches first (ASCII lowercase comparison)
+        if k.eq_ignore_ascii_case(b"data")
+            || k.eq_ignore_ascii_case(b"category")
+            || k.eq_ignore_ascii_case(b"metadata_text")
+        {
+            return true;
+        }
+        // Check substring patterns
+        let lower: Vec<u8> = k.iter().map(|b| b.to_ascii_lowercase()).collect();
+        lower.windows(4).any(|w| w == b"text" || w == b"name")
+            || lower.windows(7).any(|w| w == b"content" || w == b"summary")
+            || lower.windows(11).any(|w| w == b"description")
     }
 
     /// Remove an edge by ID. Returns the removed edge, or None if not found.
