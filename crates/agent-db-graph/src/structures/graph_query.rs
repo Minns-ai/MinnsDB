@@ -176,6 +176,20 @@ impl Graph {
             .unwrap_or_default()
     }
 
+    /// Get the outgoing adjacency list for a node without collecting into Vec.
+    /// Returns None if the node has no outgoing edges.
+    #[inline]
+    pub fn adjacency_out_ref(&self, node_id: NodeId) -> Option<&crate::structures::adj_list::AdjList> {
+        self.adjacency_out.get(node_id)
+    }
+
+    /// Get the incoming adjacency list for a node without collecting into Vec.
+    /// Returns None if the node has no incoming edges.
+    #[inline]
+    pub fn adjacency_in_ref(&self, node_id: NodeId) -> Option<&crate::structures::adj_list::AdjList> {
+        self.adjacency_in.get(node_id)
+    }
+
     /// Get node by claim ID
     pub fn get_claim_node(&self, claim_id: u64) -> Option<&GraphNode> {
         self.claim_index

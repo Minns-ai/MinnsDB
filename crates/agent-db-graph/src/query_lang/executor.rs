@@ -398,42 +398,51 @@ impl<'a> Executor<'a> {
                     }
                 },
                 None => {
-                    // Single-hop expansion.
-                    let edges = self.directed_edges(from_id, direction);
-                    for edge in edges {
-                        if !self.edge_visible(edge) {
-                            continue;
-                        }
-                        if !self.edge_matches_type(edge, edge_type) {
-                            continue;
-                        }
-                        self.stats.edges_traversed += 1;
-
-                        if out.len() >= MAX_INTERMEDIATE_ROWS {
-                            return Err(QueryError::ExecutionError(format!(
-                                "Result set exceeded {} rows during expansion",
-                                MAX_INTERMEDIATE_ROWS
-                            )));
-                        }
-
-                        let other_id = match direction {
-                            AstDirection::Out => edge.target,
-                            AstDirection::In => edge.source,
-                        };
-
-                        // Transaction-time filter on the target node.
-                        if let Some(node) = self.graph.get_node(other_id) {
-                            if !self.node_visible_txn(node) {
+                    // Single-hop expansion. Iterate adjacency list directly
+                    // to avoid the Vec allocation from get_edges_from/to.
+                    let adj = match direction {
+                        AstDirection::Out => self.graph.adjacency_out_ref(from_id),
+                        AstDirection::In => self.graph.adjacency_in_ref(from_id),
+                    };
+                    if let Some(edge_ids) = adj {
+                        for &eid in edge_ids.iter() {
+                            let edge = match self.graph.get_edge(eid) {
+                                Some(e) => e,
+                                None => continue,
+                            };
+                            if !self.edge_visible(edge) {
                                 continue;
                             }
-                        }
+                            if !self.edge_matches_type(edge, edge_type) {
+                                continue;
+                            }
+                            self.stats.edges_traversed += 1;
 
-                        let mut new_binding = binding.clone();
-                        if let Some(ev) = edge_var {
-                            new_binding.set(ev, BoundValue::Edge(edge.id));
+                            if out.len() >= MAX_INTERMEDIATE_ROWS {
+                                return Err(QueryError::ExecutionError(format!(
+                                    "Result set exceeded {} rows during expansion",
+                                    MAX_INTERMEDIATE_ROWS
+                                )));
+                            }
+
+                            let other_id = match direction {
+                                AstDirection::Out => edge.target,
+                                AstDirection::In => edge.source,
+                            };
+
+                            if let Some(node) = self.graph.get_node(other_id) {
+                                if !self.node_visible_txn(node) {
+                                    continue;
+                                }
+                            }
+
+                            let mut new_binding = binding.clone();
+                            if let Some(ev) = edge_var {
+                                new_binding.set(ev, BoundValue::Edge(edge.id));
+                            }
+                            new_binding.set(to_var, BoundValue::Node(other_id));
+                            out.push(new_binding);
                         }
-                        new_binding.set(to_var, BoundValue::Node(other_id));
-                        out.push(new_binding);
                     }
                 },
             }
@@ -480,34 +489,43 @@ impl<'a> Executor<'a> {
                 break;
             }
 
-            let edges = self.directed_edges(current, direction);
-            for edge in edges {
-                if !self.edge_visible(edge) {
-                    continue;
-                }
-                if !self.edge_matches_type(edge, edge_type) {
-                    continue;
-                }
-                self.stats.edges_traversed += 1;
-
-                let next = match direction {
-                    AstDirection::Out => edge.target,
-                    AstDirection::In => edge.source,
-                };
-
-                // Transaction-time filter on the target node.
-                if let Some(node) = self.graph.get_node(next) {
-                    if !self.node_visible_txn(node) {
+            // Iterate adjacency list directly to avoid Vec allocation.
+            let adj = match direction {
+                AstDirection::Out => self.graph.adjacency_out_ref(current),
+                AstDirection::In => self.graph.adjacency_in_ref(current),
+            };
+            if let Some(edge_ids) = adj {
+                for &eid in edge_ids.iter() {
+                    let edge = match self.graph.get_edge(eid) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    if !self.edge_visible(edge) {
                         continue;
                     }
-                }
-
-                if visited.insert(next) {
-                    let next_depth = depth + 1;
-                    if next_depth >= min_hops {
-                        result.push(next);
+                    if !self.edge_matches_type(edge, edge_type) {
+                        continue;
                     }
-                    queue.push_back((next, next_depth));
+                    self.stats.edges_traversed += 1;
+
+                    let next = match direction {
+                        AstDirection::Out => edge.target,
+                        AstDirection::In => edge.source,
+                    };
+
+                    if let Some(node) = self.graph.get_node(next) {
+                        if !self.node_visible_txn(node) {
+                            continue;
+                        }
+                    }
+
+                    if visited.insert(next) {
+                        let next_depth = depth + 1;
+                        if next_depth >= min_hops {
+                            result.push(next);
+                        }
+                        queue.push_back((next, next_depth));
+                    }
                 }
             }
         }
