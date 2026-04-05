@@ -451,14 +451,6 @@ impl<'a> Executor<'a> {
         Ok(out)
     }
 
-    /// Get edges in the requested direction.
-    fn directed_edges(&self, node_id: NodeId, direction: &AstDirection) -> Vec<&'a GraphEdge> {
-        match direction {
-            AstDirection::Out => self.graph.get_edges_from(node_id),
-            AstDirection::In => self.graph.get_edges_to(node_id),
-        }
-    }
-
     /// BFS expansion up to `max_hops`, returning all reached node IDs
     /// (excluding the start) that are at least `min_hops` away.
     ///
