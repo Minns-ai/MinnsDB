@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/Minns-ai/MinnsDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/MinnsDB/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSL--1.1-blue?style=flat-square" alt="License: BSL 1.1"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License: AGPL-3.0"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.83%2B-orange?style=flat-square&logo=rust" alt="Rust"></a>
   <a href="https://discord.gg/6a2cCRPwUR"><img src="https://img.shields.io/discord/1472727097368641720?style=flat-square&logo=discord&label=discord&color=5865F2" alt="Discord"></a>
 </p>
@@ -678,12 +678,11 @@ Have a feature request? [Open an issue](https://github.com/Minns-ai/MinnsDB/issu
 
 ## License
 
-MinnsDB is licensed under the **Business Source License 1.1 (BSL)**.
+MinnsDB is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
-- **Free for non-production use** and single-instance production use
-- **Not permitted** for hosted services or competitive offerings without a commercial license
-- **Converts to AGPL v3.0 with linking exception** on 2030-03-18
-- The linking exception means you do not need to open-source your own code — only changes to MinnsDB itself
+- **Free to use, modify, and distribute**
+- **Network use clause**: if you run a modified version as a service, you must release your modifications
+- **Copyleft**: derivative works must also be AGPL-3.0
 
 See [LICENSE](LICENSE) for the full text.
 

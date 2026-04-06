@@ -3,6 +3,8 @@
 // Graph mutation methods: add_node, add_edge, remove_edge, remove_node,
 // merge_nodes, reindex_node_with_edges, invalidate_edge.
 
+use std::collections::HashMap;
+
 use super::adj_list::AdjList;
 use super::edge::EdgeType;
 use super::graph::{edge_text_for_bm25, Graph};
@@ -518,9 +520,28 @@ impl Graph {
             .cloned()
             .unwrap_or_default();
 
+        // Build O(1) lookup maps of the survivor's existing edge targets/sources.
+        // This replaces the O(degree_absorbed * degree_survivor) linear scan
+        // with O(degree_absorbed + degree_survivor).
+        let mut survivor_out_targets: HashMap<NodeId, EdgeId> = HashMap::new();
+        if let Some(out_ids) = self.adjacency_out.get(survivor_id) {
+            for &eid in out_ids.iter() {
+                if let Some(edge) = self.edges.get(eid) {
+                    survivor_out_targets.insert(edge.target, eid);
+                }
+            }
+        }
+        let mut survivor_in_sources: HashMap<NodeId, EdgeId> = HashMap::new();
+        if let Some(in_ids) = self.adjacency_in.get(survivor_id) {
+            for &eid in in_ids.iter() {
+                if let Some(edge) = self.edges.get(eid) {
+                    survivor_in_sources.insert(edge.source, eid);
+                }
+            }
+        }
+
         // Redirect outgoing edges: absorbed -> X becomes survivor -> X
-        // First pass: gather info we need (targets, weights, existing edges)
-        let mut out_redirects: Vec<(EdgeId, NodeId, f32)> = Vec::new(); // (edge_id, target, weight)
+        let mut out_redirects: Vec<(EdgeId, NodeId, f32)> = Vec::new();
         for edge_id in &absorbed_out {
             if let Some(edge) = self.edges.get(*edge_id) {
                 let target = edge.target;
@@ -532,29 +553,19 @@ impl Graph {
         }
 
         for (edge_id, target, weight) in out_redirects {
-            // Check if survivor already has an edge to this target
-            let existing_eid = self
-                .adjacency_out
-                .get(survivor_id)
-                .and_then(|ids| {
-                    ids.iter()
-                        .find(|&&eid| self.edges.get(eid).is_some_and(|e| e.target == target))
-                })
-                .copied();
-
-            if let Some(existing_eid) = existing_eid {
-                // Strengthen existing edge
+            // O(1) lookup instead of linear scan
+            if let Some(&existing_eid) = survivor_out_targets.get(&target) {
                 if let Some(existing_edge) = self.edges.get_mut(existing_eid) {
                     existing_edge.strengthen(weight * 0.5);
                 }
             } else {
-                // Redirect edge to survivor
                 if let Some(edge) = self.edges.get_mut(edge_id) {
                     edge.source = survivor_id;
                 }
                 self.adjacency_out
                     .ensure_at(survivor_id, AdjList::new())
                     .push(edge_id);
+                survivor_out_targets.insert(target, edge_id);
             }
         }
 
@@ -571,29 +582,19 @@ impl Graph {
         }
 
         for (edge_id, source, weight) in in_redirects {
-            // Check if survivor already has an incoming edge from this source
-            let existing_eid = self
-                .adjacency_in
-                .get(survivor_id)
-                .and_then(|ids| {
-                    ids.iter()
-                        .find(|&&eid| self.edges.get(eid).is_some_and(|e| e.source == source))
-                })
-                .copied();
-
-            if let Some(existing_eid) = existing_eid {
-                // Strengthen existing edge
+            // O(1) lookup instead of linear scan
+            if let Some(&existing_eid) = survivor_in_sources.get(&source) {
                 if let Some(existing_edge) = self.edges.get_mut(existing_eid) {
                     existing_edge.strengthen(weight * 0.5);
                 }
             } else {
-                // Redirect edge to survivor
                 if let Some(edge) = self.edges.get_mut(edge_id) {
                     edge.target = survivor_id;
                 }
                 self.adjacency_in
                     .ensure_at(survivor_id, AdjList::new())
                     .push(edge_id);
+                survivor_in_sources.insert(source, edge_id);
             }
         }
 
