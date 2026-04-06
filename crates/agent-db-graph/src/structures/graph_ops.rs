@@ -238,24 +238,35 @@ impl Graph {
         }
     }
 
-    /// Fast check whether a property key is searchable without allocating
-    /// a lowercase copy. Checks for common searchable key patterns via
-    /// case-insensitive byte comparison.
+    /// Fast check whether a property key is searchable. Zero allocations.
+    /// Uses case-insensitive byte window matching directly on the key bytes.
     #[inline]
     fn is_searchable_key(key: &str) -> bool {
         let k = key.as_bytes();
-        // Check common exact matches first (ASCII lowercase comparison)
+        // Exact matches (most common, fastest path)
         if k.eq_ignore_ascii_case(b"data")
             || k.eq_ignore_ascii_case(b"category")
             || k.eq_ignore_ascii_case(b"metadata_text")
         {
             return true;
         }
-        // Check substring patterns
-        let lower: Vec<u8> = k.iter().map(|b| b.to_ascii_lowercase()).collect();
-        lower.windows(4).any(|w| w == b"text" || w == b"name")
-            || lower.windows(7).any(|w| w == b"content" || w == b"summary")
-            || lower.windows(11).any(|w| w == b"description")
+        // Substring patterns via case-insensitive window scan (no allocation)
+        Self::contains_ascii_ci(k, b"text")
+            || Self::contains_ascii_ci(k, b"name")
+            || Self::contains_ascii_ci(k, b"content")
+            || Self::contains_ascii_ci(k, b"summary")
+            || Self::contains_ascii_ci(k, b"description")
+    }
+
+    /// Case-insensitive ASCII substring check without allocation.
+    #[inline]
+    fn contains_ascii_ci(haystack: &[u8], needle: &[u8]) -> bool {
+        if needle.len() > haystack.len() {
+            return false;
+        }
+        haystack
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle))
     }
 
     /// Remove an edge by ID. Returns the removed edge, or None if not found.

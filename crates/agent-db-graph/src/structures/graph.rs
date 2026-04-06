@@ -149,32 +149,49 @@ impl Default for Graph {
 /// Converts edge labels like "preference:food" into "preference food" and
 /// includes edge property values (category, details) so that queries for
 /// edge-related terms can find the connected nodes.
+/// Build BM25-indexable text for an edge. Uses a single String buffer
+/// instead of Vec<String> + join to avoid intermediate allocations.
 pub(crate) fn edge_text_for_bm25(edge: &GraphEdge) -> String {
-    let mut parts = Vec::new();
+    let mut text = String::with_capacity(64);
     match &edge.edge_type {
         EdgeType::Association {
             association_type, ..
         } => {
             // "preference:food" → "preference food"
-            parts.push(association_type.replace(':', " "));
-            // Include property values (sentiment, category, etc.)
+            for (i, ch) in association_type.chars().enumerate() {
+                if ch == ':' {
+                    text.push(' ');
+                } else {
+                    text.push(ch);
+                }
+                // Safety: won't exceed reasonable edge type lengths
+                if i > 256 {
+                    break;
+                }
+            }
             if let Some(details) = edge.properties.get("details") {
                 if let Some(cat) = details.get("category").and_then(|v| v.as_str()) {
-                    parts.push(cat.to_string());
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    text.push_str(cat);
                 }
             }
             if let Some(cat) = edge.properties.get("category").and_then(|v| v.as_str()) {
-                parts.push(cat.to_string());
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(cat);
             }
         },
         EdgeType::About {
             predicate: Some(p), ..
         } => {
-            parts.push(p.clone());
+            text.push_str(p);
         },
-        _ => {}, // Other edge types don't need BM25 indexing
+        _ => {},
     }
-    parts.join(" ")
+    text
 }
 
 impl Graph {
