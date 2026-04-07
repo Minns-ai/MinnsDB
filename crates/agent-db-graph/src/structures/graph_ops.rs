@@ -3,7 +3,7 @@
 // Graph mutation methods: add_node, add_edge, remove_edge, remove_node,
 // merge_nodes, reindex_node_with_edges, invalidate_edge.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use super::adj_list::AdjList;
 use super::edge::EdgeType;
@@ -523,7 +523,7 @@ impl Graph {
         // Build O(1) lookup maps of the survivor's existing edge targets/sources.
         // This replaces the O(degree_absorbed * degree_survivor) linear scan
         // with O(degree_absorbed + degree_survivor).
-        let mut survivor_out_targets: HashMap<NodeId, EdgeId> = HashMap::new();
+        let mut survivor_out_targets: FxHashMap<NodeId, EdgeId> = FxHashMap::default();
         if let Some(out_ids) = self.adjacency_out.get(survivor_id) {
             for &eid in out_ids.iter() {
                 if let Some(edge) = self.edges.get(eid) {
@@ -531,7 +531,7 @@ impl Graph {
                 }
             }
         }
-        let mut survivor_in_sources: HashMap<NodeId, EdgeId> = HashMap::new();
+        let mut survivor_in_sources: FxHashMap<NodeId, EdgeId> = FxHashMap::default();
         if let Some(in_ids) = self.adjacency_in.get(survivor_id) {
             for &eid in in_ids.iter() {
                 if let Some(edge) = self.edges.get(eid) {

@@ -3,10 +3,11 @@
 //! Evaluates an [`ExecutionPlan`] against a [`Graph`], producing a [`QueryOutput`]
 //! table of rows and columns.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::ast::{CompOp, Direction as AstDirection, Literal};
@@ -198,7 +199,7 @@ impl<'a> Executor<'a> {
 
         // ----- DISTINCT -----
         if plan.projections.iter().any(|p| p.distinct) {
-            let mut seen = HashSet::new();
+            let mut seen = FxHashSet::default();
             let mut deduped = Vec::new();
             for row in result_rows {
                 let hash = hash_row(&row);
@@ -464,7 +465,7 @@ impl<'a> Executor<'a> {
         min_hops: u32,
         max_hops: u32,
     ) -> Result<Vec<NodeId>, QueryError> {
-        let mut visited = HashSet::with_capacity(256);
+        let mut visited = FxHashSet::with_capacity_and_hasher(256, Default::default());
         visited.insert(start);
 
         let mut queue: VecDeque<(NodeId, u32)> = VecDeque::with_capacity(256);
@@ -1663,7 +1664,7 @@ impl<'a> Executor<'a> {
             .collect();
 
         // Group rows by hash of group-key columns to avoid String allocation per cell.
-        let mut groups: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut groups: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
         for (i, row) in result_rows.iter().enumerate() {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             for &ci in &group_col_indices {
@@ -1871,7 +1872,7 @@ impl<'a> Executor<'a> {
 
         // DISTINCT.
         if plan.projections.iter().any(|p| p.distinct) {
-            let mut seen = HashSet::new();
+            let mut seen = FxHashSet::default();
             let mut deduped = Vec::new();
             for row in result_rows {
                 let hash = hash_row(&row);
