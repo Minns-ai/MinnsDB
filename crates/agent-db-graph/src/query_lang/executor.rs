@@ -103,6 +103,64 @@ impl BindingRow {
 }
 
 // ---------------------------------------------------------------------------
+// Pre-compiled IN/NotIn literal sets
+// ---------------------------------------------------------------------------
+
+/// Holds pre-evaluated literal values for IN/NotIn expressions.
+/// Built once before the per-row filter loop to avoid re-evaluating
+/// constant expressions for every row.
+struct PreCompiledSets {
+    /// Maps the raw pointer of an RBoolExpr::In or ::NotIn node to
+    /// the pre-evaluated Vec<Value>. Using *const as key is safe because
+    /// the RBoolExpr lives for the entire filter step.
+    sets: FxHashMap<usize, Vec<Value>>,
+}
+
+impl PreCompiledSets {
+    /// Walk the expression tree and pre-evaluate IN/NotIn literal lists.
+    fn build(expr: &RBoolExpr) -> Self {
+        let mut sets = FxHashMap::default();
+        Self::collect(expr, &mut sets);
+        PreCompiledSets { sets }
+    }
+
+    fn collect(expr: &RBoolExpr, sets: &mut FxHashMap<usize, Vec<Value>>) {
+        match expr {
+            RBoolExpr::In(_, vals) | RBoolExpr::NotIn(_, vals) => {
+                // Check if ALL values are literals (the common case for user queries)
+                let all_literals = vals.iter().all(|v| matches!(v, RExpr::Literal(_)));
+                if all_literals {
+                    let precomputed: Vec<Value> = vals
+                        .iter()
+                        .map(|v| match v {
+                            RExpr::Literal(lit) => literal_to_value(lit),
+                            _ => unreachable!(), // guarded by all_literals check
+                        })
+                        .collect();
+                    let key = expr as *const RBoolExpr as usize;
+                    sets.insert(key, precomputed);
+                }
+            },
+            RBoolExpr::And(a, b) | RBoolExpr::Or(a, b) => {
+                Self::collect(a, sets);
+                Self::collect(b, sets);
+            },
+            RBoolExpr::Not(inner) | RBoolExpr::Paren(inner) => {
+                Self::collect(inner, sets);
+            },
+            _ => {},
+        }
+    }
+
+    /// Look up pre-compiled values for an IN/NotIn node.
+    #[inline]
+    fn get(&self, expr: &RBoolExpr) -> Option<&Vec<Value>> {
+        let key = expr as *const RBoolExpr as usize;
+        self.sets.get(&key)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Executor
 // ---------------------------------------------------------------------------
 
@@ -535,13 +593,16 @@ impl<'a> Executor<'a> {
         mut rows: Vec<BindingRow>,
         expr: &RBoolExpr,
     ) -> Result<Vec<BindingRow>, QueryError> {
-        // Filter in-place to avoid a second Vec allocation.
+        // Pre-compile IN/NotIn literal sets before the per-row loop.
+        // This avoids re-evaluating constant literal values for every row.
+        let precompiled = PreCompiledSets::build(expr);
+
         let mut err: Option<QueryError> = None;
         rows.retain(|binding| {
             if err.is_some() {
                 return false;
             }
-            match self.evaluate_bool(expr, binding) {
+            match self.evaluate_bool(expr, binding, &precompiled) {
                 Ok(keep) => keep,
                 Err(e) => {
                     err = Some(e);
@@ -559,7 +620,12 @@ impl<'a> Executor<'a> {
     // Boolean expression evaluation
     // -----------------------------------------------------------------------
 
-    fn evaluate_bool(&self, expr: &RBoolExpr, binding: &BindingRow) -> Result<bool, QueryError> {
+    fn evaluate_bool(
+        &self,
+        expr: &RBoolExpr,
+        binding: &BindingRow,
+        precompiled: &PreCompiledSets,
+    ) -> Result<bool, QueryError> {
         match expr {
             RBoolExpr::Comparison(lhs, op, rhs) => {
                 let l = self.evaluate_expr(lhs, binding)?;
@@ -576,6 +642,11 @@ impl<'a> Executor<'a> {
             },
             RBoolExpr::In(e, vals) => {
                 let v = self.evaluate_expr(e, binding)?;
+                // Use pre-compiled literal set if available (avoids re-evaluating
+                // constant values per row)
+                if let Some(precomputed) = precompiled.get(expr) {
+                    return Ok(precomputed.iter().any(|c| value_eq_loose(&v, c)));
+                }
                 for candidate in vals {
                     let c = self.evaluate_expr(candidate, binding)?;
                     if compare_values(&v, &CompOp::Eq, &c) {
@@ -586,6 +657,9 @@ impl<'a> Executor<'a> {
             },
             RBoolExpr::NotIn(e, vals) => {
                 let v = self.evaluate_expr(e, binding)?;
+                if let Some(precomputed) = precompiled.get(expr) {
+                    return Ok(!precomputed.iter().any(|c| value_eq_loose(&v, c)));
+                }
                 for candidate in vals {
                     let c = self.evaluate_expr(candidate, binding)?;
                     if compare_values(&v, &CompOp::Eq, &c) {
@@ -608,14 +682,12 @@ impl<'a> Executor<'a> {
                     Ok(false)
                 }
             },
-            RBoolExpr::And(a, b) => {
-                Ok(self.evaluate_bool(a, binding)? && self.evaluate_bool(b, binding)?)
-            },
-            RBoolExpr::Or(a, b) => {
-                Ok(self.evaluate_bool(a, binding)? || self.evaluate_bool(b, binding)?)
-            },
-            RBoolExpr::Not(inner) => Ok(!self.evaluate_bool(inner, binding)?),
-            RBoolExpr::Paren(inner) => self.evaluate_bool(inner, binding),
+            RBoolExpr::And(a, b) => Ok(self.evaluate_bool(a, binding, precompiled)?
+                && self.evaluate_bool(b, binding, precompiled)?),
+            RBoolExpr::Or(a, b) => Ok(self.evaluate_bool(a, binding, precompiled)?
+                || self.evaluate_bool(b, binding, precompiled)?),
+            RBoolExpr::Not(inner) => Ok(!self.evaluate_bool(inner, binding, precompiled)?),
+            RBoolExpr::Paren(inner) => self.evaluate_bool(inner, binding, precompiled),
             RBoolExpr::FuncPredicate(name, args) => self.evaluate_predicate(name, args, binding),
         }
     }
