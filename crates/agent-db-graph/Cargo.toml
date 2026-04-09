@@ -49,6 +49,11 @@ oxiri = "0.2"
 default = []
 code-intelligence = ["dep:agent-db-ast"]
 
+[[bench]]
+name = "query_filter"
+harness = false
+
 [dev-dependencies]
 tempfile = "3.8"
 serial_test = "3.1"
+criterion = "0.5"

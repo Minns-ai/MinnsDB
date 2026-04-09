@@ -33,12 +33,18 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 // ---------------------------------------------------------------------------
 
 /// A value bound during pattern matching.
+///
+/// The Path variant is boxed to keep the common variants (Node, Edge) small.
+/// Without boxing, Vec<NodeId> (24 bytes) would force every Option<BoundValue>
+/// to 32 bytes due to enum padding. With Box, the Path variant is 8 bytes
+/// (a pointer), keeping Option<BoundValue> at 16 bytes and the full 16-slot
+/// inline array at 256 bytes instead of 512 bytes.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum BoundValue {
     Node(NodeId),
     Edge(EdgeId),
-    Path(Vec<NodeId>),
+    Path(Box<[NodeId]>),
 }
 
 const INLINE_SLOTS: usize = 16;
@@ -109,11 +115,13 @@ impl BindingRow {
 /// Holds pre-evaluated literal values for IN/NotIn expressions.
 /// Built once before the per-row filter loop to avoid re-evaluating
 /// constant expressions for every row.
+///
+/// Keyed by the structural hash of each RBoolExpr node. RBoolExpr derives
+/// Hash, so two structurally identical IN clauses share the same pre-compiled
+/// set. This avoids raw pointer keys (which would depend on the expression
+/// tree being pinned in memory) while remaining O(1) lookup via FxHashMap.
 struct PreCompiledSets {
-    /// Maps the raw pointer of an RBoolExpr::In or ::NotIn node to
-    /// the pre-evaluated Vec<Value>. Using *const as key is safe because
-    /// the RBoolExpr lives for the entire filter step.
-    sets: FxHashMap<usize, Vec<Value>>,
+    sets: FxHashMap<u64, Vec<Value>>,
 }
 
 impl PreCompiledSets {
@@ -124,20 +132,19 @@ impl PreCompiledSets {
         PreCompiledSets { sets }
     }
 
-    fn collect(expr: &RBoolExpr, sets: &mut FxHashMap<usize, Vec<Value>>) {
+    fn collect(expr: &RBoolExpr, sets: &mut FxHashMap<u64, Vec<Value>>) {
         match expr {
             RBoolExpr::In(_, vals) | RBoolExpr::NotIn(_, vals) => {
-                // Check if ALL values are literals (the common case for user queries)
                 let all_literals = vals.iter().all(|v| matches!(v, RExpr::Literal(_)));
                 if all_literals {
                     let precomputed: Vec<Value> = vals
                         .iter()
                         .map(|v| match v {
                             RExpr::Literal(lit) => literal_to_value(lit),
-                            _ => unreachable!(), // guarded by all_literals check
+                            _ => unreachable!(),
                         })
                         .collect();
-                    let key = expr as *const RBoolExpr as usize;
+                    let key = Self::hash_expr(expr);
                     sets.insert(key, precomputed);
                 }
             },
@@ -152,11 +159,21 @@ impl PreCompiledSets {
         }
     }
 
+    /// Compute a deterministic hash of an RBoolExpr node.
+    /// Uses the derived Hash impl on RBoolExpr.
+    #[inline]
+    fn hash_expr(expr: &RBoolExpr) -> u64 {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        expr.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Look up pre-compiled values for an IN/NotIn node.
     #[inline]
-    fn get(&self, expr: &RBoolExpr) -> Option<&Vec<Value>> {
-        let key = expr as *const RBoolExpr as usize;
-        self.sets.get(&key)
+    fn get(&self, expr: &RBoolExpr) -> Option<&[Value]> {
+        let key = Self::hash_expr(expr);
+        self.sets.get(&key).map(|v| v.as_slice())
     }
 }
 
@@ -642,8 +659,8 @@ impl<'a> Executor<'a> {
             },
             RBoolExpr::In(e, vals) => {
                 let v = self.evaluate_expr(e, binding)?;
-                // Use pre-compiled literal set if available (avoids re-evaluating
-                // constant values per row)
+                // Use pre-compiled literal set if available (keyed by structural
+                // hash of this expression node, no raw pointers)
                 if let Some(precomputed) = precompiled.get(expr) {
                     return Ok(precomputed.iter().any(|c| value_eq_loose(&v, c)));
                 }
