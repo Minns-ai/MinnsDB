@@ -881,16 +881,7 @@ impl Table {
     }
 
     fn decode_values(&self, row_bytes: &[u8]) -> Vec<CellValue> {
-        let mut values = Vec::with_capacity(self.schema.columns.len());
-        for (i, col) in self.schema.columns.iter().enumerate() {
-            values.push(row_codec::read_column(
-                &self.layout,
-                row_bytes,
-                i,
-                &col.col_type,
-            ));
-        }
-        values
+        row_codec::decode_row(&self.layout, row_bytes, &self.schema.columns).values
     }
 
     /// Add a secondary index on the given columns. Populates it from existing rows.

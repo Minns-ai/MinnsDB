@@ -686,6 +686,25 @@ impl Parser {
                 self.advance();
                 Ok(Literal::Null)
             },
+            // NODE(id) — graph node reference for NodeRef columns
+            Token::Ident(ref s) if s.eq_ignore_ascii_case("NODE") => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let id = match self.peek().clone() {
+                    Token::IntLit(i) if i >= 0 => {
+                        self.advance();
+                        i as u64
+                    },
+                    _ => {
+                        return Err(self.error(format!(
+                            "NODE() requires a non-negative integer id, found {:?}",
+                            self.peek()
+                        )));
+                    },
+                };
+                self.expect(&Token::RParen)?;
+                Ok(Literal::NodeRef(id))
+            },
             _ => Err(self.error(format!("expected literal, found {:?}", self.peek()))),
         }
     }

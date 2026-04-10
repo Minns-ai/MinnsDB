@@ -162,12 +162,18 @@ pub enum ColumnOffset {
 impl RowLayout {
     /// Compute layout from schema. Called once at table creation.
     pub fn from_schema(schema: &TableSchema) -> Self {
-        let null_bitmap_bytes = schema.columns.len().div_ceil(8);
+        Self::from_columns(&schema.columns)
+    }
+
+    /// Compute layout from a column slice. Used for ALTER TABLE compat decoding
+    /// when old rows were encoded with fewer columns than the current schema.
+    pub fn from_columns(columns: &[ColumnDef]) -> Self {
+        let null_bitmap_bytes = columns.len().div_ceil(8);
         let mut fixed_offset = 0usize;
         let mut var_idx = 0usize;
-        let mut column_offsets = Vec::with_capacity(schema.columns.len());
+        let mut column_offsets = Vec::with_capacity(columns.len());
 
-        for col in &schema.columns {
+        for col in columns {
             if let Some(size) = col.col_type.fixed_size() {
                 column_offsets.push(ColumnOffset::Fixed {
                     offset: fixed_offset,

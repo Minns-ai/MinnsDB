@@ -60,18 +60,22 @@ pub fn execute_table_query(
                 })?;
                 let map_name = alias.as_deref().unwrap_or(table_name.as_str());
 
-                // If we have a PK lookup optimization, use it
-                if let Some((ref opt_table, row_id)) = pk_lookup {
-                    if opt_table == table_name {
-                        if let Some(decoded) = table.get_active(group_id, row_id) {
-                            rows = vec![decoded_row_to_map(
-                                map_name,
-                                &table.schema.columns,
-                                &decoded,
-                            )];
+                // PK lookup optimization: only valid for ActiveOnly viewport since
+                // get_active() returns only the current version. For WHEN ALL / point-in-time /
+                // range queries we must fall through to the full scan path.
+                if matches!(plan.temporal_viewport, TemporalViewport::ActiveOnly) {
+                    if let Some((ref opt_table, row_id)) = pk_lookup {
+                        if opt_table == table_name {
+                            if let Some(decoded) = table.get_active(group_id, row_id) {
+                                rows = vec![decoded_row_to_map(
+                                    map_name,
+                                    &table.schema.columns,
+                                    &decoded,
+                                )];
+                            }
+                            active_tables.push(map_name.to_string());
+                            continue;
                         }
-                        active_tables.push(map_name.to_string());
-                        continue;
                     }
                 }
 
@@ -449,6 +453,7 @@ fn literal_to_cell_value(lit: &Literal) -> CellValue {
         Literal::Float(f) => CellValue::Float64(*f),
         Literal::Bool(b) => CellValue::Bool(*b),
         Literal::Null => CellValue::Null,
+        Literal::NodeRef(id) => CellValue::NodeRef(*id),
     }
 }
 
@@ -723,6 +728,7 @@ fn literal_to_value(lit: &super::ast::Literal) -> Value {
         super::ast::Literal::Float(f) => Value::Float(*f),
         super::ast::Literal::Bool(b) => Value::Bool(*b),
         super::ast::Literal::Null => Value::Null,
+        super::ast::Literal::NodeRef(id) => Value::Int(*id as i64),
     }
 }
 

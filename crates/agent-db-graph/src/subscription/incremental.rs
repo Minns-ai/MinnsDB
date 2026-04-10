@@ -1316,6 +1316,7 @@ fn literal_to_value_simple(lit: &Literal) -> Value {
         Literal::Float(f) => Value::Float(*f),
         Literal::Bool(b) => Value::Bool(*b),
         Literal::Null => Value::Null,
+        Literal::NodeRef(id) => Value::Int(*id as i64),
     }
 }
 

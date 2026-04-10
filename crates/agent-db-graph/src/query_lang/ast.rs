@@ -213,6 +213,8 @@ pub enum Literal {
     Float(f64),
     Bool(bool),
     Null,
+    /// Graph node reference: NODE(id). Used in INSERT for NodeRef columns.
+    NodeRef(u64),
 }
 
 impl Eq for Literal {}
@@ -226,6 +228,7 @@ impl std::hash::Hash for Literal {
             Literal::Float(f) => f.to_bits().hash(state),
             Literal::Bool(b) => b.hash(state),
             Literal::Null => {},
+            Literal::NodeRef(id) => id.hash(state),
         }
     }
 }

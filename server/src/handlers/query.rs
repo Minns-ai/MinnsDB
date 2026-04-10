@@ -573,6 +573,9 @@ fn literal_to_cell_value(
             agent_db_tables::types::CellValue::Bool(*b)
         },
         agent_db_graph::query_lang::ast::Literal::Null => agent_db_tables::types::CellValue::Null,
+        agent_db_graph::query_lang::ast::Literal::NodeRef(id) => {
+            agent_db_tables::types::CellValue::NodeRef(*id)
+        },
     }
 }
 

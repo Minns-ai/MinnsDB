@@ -321,6 +321,11 @@ pub fn read_column(
 }
 
 /// Decode a full row from page bytes back to CellValues.
+///
+/// Handles ALTER TABLE ADD COLUMN gracefully: if the row was encoded with
+/// fewer columns than the current schema (detected by comparing row byte
+/// length against the layout's minimum), a compat layout is computed for
+/// the original column set and missing columns receive their default value.
 pub fn decode_row(
     layout: &RowLayout,
     row_bytes: &[u8],
@@ -328,9 +333,26 @@ pub fn decode_row(
 ) -> DecodedRow {
     let hdr = read_header(row_bytes);
     let mut values = Vec::with_capacity(schema_columns.len());
-    for (i, col) in schema_columns.iter().enumerate() {
-        values.push(read_column(layout, row_bytes, i, &col.col_type));
+
+    if row_bytes.len() >= layout.min_row_size {
+        // Fast path: row matches current schema
+        for (i, col) in schema_columns.iter().enumerate() {
+            values.push(read_column(layout, row_bytes, i, &col.col_type));
+        }
+    } else {
+        // Compat path: row was encoded with fewer columns (ALTER TABLE ADD COLUMN).
+        // Find the original column count and decode with its layout.
+        let encoded_col_count = find_encoded_column_count(row_bytes.len(), schema_columns);
+        let compat_layout = RowLayout::from_columns(&schema_columns[..encoded_col_count]);
+        for (i, col) in schema_columns.iter().enumerate() {
+            if i < encoded_col_count {
+                values.push(read_column(&compat_layout, row_bytes, i, &col.col_type));
+            } else {
+                values.push(col.default_value.clone().unwrap_or(CellValue::Null));
+            }
+        }
     }
+
     DecodedRow {
         version_id: hdr.version_id,
         row_id: hdr.row_id,
@@ -341,6 +363,21 @@ pub fn decode_row(
         flags: hdr.flags,
         values,
     }
+}
+
+/// Find the maximum column count such that a layout for `cols[..count]`
+/// has `min_row_size <= row_len`. Columns are always appended, so the
+/// first K columns of the current schema are the exact schema the row
+/// was encoded with.
+fn find_encoded_column_count(row_len: usize, schema_columns: &[crate::schema::ColumnDef]) -> usize {
+    for k in (1..schema_columns.len()).rev() {
+        let test_layout = RowLayout::from_columns(&schema_columns[..k]);
+        if row_len >= test_layout.min_row_size {
+            return k;
+        }
+    }
+    // Fallback: if nothing matches, assume 0 columns (all defaults)
+    0
 }
 
 #[cfg(test)]
