@@ -89,6 +89,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/graph", get(handlers::get_graph))
         .route("/api/graph/context", get(handlers::get_graph_for_context))
         .route("/api/graph/persist", post(handlers::persist_graph))
+        .route("/api/graph/nodes/:id", delete(handlers::delete_node))
+        .route("/api/graph/edges/:id", delete(handlers::delete_edge))
         .route("/api/stats", get(handlers::get_stats))
         .route(
             "/api/world-model/stats",

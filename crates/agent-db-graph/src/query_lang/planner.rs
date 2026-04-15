@@ -22,7 +22,7 @@ pub type SlotIdx = u8;
 /// Strings are owned here; the executor never touches them.
 #[derive(Debug, Clone)]
 pub struct VarTable {
-    map: HashMap<String, SlotIdx>,
+    pub(super) map: HashMap<String, SlotIdx>,
     pub count: u8,
 }
 
@@ -88,11 +88,79 @@ pub enum RBoolExpr {
     FuncPredicate(String, Vec<RExpr>),
 }
 
-/// Resolve an AST `Expr` into an `RExpr` using the VarTable.
-fn resolve_expr(expr: &Expr, vt: &VarTable) -> Result<RExpr, QueryError> {
+// ---------------------------------------------------------------------------
+// Name resolution: scope-aware Expr → RExpr translation
+// ---------------------------------------------------------------------------
+//
+// MinnsQL mixes two naming contexts in one query language:
+//
+//   1. Graph-pattern variables, bound by MATCH clauses and referenced as
+//      `n`, `e`, `n.name`.
+//   2. Table column names, bound implicitly by FROM/JOIN clauses and
+//      referenced as `orders.id`, `customers.name`, or (the feature this
+//      module exists for) bare column names like `id` or `name`.
+//
+// A `ResolutionContext` carries both the graph `VarTable` and the list of
+// slot indices that correspond to tables currently in scope. It lets
+// `resolve_expr` handle three distinct cases for `Expr::Var(name)`:
+//
+//   - `name` is a bound graph variable → `RExpr::Var(slot)`, the classic
+//     graph-pattern behavior.
+//   - `name` is unknown and exactly one table is in scope → promote to
+//     `RExpr::Property(table_slot, name)`. The executor's property path
+//     then resolves the column from the row map at runtime.
+//   - `name` is unknown and zero or many tables are in scope → error.
+//     Zero tables means a pure graph query with an undefined variable;
+//     many tables means the column reference is ambiguous and the user
+//     must qualify.
+//
+// Qualified property references (`t.col`) resolve through the VarTable as
+// before — table aliases and table names are registered as pseudo-variables
+// in `plan()`, so `vt.lookup("app_store")` returns the table's slot.
+#[derive(Debug, Clone)]
+pub struct ResolutionContext<'a> {
+    /// Graph variable table, plus table aliases and table names registered
+    /// as pseudo-variables during FROM/JOIN planning.
+    pub vt: &'a VarTable,
+    /// Slot indices that correspond to tables (FROM table, JOIN tables).
+    /// Used to disambiguate bare column references from graph variables.
+    pub table_slots: &'a [SlotIdx],
+}
+
+impl<'a> ResolutionContext<'a> {
+    pub fn new(vt: &'a VarTable, table_slots: &'a [SlotIdx]) -> Self {
+        Self { vt, table_slots }
+    }
+
+    /// Build an ambiguity error listing the tables currently in scope.
+    fn ambiguous_bare_column(&self, name: &str) -> QueryError {
+        let tables: Vec<&str> = self
+            .vt
+            .map
+            .iter()
+            .filter_map(|(k, v)| {
+                if self.table_slots.contains(v) {
+                    Some(k.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        QueryError::PlanError(format!(
+            "Ambiguous bare column reference `{}` — qualify with a table name \
+             (tables in scope: {})",
+            name,
+            tables.join(", ")
+        ))
+    }
+}
+
+/// Resolve an AST `Expr` into an `RExpr` using a scope-aware resolution
+/// context. See the `ResolutionContext` doc for the full name-resolution rules.
+fn resolve_expr(expr: &Expr, ctx: &ResolutionContext) -> Result<RExpr, QueryError> {
     match expr {
         Expr::Property(var, prop) => {
-            let slot = vt.lookup(var).ok_or_else(|| {
+            let slot = ctx.vt.lookup(var).ok_or_else(|| {
                 QueryError::PlanError(format!("Unbound variable `{}` in expression", var))
             })?;
             Ok(RExpr::Property(slot, prop.clone()))
@@ -100,58 +168,73 @@ fn resolve_expr(expr: &Expr, vt: &VarTable) -> Result<RExpr, QueryError> {
         Expr::Literal(lit) => Ok(RExpr::Literal(lit.clone())),
         Expr::FuncCall(name, args) => {
             let resolved_args: Result<Vec<RExpr>, QueryError> =
-                args.iter().map(|a| resolve_expr(a, vt)).collect();
+                args.iter().map(|a| resolve_expr(a, ctx)).collect();
             Ok(RExpr::FuncCall(name.clone(), resolved_args?))
         },
         Expr::Var(var) => {
-            let slot = vt.lookup(var).ok_or_else(|| {
-                QueryError::PlanError(format!("Unbound variable `{}` in expression", var))
-            })?;
-            Ok(RExpr::Var(slot))
+            // Bound graph variable or table alias: return as Var, preserving
+            // pre-refactor semantics exactly. For graph queries this yields
+            // the MATCH-bound BoundValue; for table queries the table
+            // executor treats bare Var references as Null (same as before).
+            if let Some(slot) = ctx.vt.lookup(var) {
+                return Ok(RExpr::Var(slot));
+            }
+
+            // Unknown name: bare column reference. Promote to RExpr::Property
+            // against the active table scan when a single table is in scope,
+            // error if ambiguous, error if no tables in scope.
+            match ctx.table_slots.len() {
+                0 => Err(QueryError::PlanError(format!(
+                    "Unbound variable `{}` in expression",
+                    var
+                ))),
+                1 => Ok(RExpr::Property(ctx.table_slots[0], var.clone())),
+                _ => Err(ctx.ambiguous_bare_column(var)),
+            }
         },
         Expr::Star => Ok(RExpr::Star),
     }
 }
 
 /// Resolve an AST `BoolExpr` into an `RBoolExpr`.
-fn resolve_bool_expr(expr: &BoolExpr, vt: &VarTable) -> Result<RBoolExpr, QueryError> {
+fn resolve_bool_expr(expr: &BoolExpr, ctx: &ResolutionContext) -> Result<RBoolExpr, QueryError> {
     match expr {
         BoolExpr::Comparison(lhs, op, rhs) => Ok(RBoolExpr::Comparison(
-            resolve_expr(lhs, vt)?,
+            resolve_expr(lhs, ctx)?,
             op.clone(),
-            resolve_expr(rhs, vt)?,
+            resolve_expr(rhs, ctx)?,
         )),
-        BoolExpr::IsNull(e) => Ok(RBoolExpr::IsNull(resolve_expr(e, vt)?)),
-        BoolExpr::IsNotNull(e) => Ok(RBoolExpr::IsNotNull(resolve_expr(e, vt)?)),
+        BoolExpr::IsNull(e) => Ok(RBoolExpr::IsNull(resolve_expr(e, ctx)?)),
+        BoolExpr::IsNotNull(e) => Ok(RBoolExpr::IsNotNull(resolve_expr(e, ctx)?)),
         BoolExpr::In(e, vals) => {
             let resolved_vals: Result<Vec<RExpr>, QueryError> =
-                vals.iter().map(|v| resolve_expr(v, vt)).collect();
-            Ok(RBoolExpr::In(resolve_expr(e, vt)?, resolved_vals?))
+                vals.iter().map(|v| resolve_expr(v, ctx)).collect();
+            Ok(RBoolExpr::In(resolve_expr(e, ctx)?, resolved_vals?))
         },
         BoolExpr::NotIn(e, vals) => {
             let resolved_vals: Result<Vec<RExpr>, QueryError> =
-                vals.iter().map(|v| resolve_expr(v, vt)).collect();
-            Ok(RBoolExpr::NotIn(resolve_expr(e, vt)?, resolved_vals?))
+                vals.iter().map(|v| resolve_expr(v, ctx)).collect();
+            Ok(RBoolExpr::NotIn(resolve_expr(e, ctx)?, resolved_vals?))
         },
         BoolExpr::Between(e, low, high) => Ok(RBoolExpr::Between(
-            resolve_expr(e, vt)?,
-            resolve_expr(low, vt)?,
-            resolve_expr(high, vt)?,
+            resolve_expr(e, ctx)?,
+            resolve_expr(low, ctx)?,
+            resolve_expr(high, ctx)?,
         )),
-        BoolExpr::Like(e, pattern) => Ok(RBoolExpr::Like(resolve_expr(e, vt)?, pattern.clone())),
+        BoolExpr::Like(e, pattern) => Ok(RBoolExpr::Like(resolve_expr(e, ctx)?, pattern.clone())),
         BoolExpr::And(a, b) => Ok(RBoolExpr::And(
-            Box::new(resolve_bool_expr(a, vt)?),
-            Box::new(resolve_bool_expr(b, vt)?),
+            Box::new(resolve_bool_expr(a, ctx)?),
+            Box::new(resolve_bool_expr(b, ctx)?),
         )),
         BoolExpr::Or(a, b) => Ok(RBoolExpr::Or(
-            Box::new(resolve_bool_expr(a, vt)?),
-            Box::new(resolve_bool_expr(b, vt)?),
+            Box::new(resolve_bool_expr(a, ctx)?),
+            Box::new(resolve_bool_expr(b, ctx)?),
         )),
-        BoolExpr::Not(inner) => Ok(RBoolExpr::Not(Box::new(resolve_bool_expr(inner, vt)?))),
-        BoolExpr::Paren(inner) => Ok(RBoolExpr::Paren(Box::new(resolve_bool_expr(inner, vt)?))),
+        BoolExpr::Not(inner) => Ok(RBoolExpr::Not(Box::new(resolve_bool_expr(inner, ctx)?))),
+        BoolExpr::Paren(inner) => Ok(RBoolExpr::Paren(Box::new(resolve_bool_expr(inner, ctx)?))),
         BoolExpr::FuncPredicate(name, args) => {
             let resolved: Result<Vec<RExpr>, QueryError> =
-                args.iter().map(|a| resolve_expr(a, vt)).collect();
+                args.iter().map(|a| resolve_expr(a, ctx)).collect();
             Ok(RBoolExpr::FuncPredicate(name.clone(), resolved?))
         },
     }
@@ -307,13 +390,34 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
     let mut steps = Vec::new();
     let mut vt = VarTable::new();
 
+    // `table_slots` tracks one slot per distinct table in scope (FROM + JOIN).
+    // It is used by the name-resolution code to promote bare `Expr::Var(col)`
+    // references to `RExpr::Property(table_slot, col)` when there is exactly
+    // one table in scope, and to produce a clear ambiguity error when there
+    // are multiple tables.
+    //
+    // Important: when a table has both an alias and a real name, only the
+    // primary slot (the alias, or the name if no alias) goes into
+    // `table_slots`. The secondary entry in `VarTable` — the real name when
+    // aliased — still exists so that qualified references through both the
+    // alias and the real name (`t.col` and `orders.col` for `FROM orders AS t`)
+    // resolve correctly via the Property path. But including the secondary
+    // slot in `table_slots` would cause an aliased single-table query to
+    // falsely trip the multi-table ambiguity check.
+    let mut table_slots: Vec<SlotIdx> = Vec::new();
+
     // 1a. Process FROM table (if present) into a ScanTable step.
     // Register table names (or aliases) as pseudo-variables so property resolution works.
     if let Some(ref table_ref) = query.from_table {
-        // Register alias (or table name) as the variable for qualified column references
+        // Register alias (or table name) as the variable for qualified column references.
         let var_name = table_ref.alias.as_ref().unwrap_or(&table_ref.name);
-        vt.get_or_insert(var_name);
-        // Also register the real table name if alias differs (so both resolve)
+        let primary_slot = vt.get_or_insert(var_name);
+        table_slots.push(primary_slot);
+        // Also register the real table name when aliased so that both
+        // `alias.col` and `real_name.col` resolve through vt.lookup. This
+        // entry is NOT added to `table_slots`: it shares the same underlying
+        // scan, and treating it as a second table in scope would break the
+        // ambiguity check for aliased single-table queries.
         if table_ref.alias.is_some() {
             vt.get_or_insert(&table_ref.name);
         }
@@ -333,7 +437,10 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
     for join in &query.joins {
         // Register alias (or table name) as pseudo-variable for property resolution.
         let var_name = join.alias.as_ref().unwrap_or(&join.table);
-        vt.get_or_insert(var_name);
+        let primary_slot = vt.get_or_insert(var_name);
+        table_slots.push(primary_slot);
+        // Same aliased-resolution trick as FROM above: register the real name
+        // so qualified refs through it work, but do not add it to table_slots.
         if join.alias.is_some() {
             vt.get_or_insert(&join.table);
         }
@@ -346,6 +453,16 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
         });
     }
 
+    // Build the name-resolution context once; every expression resolved from
+    // here on routes through it. The context is a thin view — borrows both
+    // `vt` and `table_slots` — so it imposes no additional allocation.
+    //
+    // Bare-column promotion is gated on `table_slots.len() == 1`, which
+    // distinguishes single-table queries (where `WHERE key = "x"` is
+    // unambiguous and can be resolved to the FROM table) from multi-table
+    // queries (where the user must qualify, or get an ambiguity error).
+    let ctx = ResolutionContext::new(&vt, &table_slots);
+
     // 2. Process WHEN clause into a temporal viewport.
     let temporal_viewport = plan_when(&query.when)?;
 
@@ -357,15 +474,11 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
 
     // 3. Process WHERE clause into a Filter step (resolve to RBoolExpr).
     if let Some(ref cond) = query.where_clause {
-        // For table queries, WHERE references may be table.column (Property nodes).
-        // resolve_bool_expr handles Expr::Property via VarTable, but table columns
-        // don't have slot variables. We pass them through as-is; the executor
-        // resolves table.column references at runtime.
-        steps.push(PlanStep::Filter(resolve_bool_expr(cond, &vt)?));
+        steps.push(PlanStep::Filter(resolve_bool_expr(cond, &ctx)?));
     }
 
     // 4. Process RETURN into projections, aggregations, and group-by keys.
-    let (projections, aggregations, mut group_by_keys) = plan_return(&query.returns, &vt)?;
+    let (projections, aggregations, mut group_by_keys) = plan_return(&query.returns, &ctx)?;
 
     // 4b. Merge explicit GROUP BY expressions into group_by_keys.
     for gb_expr in &query.group_by {
@@ -385,9 +498,9 @@ pub fn plan(query: Query) -> Result<ExecutionPlan, QueryError> {
         })
         .collect();
 
-    // 6. HAVING clause (resolved against the same variable table)
+    // 6. HAVING clause (resolved against the same resolution context)
     let having = match &query.having {
-        Some(expr) => Some(resolve_bool_expr(expr, &vt)?),
+        Some(expr) => Some(resolve_bool_expr(expr, &ctx)?),
         None => None,
     };
 
@@ -739,7 +852,7 @@ pub fn parse_duration_nanos(s: &str) -> Result<u64, String> {
 /// Translate RETURN items into projections, aggregations, and group-by keys.
 fn plan_return(
     items: &[ReturnItem],
-    vt: &VarTable,
+    ctx: &ResolutionContext,
 ) -> Result<(Vec<Projection>, Vec<Aggregation>, Vec<String>), QueryError> {
     let mut projections = Vec::new();
     let mut aggregations = Vec::new();
@@ -756,7 +869,7 @@ fn plan_return(
                 let input_ast = args.first().cloned().unwrap_or(Expr::Star);
                 aggregations.push(Aggregation {
                     function: agg_fn,
-                    input_expr: resolve_expr(&input_ast, vt)?,
+                    input_expr: resolve_expr(&input_ast, ctx)?,
                     output_alias: alias.clone(),
                 });
             }
@@ -765,7 +878,7 @@ fn plan_return(
         }
 
         projections.push(Projection {
-            expr: resolve_expr(&item.expr, vt)?,
+            expr: resolve_expr(&item.expr, ctx)?,
             alias,
             distinct: item.distinct,
         });
@@ -810,6 +923,7 @@ fn expr_to_alias(expr: &Expr, index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_lang::parser::Parser;
 
     /// Helper: minimal query with no match/where/when/order/limit.
     fn empty_query() -> Query {
@@ -1242,11 +1356,152 @@ mod tests {
         }
     }
 
-    // resolve_expr catches unbound variables.
+    // resolve_expr catches unbound variables when there are no tables in
+    // scope (a pure graph query with an undefined variable).
     #[test]
     fn test_resolve_unbound_variable_error() {
         let vt = VarTable::new();
+        let ctx = ResolutionContext::new(&vt, &[]);
         let expr = Expr::Var("x".into());
-        assert!(resolve_expr(&expr, &vt).is_err());
+        assert!(resolve_expr(&expr, &ctx).is_err());
+    }
+
+    // Bare column reference promotes to Property when a single table is in
+    // scope — the feature that unblocks `FROM t WHERE col = "x"`.
+    #[test]
+    fn test_resolve_bare_column_promotes_to_property_single_table() {
+        let mut vt = VarTable::new();
+        let table_slot = vt.get_or_insert("app_store");
+        let table_slots = vec![table_slot];
+        let ctx = ResolutionContext::new(&vt, &table_slots);
+        let expr = Expr::Var("key".into());
+        match resolve_expr(&expr, &ctx).unwrap() {
+            RExpr::Property(slot, prop) => {
+                assert_eq!(slot, table_slot);
+                assert_eq!(prop, "key");
+            },
+            other => panic!("expected Property, got {:?}", other),
+        }
+    }
+
+    // Bare column reference errors with a qualification hint when multiple
+    // tables are in scope.
+    #[test]
+    fn test_resolve_bare_column_ambiguous_multi_table() {
+        let mut vt = VarTable::new();
+        let orders_slot = vt.get_or_insert("orders");
+        let customers_slot = vt.get_or_insert("customers");
+        let table_slots = vec![orders_slot, customers_slot];
+        let ctx = ResolutionContext::new(&vt, &table_slots);
+        let expr = Expr::Var("name".into());
+        let err = resolve_expr(&expr, &ctx).unwrap_err();
+        match err {
+            QueryError::PlanError(msg) => {
+                assert!(
+                    msg.contains("Ambiguous"),
+                    "error should mention ambiguity: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("orders") && msg.contains("customers"),
+                    "error should list both tables: {}",
+                    msg
+                );
+            },
+            other => panic!("expected PlanError, got {:?}", other),
+        }
+    }
+
+    // Graph variables still resolve to Var — bare column promotion does not
+    // shadow or replace the graph-pattern variable lookup.
+    #[test]
+    fn test_resolve_graph_var_not_promoted_when_table_also_in_scope() {
+        let mut vt = VarTable::new();
+        let graph_slot = vt.get_or_insert("n"); // graph variable from MATCH
+        let table_slot = vt.get_or_insert("orders"); // table from JOIN
+        let table_slots = vec![table_slot];
+        let ctx = ResolutionContext::new(&vt, &table_slots);
+        // `n` is a bound graph variable, resolves to Var even though a table
+        // is in scope.
+        let expr = Expr::Var("n".into());
+        match resolve_expr(&expr, &ctx).unwrap() {
+            RExpr::Var(slot) => assert_eq!(slot, graph_slot),
+            other => panic!("expected Var, got {:?}", other),
+        }
+    }
+
+    // Bug 1 regression: an aliased single-table query must not trip the
+    // multi-table ambiguity check. The plan() function registers both the
+    // alias and the real name in the VarTable, but only the primary slot
+    // goes into table_slots — treating aliased single-tables as having one
+    // distinct scan in scope, not two.
+    #[test]
+    fn test_plan_aliased_single_table_bare_column_is_not_ambiguous() {
+        let ast =
+            Parser::parse(r#"FROM app_store AS s WHERE key = "x" RETURN value"#).expect("parse");
+        let plan = plan(ast).expect(
+            "aliased single-table with bare column should plan (not ambiguous), but failed",
+        );
+        // Filter step must reference the alias slot via Property, not Var.
+        let filter = plan
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                PlanStep::Filter(cond) => Some(cond),
+                _ => None,
+            })
+            .expect("expected a Filter step");
+        match filter {
+            RBoolExpr::Comparison(lhs, _, _) => match lhs {
+                RExpr::Property(_, prop) => assert_eq!(prop, "key"),
+                other => panic!("expected Property for bare column, got {:?}", other),
+            },
+            other => panic!("expected Comparison, got {:?}", other),
+        }
+    }
+
+    // Bug 2 regression: `RETURN <bare-table-alias>` in a table query must
+    // not be promoted to a Property lookup. It stays as Var(slot), which
+    // the table executor treats as Null — matching pre-refactor semantics.
+    #[test]
+    fn test_plan_return_bare_table_alias_stays_as_var() {
+        let ast = Parser::parse("FROM orders RETURN orders").expect("parse");
+        let plan = plan(ast).expect("plan");
+        let first_projection = &plan.projections[0];
+        match &first_projection.expr {
+            RExpr::Var(_) => { /* correct: preserves pre-refactor semantics */ },
+            RExpr::Property(_, _) => panic!(
+                "Bug 2 regression: `RETURN orders` in `FROM orders` should stay as Var, \
+                 not be promoted to Property — that would silently change semantics \
+                 for any schema with a column literally named `orders`"
+            ),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    // Exhaustive multi-table ambiguity: aliased tables in a multi-table
+    // query still count as distinct scans and must error on bare columns.
+    #[test]
+    fn test_plan_multi_table_with_aliases_bare_column_is_ambiguous() {
+        let ast = Parser::parse(
+            "FROM orders AS o JOIN customers AS c ON o.customer_id = c.id RETURN name",
+        )
+        .expect("parse");
+        let err = plan(ast).expect_err("should be ambiguous");
+        match err {
+            QueryError::PlanError(msg) => {
+                assert!(
+                    msg.contains("Ambiguous"),
+                    "expected ambiguity error: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("o") && msg.contains("c"),
+                    "error should list both aliases: {}",
+                    msg
+                );
+            },
+            other => panic!("expected PlanError, got {:?}", other),
+        }
     }
 }

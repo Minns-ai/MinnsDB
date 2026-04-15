@@ -1,4 +1,4 @@
-// Graph visualization handlers
+// Graph visualization and mutation handlers
 
 use crate::errors::ApiError;
 use crate::models::{
@@ -8,9 +8,10 @@ use crate::models::{
 use crate::state::AppState;
 use crate::write_lanes::WriteJob;
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     Json,
 };
+use serde::Serialize;
 use tracing::info;
 
 // GET /api/graph - Get graph structure
@@ -157,4 +158,52 @@ pub async fn get_stats(State(state): State<AppState>) -> Result<Json<StatsRespon
         average_processing_time_ms: stats.average_processing_time_ms,
         stores: store_metrics,
     }))
+}
+
+// -- Delete responses --
+
+#[derive(Serialize)]
+pub struct DeleteNodeResponse {
+    pub deleted: bool,
+    pub node_id: u64,
+}
+
+#[derive(Serialize)]
+pub struct DeleteEdgeResponse {
+    pub deleted: bool,
+    pub edge_id: u64,
+}
+
+// DELETE /api/graph/nodes/:id - Hard delete a node and all its edges
+pub async fn delete_node(
+    State(state): State<AppState>,
+    Path(node_id): Path<u64>,
+) -> Result<Json<DeleteNodeResponse>, ApiError> {
+    info!("Deleting node {}", node_id);
+
+    if state.engine.delete_node(node_id).await {
+        Ok(Json(DeleteNodeResponse {
+            deleted: true,
+            node_id,
+        }))
+    } else {
+        Err(ApiError::NotFound(format!("node {} not found", node_id)))
+    }
+}
+
+// DELETE /api/graph/edges/:id - Hard delete a single edge
+pub async fn delete_edge(
+    State(state): State<AppState>,
+    Path(edge_id): Path<u64>,
+) -> Result<Json<DeleteEdgeResponse>, ApiError> {
+    info!("Deleting edge {}", edge_id);
+
+    if state.engine.delete_edge(edge_id).await {
+        Ok(Json(DeleteEdgeResponse {
+            deleted: true,
+            edge_id,
+        }))
+    } else {
+        Err(ApiError::NotFound(format!("edge {} not found", edge_id)))
+    }
 }

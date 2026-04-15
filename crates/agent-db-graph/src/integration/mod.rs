@@ -16,6 +16,7 @@ mod execution;
 mod export_import;
 mod graph_analytics;
 mod graph_building;
+mod graph_delete;
 mod lifecycle;
 mod ontology;
 mod persistence;

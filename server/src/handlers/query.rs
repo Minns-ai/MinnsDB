@@ -42,6 +42,14 @@ fn map_query_error(e: &agent_db_graph::query_lang::QueryError) -> ApiError {
         agent_db_graph::query_lang::QueryError::ParseError { message, position } => {
             ApiError::BadRequest(format!("Parse error at position {}: {}", position, message))
         },
+        // Plan errors are always user-facing: the query parsed but can't be
+        // lowered — unbound variable, ambiguous bare column reference, type
+        // mismatch between a predicate and its column, etc. These should
+        // return 400, not 500. A 500 here would cause false-positive alerts
+        // in production and hide the fact that the user's query is broken.
+        agent_db_graph::query_lang::QueryError::PlanError(msg) => {
+            ApiError::BadRequest(format!("Plan error: {}", msg))
+        },
         agent_db_graph::query_lang::QueryError::Timeout => {
             ApiError::GatewayTimeout("Query execution timed out".into())
         },

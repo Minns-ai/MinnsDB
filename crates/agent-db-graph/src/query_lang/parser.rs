@@ -50,11 +50,15 @@ impl Parser {
                 ))),
             }
         } else if parser.at(&Token::Create) {
-            // Peek next token to distinguish CREATE TABLE vs CREATE [UNIQUE] INDEX
+            // Peek next token to distinguish CREATE TABLE vs CREATE [UNIQUE] INDEX.
+            // `INDEX`, `UNIQUE`, and `TABLE` are soft keywords (Token::Ident).
+            let is_ident_kw = |tok: Option<&Token>, kw: &str| -> bool {
+                matches!(tok, Some(Token::Ident(s)) if s.eq_ignore_ascii_case(kw))
+            };
             let next = parser.tokens.get(parser.pos + 1).map(|s| &s.token);
             let next2 = parser.tokens.get(parser.pos + 2).map(|s| &s.token);
-            if next == Some(&Token::Index)
-                || (next == Some(&Token::Unique) && next2 == Some(&Token::Index))
+            if is_ident_kw(next, "INDEX")
+                || (is_ident_kw(next, "UNIQUE") && is_ident_kw(next2, "INDEX"))
             {
                 parser.parse_create_index().map(Statement::CreateIndex)
             } else {
@@ -82,11 +86,14 @@ impl Parser {
         // Determine query shape: MATCH or FROM
         let (match_clauses, from_table) = if self.at(&Token::From) {
             self.advance(); // consume FROM
-            let table_name = self.expect_ident_or_keyword()?;
-            // Optional alias: FROM table AS alias, or FROM table alias
+            let table_name = self.expect_ident()?;
+            // Optional alias: `FROM table AS alias`, or `FROM table alias`.
+            // The bare-alias form must not swallow a following clause keyword.
+            // Clause-delimiter keywords retain their specialized tokens, so a
+            // negative check against the known set is still exhaustive.
             let alias = if self.at(&Token::As) {
                 self.advance();
-                Some(self.expect_ident_or_keyword()?)
+                Some(self.expect_ident()?)
             } else if matches!(self.peek(), Token::Ident(_))
                 && !self.at(&Token::Join)
                 && !self.at(&Token::Left)
@@ -284,14 +291,12 @@ impl Parser {
         self.advance();
 
         // WHEN ALL
-        if self.at(&Token::All) {
-            self.advance();
+        if self.consume_keyword("ALL") {
             return Ok(Some(WhenClause::All));
         }
 
         // WHEN LAST "duration"
-        if self.at(&Token::Last) {
-            self.advance();
+        if self.consume_keyword("LAST") {
             match self.peek().clone() {
                 Token::StringLit(s) => {
                     let val = s.clone();
@@ -304,8 +309,7 @@ impl Parser {
 
         // WHEN expr [TO expr]
         let expr1 = self.parse_expr()?;
-        if self.at(&Token::To) {
-            self.advance();
+        if self.consume_keyword("TO") {
             let expr2 = self.parse_expr()?;
             Ok(Some(WhenClause::Range(expr1, expr2)))
         } else {
@@ -734,12 +738,12 @@ impl Parser {
                 break;
             };
 
-            let table = self.expect_ident_or_keyword()?;
+            let table = self.expect_ident()?;
 
             // Optional alias: JOIN table AS alias, or JOIN table alias
             let alias = if self.at(&Token::As) {
                 self.advance();
-                Some(self.expect_ident_or_keyword()?)
+                Some(self.expect_ident()?)
             } else if matches!(self.peek(), Token::Ident(_)) && !self.at(&Token::On) {
                 Some(self.expect_ident()?)
             } else {
@@ -769,10 +773,10 @@ impl Parser {
     }
 
     fn parse_join_side(&mut self) -> Result<JoinSide, QueryError> {
-        let name = self.expect_ident_or_keyword()?;
+        let name = self.expect_ident()?;
         if self.at(&Token::Dot) {
             self.advance();
-            let col = self.expect_ident_or_keyword()?;
+            let col = self.expect_ident()?;
             Ok(JoinSide::TableColumn {
                 table: name,
                 column: col,
@@ -787,8 +791,8 @@ impl Parser {
     /// CREATE TABLE name (col_defs [, constraints])
     fn parse_create_table(&mut self) -> Result<CreateTableStmt, QueryError> {
         self.expect(&Token::Create)?;
-        self.expect(&Token::Table)?;
-        let name = self.expect_ident_or_keyword()?;
+        self.expect_keyword("TABLE")?;
+        let name = self.expect_ident()?;
         self.expect(&Token::LParen)?;
 
         let mut columns = Vec::new();
@@ -799,18 +803,30 @@ impl Parser {
                 break;
             }
 
-            // Check for table-level constraints: PRIMARY KEY(...), UNIQUE(...)
-            if self.at(&Token::Primary) {
-                self.advance();
-                self.expect(&Token::Key)?;
+            // Table-level constraints require two-token lookahead so that
+            // `CREATE TABLE t (primary INT)` parses `primary` as a column name
+            // rather than committing to a broken PRIMARY KEY constraint:
+            //   `PRIMARY KEY (...)`  → table constraint
+            //   `UNIQUE (...)`       → table constraint
+            //   `primary INT`        → column definition (column named `primary`)
+            //   `unique VARCHAR`     → column definition (column named `unique`)
+            let next_tok = self.tokens.get(self.pos + 1).map(|s| &s.token);
+            let is_primary_constraint = self.at_keyword("PRIMARY")
+                && matches!(next_tok, Some(Token::Ident(s)) if s.eq_ignore_ascii_case("KEY"));
+            let is_unique_constraint =
+                self.at_keyword("UNIQUE") && matches!(next_tok, Some(Token::LParen));
+
+            if is_primary_constraint {
+                self.expect_keyword("PRIMARY")?;
+                self.expect_keyword("KEY")?;
                 self.expect(&Token::LParen)?;
                 let cols = self.parse_ident_list()?;
                 self.expect(&Token::RParen)?;
                 constraints.push(ConstraintAst {
                     kind: ConstraintKind::PrimaryKey(cols),
                 });
-            } else if self.at(&Token::Unique) {
-                self.advance();
+            } else if is_unique_constraint {
+                self.expect_keyword("UNIQUE")?;
                 self.expect(&Token::LParen)?;
                 let cols = self.parse_ident_list()?;
                 self.expect(&Token::RParen)?;
@@ -848,34 +864,38 @@ impl Parser {
 
     /// Parse a single column def: name Type [NOT NULL] [PRIMARY KEY] [DEFAULT literal] [AUTOINCREMENT] [REFERENCES GRAPH]
     fn parse_column_def(&mut self) -> Result<ColumnDefAst, QueryError> {
-        let name = self.expect_ident_or_keyword()?;
-        let col_type = self.expect_ident_or_keyword()?;
+        let name = self.expect_ident()?;
+        let col_type = self.expect_ident()?;
         let mut nullable = true;
         let mut is_primary_key = false;
         let mut default_value = None;
         let mut autoincrement = false;
 
-        // Optional modifiers (any order)
+        // Optional modifiers (any order). Modifier keywords are soft keywords
+        // (`PRIMARY`, `DEFAULT`, `AUTOINCREMENT`, `REFERENCES`) lexed as Ident.
+        // Inside the modifier loop there is no ambiguity with column names —
+        // a column def ends at `,` or `)` — so a direct `at_keyword` check is
+        // sufficient.
         loop {
             if self.at(&Token::Not) {
                 self.advance();
                 self.expect(&Token::Null)?;
                 nullable = false;
-            } else if self.at(&Token::Primary) {
+            } else if self.at_keyword("PRIMARY") {
                 self.advance();
-                self.expect(&Token::Key)?;
+                self.expect_keyword("KEY")?;
                 is_primary_key = true;
                 nullable = false; // PKs are implicitly NOT NULL
-            } else if self.at(&Token::Default) {
+            } else if self.at_keyword("DEFAULT") {
                 self.advance();
                 default_value = Some(self.parse_literal()?);
-            } else if self.at(&Token::Autoincrement) {
+            } else if self.at_keyword("AUTOINCREMENT") {
                 self.advance();
                 autoincrement = true;
                 nullable = false; // auto-increment columns are implicitly NOT NULL
-            } else if self.at(&Token::References) {
+            } else if self.at_keyword("REFERENCES") {
                 self.advance();
-                self.expect(&Token::Graph)?;
+                self.expect_keyword("GRAPH")?;
             } else {
                 break;
             }
@@ -894,16 +914,11 @@ impl Parser {
     /// CREATE [UNIQUE] INDEX name ON table (col1, col2, ...)
     fn parse_create_index(&mut self) -> Result<CreateIndexStmt, QueryError> {
         self.expect(&Token::Create)?;
-        let unique = if self.at(&Token::Unique) {
-            self.advance();
-            true
-        } else {
-            false
-        };
-        self.expect(&Token::Index)?;
-        let index_name = self.expect_ident_or_keyword()?;
+        let unique = self.consume_keyword("UNIQUE");
+        self.expect_keyword("INDEX")?;
+        let index_name = self.expect_ident()?;
         self.expect(&Token::On)?;
-        let table = self.expect_ident_or_keyword()?;
+        let table = self.expect_ident()?;
         self.expect(&Token::LParen)?;
         let columns = self.parse_ident_list()?;
         self.expect(&Token::RParen)?;
@@ -918,24 +933,22 @@ impl Parser {
     /// DROP TABLE name
     fn parse_drop_table(&mut self) -> Result<Statement, QueryError> {
         self.expect(&Token::Drop)?;
-        self.expect(&Token::Table)?;
-        let name = self.expect_ident_or_keyword()?;
+        self.expect_keyword("TABLE")?;
+        let name = self.expect_ident()?;
         Ok(Statement::DropTable(name))
     }
 
     /// ALTER TABLE name ADD [COLUMN] col_def [, ADD [COLUMN] col_def ...]
     fn parse_alter_table(&mut self) -> Result<AlterTableStmt, QueryError> {
         self.expect(&Token::Alter)?;
-        self.expect(&Token::Table)?;
-        let table = self.expect_ident_or_keyword()?;
+        self.expect_keyword("TABLE")?;
+        let table = self.expect_ident()?;
 
         let mut add_columns = Vec::new();
         loop {
-            self.expect(&Token::Add)?;
+            self.expect_keyword("ADD")?;
             // Optional COLUMN keyword
-            if self.at(&Token::Column) {
-                self.advance();
-            }
+            self.consume_keyword("COLUMN");
             add_columns.push(self.parse_column_def()?);
             if !self.at(&Token::Comma) {
                 break;
@@ -951,13 +964,13 @@ impl Parser {
     /// INSERT INTO table [(columns)] VALUES (vals) [, (vals)]*
     fn parse_insert_into(&mut self) -> Result<InsertStmt, QueryError> {
         self.expect(&Token::Insert)?;
-        self.expect(&Token::Into)?;
-        let table = self.expect_ident_or_keyword()?;
+        self.expect_keyword("INTO")?;
+        let table = self.expect_ident()?;
 
         // Optional column list
         let columns = if self.at(&Token::LParen) {
-            // Could be column list or VALUES
-            // Peek ahead: if next token after LParen is an ident (not a literal), it's columns
+            // Could be column list or VALUES.
+            // Peek ahead: if next token after LParen is an ident (not a literal), it's columns.
             let saved = self.pos;
             self.advance(); // consume (
             if matches!(self.peek(), Token::Ident(_)) {
@@ -973,7 +986,7 @@ impl Parser {
             None
         };
 
-        self.expect(&Token::Values)?;
+        self.expect_keyword("VALUES")?;
 
         let mut rows = Vec::new();
         loop {
@@ -1005,12 +1018,12 @@ impl Parser {
     /// UPDATE table SET col = expr [, col = expr]* WHERE condition
     fn parse_update_table(&mut self) -> Result<UpdateStmt, QueryError> {
         self.expect(&Token::Update)?;
-        let table = self.expect_ident_or_keyword()?;
-        self.expect(&Token::Set)?;
+        let table = self.expect_ident()?;
+        self.expect_keyword("SET")?;
 
         let mut assignments = Vec::new();
         loop {
-            let col = self.expect_ident_or_keyword()?;
+            let col = self.expect_ident()?;
             self.expect(&Token::Eq)?;
             let val = self.parse_expr()?;
             assignments.push((col, val));
@@ -1037,7 +1050,7 @@ impl Parser {
     fn parse_delete_from(&mut self) -> Result<DeleteStmt, QueryError> {
         self.expect(&Token::Delete)?;
         self.expect(&Token::From)?;
-        let table = self.expect_ident_or_keyword()?;
+        let table = self.expect_ident()?;
 
         if !self.at(&Token::Where) {
             return Err(self.error("DELETE FROM requires a WHERE clause".into()));
@@ -1053,10 +1066,10 @@ impl Parser {
 
     /// Parse comma-separated identifier list.
     fn parse_ident_list(&mut self) -> Result<Vec<String>, QueryError> {
-        let mut names = vec![self.expect_ident_or_keyword()?];
+        let mut names = vec![self.expect_ident()?];
         while self.at(&Token::Comma) {
             self.advance();
-            names.push(self.expect_ident_or_keyword()?);
+            names.push(self.expect_ident()?);
         }
         Ok(names)
     }
@@ -1106,53 +1119,38 @@ impl Parser {
         }
     }
 
-    /// Like expect_ident but also accepts keywords that might be used as names
-    /// (e.g. table names like "orders", column types like "String").
-    fn expect_ident_or_keyword(&mut self) -> Result<String, QueryError> {
-        match self.peek().clone() {
-            Token::Ident(name) => {
-                let name = name.clone();
-                self.advance();
-                Ok(name)
-            },
-            // Allow keywords as identifiers in DDL/DML contexts
-            Token::Table => {
-                self.advance();
-                Ok("table".into())
-            },
-            Token::Key => {
-                self.advance();
-                Ok("key".into())
-            },
-            Token::Set => {
-                self.advance();
-                Ok("set".into())
-            },
-            Token::Graph => {
-                self.advance();
-                Ok("graph".into())
-            },
-            Token::Order => {
-                self.advance();
-                Ok("order".into())
-            },
-            Token::All => {
-                self.advance();
-                Ok("all".into())
-            },
-            Token::Last => {
-                self.advance();
-                Ok("last".into())
-            },
-            Token::From => {
-                self.advance();
-                Ok("from".into())
-            },
-            Token::Values => {
-                self.advance();
-                Ok("values".into())
-            },
-            other => Err(self.error(format!("expected identifier, found {:?}", other))),
+    // ── Soft-keyword helpers ────────────────────────────────────────────
+    //
+    // Most MinnsQL keywords (`TABLE`, `PRIMARY`, `KEY`, `VALUES`, `SET`, etc.)
+    // lex as `Token::Ident(String)` and are recognized by case-insensitive
+    // string comparison at the specific parser sites where they have
+    // structural meaning. These helpers are the canonical way to do that
+    // recognition, replacing the hand-written `Token::X` matches that used
+    // to pepper the DDL and clause-parsing code.
+
+    /// True if the current token is an `Ident` matching `kw` case-insensitively.
+    fn at_keyword(&self, kw: &str) -> bool {
+        matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case(kw))
+    }
+
+    /// If the current token is `Ident(kw)` (case-insensitive), consume it and
+    /// return `true`. Otherwise leave the position alone and return `false`.
+    fn consume_keyword(&mut self, kw: &str) -> bool {
+        if self.at_keyword(kw) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Require the current token to be `Ident(kw)` (case-insensitive), consume
+    /// it, and return Ok. Error with a position-bearing parse error otherwise.
+    fn expect_keyword(&mut self, kw: &str) -> Result<(), QueryError> {
+        if self.consume_keyword(kw) {
+            Ok(())
+        } else {
+            Err(self.error(format!("expected `{}`, found {:?}", kw, self.peek())))
         }
     }
 
@@ -1613,6 +1611,40 @@ mod tests {
         assert_eq!(q.returns.len(), 2);
     }
 
+    /// Regression: keyword-named columns used to fail parsing at expression
+    /// position because the lexer emitted `Token::Key` and the expression
+    /// parser only accepted `Token::Ident`. After the soft-keyword refactor,
+    /// `key` lexes as `Token::Ident("key")` and parses everywhere an
+    /// identifier is expected.
+    #[test]
+    fn test_keyword_named_column_qualified() {
+        let q = Parser::parse(
+            r#"FROM app_store WHERE app_store.key = "env_overrides" RETURN app_store.value"#,
+        )
+        .expect("parse");
+        assert_eq!(q.from_table.as_ref().unwrap().name, "app_store");
+        assert_eq!(q.returns.len(), 1);
+        // RETURN expression is `Expr::Property("app_store", "value")`
+        match &q.returns[0].expr {
+            Expr::Property(var, prop) => {
+                assert_eq!(var, "app_store");
+                assert_eq!(prop, "value");
+            },
+            other => panic!("expected Property, got {:?}", other),
+        }
+        // WHERE comparison LHS is `Expr::Property("app_store", "key")`
+        match q.where_clause.as_ref().unwrap() {
+            BoolExpr::Comparison(lhs, _op, _rhs) => match lhs {
+                Expr::Property(var, prop) => {
+                    assert_eq!(var, "app_store");
+                    assert_eq!(prop, "key");
+                },
+                other => panic!("expected Property, got {:?}", other),
+            },
+            other => panic!("expected Comparison, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_from_table_with_temporal() {
         let q = Parser::parse("FROM orders WHEN ALL RETURN id, amount").unwrap();
@@ -1801,6 +1833,250 @@ mod tests {
                 assert_eq!(alt.add_columns[1].name, "weight");
             },
             other => panic!("expected AlterTable, got {:?}", other),
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Soft-keyword regression matrix
+    //
+    // Every keyword that the soft-keyword refactor moved from specialized
+    // Token to plain Ident is exercised here across every expression
+    // position: bare WHERE, qualified WHERE, bare RETURN, qualified RETURN,
+    // AS alias, ORDER BY, GROUP BY, inline property literal, INSERT column
+    // list, UPDATE SET column, CREATE TABLE column def, and DELETE WHERE.
+    // These tests lock in the post-refactor behavior — a future regression
+    // that reintroduces the bug will fail exactly one of them and point
+    // directly at the class of call site to fix.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Exact regression for the user-reported query that motivated the
+    /// soft-keyword refactor. Parses and produces the expected AST shape.
+    #[test]
+    fn test_user_kv_query_qualified() {
+        let q = Parser::parse(
+            r#"FROM app_store WHERE app_store.key = "env_overrides" RETURN app_store.value"#,
+        )
+        .expect("parse");
+        assert_eq!(q.from_table.as_ref().unwrap().name, "app_store");
+    }
+
+    /// Bare form: `WHERE key = "x" RETURN value` (no qualification).
+    /// Phase 1+2 makes this parse; Phase 3 makes it plan and execute.
+    #[test]
+    fn test_user_kv_query_bare() {
+        let q = Parser::parse(r#"FROM app_store WHERE key = "env_overrides" RETURN value"#)
+            .expect("parse");
+        assert_eq!(q.from_table.as_ref().unwrap().name, "app_store");
+        assert_eq!(q.returns.len(), 1);
+        match &q.returns[0].expr {
+            Expr::Var(name) => assert_eq!(name, "value"),
+            other => panic!("expected Var, got {:?}", other),
+        }
+    }
+
+    /// Every keyword that was converted to a soft keyword, used as a
+    /// qualified column reference in WHERE. The test is parameterized so
+    /// the list matches the canonical soft-keyword set in the lexer.
+    #[test]
+    fn test_soft_keywords_in_qualified_where() {
+        let soft_kws = [
+            "table",
+            "primary",
+            "key",
+            "unique",
+            "references",
+            "graph",
+            "default",
+            "autoincrement",
+            "index",
+            "column",
+            "add",
+            "into",
+            "values",
+            "set",
+            "all",
+            "last",
+            "to",
+        ];
+        for kw in soft_kws {
+            let src = format!(r#"FROM t WHERE t.{kw} = "x" RETURN t.{kw}"#, kw = kw);
+            Parser::parse(&src).unwrap_or_else(|e| panic!("should parse `{}`: {:?}", kw, e));
+        }
+    }
+
+    /// Same soft-keyword matrix but in bare form (unqualified). The parser
+    /// produces `Expr::Var(kw)`; the planner will later promote this to
+    /// `RExpr::Property(table_slot, kw)` when a single table is in scope.
+    #[test]
+    fn test_soft_keywords_in_bare_where() {
+        let soft_kws = [
+            "key", "table", "set", "graph", "all", "last", "default", "index",
+        ];
+        for kw in soft_kws {
+            let src = format!(r#"FROM t WHERE {kw} = "x" RETURN {kw}"#, kw = kw);
+            Parser::parse(&src).unwrap_or_else(|e| panic!("should parse bare `{}`: {:?}", kw, e));
+        }
+    }
+
+    /// Soft keywords as AS aliases in RETURN. Previously failed because
+    /// `expect_ident()` for the alias name rejected the specialized keyword
+    /// tokens. Now works because the tokens are plain idents.
+    #[test]
+    fn test_soft_keywords_as_return_alias() {
+        let q = Parser::parse(r#"FROM t RETURN t.x AS key, t.y AS table"#).unwrap();
+        assert_eq!(q.returns.len(), 2);
+        assert_eq!(q.returns[0].alias.as_deref(), Some("key"));
+        assert_eq!(q.returns[1].alias.as_deref(), Some("table"));
+    }
+
+    /// Soft keywords as property literal keys in MATCH patterns:
+    /// `MATCH (n:Person {key: "alice"})`. Previously failed at parse_props.
+    #[test]
+    fn test_soft_keywords_in_match_property_literal() {
+        let q = Parser::parse(r#"MATCH (n:Person {key: "alice"}) RETURN n.name"#).unwrap();
+        assert_eq!(q.match_clauses.len(), 1);
+    }
+
+    /// Soft keyword as column in ORDER BY (qualified) and GROUP BY.
+    /// Note that MinnsQL's clause order places GROUP BY before RETURN.
+    #[test]
+    fn test_soft_keywords_in_order_and_group_by() {
+        Parser::parse("FROM t RETURN t.name ORDER BY t.key DESC").expect("order by");
+        Parser::parse("FROM t GROUP BY t.key RETURN t.key, count(*)").expect("group by");
+    }
+
+    /// The UPDATE path shares parse_or_expr with SELECT, so fixing parse_expr
+    /// also fixes `UPDATE t SET v = "x" WHERE t.key = "y"`.
+    #[test]
+    fn test_update_with_keyword_column_in_where() {
+        let stmt = Parser::parse_statement(
+            r#"UPDATE app_store SET value = "new" WHERE app_store.key = "env_overrides""#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::UpdateTable(upd) => {
+                assert_eq!(upd.table, "app_store");
+                assert_eq!(upd.assignments.len(), 1);
+                assert_eq!(upd.assignments[0].0, "value");
+            },
+            other => panic!("expected UpdateTable, got {:?}", other),
+        }
+    }
+
+    /// Same for DELETE.
+    #[test]
+    fn test_delete_with_keyword_column_in_where() {
+        let stmt = Parser::parse_statement(
+            r#"DELETE FROM app_store WHERE app_store.key = "env_overrides""#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::DeleteFrom(del) => assert_eq!(del.table, "app_store"),
+            other => panic!("expected DeleteFrom, got {:?}", other),
+        }
+    }
+
+    /// CREATE TABLE with a column literally named `primary`. Requires the
+    /// two-token lookahead in parse_create_table that distinguishes
+    /// `PRIMARY KEY (...)` constraints from columns named `primary`.
+    #[test]
+    fn test_create_table_with_primary_column() {
+        let stmt = Parser::parse_statement("CREATE TABLE t (primary INT PRIMARY KEY, name STRING)")
+            .unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.columns.len(), 2);
+                assert_eq!(ct.columns[0].name, "primary");
+                assert!(ct.columns[0].is_primary_key);
+                assert_eq!(ct.columns[1].name, "name");
+            },
+            other => panic!("expected CreateTable, got {:?}", other),
+        }
+    }
+
+    /// CREATE TABLE with a column literally named `unique`.
+    #[test]
+    fn test_create_table_with_unique_column() {
+        let stmt =
+            Parser::parse_statement("CREATE TABLE t (unique STRING NOT NULL, id INT PRIMARY KEY)")
+                .unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.columns.len(), 2);
+                assert_eq!(ct.columns[0].name, "unique");
+                assert!(!ct.columns[0].nullable);
+            },
+            other => panic!("expected CreateTable, got {:?}", other),
+        }
+    }
+
+    /// INSERT with a soft keyword as a column name.
+    #[test]
+    fn test_insert_with_keyword_column() {
+        let stmt = Parser::parse_statement(
+            r#"INSERT INTO app_store (key, value) VALUES ("env_overrides", "data")"#,
+        )
+        .unwrap();
+        match stmt {
+            Statement::InsertInto(ins) => {
+                assert_eq!(ins.table, "app_store");
+                assert_eq!(
+                    ins.columns.as_deref(),
+                    Some(&["key".to_string(), "value".to_string()][..])
+                );
+            },
+            other => panic!("expected InsertInto, got {:?}", other),
+        }
+    }
+
+    /// Reserved operator keywords must still fail when used as identifiers
+    /// in expression position. This is the negative half of the
+    /// soft-keyword policy — operators stay reserved because accepting
+    /// them as idents would change the parse of other queries.
+    #[test]
+    fn test_reserved_operators_still_fail_as_identifiers() {
+        for bad in &["AND", "OR", "NOT", "IS", "IN", "BETWEEN", "LIKE"] {
+            let src = format!(r#"FROM t WHERE t.{} = "x" RETURN t.{}"#, bad, bad);
+            assert!(
+                Parser::parse(&src).is_err(),
+                "`{}` must not be usable as a column name",
+                bad
+            );
+        }
+    }
+
+    // ── Backtick-quoted identifier escape hatch ────────────────────────
+
+    /// Backticks let the user name a column after a genuinely reserved
+    /// keyword. This is the escape hatch that makes the soft-keyword policy
+    /// complete — every other column name works unquoted, and the small
+    /// set of truly-reserved words is reachable via `` `name` ``.
+    #[test]
+    fn test_backtick_quoted_reserved_keyword_in_where() {
+        let q = Parser::parse(r#"FROM t WHERE t.`where` = "x" RETURN t.`return`"#).unwrap();
+        assert_eq!(q.returns.len(), 1);
+        match &q.returns[0].expr {
+            Expr::Property(var, prop) => {
+                assert_eq!(var, "t");
+                assert_eq!(prop, "return");
+            },
+            other => panic!("expected Property, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_backtick_quoted_reserved_keyword_in_create_table() {
+        let stmt =
+            Parser::parse_statement("CREATE TABLE t (`where` STRING, `select` INT PRIMARY KEY)")
+                .unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.columns.len(), 2);
+                assert_eq!(ct.columns[0].name, "where");
+                assert_eq!(ct.columns[1].name, "select");
+                assert!(ct.columns[1].is_primary_key);
+            },
+            other => panic!("expected CreateTable, got {:?}", other),
         }
     }
 }

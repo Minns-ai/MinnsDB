@@ -68,6 +68,14 @@ impl<'a> Lexer<'a> {
             return self.scan_string();
         }
 
+        // Backtick-quoted identifiers: `column name` or `where` (escape hatch
+        // for genuinely reserved keywords like WHERE, RETURN, SELECT that
+        // would otherwise conflict with query syntax). The content between
+        // backticks is taken verbatim and emitted as Token::Ident.
+        if ch == b'`' {
+            return self.scan_quoted_ident();
+        }
+
         // Multi-character symbols
         let start = self.pos;
 
@@ -299,7 +307,19 @@ impl<'a> Lexer<'a> {
             self.pos = saved_pos;
         }
 
+        // Reserved keyword table.
+        //
+        // Only tokens the parser must pattern-match at fixed positions are
+        // specialized: clause delimiters, operators, literal keywords, and
+        // statement-top-level verbs. Everything else falls through to
+        // `Token::Ident(text)` — including DDL-structural keywords like
+        // `TABLE`, `PRIMARY`, `KEY`, `VALUES`, `SET`, etc. — and is recognized
+        // by case-insensitive string comparison at the specific parser sites
+        // that need it. The effect: a user column literally named `key` or
+        // `table` parses as a normal identifier in every expression context
+        // without any special handling.
         let token = match upper.as_str() {
+            // Clause delimiters
             "MATCH" => Token::Match,
             "WHEN" => Token::When,
             "WHERE" => Token::Where,
@@ -309,53 +329,39 @@ impl<'a> Lexer<'a> {
             "LIMIT" => Token::Limit,
             "AS" => Token::As,
             "OF" => Token::Of,
-            "AND" => Token::And,
-            "OR" => Token::Or,
-            "NOT" => Token::Not,
-            "IS" => Token::Is,
-            "NULL" => Token::Null,
             "DISTINCT" => Token::Distinct,
             "ASC" => Token::Asc,
             "DESC" => Token::Desc,
-            "ALL" => Token::All,
-            "LAST" => Token::Last,
-            "TO" => Token::To,
-            "TRUE" => Token::True,
-            "FALSE" => Token::False,
-            "CONTAINS" => Token::Contains,
-            "SUBSCRIBE" => Token::Subscribe,
-            "UNSUBSCRIBE" => Token::Unsubscribe,
-            // DDL/DML/Table keywords
-            "CREATE" => Token::Create,
-            "TABLE" => Token::Table,
-            "DROP" => Token::Drop,
-            "INSERT" => Token::Insert,
-            "INTO" => Token::Into,
-            "VALUES" => Token::Values,
-            "UPDATE" => Token::Update,
-            "SET" => Token::Set,
-            "DELETE" => Token::Delete,
             "FROM" => Token::From,
             "JOIN" => Token::Join,
             "LEFT" => Token::Left,
             "INNER" => Token::Inner,
             "ON" => Token::On,
-            "PRIMARY" => Token::Primary,
-            "KEY" => Token::Key,
-            "UNIQUE" => Token::Unique,
-            "REFERENCES" => Token::References,
-            "GRAPH" => Token::Graph,
             "GROUP" => Token::Group,
             "HAVING" => Token::Having,
-            "DEFAULT" => Token::Default,
-            "AUTOINCREMENT" => Token::Autoincrement,
-            "INDEX" => Token::Index,
+            // Expression operators
+            "AND" => Token::And,
+            "OR" => Token::Or,
+            "NOT" => Token::Not,
+            "IS" => Token::Is,
             "IN" => Token::In,
             "BETWEEN" => Token::Between,
             "LIKE" => Token::Like,
+            "CONTAINS" => Token::Contains,
+            // Literal keywords
+            "NULL" => Token::Null,
+            "TRUE" => Token::True,
+            "FALSE" => Token::False,
+            // Statement-top-level verbs
+            "CREATE" => Token::Create,
+            "DROP" => Token::Drop,
+            "INSERT" => Token::Insert,
+            "UPDATE" => Token::Update,
+            "DELETE" => Token::Delete,
             "ALTER" => Token::Alter,
-            "ADD" => Token::Add,
-            "COLUMN" => Token::Column,
+            "SUBSCRIBE" => Token::Subscribe,
+            "UNSUBSCRIBE" => Token::Unsubscribe,
+            // Everything else is a soft keyword / identifier
             _ => Token::Ident(text.to_string()),
         };
 
@@ -415,6 +421,61 @@ impl<'a> Lexer<'a> {
             token: Token::IntLit(val),
             span: (start, self.pos),
         })
+    }
+
+    /// Scan a backtick-quoted identifier: `` `column name` ``.
+    ///
+    /// The content between backticks is taken verbatim and emitted as
+    /// `Token::Ident(String)`. The quoting is the escape hatch for the
+    /// narrow set of genuinely reserved keywords (WHERE, RETURN, FROM,
+    /// AND, OR, NOT, IS, IN, BETWEEN, LIKE, CONTAINS, TRUE, FALSE, NULL,
+    /// and the statement verbs) that could not be used as bare identifiers
+    /// without changing the parse of another query. Soft keywords like
+    /// `KEY`, `TABLE`, `PRIMARY` do not need backticks — they already
+    /// lex as regular identifiers. A literal backtick inside the
+    /// identifier is written `` `` `` (doubled).
+    ///
+    /// Unicode is preserved: the scanner accumulates raw bytes and decodes
+    /// them as UTF-8 at the end, so `` `café` `` and `` `名前` `` round-trip
+    /// correctly. The lexer input is already `&str` so the UTF-8 validation
+    /// always succeeds, but we use the fallible decode defensively.
+    fn scan_quoted_ident(&mut self) -> Result<Spanned, LexError> {
+        let start = self.pos;
+        self.advance(); // consume opening '`'
+        let mut bytes: Vec<u8> = Vec::new();
+
+        loop {
+            if self.at_end() {
+                return Err(LexError {
+                    message: "unterminated quoted identifier".into(),
+                    position: start,
+                });
+            }
+            let ch = self.advance();
+            if ch == b'`' {
+                // Doubled backtick is a literal backtick in the identifier.
+                if self.peek() == Some(b'`') {
+                    self.advance();
+                    bytes.push(b'`');
+                    continue;
+                }
+                if bytes.is_empty() {
+                    return Err(LexError {
+                        message: "empty quoted identifier".into(),
+                        position: start,
+                    });
+                }
+                let value = String::from_utf8(bytes).map_err(|e| LexError {
+                    message: format!("invalid UTF-8 in quoted identifier: {}", e),
+                    position: start,
+                })?;
+                return Ok(Spanned {
+                    token: Token::Ident(value),
+                    span: (start, self.pos),
+                });
+            }
+            bytes.push(ch);
+        }
     }
 
     fn scan_string(&mut self) -> Result<Spanned, LexError> {
@@ -540,6 +601,142 @@ mod tests {
                 Token::Eof,
             ]
         );
+    }
+
+    // ── Soft-keyword regression tests ──────────────────────────────────
+    //
+    // These keywords used to be specialized Token variants. They now lex as
+    // `Token::Ident`, which lets them act as user-chosen column, table, and
+    // alias names throughout the query language without any special handling
+    // in the parser. The lexer preserves the user's original casing.
+
+    #[test]
+    fn test_soft_keyword_key_lexes_as_ident() {
+        let tokens = tok("key KEY Key");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("key".into()),
+                Token::Ident("KEY".into()),
+                Token::Ident("Key".into()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_soft_keyword_full_matrix() {
+        // Every keyword converted from specialized variant to Ident in the
+        // soft-keyword refactor. This test is the canonical list — adding
+        // a new soft keyword means adding it here.
+        let kws = [
+            "TABLE",
+            "PRIMARY",
+            "KEY",
+            "UNIQUE",
+            "REFERENCES",
+            "GRAPH",
+            "DEFAULT",
+            "AUTOINCREMENT",
+            "INDEX",
+            "COLUMN",
+            "ADD",
+            "INTO",
+            "VALUES",
+            "SET",
+            "ALL",
+            "LAST",
+            "TO",
+        ];
+        for kw in kws {
+            let tokens = tok(kw);
+            assert_eq!(
+                tokens,
+                vec![Token::Ident(kw.to_string()), Token::Eof],
+                "{} should lex as Ident",
+                kw
+            );
+        }
+    }
+
+    #[test]
+    fn test_reserved_keywords_still_specialized() {
+        // Operators, clause delimiters, literal keywords, and statement
+        // verbs must remain specialized — their Token::X variants are the
+        // ones the parser pattern-matches at fixed positions.
+        assert_eq!(tok("AND"), vec![Token::And, Token::Eof]);
+        assert_eq!(tok("OR"), vec![Token::Or, Token::Eof]);
+        assert_eq!(tok("NOT"), vec![Token::Not, Token::Eof]);
+        assert_eq!(tok("IS"), vec![Token::Is, Token::Eof]);
+        assert_eq!(tok("IN"), vec![Token::In, Token::Eof]);
+        assert_eq!(tok("BETWEEN"), vec![Token::Between, Token::Eof]);
+        assert_eq!(tok("LIKE"), vec![Token::Like, Token::Eof]);
+        assert_eq!(tok("CONTAINS"), vec![Token::Contains, Token::Eof]);
+        assert_eq!(tok("TRUE"), vec![Token::True, Token::Eof]);
+        assert_eq!(tok("FALSE"), vec![Token::False, Token::Eof]);
+        assert_eq!(tok("NULL"), vec![Token::Null, Token::Eof]);
+        assert_eq!(tok("MATCH"), vec![Token::Match, Token::Eof]);
+        assert_eq!(tok("WHERE"), vec![Token::Where, Token::Eof]);
+        assert_eq!(tok("RETURN"), vec![Token::Return, Token::Eof]);
+        assert_eq!(tok("FROM"), vec![Token::From, Token::Eof]);
+        assert_eq!(tok("CREATE"), vec![Token::Create, Token::Eof]);
+        assert_eq!(tok("INSERT"), vec![Token::Insert, Token::Eof]);
+    }
+
+    // ── Backtick-quoted identifier tests ────────────────────────────────
+
+    #[test]
+    fn test_backtick_quoted_ident_basic() {
+        let tokens = tok("`column name`");
+        assert_eq!(tokens, vec![Token::Ident("column name".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn test_backtick_quoted_reserved_keyword() {
+        // The whole point of backtick quoting: WHERE is a reserved keyword
+        // that would otherwise be impossible to use as an identifier.
+        let tokens = tok("`where`");
+        assert_eq!(tokens, vec![Token::Ident("where".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn test_backtick_quoted_preserves_case_and_spaces() {
+        let tokens = tok("`My Column`");
+        assert_eq!(tokens, vec![Token::Ident("My Column".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn test_backtick_quoted_doubled_backtick_is_literal() {
+        let tokens = tok("`a``b`");
+        assert_eq!(tokens, vec![Token::Ident("a`b".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn test_backtick_quoted_empty_is_error() {
+        assert!(Lexer::tokenize("``").is_err());
+    }
+
+    #[test]
+    fn test_backtick_quoted_unterminated_is_error() {
+        assert!(Lexer::tokenize("`unterminated").is_err());
+    }
+
+    /// Unicode regression: backtick-quoted identifiers must preserve
+    /// non-ASCII bytes exactly. Before the fix, `scan_quoted_ident` pushed
+    /// bytes one-at-a-time as `u8 as char`, which corrupts multi-byte UTF-8
+    /// sequences. After the fix, bytes are accumulated and decoded as
+    /// UTF-8 at the end, so `café` and `名前` round-trip correctly.
+    #[test]
+    fn test_backtick_quoted_unicode_identifier() {
+        let tokens = tok("`café`");
+        assert_eq!(tokens, vec![Token::Ident("café".into()), Token::Eof]);
+
+        let tokens = tok("`名前`");
+        assert_eq!(tokens, vec![Token::Ident("名前".into()), Token::Eof]);
+
+        // Mixed ASCII and non-ASCII with a doubled backtick.
+        let tokens = tok("`a``é`");
+        assert_eq!(tokens, vec![Token::Ident("a`é".into()), Token::Eof]);
     }
 
     #[test]
