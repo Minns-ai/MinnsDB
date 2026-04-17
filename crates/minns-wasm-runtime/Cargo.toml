@@ -12,8 +12,8 @@ agent-db-core = { path = "../agent-db-core" }
 agent-db-tables = { path = "../agent-db-tables" }
 agent-db-graph = { path = "../agent-db-graph" }
 agent-db-storage = { path = "../agent-db-storage" }
-wasmtime = "41"
-wasmtime-wasi = "41"
+wasmtime = "42"
+wasmtime-wasi = "42"
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
 tokio = { version = "1", features = ["full"] }
