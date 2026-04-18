@@ -21,6 +21,8 @@ pub enum ApiError {
     NotImplemented(String),
     /// 503 Service Unavailable — returned when write lanes or read gate are exhausted.
     ServiceUnavailable(String),
+    /// 429 Too Many Requests — returned when a rate or concurrency limit is hit.
+    TooManyRequests(String),
     /// 504 Gateway Timeout — returned when LLM synthesis times out.
     GatewayTimeout(String),
 }
@@ -42,6 +44,11 @@ impl IntoResponse for ApiError {
             ApiError::NotImplemented(msg) => (
                 StatusCode::NOT_IMPLEMENTED,
                 "Not Implemented".to_string(),
+                Some(msg),
+            ),
+            ApiError::TooManyRequests(msg) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too Many Requests".to_string(),
                 Some(msg),
             ),
             ApiError::ServiceUnavailable(msg) => (

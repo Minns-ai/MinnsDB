@@ -218,6 +218,12 @@ async fn handle_client_message(
 
     match msg {
         ClientMessage::Subscribe { query, request_id } => {
+            if my_subs.len() >= 50 {
+                return Some(ServerMessage::Error {
+                    message: "Subscription limit reached (max 50 per connection)".into(),
+                    request_id,
+                });
+            }
             if query.len() > 4096 {
                 return Some(ServerMessage::Error {
                     message: "Query too long (max 4096 bytes)".into(),

@@ -13,7 +13,7 @@ use minns_wasm_runtime::scheduler::ScheduleRunner;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,4 +39,6 @@ pub struct AppState {
     pub key_store: Arc<tokio::sync::RwLock<KeyStore>>,
     /// Whether auth is enabled (can be disabled via MINNS_AUTH_DISABLED=true for development).
     pub auth_enabled: bool,
+    /// Limits concurrent exports to 1.
+    pub export_semaphore: Arc<Semaphore>,
 }

@@ -102,20 +102,26 @@ impl Drop for ChannelWriter {
 /// Export all persisted state as a streaming binary v2 response.
 /// Content-Type: application/octet-stream
 pub async fn export_handler(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let _permit = state
-        .read_gate
-        .acquire()
-        .await
-        .map_err(ApiError::ServiceUnavailable)?;
+    let _export_permit = state
+        .export_semaphore
+        .try_acquire()
+        .map_err(|_| ApiError::TooManyRequests("An export is already in progress".into()))?;
 
     info!("Starting streaming database export");
 
-    // Step 1: Flush caches (async)
+    // Step 1: Flush caches BEFORE acquiring read gate
     state
         .engine
         .export_prepare()
         .await
         .map_err(|e| ApiError::Internal(format!("Export prepare failed: {}", e)))?;
+
+    // Step 2: Acquire read gate for snapshot
+    let _read_permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
 
     // Step 2: Create channel for streaming
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);

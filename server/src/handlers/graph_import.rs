@@ -144,115 +144,110 @@ pub async fn import_graph(
     );
 
     let group_id = request.group_id.unwrap_or_default();
-    let mut inference = state.engine.inference().write().await;
-    let graph = inference.graph_mut();
-
-    let mut name_to_id: HashMap<String, u64> = HashMap::new();
+    let mut name_to_id: HashMap<String, u64> = HashMap::with_capacity(request.nodes.len());
     let mut nodes_created = 0usize;
     let mut nodes_reused = 0usize;
     let mut edges_created = 0usize;
     let mut errors = Vec::new();
 
-    // Phase 1: Resolve or create nodes.
-    for n in &request.nodes {
-        // For Concept nodes, deduplicate by name.
-        let is_concept = matches!(
-            n.r#type.to_lowercase().as_str(),
-            "concept"
-                | "person"
-                | "organization"
-                | "org"
-                | "company"
-                | "location"
-                | "place"
-                | "city"
-                | "country"
-                | "product"
-                | "brand"
-                | "named_entity"
-                | "entity"
-                | ""
-        );
+    // Phase 1: Nodes (single lock — HashMap inserts are O(1), fast even for 100k)
+    {
+        let mut inference = state.engine.inference().write().await;
+        let graph = inference.graph_mut();
 
-        if is_concept {
-            let name_lower = n.name.to_lowercase();
-            if let Some(existing) = graph
-                .get_concept_node(&name_lower)
-                .or_else(|| graph.get_concept_node(&n.name))
-            {
-                name_to_id.insert(n.name.clone(), existing.id);
-                nodes_reused += 1;
-                continue;
+        for n in &request.nodes {
+            let is_concept = matches!(
+                n.r#type.to_lowercase().as_str(),
+                "concept" | "person" | "organization" | "org" | "company"
+                    | "location" | "place" | "city" | "country"
+                    | "product" | "brand" | "named_entity" | "entity" | ""
+            );
+
+            if is_concept {
+                let name_lower = n.name.to_lowercase();
+                if let Some(existing) = graph
+                    .get_concept_node(&name_lower)
+                    .or_else(|| graph.get_concept_node(&n.name))
+                {
+                    name_to_id.insert(n.name.clone(), existing.id);
+                    nodes_reused += 1;
+                    continue;
+                }
             }
-        }
 
-        let node_type = build_node_type(&n.name, &n.r#type, &n.properties);
-        let mut node = GraphNode::new(node_type);
-        node.group_id = group_id.clone();
-
-        // Store non-type-specific properties.
-        for (k, v) in &n.properties {
-            if !is_type_specific_key(&n.r#type, k) {
-                node.properties.insert(k.clone(), v.clone());
+            let node_type = build_node_type(&n.name, &n.r#type, &n.properties);
+            let mut node = GraphNode::new(node_type);
+            node.group_id = group_id.clone();
+            for (k, v) in &n.properties {
+                if !is_type_specific_key(&n.r#type, k) {
+                    node.properties.insert(k.clone(), v.clone());
+                }
             }
-        }
 
-        match graph.add_node(node) {
-            Ok(id) => {
-                name_to_id.insert(n.name.clone(), id);
-                nodes_created += 1;
-            },
-            Err(e) => errors.push(format!("Node '{}': {}", n.name, e)),
+            match graph.add_node(node) {
+                Ok(id) => {
+                    name_to_id.insert(n.name.clone(), id);
+                    nodes_created += 1;
+                },
+                Err(e) => errors.push(format!("Node '{}': {}", n.name, e)),
+            }
         }
     }
+    // Lock released — reads can proceed while we prepare edge batches
 
-    // Phase 2: Create edges.
-    for e in &request.edges {
-        let source_id = match resolve_node(&e.source, &name_to_id, graph) {
-            Some(id) => id,
-            None => {
-                errors.push(format!("Edge source '{}' not found", e.source));
-                continue;
-            },
-        };
-        let target_id = match resolve_node(&e.target, &name_to_id, graph) {
-            Some(id) => id,
-            None => {
-                errors.push(format!("Edge target '{}' not found", e.target));
-                continue;
-            },
-        };
+    // Phase 2: Edges in batches of 10k (release lock between batches)
+    const EDGE_BATCH: usize = 10_000;
+    for chunk in request.edges.chunks(EDGE_BATCH) {
+        let mut inference = state.engine.inference().write().await;
+        let graph = inference.graph_mut();
 
-        let label = e.label.clone().unwrap_or_else(|| {
-            // Fall back to edge type as label for Association edges.
-            if e.r#type.to_lowercase() == "association" {
-                "related_to".to_string()
-            } else {
-                e.r#type.clone()
+        for e in chunk {
+            let source_id = match resolve_node(&e.source, &name_to_id, graph) {
+                Some(id) => id,
+                None => {
+                    errors.push(format!("Edge source '{}' not found", e.source));
+                    continue;
+                },
+            };
+            let target_id = match resolve_node(&e.target, &name_to_id, graph) {
+                Some(id) => id,
+                None => {
+                    errors.push(format!("Edge target '{}' not found", e.target));
+                    continue;
+                },
+            };
+
+            let label = e.label.clone().unwrap_or_else(|| {
+                if e.r#type.to_lowercase() == "association" {
+                    "related_to".to_string()
+                } else {
+                    e.r#type.clone()
+                }
+            });
+
+            let edge_type = build_edge_type(&e.r#type, &label, e.confidence, &e.properties);
+            let mut edge = GraphEdge::new(source_id, target_id, edge_type, e.weight);
+            edge.confidence = e.confidence;
+            edge.group_id = group_id.clone();
+            edge.valid_from = e.valid_from;
+            edge.valid_until = e.valid_until;
+            for (k, v) in &e.properties {
+                if !is_edge_type_specific_key(&e.r#type, k) {
+                    edge.properties.insert(k.clone(), v.clone());
+                }
             }
-        });
 
-        let edge_type = build_edge_type(&e.r#type, &label, e.confidence, &e.properties);
-
-        let mut edge = GraphEdge::new(source_id, target_id, edge_type, e.weight);
-        edge.confidence = e.confidence;
-        edge.group_id = group_id.clone();
-        edge.valid_from = e.valid_from;
-        edge.valid_until = e.valid_until;
-
-        for (k, v) in &e.properties {
-            if !is_edge_type_specific_key(&e.r#type, k) {
-                edge.properties.insert(k.clone(), v.clone());
+            match graph.add_edge(edge) {
+                Some(_) => edges_created += 1,
+                None => errors.push(format!(
+                    "Edge '{}' → '{}': source or target node not in graph",
+                    e.source, e.target
+                )),
             }
         }
 
-        match graph.add_edge(edge) {
-            Some(_) => edges_created += 1,
-            None => errors.push(format!(
-                "Edge '{}' → '{}': source or target node not in graph",
-                e.source, e.target
-            )),
-        }
+        drop(inference);
+        tokio::task::yield_now().await;
     }
 
     info!(

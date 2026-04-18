@@ -174,35 +174,57 @@ pub struct DeleteEdgeResponse {
     pub edge_id: u64,
 }
 
-// DELETE /api/graph/nodes/:id - Hard delete a node and all its edges
+// DELETE /api/graph/nodes/:id - Hard delete a node via write lane
 pub async fn delete_node(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
 ) -> Result<Json<DeleteNodeResponse>, ApiError> {
     info!("Deleting node {}", node_id);
 
-    if state.engine.delete_node(node_id).await {
-        Ok(Json(DeleteNodeResponse {
-            deleted: true,
+    let result = state
+        .write_lanes
+        .submit_and_await(node_id, |tx| crate::write_lanes::WriteJob::DeleteNode {
             node_id,
-        }))
+            result_tx: tx,
+        })
+        .await
+        .map_err(|e| match e {
+            crate::write_lanes::WriteError::LaneUnavailable(m) => ApiError::ServiceUnavailable(m),
+            crate::write_lanes::WriteError::WorkerDropped => ApiError::Internal("Worker dropped".into()),
+            crate::write_lanes::WriteError::OperationFailed(m) => ApiError::Internal(m),
+        })?;
+
+    let deleted = result.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
+    if deleted {
+        Ok(Json(DeleteNodeResponse { deleted: true, node_id }))
     } else {
         Err(ApiError::NotFound(format!("node {} not found", node_id)))
     }
 }
 
-// DELETE /api/graph/edges/:id - Hard delete a single edge
+// DELETE /api/graph/edges/:id - Hard delete a single edge via write lane
 pub async fn delete_edge(
     State(state): State<AppState>,
     Path(edge_id): Path<u64>,
 ) -> Result<Json<DeleteEdgeResponse>, ApiError> {
     info!("Deleting edge {}", edge_id);
 
-    if state.engine.delete_edge(edge_id).await {
-        Ok(Json(DeleteEdgeResponse {
-            deleted: true,
+    let result = state
+        .write_lanes
+        .submit_and_await(edge_id, |tx| crate::write_lanes::WriteJob::DeleteEdge {
             edge_id,
-        }))
+            result_tx: tx,
+        })
+        .await
+        .map_err(|e| match e {
+            crate::write_lanes::WriteError::LaneUnavailable(m) => ApiError::ServiceUnavailable(m),
+            crate::write_lanes::WriteError::WorkerDropped => ApiError::Internal("Worker dropped".into()),
+            crate::write_lanes::WriteError::OperationFailed(m) => ApiError::Internal(m),
+        })?;
+
+    let deleted = result.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
+    if deleted {
+        Ok(Json(DeleteEdgeResponse { deleted: true, edge_id }))
     } else {
         Err(ApiError::NotFound(format!("edge {} not found", edge_id)))
     }

@@ -205,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         schedule_runner: schedule_runner.clone(),
         key_store: key_store.clone(),
         auth_enabled,
+        export_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
     // Build router

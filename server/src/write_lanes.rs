@@ -5,7 +5,7 @@
 //! channel is full, the caller receives a 503 (Service Unavailable).
 
 use agent_db_graph::GraphEngine;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +37,16 @@ pub enum WriteJob {
     /// Used for structured memory ops, planning writes, import, etc.
     GenericWrite {
         operation: GenericWriteOp,
+        result_tx: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+    /// Hard-delete a node and its incident edges. Zero-alloc dispatch.
+    DeleteNode {
+        node_id: u64,
+        result_tx: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+    /// Hard-delete a single edge. Zero-alloc dispatch.
+    DeleteEdge {
+        edge_id: u64,
         result_tx: oneshot::Sender<Result<serde_json::Value, String>>,
     },
 }
@@ -142,7 +152,7 @@ impl WriteLaneMetrics {
 
     /// Current in-flight job count for this lane.
     pub fn lane_depth(&self, lane: usize) -> u64 {
-        self.per_lane_in_flight[lane].load(Relaxed)
+        self.per_lane_in_flight[lane].load(Ordering::Acquire)
     }
 }
 
@@ -212,11 +222,11 @@ impl WriteLanes {
     /// or if the lanes have been cancelled.
     pub async fn submit(&self, routing_key: u64, job: WriteJob) -> Result<(), String> {
         let lane_index = (routing_key as usize) % self.num_lanes;
-        self.metrics.total_submitted.fetch_add(1, Relaxed);
+        self.metrics.total_submitted.fetch_add(1, Ordering::Relaxed);
 
         // Atomic check — no lock
         if self.cancel.is_cancelled() {
-            self.metrics.total_rejected.fetch_add(1, Relaxed);
+            self.metrics.total_rejected.fetch_add(1, Ordering::Relaxed);
             return Err("Write lanes have been shut down".to_string());
         }
 
@@ -227,17 +237,17 @@ impl WriteLanes {
         .await
         {
             Ok(Ok(())) => {
-                self.metrics.per_lane_in_flight[lane_index].fetch_add(1, Relaxed);
+                self.metrics.per_lane_in_flight[lane_index].fetch_add(1, Ordering::Release);
                 Ok(())
             },
             Ok(Err(_)) => {
-                self.metrics.total_rejected.fetch_add(1, Relaxed);
-                self.metrics.per_lane_rejected[lane_index].fetch_add(1, Relaxed);
+                self.metrics.total_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics.per_lane_rejected[lane_index].fetch_add(1, Ordering::Relaxed);
                 Err(format!("Write lane {} is dead (worker exited)", lane_index))
             },
             Err(_) => {
-                self.metrics.total_rejected.fetch_add(1, Relaxed);
-                self.metrics.per_lane_rejected[lane_index].fetch_add(1, Relaxed);
+                self.metrics.total_rejected.fetch_add(1, Ordering::Relaxed);
+                self.metrics.per_lane_rejected[lane_index].fetch_add(1, Ordering::Relaxed);
                 Err(format!(
                     "Write lane {} is full (backpressure timeout after 5s)",
                     lane_index
@@ -353,13 +363,26 @@ async fn execute_job(
             let result = operation(engine.clone()).await;
             let _ = result_tx.send(result);
         },
+        WriteJob::DeleteNode { node_id, result_tx } => {
+            let deleted = engine.delete_node(node_id).await;
+            let _ = result_tx.send(Ok(serde_json::json!({
+                "deleted": deleted,
+                "node_id": node_id,
+            })));
+        },
+        WriteJob::DeleteEdge { edge_id, result_tx } => {
+            let deleted = engine.delete_edge(edge_id).await;
+            let _ = result_tx.send(Ok(serde_json::json!({
+                "deleted": deleted,
+                "edge_id": edge_id,
+            })));
+        },
     }
 
-    // Record metrics — decrement in-flight, increment completed
     let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-    metrics.per_lane_in_flight[lane_id].fetch_sub(1, Relaxed);
-    metrics.per_lane_completed[lane_id].fetch_add(1, Relaxed);
-    metrics.total_completed.fetch_add(1, Relaxed);
+    metrics.per_lane_in_flight[lane_id].fetch_sub(1, Ordering::Release);
+    metrics.per_lane_completed[lane_id].fetch_add(1, Ordering::Relaxed);
+    metrics.total_completed.fetch_add(1, Ordering::Relaxed);
     metrics.write_latency.lock().record(elapsed_us);
 }
 
