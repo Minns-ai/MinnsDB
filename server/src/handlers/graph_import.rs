@@ -158,9 +158,20 @@ pub async fn import_graph(
         for n in &request.nodes {
             let is_concept = matches!(
                 n.r#type.to_lowercase().as_str(),
-                "concept" | "person" | "organization" | "org" | "company"
-                    | "location" | "place" | "city" | "country"
-                    | "product" | "brand" | "named_entity" | "entity" | ""
+                "concept"
+                    | "person"
+                    | "organization"
+                    | "org"
+                    | "company"
+                    | "location"
+                    | "place"
+                    | "city"
+                    | "country"
+                    | "product"
+                    | "brand"
+                    | "named_entity"
+                    | "entity"
+                    | ""
             );
 
             if is_concept {

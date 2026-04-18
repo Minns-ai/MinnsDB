@@ -867,7 +867,10 @@ pub struct CodeSearchRequest {
     /// Glob pattern for file path matching
     #[serde(default)]
     pub file_pattern: Option<String>,
-    #[serde(default = "default_limit", deserialize_with = "deserialize_capped_limit")]
+    #[serde(
+        default = "default_limit",
+        deserialize_with = "deserialize_capped_limit"
+    )]
     pub limit: usize,
 }
 

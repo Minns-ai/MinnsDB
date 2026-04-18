@@ -18,7 +18,9 @@ pub async fn nlq_query(
         .map_err(ApiError::ServiceUnavailable)?;
 
     if request.question.len() > 4096 {
-        return Err(ApiError::BadRequest("Query too long (max 4096 bytes)".into()));
+        return Err(ApiError::BadRequest(
+            "Query too long (max 4096 bytes)".into(),
+        ));
     }
     info!("NLQ query: '{}'", request.question);
 

@@ -190,13 +190,21 @@ pub async fn delete_node(
         .await
         .map_err(|e| match e {
             crate::write_lanes::WriteError::LaneUnavailable(m) => ApiError::ServiceUnavailable(m),
-            crate::write_lanes::WriteError::WorkerDropped => ApiError::Internal("Worker dropped".into()),
+            crate::write_lanes::WriteError::WorkerDropped => {
+                ApiError::Internal("Worker dropped".into())
+            },
             crate::write_lanes::WriteError::OperationFailed(m) => ApiError::Internal(m),
         })?;
 
-    let deleted = result.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
+    let deleted = result
+        .get("deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if deleted {
-        Ok(Json(DeleteNodeResponse { deleted: true, node_id }))
+        Ok(Json(DeleteNodeResponse {
+            deleted: true,
+            node_id,
+        }))
     } else {
         Err(ApiError::NotFound(format!("node {} not found", node_id)))
     }
@@ -218,13 +226,21 @@ pub async fn delete_edge(
         .await
         .map_err(|e| match e {
             crate::write_lanes::WriteError::LaneUnavailable(m) => ApiError::ServiceUnavailable(m),
-            crate::write_lanes::WriteError::WorkerDropped => ApiError::Internal("Worker dropped".into()),
+            crate::write_lanes::WriteError::WorkerDropped => {
+                ApiError::Internal("Worker dropped".into())
+            },
             crate::write_lanes::WriteError::OperationFailed(m) => ApiError::Internal(m),
         })?;
 
-    let deleted = result.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false);
+    let deleted = result
+        .get("deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if deleted {
-        Ok(Json(DeleteEdgeResponse { deleted: true, edge_id }))
+        Ok(Json(DeleteEdgeResponse {
+            deleted: true,
+            edge_id,
+        }))
     } else {
         Err(ApiError::NotFound(format!("edge {} not found", edge_id)))
     }

@@ -96,7 +96,9 @@ pub async fn search(
         SearchMode::Hybrid => {
             let (bm25_results, semantic_result) = tokio::join!(
                 state.engine.search_bm25(&request.query, request.limit * 2),
-                state.engine.search_claims_semantic(&request.query, request.limit * 2, 0.5),
+                state
+                    .engine
+                    .search_claims_semantic(&request.query, request.limit * 2, 0.5),
             );
             let semantic_results = semantic_result.unwrap_or_else(|e| {
                 info!("Semantic search failed or unavailable: {}", e);
