@@ -6,7 +6,8 @@ use axum::{
     extract::State,
     http::{Request, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
+    Json,
 };
 
 use crate::state::AppState;
@@ -18,7 +19,7 @@ pub async fn auth_layer(
     State(state): State<AppState>,
     request: Request<Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
     // If auth is disabled, pass through
     if !state.auth_enabled {
         return Ok(next.run(request).await);
@@ -48,7 +49,7 @@ pub async fn auth_layer(
                 _ => StatusCode::UNAUTHORIZED,
             };
             tracing::warn!("Auth rejected: {} (path: {})", e, path);
-            Err(status)
+            Err((status, Json(serde_json::json!({"error": "Unauthorized"}))).into_response())
         },
     }
 }

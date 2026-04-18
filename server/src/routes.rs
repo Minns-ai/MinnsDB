@@ -2,12 +2,13 @@
 
 use crate::handlers;
 use crate::state::AppState;
-use axum::http::Method;
+use axum::http::{header, Method};
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
     Router,
 };
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 /// Build CORS layer from environment configuration.
 ///
@@ -33,7 +34,7 @@ fn build_cors_layer() -> CorsLayer {
                 Method::DELETE,
                 Method::OPTIONS,
             ])
-            .allow_headers(Any)
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
     }
 }
 
@@ -325,5 +326,6 @@ pub fn create_router(state: AppState) -> Router {
             crate::auth_middleware::auth_layer,
         ))
         .layer(build_cors_layer())
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state)
 }

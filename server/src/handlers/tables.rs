@@ -188,7 +188,7 @@ pub async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
             constraints: s.constraints.clone(),
         })
         .collect();
-    Json(serde_json::to_value(tables).unwrap())
+    Json(serde_json::to_value(tables).unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})))
 }
 
 pub async fn get_schema(
@@ -291,7 +291,7 @@ pub async fn insert_rows(
         }
         (
             StatusCode::CREATED,
-            Json(serde_json::to_value(results).unwrap()),
+            Json(serde_json::to_value(results).unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}))),
         )
     } else {
         (
@@ -339,7 +339,7 @@ pub async fn delete_row(
     match table.delete(gid(params.group_id), row_id) {
         Ok(vid) => (
             StatusCode::OK,
-            Json(serde_json::to_value(DeleteResponse { version_id: vid }).unwrap()),
+            Json(serde_json::to_value(DeleteResponse { version_id: vid }).unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}))),
         ),
         Err(e) => table_err(e),
     }
@@ -374,7 +374,7 @@ pub async fn scan_rows(
     };
 
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.unwrap_or(rows.len());
+    let limit = params.limit.unwrap_or(1000).min(10_000);
     let total = rows.len();
     let rows: Vec<RowData> = rows
         .into_iter()
@@ -385,7 +385,7 @@ pub async fn scan_rows(
 
     (
         StatusCode::OK,
-        Json(serde_json::to_value(ScanResponse { count: total, rows }).unwrap()),
+        Json(serde_json::to_value(ScanResponse { count: total, rows }).unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}))),
     )
 }
 
@@ -414,7 +414,7 @@ pub async fn rows_by_node(
 
     (
         StatusCode::OK,
-        Json(serde_json::to_value(ScanResponse { count, rows }).unwrap()),
+        Json(serde_json::to_value(ScanResponse { count, rows }).unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}))),
     )
 }
 

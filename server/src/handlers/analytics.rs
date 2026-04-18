@@ -207,7 +207,7 @@ pub async fn get_ppr(
         .map_err(|e| ApiError::Internal(format!("Failed to compute PPR: {}", e)))?;
 
     let min_score = params.min_score.unwrap_or(0.001);
-    let limit = params.limit.unwrap_or(100);
+    let limit = params.limit.unwrap_or(100).min(10_000);
 
     let mut scores: Vec<PprNodeScore> = ppr_scores
         .into_iter()
@@ -249,7 +249,7 @@ pub async fn get_reachability(
 
     let start = std::time::Instant::now();
     let max_hops = params.max_hops.unwrap_or(0);
-    let max_results = params.max_results.unwrap_or(500);
+    let max_results = params.max_results.unwrap_or(500).min(10_000);
 
     let result = state
         .engine

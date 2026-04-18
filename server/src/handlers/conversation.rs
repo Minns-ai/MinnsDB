@@ -179,7 +179,7 @@ pub async fn ingest_conversation(
 
     // Submit the entire write-side logic to a write lane
     let case_id_for_closure = case_id.clone();
-    let ingest_data_clone = ingest_data.clone();
+    let ingest_data_clone = ingest_data;
     let result = state
         .write_lanes
         .submit_and_await(routing_key, |tx| WriteJob::GenericWrite {
@@ -618,10 +618,5 @@ pub async fn accept_message(
 
 /// Generate a simple pseudo-UUID (no external dependency).
 fn uuid_v4_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("case_{:x}", t)
+    uuid::Uuid::new_v4().to_string()
 }
