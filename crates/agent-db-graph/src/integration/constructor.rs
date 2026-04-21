@@ -622,6 +622,18 @@ impl GraphEngine {
             None
         };
 
+        let federated_search_client: Option<
+            Arc<dyn crate::federated_search::FederatedSearchProvider>,
+        > = config.federated_search_url.as_ref().map(|url| {
+            Arc::new(
+                crate::federated_search::http_client::HttpFederatedClient::new(
+                    url.clone(),
+                    config.federated_search_api_key.clone().unwrap_or_default(),
+                    config.federated_search_timeout_ms,
+                ),
+            ) as Arc<dyn crate::federated_search::FederatedSearchProvider>
+        });
+
         // Load OWL/RDFS ontology from TTL files (data/ontology/ by default)
         let ontology_path = std::path::PathBuf::from("data/ontology");
         let ontology = Arc::new(
@@ -700,6 +712,7 @@ impl GraphEngine {
             next_execution_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             #[cfg(feature = "code-intelligence")]
             ast_parser,
+            federated_search: federated_search_client,
         };
 
         // Restore graph state from redb if available

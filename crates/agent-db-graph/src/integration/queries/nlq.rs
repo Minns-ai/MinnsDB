@@ -22,6 +22,39 @@ impl GraphEngine {
             .await
     }
 
+    pub async fn natural_language_query_federated(
+        &self,
+        question: &str,
+        pagination: &crate::nlq::NlqPagination,
+        session_id: Option<&str>,
+        include_memories: bool,
+        group_id: &str,
+        metadata_filter: &std::collections::HashMap<String, serde_json::Value>,
+        federated_sources: Option<&Vec<String>>,
+    ) -> GraphResult<crate::nlq::NlqResponse> {
+        let effective_question = if let Some(sid) = session_id {
+            let contexts = self.nlq_contexts.lock().await;
+            if let Some(ctx) = contexts.get(sid) {
+                crate::nlq::resolve_followup(question, ctx).unwrap_or_else(|| question.to_string())
+            } else {
+                question.to_string()
+            }
+        } else {
+            question.to_string()
+        };
+
+        self.execute_unified_query(
+            &effective_question,
+            pagination,
+            session_id,
+            include_memories,
+            group_id,
+            metadata_filter,
+            federated_sources,
+        )
+        .await
+    }
+
     /// Execute a natural language query with options.
     ///
     /// When `include_memories` is true, memory retrieval is included in the
@@ -99,6 +132,7 @@ impl GraphEngine {
             include_memories,
             group_id,
             metadata_filter,
+            None,
         )
         .await
     }
@@ -115,10 +149,32 @@ impl GraphEngine {
         include_memories: bool,
         group_id: &str,
         metadata_filter: &std::collections::HashMap<String, serde_json::Value>,
+        federated_sources: Option<&Vec<String>>,
     ) -> GraphResult<crate::nlq::NlqResponse> {
         let start = std::time::Instant::now();
         let mut explanation = vec!["Unified NLQ pipeline activated".to_string()];
         let mut ranked_lists: Vec<Vec<(u64, f32)>> = Vec::new();
+
+        // Spawn federated search in parallel with local sources
+        let federated_task = match (&self.federated_search, federated_sources) {
+            (Some(fed), Some(sources)) if !sources.is_empty() => {
+                let fed = Arc::clone(fed);
+                let req = crate::federated_search::FederatedSearchRequest {
+                    query: question.to_string(),
+                    sources: sources.clone(),
+                    limit: 10,
+                };
+                let timeout_ms = self.config.federated_search_timeout_ms;
+                Some(tokio::spawn(async move {
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(timeout_ms),
+                        fed.search(&req),
+                    )
+                    .await
+                }))
+            },
+            _ => None,
+        };
 
         // When metadata filtering is active, over-fetch so we have enough
         // results after filtering. The multiplier ensures we don't lose all
@@ -482,6 +538,35 @@ impl GraphEngine {
                     "PREFERENCE ANALYSIS:\n{}\n\n{}",
                     analysis, retrieval_context
                 )
+            }
+        } else {
+            retrieval_context
+        };
+
+        let retrieval_context = if let Some(task) = federated_task {
+            match task.await {
+                Ok(Ok(Ok(response))) if !response.results.is_empty() => {
+                    let fed_text =
+                        crate::federated_search::format_federated_context(&response.results);
+                    explanation.push(format!("Federated: {} results", response.results.len()));
+                    for err in &response.errors {
+                        tracing::debug!("Federated source {}: {}", err.source, err.error);
+                    }
+                    format!("{}\n\nEXTERNAL SOURCES:\n{}", retrieval_context, fed_text)
+                },
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!("Federated search error: {}", e);
+                    retrieval_context
+                },
+                Ok(Err(_)) => {
+                    tracing::warn!("Federated search timed out");
+                    retrieval_context
+                },
+                Err(e) => {
+                    tracing::warn!("Federated search task failed: {}", e);
+                    retrieval_context
+                },
+                _ => retrieval_context,
             }
         } else {
             retrieval_context

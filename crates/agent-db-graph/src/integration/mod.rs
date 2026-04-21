@@ -348,8 +348,11 @@ pub struct GraphEngineConfig {
     pub enrichment_config: crate::context_enrichment::EnrichmentConfig,
 
     // ========== Code Intelligence ==========
-    /// Enable AST-based code intelligence (requires `code-intelligence` feature). Default: false.
     pub enable_code_intelligence: bool,
+
+    pub federated_search_url: Option<String>,
+    pub federated_search_api_key: Option<String>,
+    pub federated_search_timeout_ms: u64,
 }
 
 impl GraphEngineConfig {
@@ -617,6 +620,8 @@ pub struct GraphEngine {
     /// AST parser for code intelligence (feature-gated)
     #[cfg(feature = "code-intelligence")]
     pub(crate) ast_parser: Option<Arc<agent_db_ast::AstParser>>,
+
+    pub(crate) federated_search: Option<Arc<dyn crate::federated_search::FederatedSearchProvider>>,
 }
 
 /// Statistics for the graph engine (lock-free atomic counters).
@@ -815,6 +820,9 @@ impl Default for GraphEngineConfig {
             enrichment_config: crate::context_enrichment::EnrichmentConfig::default(),
             // Code intelligence (disabled by default, requires code-intelligence feature)
             enable_code_intelligence: false,
+            federated_search_url: None,
+            federated_search_api_key: None,
+            federated_search_timeout_ms: 3000,
         }
     }
 }

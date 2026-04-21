@@ -727,6 +727,8 @@ pub struct NlqRequest {
     /// E.g., `{"user_id": "19039485485"}` to scope results to a specific user.
     #[serde(default)]
     pub metadata: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub federated_sources: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

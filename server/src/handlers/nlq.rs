@@ -29,25 +29,40 @@ pub async fn nlq_query(
         offset: request.offset,
     };
 
-    let response = state
-        .engine
-        .natural_language_query_scoped(
-            &request.question,
-            &pagination,
-            request.session_id.as_deref(),
-            request.include_context,
-            &request.group_id,
-            &request.metadata,
-        )
-        .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("timed out") || msg.contains("synthesis failed") {
-                ApiError::GatewayTimeout(msg)
-            } else {
-                ApiError::BadRequest(msg)
-            }
-        })?;
+    let response = if request.federated_sources.is_some() {
+        state
+            .engine
+            .natural_language_query_federated(
+                &request.question,
+                &pagination,
+                request.session_id.as_deref(),
+                request.include_context,
+                &request.group_id,
+                &request.metadata,
+                request.federated_sources.as_ref(),
+            )
+            .await
+    } else {
+        state
+            .engine
+            .natural_language_query_scoped(
+                &request.question,
+                &pagination,
+                request.session_id.as_deref(),
+                request.include_context,
+                &request.group_id,
+                &request.metadata,
+            )
+            .await
+    }
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("timed out") || msg.contains("synthesis failed") {
+            ApiError::GatewayTimeout(msg)
+        } else {
+            ApiError::BadRequest(msg)
+        }
+    })?;
 
     let entities: Vec<NlqEntity> = response
         .entities_resolved

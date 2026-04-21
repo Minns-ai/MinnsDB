@@ -162,6 +162,17 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
         .unwrap_or(3000);
     config.metadata_normalization_model = env::var("METADATA_NORMALIZATION_MODEL").ok();
 
+    config.federated_search_url = env::var("FEDERATED_SEARCH_URL").ok();
+    config.federated_search_api_key = env::var("FEDERATED_SEARCH_API_KEY").ok();
+    config.federated_search_timeout_ms = env::var("FEDERATED_SEARCH_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000);
+
+    if config.federated_search_url.is_some() {
+        info!("  Federated search: ENABLED");
+    }
+
     info!(
         "  World model mode: {:?}",
         config.effective_world_model_mode()
