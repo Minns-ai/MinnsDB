@@ -624,14 +624,24 @@ impl GraphEngine {
 
         let federated_search_client: Option<
             Arc<dyn crate::federated_search::FederatedSearchProvider>,
-        > = config.federated_search_url.as_ref().map(|url| {
-            Arc::new(
+        > = config.federated_search_url.as_ref().and_then(|url| {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                tracing::warn!("Ignoring invalid FEDERATED_SEARCH_URL: must start with http(s)://");
+                return None;
+            }
+            let api_key = config.federated_search_api_key.clone().unwrap_or_default();
+            if api_key.is_empty() {
+                tracing::warn!("FEDERATED_SEARCH_API_KEY is empty; federated search disabled");
+                return None;
+            }
+            Some(Arc::new(
                 crate::federated_search::http_client::HttpFederatedClient::new(
                     url.clone(),
-                    config.federated_search_api_key.clone().unwrap_or_default(),
+                    api_key,
                     config.federated_search_timeout_ms,
                 ),
-            ) as Arc<dyn crate::federated_search::FederatedSearchProvider>
+            )
+                as Arc<dyn crate::federated_search::FederatedSearchProvider>)
         });
 
         // Load OWL/RDFS ontology from TTL files (data/ontology/ by default)

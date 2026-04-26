@@ -22,6 +22,19 @@ pub async fn nlq_query(
             "Query too long (max 4096 bytes)".into(),
         ));
     }
+
+    if let Some(ref sources) = request.federated_sources {
+        if sources.len() > 10 {
+            return Err(ApiError::BadRequest(
+                "Too many federated sources (max 10)".into(),
+            ));
+        }
+        if sources.iter().any(|s| s.len() > 64) {
+            return Err(ApiError::BadRequest(
+                "Federated source name too long (max 64 bytes)".into(),
+            ));
+        }
+    }
     info!("NLQ query: '{}'", request.question);
 
     let pagination = agent_db_graph::nlq::NlqPagination {
@@ -29,7 +42,9 @@ pub async fn nlq_query(
         offset: request.offset,
     };
 
-    let response = if request.federated_sources.is_some() {
+    let fed_sources = request.federated_sources.as_ref().filter(|v| !v.is_empty());
+
+    let response = if fed_sources.is_some() {
         state
             .engine
             .natural_language_query_federated(
@@ -39,7 +54,7 @@ pub async fn nlq_query(
                 request.include_context,
                 &request.group_id,
                 &request.metadata,
-                request.federated_sources.as_ref(),
+                fed_sources,
             )
             .await
     } else {
@@ -60,7 +75,7 @@ pub async fn nlq_query(
         if msg.contains("timed out") || msg.contains("synthesis failed") {
             ApiError::GatewayTimeout(msg)
         } else {
-            ApiError::BadRequest(msg)
+            ApiError::Internal(msg)
         }
     })?;
 

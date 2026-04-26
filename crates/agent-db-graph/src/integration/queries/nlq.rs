@@ -164,14 +164,7 @@ impl GraphEngine {
                     sources: sources.clone(),
                     limit: 10,
                 };
-                let timeout_ms = self.config.federated_search_timeout_ms;
-                Some(tokio::spawn(async move {
-                    tokio::time::timeout(
-                        std::time::Duration::from_millis(timeout_ms),
-                        fed.search(&req),
-                    )
-                    .await
-                }))
+                Some(tokio::spawn(async move { fed.search(&req).await }))
             },
             _ => None,
         };
@@ -545,7 +538,7 @@ impl GraphEngine {
 
         let retrieval_context = if let Some(task) = federated_task {
             match task.await {
-                Ok(Ok(Ok(response))) if !response.results.is_empty() => {
+                Ok(Ok(response)) if !response.results.is_empty() => {
                     let fed_text =
                         crate::federated_search::format_federated_context(&response.results);
                     explanation.push(format!("Federated: {} results", response.results.len()));
@@ -554,12 +547,8 @@ impl GraphEngine {
                     }
                     format!("{}\n\nEXTERNAL SOURCES:\n{}", retrieval_context, fed_text)
                 },
-                Ok(Ok(Err(e))) => {
+                Ok(Err(e)) => {
                     tracing::warn!("Federated search error: {}", e);
-                    retrieval_context
-                },
-                Ok(Err(_)) => {
-                    tracing::warn!("Federated search timed out");
                     retrieval_context
                 },
                 Err(e) => {
