@@ -345,7 +345,7 @@ async fn execute_job(
             let _ = result_tx.send(response);
         },
         WriteJob::PersistGraph { result_tx } => {
-            let r = engine.persist_graph_state().await;
+            let r = engine.full_persist().await;
             let response = match r {
                 Ok((nodes, edges)) => Ok(serde_json::json!({
                     "success": true,

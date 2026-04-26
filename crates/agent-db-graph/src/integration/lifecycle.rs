@@ -12,39 +12,27 @@ impl GraphEngine {
         Ok(())
     }
 
-    /// Graceful shutdown: flush all buffers, drain queues, and sync storage.
+    /// Persist all engine-owned state to redb without draining queues.
     ///
-    /// Call this before dropping the engine to ensure all in-flight work is
-    /// committed to redb. After this returns the process can exit safely.
-    pub async fn shutdown(&self) {
-        tracing::info!("GraphEngine shutdown initiated — flushing buffers");
+    /// This is the API-callable counterpart of `shutdown()`. It flushes
+    /// dirty caches and persists every store the engine owns: graph,
+    /// memories, strategies, transition model, episode detector,
+    /// consolidation counter, and world model. It does NOT drain
+    /// background queues (NER, claims, embeddings) — that's a
+    /// shutdown-only concern.
+    ///
+    /// Server-level stores (table catalog, WASM registry, schedules,
+    /// API keys) must be persisted by the caller.
+    pub async fn full_persist(&self) -> GraphResult<(usize, usize)> {
+        tracing::info!("Full persist initiated");
 
-        // 1. Flush event ordering buffers (process any queued out-of-order events)
-        if let Err(e) = self.flush_all_buffers().await {
-            tracing::warn!("Error flushing event buffers during shutdown: {}", e);
-        }
-
-        // 2. Process any pending claim extraction jobs by dropping the queue sender.
-        //    Workers will drain remaining items and exit when the channel closes.
-        //    We can't drop Arc fields, but the server dropping AppState after this
-        //    will trigger cleanup. Log the intent so operators know.
-        if self.claim_queue.is_some() {
-            tracing::info!("Claim extraction queue will drain on drop");
-        }
-        if self.embedding_queue.is_some() {
-            tracing::info!("Embedding queue will drain on drop");
-        }
-        if self.ner_queue.is_some() {
-            tracing::info!("NER extraction queue will drain on drop");
-        }
-
-        // 3. BUG 11 fix: Flush dirty memory/strategy caches before graph persistence
+        // 1. Flush dirty memory/strategy caches
         {
             self.memory_store.write().await.flush_cache();
             self.strategy_store.write().await.flush_cache();
         }
 
-        // 4. BUG 3 fix: Persist transition model (with version envelope)
+        // 2. Persist transition model
         if let Some(ref backend) = self.redb_backend {
             let tm = self.transition_model.read().await;
             match tm.to_bytes() {
@@ -57,15 +45,13 @@ impl GraphEngine {
                         backend.put_raw(table_names::TRANSITION_STATS, b"__model__", &wrapped)
                     {
                         tracing::warn!("Failed to persist transition model: {:?}", e);
-                    } else {
-                        tracing::info!("Transition model persisted ({} bytes)", bytes.len());
                     }
                 },
                 Err(e) => tracing::warn!("Failed to serialize transition model: {}", e),
             }
         }
 
-        // 5. BUG 4 fix: Persist episode detector (with version envelope)
+        // 3. Persist episode detector
         if let Some(ref backend) = self.redb_backend {
             let ed = self.episode_detector.read().await;
             match ed.to_bytes() {
@@ -78,15 +64,13 @@ impl GraphEngine {
                         backend.put_raw(table_names::EPISODE_CATALOG, b"__detector__", &wrapped)
                     {
                         tracing::warn!("Failed to persist episode detector: {:?}", e);
-                    } else {
-                        tracing::info!("Episode detector persisted ({} bytes)", bytes.len());
                     }
                 },
                 Err(e) => tracing::warn!("Failed to serialize episode detector: {}", e),
             }
         }
 
-        // 6. BUG 12 fix: Persist consolidation counter (with version envelope)
+        // 4. Persist consolidation counter
         if let Some(ref backend) = self.redb_backend {
             let counter = self
                 .episodes_since_consolidation
@@ -105,7 +89,7 @@ impl GraphEngine {
             }
         }
 
-        // 7. Persist world model weights (with version envelope)
+        // 5. Persist world model weights
         if let (Some(ref wm), Some(ref backend)) = (&self.world_model, &self.redb_backend) {
             let wm_guard = wm.read().await;
             match wm_guard.to_bytes() {
@@ -118,49 +102,66 @@ impl GraphEngine {
                         backend.put_raw(table_names::WORLD_MODEL, b"__weights__", &wrapped)
                     {
                         tracing::warn!("Failed to persist world model: {:?}", e);
-                    } else {
-                        let stats = wm_guard.energy_stats();
-                        tracing::info!(
-                            "World model persisted ({} bytes, trained={}, scored={})",
-                            bytes.len(),
-                            stats.total_trained,
-                            stats.total_scored,
-                        );
                     }
                 },
                 Err(e) => tracing::warn!("Failed to serialize world model: {}", e),
             }
         }
 
-        // 8. BUG 9 fix: Persist graph state with retry (3 attempts, 100ms delay)
-        if self.redb_backend.is_some() {
-            let mut last_err = None;
-            for attempt in 1..=3u32 {
-                match self.persist_graph_state().await {
-                    Ok((n, e)) => {
-                        tracing::info!("Graph persisted on shutdown: {} nodes, {} edges", n, e);
-                        last_err = None;
-                        break;
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to persist graph during shutdown (attempt {}): {}",
-                            attempt,
-                            e
-                        );
-                        last_err = Some(e);
-                        if attempt < 3 {
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                        }
-                    },
-                }
-            }
-            if let Some(e) = last_err {
-                tracing::error!("Graph persistence failed after 3 attempts: {}", e);
-            }
+        // 6. Persist graph state
+        let (nodes, edges) = self.persist_graph_state().await?;
+
+        tracing::info!("Full persist complete: {} nodes, {} edges", nodes, edges);
+        Ok((nodes, edges))
+    }
+
+    /// Graceful shutdown: flush all buffers, drain queues, and sync storage.
+    ///
+    /// Call this before dropping the engine to ensure all in-flight work is
+    /// committed to redb. After this returns the process can exit safely.
+    pub async fn shutdown(&self) {
+        tracing::info!("GraphEngine shutdown initiated — flushing buffers");
+
+        // 1. Flush event ordering buffers (process any queued out-of-order events)
+        if let Err(e) = self.flush_all_buffers().await {
+            tracing::warn!("Error flushing event buffers during shutdown: {}", e);
         }
 
-        tracing::info!("GraphEngine shutdown complete — all buffers flushed, graph persisted");
+        // 2. Process any pending claim extraction jobs by dropping the queue sender.
+        if self.claim_queue.is_some() {
+            tracing::info!("Claim extraction queue will drain on drop");
+        }
+        if self.embedding_queue.is_some() {
+            tracing::info!("Embedding queue will drain on drop");
+        }
+        if self.ner_queue.is_some() {
+            tracing::info!("NER extraction queue will drain on drop");
+        }
+
+        // 3. Full persist (memories, strategies, transition model, episode detector, graph)
+        match self.full_persist().await {
+            Ok((n, e)) => {
+                tracing::info!("Shutdown persist: {} nodes, {} edges", n, e);
+            },
+            Err(e) => {
+                tracing::error!("Shutdown persist failed: {} — retrying graph only", e);
+                // Retry graph-only persistence as fallback
+                for attempt in 1..=2u32 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    if let Ok((n, e)) = self.persist_graph_state().await {
+                        tracing::info!(
+                            "Graph-only persist succeeded on retry {}: {} nodes, {} edges",
+                            attempt,
+                            n,
+                            e
+                        );
+                        break;
+                    }
+                }
+            },
+        }
+
+        tracing::info!("GraphEngine shutdown complete");
     }
 
     /// Spawn a background maintenance loop that periodically runs:

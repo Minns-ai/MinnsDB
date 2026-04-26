@@ -114,12 +114,13 @@ pub async fn get_graph_for_context(
     Ok(Json(GraphResponse { nodes, edges }))
 }
 
-// POST /api/graph/persist - Force-flush graph state to disk
+// POST /api/graph/persist - Force-flush ALL state to disk
 pub async fn persist_graph(
     State(state): State<AppState>,
 ) -> Result<Json<GraphPersistResponse>, ApiError> {
-    info!("Force-persisting graph state to disk");
+    info!("Force-persisting all state to disk");
 
+    // 1. Engine-level: memories, strategies, transition model, episode detector, graph
     let result = state
         .write_lanes
         .submit_and_await(0, |tx| WriteJob::PersistGraph { result_tx: tx })
@@ -127,6 +128,29 @@ pub async fn persist_graph(
 
     let nodes_persisted = result["nodes_persisted"].as_u64().unwrap_or(0) as usize;
     let edges_persisted = result["edges_persisted"].as_u64().unwrap_or(0) as usize;
+
+    // 2. Server-level: table catalog, WASM registry, schedules, API keys
+    if let Some(backend) = state.engine.redb_backend() {
+        let mut catalog = state.table_catalog.write().await;
+        if let Err(e) = agent_db_tables::persistence::persist_catalog(backend, &mut catalog) {
+            tracing::error!("Failed to persist table catalog: {}", e);
+        }
+
+        let registry = state.module_registry.read().await;
+        if let Err(e) = minns_wasm_runtime::persistence::persist_registry(backend, &registry) {
+            tracing::error!("Failed to persist WASM registry: {}", e);
+        }
+
+        let runner = state.schedule_runner.read().await;
+        if let Err(e) = minns_wasm_runtime::persistence::persist_schedules(backend, &runner) {
+            tracing::error!("Failed to persist schedules: {}", e);
+        }
+
+        let store = state.key_store.read().await;
+        if let Err(e) = store.persist(backend) {
+            tracing::error!("Failed to persist API keys: {}", e);
+        }
+    }
 
     Ok(Json(GraphPersistResponse {
         success: true,
