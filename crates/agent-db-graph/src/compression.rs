@@ -21,7 +21,9 @@ pub struct CompressedAdjacencyList {
     /// First node ID (base value)
     pub base: NodeId,
 
-    /// Delta-encoded subsequent IDs (each is: next_id - current_id)
+    /// Delta-encoded subsequent IDs (each is: next_id - current_id).
+    /// A sentinel value of `u32::MAX` indicates the next two u32 entries
+    /// are the high and low halves of a u64 delta.
     pub deltas: Vec<u32>,
 }
 
@@ -47,8 +49,14 @@ impl CompressedAdjacencyList {
         let mut deltas = Vec::with_capacity(nodes.len().saturating_sub(1));
 
         for window in nodes.windows(2) {
-            let delta = window[1].saturating_sub(window[0]) as u32;
-            deltas.push(delta);
+            let delta = window[1].saturating_sub(window[0]);
+            if delta < u32::MAX as u64 {
+                deltas.push(delta as u32);
+            } else {
+                deltas.push(u32::MAX);
+                deltas.push((delta >> 32) as u32);
+                deltas.push(delta as u32);
+            }
         }
 
         Self { base, deltas }
@@ -77,8 +85,19 @@ impl CompressedAdjacencyList {
         result.push(self.base);
 
         let mut current = self.base;
-        for &delta in &self.deltas {
-            current = current.saturating_add(delta as NodeId);
+        let mut i = 0;
+        while i < self.deltas.len() {
+            let delta = if self.deltas[i] == u32::MAX && i + 2 < self.deltas.len() {
+                let hi = self.deltas[i + 1] as u64;
+                let lo = self.deltas[i + 2] as u64;
+                i += 3;
+                (hi << 32) | lo
+            } else {
+                let d = self.deltas[i] as u64;
+                i += 1;
+                d
+            };
+            current = current.saturating_add(delta);
             result.push(current);
         }
 
@@ -115,8 +134,19 @@ impl CompressedAdjacencyList {
 
         // Reconstruct and check
         let mut current = self.base;
-        for &delta in &self.deltas {
-            current = current.saturating_add(delta as NodeId);
+        let mut i = 0;
+        while i < self.deltas.len() {
+            let delta = if self.deltas[i] == u32::MAX && i + 2 < self.deltas.len() {
+                let hi = self.deltas[i + 1] as u64;
+                let lo = self.deltas[i + 2] as u64;
+                i += 3;
+                (hi << 32) | lo
+            } else {
+                let d = self.deltas[i] as u64;
+                i += 1;
+                d
+            };
+            current = current.saturating_add(delta);
             if current == node_id {
                 return true;
             }

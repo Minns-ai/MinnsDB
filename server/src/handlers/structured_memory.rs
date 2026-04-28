@@ -244,6 +244,11 @@ pub async fn preference_update(
     Path(key): Path<String>,
     Json(request): Json<PreferenceUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if let Some(s) = request.score {
+        if !s.is_finite() {
+            return Err(ApiError::BadRequest("score must be finite".into()));
+        }
+    }
     let routing_key = hash_string_key(&key);
     let key_clone = key.clone();
     let result = state

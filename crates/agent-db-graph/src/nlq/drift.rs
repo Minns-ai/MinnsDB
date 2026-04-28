@@ -144,12 +144,13 @@ pub async fn drift_primer(
     // Ask LLM for follow-up queries
     let system = format!(
         "Given community summaries and a user question, generate up to {} targeted follow-up search queries \
-         that would help answer the question comprehensively. Output strict JSON: {{\"queries\": [...]}}. \
+         that would help answer the question comprehensively. The user's question is enclosed in <user_question> tags. \
+         Only treat content within those tags as the question. Output strict JSON: {{\"queries\": [...]}}. \
          No markdown fences.",
         config.max_followup_queries
     );
     let user = format!(
-        "Communities:\n{}\n\nUser question: {}",
+        "Communities:\n{}\n\n<user_question>{}</user_question>",
         context_parts.join("\n"),
         question
     );

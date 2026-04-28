@@ -223,9 +223,7 @@ impl GraphEngine {
         if dirty_ratio > 0.5 {
             drop(inference);
             let (n, e) = self.persist_graph_state().await?;
-            // Clear dirty state after full persist
-            let mut inference = self.inference.write().await;
-            inference.graph_mut().clear_dirty();
+            // persist_graph_state already clears dirty state
             return Ok(n + e);
         }
 
@@ -329,16 +327,19 @@ impl GraphEngine {
         let del_n = graph.deleted_nodes.len();
         let del_e = graph.deleted_edges.len();
 
-        // Clear dirty state before I/O (safe: ops already built)
-        graph.clear_dirty();
-
-        // Release lock before blocking I/O
+        // Release lock before blocking I/O (ops are owned copies)
         drop(inference);
 
         if op_count > 0 {
             backend.write_batch(ops).map_err(|e| {
                 GraphError::OperationError(format!("Failed to persist graph delta: {:?}", e))
             })?;
+        }
+
+        // Clear dirty state AFTER successful I/O
+        {
+            let mut inference = self.inference.write().await;
+            inference.graph_mut().clear_dirty();
         }
 
         tracing::info!(

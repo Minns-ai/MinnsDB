@@ -62,9 +62,7 @@ impl Table {
         let mut unique_indexes = Vec::new();
         for constraint in &schema.constraints {
             match constraint {
-                Constraint::Unique(cols)
-                | Constraint::PrimaryKey(cols)
-                | Constraint::Index(cols) => {
+                Constraint::Unique(cols) | Constraint::PrimaryKey(cols) => {
                     let indices: Vec<usize> = cols
                         .iter()
                         .filter_map(|name| schema.column_index(name))
@@ -75,6 +73,9 @@ impl Table {
                             entries: FxHashMap::default(),
                         });
                     }
+                },
+                Constraint::Index(_) => {
+                    // Non-unique secondary index — no uniqueness enforcement needed
                 },
                 _ => {},
             }

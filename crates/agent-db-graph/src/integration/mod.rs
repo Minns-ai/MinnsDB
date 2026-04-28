@@ -622,6 +622,9 @@ pub struct GraphEngine {
     pub(crate) ast_parser: Option<Arc<agent_db_ast::AstParser>>,
 
     pub(crate) federated_search: Option<Arc<dyn crate::federated_search::FederatedSearchProvider>>,
+
+    /// Semaphore limiting concurrent background tasks (embeddings, refinement, consolidation).
+    pub(crate) background_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 /// Statistics for the graph engine (lock-free atomic counters).

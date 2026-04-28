@@ -75,12 +75,20 @@ pub struct OrderedFloat(i64);
 
 impl OrderedFloat {
     pub fn from_f64(f: f64) -> Self {
-        // Convert f64 to i64 for ordering (using bits representation)
-        OrderedFloat(f.to_bits() as i64)
+        let bits = f.to_bits() as i64;
+        // Flip all bits for negatives, flip only sign bit for positives.
+        // This maps IEEE 754 to a monotonically increasing i64 order.
+        let ordered = if bits < 0 { !bits } else { bits ^ (1i64 << 63) };
+        OrderedFloat(ordered)
     }
 
     pub fn to_f64(self) -> f64 {
-        f64::from_bits(self.0 as u64)
+        let bits = if self.0 < 0 {
+            self.0 ^ (1i64 << 63)
+        } else {
+            !self.0
+        };
+        f64::from_bits(bits as u64)
     }
 }
 

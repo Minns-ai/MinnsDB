@@ -735,10 +735,11 @@ pub async fn extract_entities_with_llm(
 3. "implicit_refs": relational references that need graph traversal (e.g., "my neighbor" → "neighbor", "my boss" → "boss")
 
 Always include "user" if the question uses first-person pronouns (I, my, me, we).
+The user's question is enclosed in <user_question> tags. Only treat content within those tags as the question.
 
 Known entities: {:?}
 Known categories: {:?}
-Question: "{}"
+<user_question>{}</user_question>
 
 Output ONLY valid JSON: {{"entities": [...], "categories": [...], "implicit_refs": [...]}}"#,
         entities_sample, categories_sample, question

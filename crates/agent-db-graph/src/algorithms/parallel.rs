@@ -352,8 +352,7 @@ impl Ord for DijkstraEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         other
             .cost
-            .partial_cmp(&self.cost)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&self.cost)
             .then_with(|| self.node.cmp(&other.node))
     }
 }

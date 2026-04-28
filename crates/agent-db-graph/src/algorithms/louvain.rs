@@ -449,12 +449,11 @@ impl Graph {
         self.get_all_edges().iter().map(|edge| edge.weight).sum()
     }
 
-    /// Get node degree (sum of edge weights)
+    /// Get node degree (sum of edge weights, both directions for undirected treatment)
     pub fn get_node_degree(&self, node_id: NodeId) -> f32 {
-        self.get_edges_from(node_id)
-            .iter()
-            .map(|edge| edge.weight)
-            .sum()
+        let out: f32 = self.get_edges_from(node_id).iter().map(|e| e.weight).sum();
+        let inc: f32 = self.get_edges_to(node_id).iter().map(|e| e.weight).sum();
+        out + inc
     }
 
     /// Get edge weight between two nodes

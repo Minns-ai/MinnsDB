@@ -38,8 +38,8 @@ pub async fn nlq_query(
     info!("NLQ query: '{}'", request.question);
 
     let pagination = agent_db_graph::nlq::NlqPagination {
-        limit: request.limit,
-        offset: request.offset,
+        limit: request.limit.map(|l| l.min(1_000)),
+        offset: request.offset.map(|o| o.min(100_000)),
     };
 
     let fed_sources = request.federated_sources.as_ref().filter(|v| !v.is_empty());

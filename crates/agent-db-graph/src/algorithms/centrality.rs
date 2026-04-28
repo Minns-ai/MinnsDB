@@ -200,7 +200,6 @@ impl CentralityMeasures {
 
         for _ in 0..max_iterations {
             let mut new_centrality = HashMap::new();
-            let mut max_diff: f32 = 0.0;
 
             // For each node, new centrality = sum of neighbors' centralities
             for &node_id in &nodes {
@@ -211,9 +210,6 @@ impl CentralityMeasures {
                     .sum();
 
                 new_centrality.insert(node_id, neighbor_sum);
-
-                let diff = (neighbor_sum - centrality[&node_id]).abs();
-                max_diff = max_diff.max(diff);
             }
 
             // Normalize so values sum to 1
@@ -224,7 +220,12 @@ impl CentralityMeasures {
                 }
             }
 
-            // Check convergence
+            // Check convergence after normalization
+            let mut max_diff: f32 = 0.0;
+            for &node_id in &nodes {
+                let diff = (new_centrality[&node_id] - centrality[&node_id]).abs();
+                max_diff = max_diff.max(diff);
+            }
             if max_diff < tolerance {
                 return Ok(new_centrality);
             }
@@ -258,9 +259,16 @@ impl CentralityMeasures {
             let mut new_pagerank = HashMap::new();
             let mut max_diff: f32 = 0.0;
 
+            // Redistribute probability mass from dangling nodes (no outgoing edges)
+            let dangling_sum: f32 = nodes
+                .iter()
+                .filter(|&&id| graph.get_neighbors(id).is_empty())
+                .map(|&id| pagerank[&id])
+                .sum();
+
             for &node_id in &nodes {
-                // Base rank (random jump probability)
-                let mut rank = (1.0 - damping_factor) / n;
+                // Base rank (random jump probability) + dangling contribution
+                let mut rank = (1.0 - damping_factor) / n + damping_factor * dangling_sum / n;
 
                 // Add contribution from incoming neighbors
                 for incoming in graph.get_incoming_neighbors(node_id) {

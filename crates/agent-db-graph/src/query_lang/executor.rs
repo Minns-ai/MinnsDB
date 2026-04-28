@@ -2234,17 +2234,7 @@ fn compare_values(lhs: &Value, op: &CompOp, rhs: &Value) -> bool {
         ),
         CompOp::Contains => match (lhs, rhs) {
             (Value::String(haystack), Value::String(needle)) => {
-                // Case-insensitive contains without allocating the haystack lowercase.
-                let needle_lower = needle.to_lowercase();
-                haystack
-                    .as_bytes()
-                    .windows(needle_lower.len())
-                    .any(|window| {
-                        window
-                            .iter()
-                            .zip(needle_lower.as_bytes())
-                            .all(|(a, b)| a.to_ascii_lowercase() == *b)
-                    })
+                haystack.to_lowercase().contains(&needle.to_lowercase())
             },
             (Value::List(items), val) => items.iter().any(|item| value_eq_loose(item, val)),
             _ => false,

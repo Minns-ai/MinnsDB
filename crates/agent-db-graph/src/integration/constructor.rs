@@ -723,6 +723,7 @@ impl GraphEngine {
             #[cfg(feature = "code-intelligence")]
             ast_parser,
             federated_search: federated_search_client,
+            background_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
         };
 
         // Restore graph state from redb if available

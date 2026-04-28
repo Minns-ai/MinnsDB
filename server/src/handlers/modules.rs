@@ -6,6 +6,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::errors::ApiError;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -220,15 +221,21 @@ pub async fn call_function(
     State(state): State<AppState>,
     Path((name, func_name)): Path<(String, String)>,
     Json(req): Json<CallFunctionRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiError> {
+    let _read_permit = state
+        .read_gate
+        .acquire()
+        .await
+        .map_err(ApiError::ServiceUnavailable)?;
+
     let registry = state.module_registry.read().await;
     let instance = match registry.get(&name) {
         Some(i) => i,
         None => {
-            return (
+            return Ok((
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({ "error": format!("module not found: {}", name) })),
-            )
+            ))
         },
     };
 
@@ -237,27 +244,29 @@ pub async fn call_function(
         match base64::engine::general_purpose::STANDARD.decode(b64) {
             Ok(b) => b,
             Err(e) => {
-                return (
+                return Ok((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": format!("invalid args base64: {}", e) })),
-                )
+                ))
             },
         }
     } else {
         vec![]
     };
 
-    match instance.call_function(&state.wasm_runtime, &func_name, &args) {
-        Ok(result_bytes) => {
-            use base64::Engine as _;
-            let result_b64 = base64::engine::general_purpose::STANDARD.encode(&result_bytes);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({ "result_base64": result_b64 })),
-            )
+    Ok(
+        match instance.call_function(&state.wasm_runtime, &func_name, &args) {
+            Ok(result_bytes) => {
+                use base64::Engine as _;
+                let result_b64 = base64::engine::general_purpose::STANDARD.encode(&result_bytes);
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "result_base64": result_b64 })),
+                )
+            },
+            Err(e) => wasm_err(e),
         },
-        Err(e) => wasm_err(e),
-    }
+    )
 }
 
 /// PUT /api/modules/:name/enable

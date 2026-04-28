@@ -142,24 +142,26 @@ impl ClassHierarchy {
         self.classes.write().unwrap().insert(desc.id.clone(), desc);
     }
 
-    /// Check if `child` is a subclass of `parent` (transitive).
+    /// Check if `child` is a subclass of `parent` (transitive BFS).
     pub fn is_subclass_of(&self, child: &str, parent: &str) -> bool {
         if child == parent {
             return true;
         }
         let classes = self.classes.read().unwrap();
-        let mut current = child.to_string();
+        let mut queue = std::collections::VecDeque::new();
         let mut visited = std::collections::HashSet::new();
-        while visited.insert(current.clone()) {
+        queue.push_back(child.to_string());
+        visited.insert(child.to_string());
+        while let Some(current) = queue.pop_front() {
             if let Some(desc) = classes.get(&current) {
                 for sup in &desc.sub_class_of {
                     if sup == parent {
                         return true;
                     }
-                    current = sup.clone();
+                    if visited.insert(sup.clone()) {
+                        queue.push_back(sup.clone());
+                    }
                 }
-            } else {
-                break;
             }
         }
         false

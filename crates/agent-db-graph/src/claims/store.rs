@@ -147,19 +147,12 @@ impl VectorIndex {
             if self.entries.is_empty() {
                 self.entries = hnsw
                     .iter()
-                    .map(|(_, point)| {
-                        // We need the claim id too — stored in values at same index
-                        // iter yields (PointId, &HnswPoint)
-                        VectorEntry {
-                            id: 0, // placeholder, filled below
-                            embedding: point.0.clone(),
-                        }
+                    .enumerate()
+                    .map(|(i, (_, point))| VectorEntry {
+                        id: hnsw.values[i],
+                        embedding: point.0.clone(),
                     })
                     .collect();
-                // Fix up IDs from values vec
-                for (i, entry) in self.entries.iter_mut().enumerate() {
-                    entry.id = hnsw.values[i];
-                }
             }
         }
     }

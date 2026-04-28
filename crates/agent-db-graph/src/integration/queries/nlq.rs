@@ -565,6 +565,16 @@ impl GraphEngine {
         // If the LLM is available, we ask it to answer the question using ONLY the
         // retrieved facts. This replaces the raw bullet-point dump with a direct answer.
         // Falls back to the raw retrieval context if LLM is unavailable or fails.
+        const MAX_CONTEXT_CHARS: usize = 24_000;
+        let synthesis_context = if retrieval_context.len() > MAX_CONTEXT_CHARS {
+            let mut end = MAX_CONTEXT_CHARS;
+            while end < retrieval_context.len() && !retrieval_context.is_char_boundary(end) {
+                end -= 1;
+            }
+            &retrieval_context[..end]
+        } else {
+            &retrieval_context
+        };
         let answer = if retrieval_context != "No relevant information found." {
             let synth_client = self
                 .synthesis_llm_client
@@ -573,7 +583,7 @@ impl GraphEngine {
             if let Some(llm_client) = synth_client {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    synthesize_answer(llm_client.as_ref(), question, &retrieval_context),
+                    synthesize_answer(llm_client.as_ref(), question, synthesis_context),
                 )
                 .await
                 {
@@ -691,10 +701,15 @@ impl GraphEngine {
         // Push exchange to conversational context
         if let Some(sid) = session_id {
             let mut contexts = self.nlq_contexts.lock().await;
-            // Evict if too many sessions tracked
+            // Evict oldest half by last_activity when too many sessions tracked
             if contexts.len() > 1000 {
-                let keys: Vec<String> = contexts.keys().take(contexts.len() / 2).cloned().collect();
-                for k in keys {
+                let mut by_activity: Vec<(String, u64)> = contexts
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.last_activity()))
+                    .collect();
+                by_activity.sort_by_key(|(_, ts)| *ts);
+                let evict_count = by_activity.len() / 2;
+                for (k, _) in by_activity.into_iter().take(evict_count) {
                     contexts.remove(&k);
                 }
             }

@@ -130,7 +130,9 @@ impl GraphEngine {
                         None
                     };
 
+                    let bg_permit = self.background_semaphore.clone();
                     tokio::spawn(async move {
+                        let _permit = bg_permit.acquire().await;
                         if let Err(e) = refinement_ref
                             .refine_and_embed_memory(
                                 memory_id,
@@ -189,7 +191,9 @@ impl GraphEngine {
                 let engine_ref = self.consolidation_engine.clone();
                 let bm25_ref = self.memory_bm25_index.clone();
                 let llm_ref = self.unified_llm_client.clone();
+                let bg_permit = self.background_semaphore.clone();
                 tokio::spawn(async move {
+                    let _permit = bg_permit.acquire().await;
                     // Pre-pass: infer goal labels for goalless buckets via LLM
                     // Extract data under read lock, drop it, then make LLM call without holding lock
                     let goal_overrides = if let Some(ref llm) = llm_ref {

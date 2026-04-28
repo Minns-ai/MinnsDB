@@ -216,6 +216,22 @@ async fn main() -> anyhow::Result<()> {
     let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let addr = format!("{}:{}", host, port);
 
+    if host == "0.0.0.0" {
+        let cors_origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
+        if cors_origins.is_empty() {
+            tracing::warn!(
+                "Permissive CORS is active on a public bind address (0.0.0.0). \
+                 Set CORS_ALLOWED_ORIGINS to restrict allowed origins in production."
+            );
+        }
+        if !auth_enabled {
+            tracing::warn!(
+                "Authentication is disabled on a public bind address (0.0.0.0). \
+                 Set MINNS_AUTH_ENABLED=true to require API keys in production."
+            );
+        }
+    }
+
     info!("Server listening on http://{}", addr);
     info!("API documentation: http://{}/docs", addr);
     info!("Health check: http://{}/api/health", addr);

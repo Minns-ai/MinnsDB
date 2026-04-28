@@ -405,7 +405,7 @@ impl GraphEngine {
                             .filter(|(_, s)| {
                                 if let Some(ts) = s.buffer_first_timestamp {
                                     !s.message_buffer.is_empty()
-                                        && (now_nanos - ts as u128) >= timeout_nanos
+                                        && now_nanos.saturating_sub(ts as u128) >= timeout_nanos
                                 } else {
                                     false
                                 }

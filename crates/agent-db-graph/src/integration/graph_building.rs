@@ -18,7 +18,9 @@ impl GraphEngine {
             None => return,
         };
         let inference_ref = self.inference.clone();
+        let bg_permit = self.background_semaphore.clone();
         tokio::spawn(async move {
+            let _permit = bg_permit.acquire().await;
             for (nid, text) in nodes {
                 match ec
                     .embed(crate::claims::EmbeddingRequest {

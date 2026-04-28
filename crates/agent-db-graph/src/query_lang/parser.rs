@@ -3,9 +3,12 @@ use super::lexer::Lexer;
 use super::token::{Spanned, Token};
 use super::types::QueryError;
 
+const MAX_PARSE_DEPTH: usize = 64;
+
 pub struct Parser {
     tokens: Vec<Spanned>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -14,7 +17,11 @@ impl Parser {
             message: e.message,
             position: e.position,
         })?;
-        let mut parser = Parser { tokens, pos: 0 };
+        let mut parser = Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        };
         parser.parse_query()
     }
 
@@ -24,7 +31,11 @@ impl Parser {
             message: e.message,
             position: e.position,
         })?;
-        let mut parser = Parser { tokens, pos: 0 };
+        let mut parser = Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        };
 
         if parser.at(&Token::Subscribe) {
             parser.advance(); // consume SUBSCRIBE
@@ -362,12 +373,17 @@ impl Parser {
     }
 
     fn parse_or_expr(&mut self) -> Result<BoolExpr, QueryError> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(self.error("expression nesting depth exceeds limit".into()));
+        }
         let mut left = self.parse_and_expr()?;
         while self.at(&Token::Or) {
             self.advance();
             let right = self.parse_and_expr()?;
             left = BoolExpr::Or(Box::new(left), Box::new(right));
         }
+        self.depth -= 1;
         Ok(left)
     }
 
@@ -384,7 +400,12 @@ impl Parser {
     fn parse_not_expr(&mut self) -> Result<BoolExpr, QueryError> {
         if self.at(&Token::Not) {
             self.advance();
+            self.depth += 1;
+            if self.depth > MAX_PARSE_DEPTH {
+                return Err(self.error("expression nesting depth exceeds limit".into()));
+            }
             let inner = self.parse_not_expr()?;
+            self.depth -= 1;
             return Ok(BoolExpr::Not(Box::new(inner)));
         }
         if self.at(&Token::LParen) {

@@ -146,14 +146,15 @@ impl GraphEngine {
         summary: crate::conversation::compaction::ConversationRollingSummary,
     ) {
         let mut summaries = self.conversation_summaries.write().await;
-        // Evict if too many conversation summaries tracked
+        // Evict oldest half by last_updated when too many summaries tracked
         if summaries.len() > 1000 {
-            let keys: Vec<String> = summaries
-                .keys()
-                .take(summaries.len() / 2)
-                .cloned()
+            let mut by_staleness: Vec<(String, u64)> = summaries
+                .iter()
+                .map(|(k, v)| (k.clone(), v.last_updated))
                 .collect();
-            for k in keys {
+            by_staleness.sort_by_key(|(_, ts)| *ts);
+            let evict_count = by_staleness.len() / 2;
+            for (k, _) in by_staleness.into_iter().take(evict_count) {
                 summaries.remove(&k);
             }
         }
