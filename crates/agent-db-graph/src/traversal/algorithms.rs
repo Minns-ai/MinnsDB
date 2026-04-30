@@ -258,15 +258,6 @@ impl GraphTraversal {
         let mut iterations: usize = 0;
 
         loop {
-            iterations += 1;
-            if iterations > MAX_DIJKSTRA_ITERATIONS {
-                tracing::warn!(
-                    "Bidirectional Dijkstra hit iteration cap ({}), terminating early",
-                    MAX_DIJKSTRA_ITERATIONS
-                );
-                break;
-            }
-
             let fwd_min = fwd_heap.peek().map(|e| e.cost).unwrap_or(f32::INFINITY);
             let bwd_min = bwd_heap.peek().map(|e| e.cost).unwrap_or(f32::INFINITY);
 
@@ -285,6 +276,14 @@ impl GraphTraversal {
                 if let Some(PathEntry { node_id: u, cost }) = fwd_heap.pop() {
                     if cost > *fwd_dist.get(&u).unwrap_or(&f32::INFINITY) {
                         continue;
+                    }
+                    iterations += 1;
+                    if iterations > MAX_DIJKSTRA_ITERATIONS {
+                        tracing::warn!(
+                            "Bidirectional Dijkstra hit iteration cap ({}), terminating early",
+                            MAX_DIJKSTRA_ITERATIONS
+                        );
+                        break;
                     }
                     fwd_settled.insert(u);
 
@@ -315,6 +314,14 @@ impl GraphTraversal {
             } else if let Some(PathEntry { node_id: u, cost }) = bwd_heap.pop() {
                 if cost > *bwd_dist.get(&u).unwrap_or(&f32::INFINITY) {
                     continue;
+                }
+                iterations += 1;
+                if iterations > MAX_DIJKSTRA_ITERATIONS {
+                    tracing::warn!(
+                        "Bidirectional Dijkstra hit iteration cap ({}), terminating early",
+                        MAX_DIJKSTRA_ITERATIONS
+                    );
+                    break;
                 }
                 bwd_settled.insert(u);
 

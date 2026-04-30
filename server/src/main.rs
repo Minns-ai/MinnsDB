@@ -88,7 +88,8 @@ async fn main() -> anyhow::Result<()> {
         graph.enable_subscriptions()
     };
     let subscription_manager = Arc::new(Mutex::new(SubscriptionManager::new(subscription_rx)));
-    let _subscription_task = subscription_task::spawn(engine.clone(), subscription_manager.clone());
+    let (subscription_cancel, subscription_handle) =
+        subscription_task::spawn(engine.clone(), subscription_manager.clone());
     info!("Subscription system enabled (background processing active)");
 
     // ── Table Catalog ──────────────────────────────────────────────────
@@ -243,7 +244,9 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    // ── Post-shutdown: drain write lanes, persist tables, then flush engine ──
+    // ── Post-shutdown: stop subscription task, drain write lanes, persist, flush ──
+    subscription_cancel.cancel();
+    let _ = subscription_handle.await;
     info!("Server stopped accepting connections — draining write lanes");
     write_lanes.drain().await;
 

@@ -26,8 +26,8 @@ pub async fn auth_layer(
     }
 
     // Health endpoint is always open
-    let path = request.uri().path();
-    if path == "/api/health" || path == "/" || path == "/docs" {
+    let path = request.uri().path().trim_end_matches('/');
+    if path == "/api/health" || path.is_empty() || path == "/docs" {
         return Ok(next.run(request).await);
     }
 

@@ -1022,7 +1022,9 @@ impl GraphEngine {
 
         // Process any remaining buffered events
         for event in buffered_events {
-            let _ = self.process_event(event).await; // Ignore errors during shutdown
+            if let Err(e) = self.process_event(event).await {
+                tracing::warn!("Failed to flush buffered event: {}", e);
+            }
         }
 
         Ok(())

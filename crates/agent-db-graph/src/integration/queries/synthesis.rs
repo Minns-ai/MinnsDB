@@ -139,10 +139,19 @@ pub(crate) fn extract_entity_names_from_question(
         found.push("user".to_string());
     }
 
-    // Check all concept names against the question
+    // Check all concept names against the question (word-boundary matching)
     for concept_name in graph.concept_index.keys() {
-        if lower.contains(&concept_name.to_lowercase()) {
-            found.push(concept_name.to_string());
+        let cn_lower = concept_name.to_lowercase();
+        if cn_lower.len() < 3 {
+            continue;
+        }
+        if let Some(pos) = lower.find(&cn_lower) {
+            let before_ok = pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphanumeric();
+            let end = pos + cn_lower.len();
+            let after_ok = end >= lower.len() || !lower.as_bytes()[end].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                found.push(concept_name.to_string());
+            }
         }
     }
 

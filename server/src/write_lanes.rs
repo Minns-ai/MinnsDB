@@ -160,8 +160,9 @@ impl WriteLaneMetrics {
 
 /// Striped write lane pool. Routes write operations by session_id hash.
 pub struct WriteLanes {
-    /// Immutable lane senders — no lock needed on the submit hot path.
-    lane_txs: Vec<mpsc::Sender<WriteJob>>,
+    /// Lane senders. Wrapped in a Mutex so `drain()` can drop them, which
+    /// closes the channels and lets workers see channel closure promptly.
+    lane_txs: parking_lot::Mutex<Vec<mpsc::Sender<WriteJob>>>,
     num_lanes: usize,
     pub metrics: Arc<WriteLaneMetrics>,
     cancel: CancellationToken,
@@ -198,7 +199,7 @@ impl WriteLanes {
         }
 
         Self {
-            lane_txs,
+            lane_txs: parking_lot::Mutex::new(lane_txs),
             num_lanes,
             metrics,
             cancel,
@@ -206,10 +207,12 @@ impl WriteLanes {
         }
     }
 
-    /// Gracefully drain all write lanes: signal cancellation so workers
-    /// drain remaining buffered jobs, then await all worker tasks.
+    /// Gracefully drain all write lanes: signal cancellation, drop senders
+    /// so workers see channel closure, then await all worker tasks.
     pub async fn drain(&self) {
         self.cancel.cancel();
+        // Drop all senders so workers unblock from recv() immediately.
+        self.lane_txs.lock().clear();
         let handles: Vec<_> = self.worker_handles.lock().drain(..).collect();
         for handle in handles {
             let _ = handle.await;
@@ -230,12 +233,24 @@ impl WriteLanes {
             return Err("Write lanes have been shut down".to_string());
         }
 
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.lane_txs[lane_index].send(job),
-        )
-        .await
-        {
+        // Clone the sender under the lock (cheap Arc bump), then release
+        // the lock before the potentially blocking send.
+        let sender = {
+            let txs = self.lane_txs.lock();
+            match txs.get(lane_index) {
+                Some(tx) => tx.clone(),
+                None => {
+                    self.metrics.total_rejected.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.per_lane_rejected[lane_index].fetch_add(1, Ordering::Relaxed);
+                    return Err(format!(
+                        "Write lane {} is dead (senders dropped)",
+                        lane_index
+                    ));
+                },
+            }
+        };
+
+        match tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(job)).await {
             Ok(Ok(())) => {
                 self.metrics.per_lane_in_flight[lane_index].fetch_add(1, Ordering::Release);
                 Ok(())

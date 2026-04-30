@@ -5,7 +5,7 @@ use crate::state::AppState;
 use agent_db_graph::query_lang::ast::Statement;
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Deserialize)]
 pub struct QueryRequest {
@@ -68,7 +68,7 @@ pub async fn minnsql_query(
         ));
     }
 
-    info!("MinnsQL: '{}'", request.query);
+    debug!("MinnsQL: '{}'", request.query);
 
     // Parse as a Statement to detect SUBSCRIBE/UNSUBSCRIBE.
     let stmt = agent_db_graph::query_lang::parser::Parser::parse_statement(&request.query)

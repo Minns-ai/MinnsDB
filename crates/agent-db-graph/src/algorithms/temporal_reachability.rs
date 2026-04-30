@@ -13,7 +13,7 @@ use crate::structures::{Graph, NodeId};
 use crate::GraphResult;
 use agent_db_core::types::Timestamp;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Configuration for temporal reachability analysis.
 #[derive(Debug, Clone)]
@@ -329,11 +329,17 @@ impl TemporalReachability {
         target: NodeId,
     ) -> Option<Vec<NodeId>> {
         let record = result.reachable.get(&target)?;
+        let max_len = result.reachable.len();
+        let mut visited = HashSet::with_capacity(max_len);
         let mut path = Vec::new();
         let mut current = target;
 
         path.push(current);
+        visited.insert(current);
         while let Some(pred) = result.reachable.get(&current).and_then(|r| r.predecessor) {
+            if !visited.insert(pred) || path.len() >= max_len {
+                break;
+            }
             path.push(pred);
             current = pred;
             if current == record.origin {

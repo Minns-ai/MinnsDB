@@ -476,6 +476,11 @@ impl EpisodeDetector {
 
     /// Start a new episode
     fn start_episode(&mut self, event: &Event) {
+        // Complete any existing active episode for this agent before starting a new one
+        if self.active_episodes.contains_key(&event.agent_id) {
+            self.complete_episode(event.agent_id, event);
+        }
+
         let episode_id = self.next_episode_id;
         self.next_episode_id += 1;
 

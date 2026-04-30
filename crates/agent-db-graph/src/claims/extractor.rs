@@ -186,17 +186,17 @@ impl ClaimExtractionQueue {
                     }
                 }
 
+                // Pre-compute claim embedding (used in both fallback and scoring)
+                let claim_embedding = embedding_client
+                    .embed(EmbeddingRequest {
+                        text: llm_claim.claim_text.clone(),
+                        context: None,
+                    })
+                    .await?
+                    .embedding;
+
                 // fallback to top-k sentences by semantic similarity if none found
                 if candidate_sentences.is_empty() && !context_sentence_entities.is_empty() {
-                    // Generate embedding for claim
-                    let claim_embedding = embedding_client
-                        .embed(EmbeddingRequest {
-                            text: llm_claim.claim_text.clone(),
-                            context: None,
-                        })
-                        .await?
-                        .embedding;
-
                     let mut scored_sentences = Vec::new();
                     for (i, sent) in context_sentence_entities.iter().enumerate() {
                         let sent_embedding = embedding_client
@@ -212,8 +212,7 @@ impl ClaimExtractionQueue {
                         scored_sentences.push((i, sent.clone(), sim));
                     }
 
-                    scored_sentences
-                        .sort_by(|a, b| b.2.total_cmp(&a.2));
+                    scored_sentences.sort_by(|a, b| b.2.total_cmp(&a.2));
                     candidate_sentences = scored_sentences.into_iter().take(3).collect();
                 }
 
@@ -226,13 +225,6 @@ impl ClaimExtractionQueue {
                 }
 
                 // 3.3 Compute geometric score over candidate sentences and take the best one
-                let claim_embedding = embedding_client
-                    .embed(EmbeddingRequest {
-                        text: llm_claim.claim_text.clone(),
-                        context: None,
-                    })
-                    .await?
-                    .embedding;
 
                 let mut best_sentence = None;
                 let mut max_support_score = f32::NEG_INFINITY;

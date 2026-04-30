@@ -179,14 +179,26 @@ impl GraphEngine {
             }
 
             // Check if we should run consolidation
-            let new_counter = self
-                .episodes_since_consolidation
-                .fetch_add(1, AtomicOrdering::Relaxed)
-                + 1;
-            let should_consolidate = new_counter >= self.config.consolidation_interval;
+            self.episodes_since_consolidation
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            let should_consolidate = loop {
+                let current = self
+                    .episodes_since_consolidation
+                    .load(AtomicOrdering::Relaxed);
+                if current < self.config.consolidation_interval {
+                    break false;
+                }
+                match self.episodes_since_consolidation.compare_exchange_weak(
+                    current,
+                    0,
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Relaxed,
+                ) {
+                    Ok(_) => break true,
+                    Err(_) => continue,
+                }
+            };
             if should_consolidate {
-                self.episodes_since_consolidation
-                    .store(0, AtomicOrdering::Relaxed);
                 let store_ref = self.memory_store.clone();
                 let engine_ref = self.consolidation_engine.clone();
                 let bm25_ref = self.memory_bm25_index.clone();

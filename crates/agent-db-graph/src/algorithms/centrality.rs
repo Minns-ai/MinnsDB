@@ -162,17 +162,16 @@ impl CentralityMeasures {
                 }
             }
 
-            // Closeness = (reachable - 1) / sum_of_distances
-            // Higher value = more central
-            let closeness = if total_distance > 0.0 {
-                (reachable_count as f32) / total_distance
+            // Standard closeness: (reachable_count) / total_distance
+            // Normalized to [0,1] by scaling: (reachable_count / (n-1)) * (reachable_count / total_distance)
+            // This is the Wasserman-Faust generalization for disconnected graphs.
+            let closeness = if total_distance > 0.0 && reachable_count > 0 {
+                let scale = reachable_count as f32 / (n - 1) as f32;
+                scale * (reachable_count as f32 / total_distance)
             } else {
                 0.0
             };
-
-            // Normalize by (n-1) to get value between 0 and 1
-            let normalized = closeness / (n - 1) as f32;
-            centrality.insert(node_id, normalized);
+            centrality.insert(node_id, closeness);
         }
 
         Ok(centrality)

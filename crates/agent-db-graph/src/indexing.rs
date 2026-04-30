@@ -447,6 +447,11 @@ impl Bm25Index {
     /// * `node_id` - Unique identifier for the document
     /// * `text` - Text content to index
     pub fn index_document(&mut self, node_id: NodeId, text: &str) {
+        // Remove old stats if this document was already indexed
+        if self.documents.contains_key(&node_id) {
+            self.remove_document(node_id);
+        }
+
         let terms = Self::tokenize(text);
         let length = terms.len();
 
@@ -1037,22 +1042,45 @@ impl FusionStrategy {
         results
     }
 
-    /// Weighted fusion of raw scores
+    /// Weighted fusion of raw scores with min-max normalization
     fn weighted_fusion(
         keyword_results: Vec<(NodeId, f32)>,
         semantic_results: Vec<(NodeId, f32)>,
         keyword_weight: f32,
         semantic_weight: f32,
     ) -> Vec<(NodeId, f32)> {
+        fn normalize(results: &[(NodeId, f32)]) -> Vec<(NodeId, f32)> {
+            if results.is_empty() {
+                return Vec::new();
+            }
+            let min = results
+                .iter()
+                .map(|(_, s)| *s)
+                .fold(f32::INFINITY, f32::min);
+            let max = results
+                .iter()
+                .map(|(_, s)| *s)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let range = max - min;
+            results
+                .iter()
+                .map(|(id, s)| {
+                    let norm = if range == 0.0 { 1.0 } else { (s - min) / range };
+                    (*id, norm)
+                })
+                .collect()
+        }
+
+        let kw_norm = normalize(&keyword_results);
+        let sem_norm = normalize(&semantic_results);
+
         let mut scores: HashMap<NodeId, f32> = HashMap::new();
 
-        // Add weighted keyword scores
-        for (node_id, score) in keyword_results {
+        for (node_id, score) in kw_norm {
             *scores.entry(node_id).or_insert(0.0) += score * keyword_weight;
         }
 
-        // Add weighted semantic scores
-        for (node_id, score) in semantic_results {
+        for (node_id, score) in sem_norm {
             *scores.entry(node_id).or_insert(0.0) += score * semantic_weight;
         }
 
@@ -1339,10 +1367,11 @@ mod tests {
         };
         let fused = strategy.fuse(keyword_results, semantic_results);
 
-        // Node 1 should win (10.0 * 0.7 = 7.0)
-        // Node 2 gets (5.0 * 0.7 + 0.9 * 0.3 = 3.5 + 0.27 = 3.77)
+        // After min-max normalization:
+        // Node 1: keyword=1.0*0.7=0.7, semantic=0 → 0.7
+        // Node 2: keyword=0.0*0.7=0, semantic=1.0*0.3=0.3 → 0.3
         assert_eq!(fused[0].0, 1);
-        assert!(fused[0].1 > 6.0);
+        assert!(fused[0].1 > 0.5);
     }
 
     // ========================================================================

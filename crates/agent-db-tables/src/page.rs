@@ -261,23 +261,29 @@ impl Page {
         (0..total).filter_map(move |i| self.read_row(i).map(|data| (i, data)))
     }
 
-    /// Compute blake3 checksum of the data region (bytes 32..PAGE_SIZE) and write
-    /// it into the header. Call this before persisting.
+    /// Compute blake3 checksum covering all page bytes except the checksum field
+    /// itself (bytes 12..28). This includes header fields so that corruption in
+    /// page_id / row_count / free_start / free_end / flags is detected.
     pub fn update_checksum(&mut self) {
-        let hash = blake3::hash(&self.data[PAGE_HEADER_SIZE..]);
-        let truncated = &hash.as_bytes()[..CHECKSUM_LEN];
-        self.data[HDR_CHECKSUM..HDR_CHECKSUM + CHECKSUM_LEN].copy_from_slice(truncated);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&self.data[..HDR_CHECKSUM]);
+        hasher.update(&self.data[HDR_CHECKSUM + CHECKSUM_LEN..]);
+        let hash = hasher.finalize();
+        self.data[HDR_CHECKSUM..HDR_CHECKSUM + CHECKSUM_LEN]
+            .copy_from_slice(&hash.as_bytes()[..CHECKSUM_LEN]);
     }
 
     /// Verify the page checksum. Returns true if valid or if checksum is all zeros
     /// (legacy page without checksum).
     pub fn verify_checksum(&self) -> bool {
         let stored = &self.data[HDR_CHECKSUM..HDR_CHECKSUM + CHECKSUM_LEN];
-        // All-zero means no checksum was set (legacy or new empty page)
         if stored.iter().all(|&b| b == 0) {
             return true;
         }
-        let hash = blake3::hash(&self.data[PAGE_HEADER_SIZE..]);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&self.data[..HDR_CHECKSUM]);
+        hasher.update(&self.data[HDR_CHECKSUM + CHECKSUM_LEN..]);
+        let hash = hasher.finalize();
         let expected = &hash.as_bytes()[..CHECKSUM_LEN];
         stored == expected
     }
@@ -295,26 +301,26 @@ impl Page {
     }
 
     /// Restore from raw bytes (load from ReDB).
-    /// Validates structural invariants and checksum.
+    /// Validates structural invariants and checksum; resets the page to empty
+    /// if corruption is detected so callers never operate on garbage data.
     pub fn from_bytes(data: Box<[u8; PAGE_SIZE]>) -> Self {
-        let page = Page { data };
-        // Validate structural invariants
+        let mut page = Page { data };
+        let page_id = page.page_id();
         let fs = page.free_start() as usize;
         let fe = page.free_end() as usize;
         if fs < PAGE_HEADER_SIZE || fe > PAGE_SIZE || fs > fe {
             tracing::warn!(
-                "page {} has invalid header: free_start={}, free_end={} — may be corrupted",
-                page.page_id(),
+                "page {} has invalid header: free_start={}, free_end={} — resetting to empty",
+                page_id,
                 fs,
                 fe
             );
+            page.reset();
+            return page;
         }
-        // Validate checksum
         if !page.verify_checksum() {
-            tracing::warn!(
-                "page {} checksum mismatch — data may be corrupted",
-                page.page_id()
-            );
+            tracing::warn!("page {} checksum mismatch — resetting to empty", page_id);
+            page.reset();
         }
         page
     }

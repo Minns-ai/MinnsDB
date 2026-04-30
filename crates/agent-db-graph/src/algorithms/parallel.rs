@@ -219,46 +219,59 @@ impl ParallelGraphAlgorithms {
         Ok(paths)
     }
 
-    /// Parallel connected components detection
-    /// Uses Union-Find with parallel initialization
+    /// Parallel connected components detection using Union-Find with path compression
+    /// and union by rank.
     pub fn parallel_connected_components(
         &self,
         graph: &Graph,
     ) -> GraphResult<HashMap<NodeId, u64>> {
         let nodes = graph.get_all_node_ids();
 
-        // Initialize: each node in its own component
-        let components: HashMap<NodeId, u64> =
-            nodes.iter().map(|&node_id| (node_id, node_id)).collect();
+        let mut node_to_idx: HashMap<NodeId, usize> = HashMap::with_capacity(nodes.len());
+        for (i, &nid) in nodes.iter().enumerate() {
+            node_to_idx.insert(nid, i);
+        }
 
-        // Use sequential Union-Find for actual merging
-        // (Parallel Union-Find is complex and requires lock-free data structures)
-        let mut components = components;
-        let mut changed = true;
+        let mut parent: Vec<usize> = (0..nodes.len()).collect();
+        let mut rank: Vec<u8> = vec![0; nodes.len()];
 
-        while changed {
-            changed = false;
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
 
-            for &node_id in &nodes {
-                let node_component = components[&node_id];
+        fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
+            let ra = find(parent, a);
+            let rb = find(parent, b);
+            if ra == rb {
+                return;
+            }
+            if rank[ra] < rank[rb] {
+                parent[ra] = rb;
+            } else if rank[ra] > rank[rb] {
+                parent[rb] = ra;
+            } else {
+                parent[rb] = ra;
+                rank[ra] += 1;
+            }
+        }
 
-                for neighbor in graph.get_neighbors(node_id) {
-                    let neighbor_component = components[&neighbor];
-
-                    if node_component != neighbor_component {
-                        // Merge components: assign all nodes in larger component ID
-                        let min_component = node_component.min(neighbor_component);
-                        let max_component = node_component.max(neighbor_component);
-
-                        for (&_id, comp) in components.iter_mut() {
-                            if *comp == max_component {
-                                *comp = min_component;
-                                changed = true;
-                            }
-                        }
-                    }
+        for &node_id in &nodes {
+            let idx = node_to_idx[&node_id];
+            for neighbor in graph.get_neighbors(node_id) {
+                if let Some(&nidx) = node_to_idx.get(&neighbor) {
+                    union(&mut parent, &mut rank, idx, nidx);
                 }
             }
+        }
+
+        let mut components: HashMap<NodeId, u64> = HashMap::with_capacity(nodes.len());
+        for (i, &nid) in nodes.iter().enumerate() {
+            let root = find(&mut parent, i);
+            components.insert(nid, nodes[root]);
         }
 
         Ok(components)

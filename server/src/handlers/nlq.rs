@@ -4,7 +4,7 @@ use crate::errors::ApiError;
 use crate::models::{NlqEntity, NlqRequest, NlqResponseBody};
 use crate::state::AppState;
 use axum::{extract::State, Json};
-use tracing::info;
+use tracing::debug;
 
 /// POST /api/nlq - Execute a natural language query against the graph
 pub async fn nlq_query(
@@ -35,7 +35,7 @@ pub async fn nlq_query(
             ));
         }
     }
-    info!("NLQ query: '{}'", request.question);
+    debug!("NLQ query: '{}'", request.question);
 
     let pagination = agent_db_graph::nlq::NlqPagination {
         limit: request.limit.map(|l| l.min(1_000)),

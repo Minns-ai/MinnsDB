@@ -11,6 +11,10 @@ use agent_db_tables::types::CellValue;
 
 use crate::state::AppState;
 
+/// Maximum rows decoded before pagination is applied. Prevents unbounded
+/// memory usage when the underlying table scan returns millions of rows.
+const SCAN_HARD_CAP: usize = 100_000;
+
 // -- Request/Response types --
 
 #[derive(Deserialize)]
@@ -371,7 +375,11 @@ pub async fn scan_rows(
     };
 
     let group_id = gid(params.group_id);
-    let rows = match params.when.as_deref() {
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(1000).min(10_000);
+    let cap = (offset + limit).min(SCAN_HARD_CAP);
+
+    let mut rows = match params.when.as_deref() {
         Some("all") => table.scan_all(group_id),
         _ => {
             if let Some(ts) = params.as_of {
@@ -382,9 +390,8 @@ pub async fn scan_rows(
         },
     };
 
-    let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.unwrap_or(1000).min(10_000);
     let total = rows.len();
+    rows.truncate(cap);
     let rows: Vec<RowData> = rows
         .into_iter()
         .skip(offset)
@@ -417,12 +424,17 @@ pub async fn rows_by_node(
         },
     };
 
-    let rows: Vec<RowData> = table
-        .rows_by_node(gid(params.group_id), node_id)
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(100).min(1000);
+
+    let all = table.rows_by_node(gid(params.group_id), node_id);
+    let count = all.len();
+    let rows: Vec<RowData> = all
         .into_iter()
+        .skip(offset)
+        .take(limit)
         .map(decoded_to_row_data)
         .collect();
-    let count = rows.len();
 
     (
         StatusCode::OK,

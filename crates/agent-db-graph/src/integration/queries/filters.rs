@@ -137,9 +137,19 @@ pub(crate) fn apply_temporal_validity_filter(
                 if let NodeType::Claim { claim_text, .. } = &n.node_type {
                     let text_lower = claim_text.to_lowercase();
                     for target in &superseded_targets {
-                        if target.len() >= 3 && text_lower.contains(target.as_str()) {
-                            *score = 0.0; // Hard remove — references superseded entity
-                            break;
+                        if target.len() < 3 {
+                            continue;
+                        }
+                        if let Some(pos) = text_lower.find(target.as_str()) {
+                            let before_ok =
+                                pos == 0 || !text_lower.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                            let end = pos + target.len();
+                            let after_ok = end >= text_lower.len()
+                                || !text_lower.as_bytes()[end].is_ascii_alphanumeric();
+                            if before_ok && after_ok {
+                                *score = 0.0;
+                                break;
+                            }
                         }
                     }
                 }
@@ -161,9 +171,19 @@ pub(crate) fn apply_temporal_validity_filter(
                 };
                 if let Some(text_lower) = text_to_check {
                     for target in &superseded_targets {
-                        if target.len() >= 3 && text_lower.contains(target.as_str()) {
-                            *score = 0.0;
-                            break;
+                        if target.len() < 3 {
+                            continue;
+                        }
+                        if let Some(pos) = text_lower.find(target.as_str()) {
+                            let before_ok =
+                                pos == 0 || !text_lower.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                            let end = pos + target.len();
+                            let after_ok = end >= text_lower.len()
+                                || !text_lower.as_bytes()[end].is_ascii_alphanumeric();
+                            if before_ok && after_ok {
+                                *score = 0.0;
+                                break;
+                            }
                         }
                     }
                 }

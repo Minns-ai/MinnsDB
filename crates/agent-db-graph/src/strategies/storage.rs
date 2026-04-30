@@ -379,6 +379,11 @@ impl StrategyExtractor {
         let agent_id = strategy.agent_id;
         let goal_bucket_id = strategy.goal_bucket_id;
         let behavior_signature = strategy.behavior_signature.clone();
+        let strategy_signature = strategy
+            .metadata
+            .get("strategy_signature")
+            .cloned()
+            .unwrap_or_else(|| self.compute_strategy_signature(&strategy));
 
         // Update next_strategy_id if needed
         if strategy_id >= self.next_strategy_id {
@@ -405,6 +410,10 @@ impl StrategyExtractor {
             .entry(behavior_signature)
             .or_default()
             .push(strategy_id);
+
+        // Index by strategy signature for dedup
+        self.strategy_signature_index
+            .insert(strategy_signature, strategy_id);
 
         Ok(())
     }
