@@ -98,7 +98,6 @@ pub struct TableStatsResponse {
     pub name: String,
     pub active_rows: usize,
     pub total_versions: usize,
-    pub pages: usize,
     pub generation: u64,
 }
 
@@ -113,7 +112,6 @@ pub struct SchemaResponse {
 #[derive(Serialize)]
 pub struct CompactResponse {
     pub versions_removed: usize,
-    pub pages_compacted: usize,
 }
 
 fn gid(q: Option<u64>) -> u64 {
@@ -468,7 +466,6 @@ pub async fn compact_table(
         Json(
             serde_json::to_value(CompactResponse {
                 versions_removed: result.versions_removed,
-                pages_compacted: result.pages_compacted,
             })
             .unwrap(),
         ),
@@ -497,7 +494,6 @@ pub async fn table_stats(
                 name: table.schema.name.clone(),
                 active_rows: table.active_row_count(),
                 total_versions: table.total_version_count(),
-                pages: table.page_count(),
                 generation: table.generation(),
             })
             .unwrap(),

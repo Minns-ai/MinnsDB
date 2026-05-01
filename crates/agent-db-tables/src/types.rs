@@ -2,34 +2,12 @@ use serde::{Deserialize, Serialize};
 
 pub use agent_db_core::types::{GroupId, RowId, RowVersionId, TableId, Timestamp};
 
-/// 8KB page size.
-pub const PAGE_SIZE: usize = 8192;
-
-/// Maximum usable payload per page after header (32B) and one slot entry (4B).
-pub const MAX_ROW_PAYLOAD: usize = PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_SIZE;
-
-/// Page header size in bytes.
-pub const PAGE_HEADER_SIZE: usize = 32;
-
-/// Slot directory entry size in bytes.
-pub const SLOT_SIZE: usize = 4;
-
 /// Row header size in bytes.
 /// version_id(8) + row_id(8) + group_id(8) + valid_from(8) + valid_until(8) + created_at(8) + flags(2) + _reserved(2)
 pub const ROW_HEADER_SIZE: usize = 52;
 
 /// Row flags: COMMITTED bit.
 pub const ROW_FLAG_COMMITTED: u16 = 0x0001;
-
-/// Physical pointer to a row version within a table's page store.
-/// 6 bytes total. This is a **physical address**, not a stable identity.
-/// Stable across in-page compaction (slot indices preserved), but not
-/// across full page rewrites. Use (RowId, RowVersionId) for logical identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RowPointer {
-    pub page_id: u32,
-    pub slot_idx: u16,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColumnType {

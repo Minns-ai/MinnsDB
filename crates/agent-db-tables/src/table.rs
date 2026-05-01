@@ -1,4 +1,4 @@
-//! Table engine: page store + indexes + mutations + queries.
+//! Table engine: in-memory row store + indexes + mutations + queries.
 
 use std::collections::BTreeMap;
 
@@ -6,8 +6,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::error::TableError;
-use crate::page::Page;
-use crate::page_store::PageStore;
 use crate::row_codec::{self, DecodedRow};
 use crate::schema::{Constraint, RowLayout, TableSchema};
 use crate::types::*;
@@ -19,17 +17,17 @@ pub struct Table {
     pub layout: RowLayout,
 
     // -- Storage --
-    store: PageStore,
+    rows: FxHashMap<RowVersionId, Vec<u8>>,
+    /// Track whether any rows have changed since last persist.
+    dirty: bool,
 
-    // -- Indexes (all derived — rebuilt from pages on load) --
-    /// (group_id, RowId) -> RowPointer of active version. None = deleted.
-    pk_index: FxHashMap<(GroupId, RowId), Option<RowPointer>>,
-    /// (group_id, RowId) -> all RowPointers, append-ordered by RowVersionId.
-    history_index: FxHashMap<(GroupId, RowId), Vec<RowPointer>>,
-    /// RowVersionId -> RowPointer. Direct version lookup.
-    version_index: FxHashMap<RowVersionId, RowPointer>,
-    /// valid_from -> RowPointers. For temporal range queries.
-    temporal_index: BTreeMap<Timestamp, SmallVec<[RowPointer; 4]>>,
+    // -- Indexes (all derived — rebuilt from rows on load) --
+    /// (group_id, RowId) -> RowVersionId of active version. None = deleted.
+    pk_index: FxHashMap<(GroupId, RowId), Option<RowVersionId>>,
+    /// (group_id, RowId) -> all RowVersionIds, append-ordered.
+    history_index: FxHashMap<(GroupId, RowId), Vec<RowVersionId>>,
+    /// valid_from -> RowVersionIds. For temporal range queries.
+    temporal_index: BTreeMap<Timestamp, SmallVec<[RowVersionId; 4]>>,
     /// Graph NodeId -> set of (group_id, RowId) referencing it.
     node_ref_index: FxHashMap<u64, FxHashSet<(GroupId, RowId)>>,
     /// Unique constraint enforcement (active rows only, scoped by group_id).
@@ -84,10 +82,10 @@ impl Table {
         Ok(Table {
             schema,
             layout,
-            store: PageStore::new(),
+            rows: FxHashMap::default(),
+            dirty: false,
             pk_index: FxHashMap::default(),
             history_index: FxHashMap::default(),
-            version_index: FxHashMap::default(),
             temporal_index: BTreeMap::new(),
             node_ref_index: FxHashMap::default(),
             unique_indexes,
@@ -100,30 +98,31 @@ impl Table {
         })
     }
 
-    /// Restore from persisted pages. Rebuilds all indexes by scanning page data.
+    /// Restore from persisted rows. Rebuilds all indexes by scanning row data.
     pub fn from_persisted(
         schema: TableSchema,
-        pages: Vec<Page>,
+        persisted_rows: Vec<(RowVersionId, Vec<u8>)>,
         next_version_id: RowVersionId,
         next_row_id: RowId,
         generation: u64,
     ) -> Result<Self, TableError> {
         let mut table = Self::new(schema)?;
-        table.store = PageStore::from_pages(pages);
+        for (vid, data) in persisted_rows {
+            table.rows.insert(vid, data);
+        }
         table.next_version_id = next_version_id;
         table.next_row_id = next_row_id;
         table.generation = generation;
 
-        // Rebuild indexes from page contents
+        // Rebuild indexes from row data
         table.rebuild_indexes();
         Ok(table)
     }
 
-    /// Rebuild all indexes from page data. Used on load and recovery.
+    /// Rebuild all indexes from row data. Used on load and recovery.
     fn rebuild_indexes(&mut self) {
         self.pk_index.clear();
         self.history_index.clear();
-        self.version_index.clear();
         self.temporal_index.clear();
         self.node_ref_index.clear();
         for idx in &mut self.unique_indexes {
@@ -131,31 +130,28 @@ impl Table {
         }
         self.active_row_count = 0;
 
-        let entries: Vec<(RowPointer, Vec<u8>)> = self
-            .store
-            .iter_live()
-            .map(|(ptr, data)| (ptr, data.to_vec()))
-            .collect();
+        // Collect version ids so we can iterate without borrowing self.rows mutably
+        let vids: Vec<RowVersionId> = self.rows.keys().copied().collect();
 
-        for (ptr, data) in &entries {
-            let hdr = row_codec::read_header(data);
+        for vid in &vids {
+            let data = &self.rows[vid];
 
             // Skip uncommitted rows during recovery
             if !row_codec::is_committed(data) {
                 continue;
             }
 
+            let hdr = row_codec::read_header(data);
             let key = (hdr.group_id, hdr.row_id);
-            self.version_index.insert(hdr.version_id, *ptr);
-            self.history_index.entry(key).or_default().push(*ptr);
+            self.history_index.entry(key).or_default().push(*vid);
             self.temporal_index
                 .entry(hdr.valid_from)
                 .or_default()
-                .push(*ptr);
+                .push(*vid);
 
             if hdr.valid_until.is_none() {
                 // Active version
-                self.pk_index.insert(key, Some(*ptr));
+                self.pk_index.insert(key, Some(*vid));
                 self.active_row_count += 1;
 
                 // Unique index entries
@@ -169,18 +165,13 @@ impl Table {
 
         // Sort history entries by version_id
         for entries in self.history_index.values_mut() {
-            entries.sort_by_key(|ptr| {
-                self.store
-                    .read(*ptr)
-                    .map(|d| row_codec::read_header(d).version_id)
-                    .unwrap_or(0)
-            });
+            entries.sort();
         }
 
         // Recompute stats from rebuilt indexes
         self.stats.per_group_counts.clear();
-        for (&(group_id, _), active_ptr) in &self.pk_index {
-            if active_ptr.is_some() {
+        for (&(group_id, _), active_vid) in &self.pk_index {
+            if active_vid.is_some() {
                 *self.stats.per_group_counts.entry(group_id).or_insert(0) += 1;
             }
         }
@@ -233,7 +224,7 @@ impl Table {
         self.check_unique_constraints(group_id, &values, None)?;
 
         let now = current_timestamp();
-        let bytes = row_codec::encode_row(
+        let mut bytes = row_codec::encode_row(
             &self.layout,
             vid,
             row_id,
@@ -246,25 +237,17 @@ impl Table {
             &self.schema.columns,
         );
 
-        // Check row size
-        if bytes.len() > MAX_ROW_PAYLOAD {
-            return Err(TableError::RowTooLarge {
-                size: bytes.len(),
-                max: MAX_ROW_PAYLOAD,
-            });
-        }
-
-        let ptr = self.store.insert(&bytes);
-
         // Set committed
-        let row_bytes = self.store.read_mut(ptr).unwrap();
-        row_codec::set_committed(row_bytes);
+        row_codec::set_committed(&mut bytes);
+
+        // Store the row
+        self.rows.insert(vid, bytes);
+        self.dirty = true;
 
         // Update indexes
-        self.pk_index.insert(key, Some(ptr));
-        self.history_index.entry(key).or_default().push(ptr);
-        self.version_index.insert(vid, ptr);
-        self.temporal_index.entry(now).or_default().push(ptr);
+        self.pk_index.insert(key, Some(vid));
+        self.history_index.entry(key).or_default().push(vid);
+        self.temporal_index.entry(now).or_default().push(vid);
         self.insert_unique_entries(group_id, row_id, &values);
         self.insert_node_ref_entries(group_id, row_id, &values);
 
@@ -277,8 +260,9 @@ impl Table {
         Ok((row_id, vid))
     }
 
-    /// Optimistic insert: write row first, then check constraints.
-    /// Faster common path since constraint checks happen after the cheap write.
+    /// Optimistic insert: check constraints after encoding.
+    /// With in-memory storage, this is equivalent to the normal insert path
+    /// but preserves the API for callers.
     pub fn insert_optimistic(
         &mut self,
         group_id: GroupId,
@@ -292,8 +276,7 @@ impl Table {
         let key = (group_id, row_id);
         let now = current_timestamp();
 
-        // Step 1: Write row (uncommitted)
-        let bytes = row_codec::encode_row(
+        let mut bytes = row_codec::encode_row(
             &self.layout,
             vid,
             row_id,
@@ -306,31 +289,20 @@ impl Table {
             &self.schema.columns,
         );
 
-        if bytes.len() > MAX_ROW_PAYLOAD {
-            return Err(TableError::RowTooLarge {
-                size: bytes.len(),
-                max: MAX_ROW_PAYLOAD,
-            });
-        }
+        // Check constraints
+        self.check_unique_constraints(group_id, &values, None)?;
 
-        let ptr = self.store.insert(&bytes);
+        // Commit
+        row_codec::set_committed(&mut bytes);
 
-        // Step 2: Check constraints
-        if let Err(e) = self.check_unique_constraints(group_id, &values, None) {
-            // Rollback: mark the row dead
-            self.store.mark_dead(ptr);
-            return Err(e);
-        }
+        // Store the row
+        self.rows.insert(vid, bytes);
+        self.dirty = true;
 
-        // Step 3: Commit
-        let row_bytes = self.store.read_mut(ptr).unwrap();
-        row_codec::set_committed(row_bytes);
-
-        // Step 4: Update indexes
-        self.pk_index.insert(key, Some(ptr));
-        self.history_index.entry(key).or_default().push(ptr);
-        self.version_index.insert(vid, ptr);
-        self.temporal_index.entry(now).or_default().push(ptr);
+        // Update indexes
+        self.pk_index.insert(key, Some(vid));
+        self.history_index.entry(key).or_default().push(vid);
+        self.temporal_index.entry(now).or_default().push(vid);
         self.insert_unique_entries(group_id, row_id, &values);
         self.insert_node_ref_entries(group_id, row_id, &values);
 
@@ -351,15 +323,15 @@ impl Table {
         values: Vec<CellValue>,
     ) -> Result<(RowVersionId, RowVersionId), TableError> {
         let key = (group_id, row_id);
-        let old_ptr = self.active_ptr(key)?;
+        let old_vid = self.active_vid(key)?;
         self.validate_values(&values)?;
         self.check_unique_constraints(group_id, &values, Some(row_id))?;
 
         let now = current_timestamp();
         let new_vid = self.next_version_id;
 
-        // Step 1: Append new version (uncommitted)
-        let new_bytes = row_codec::encode_row(
+        // Step 1: Encode new version
+        let mut new_bytes = row_codec::encode_row(
             &self.layout,
             new_vid,
             row_id,
@@ -372,41 +344,31 @@ impl Table {
             &self.schema.columns,
         );
 
-        if new_bytes.len() > MAX_ROW_PAYLOAD {
-            return Err(TableError::RowTooLarge {
-                size: new_bytes.len(),
-                max: MAX_ROW_PAYLOAD,
-            });
-        }
-
-        let new_ptr = self.store.insert(&new_bytes);
-
         // Step 2: Close old version
-        let old_bytes = self.store.read_mut(old_ptr).unwrap();
+        let old_bytes = self.rows.get_mut(&old_vid).unwrap();
         row_codec::write_valid_until(old_bytes, now);
-        let old_vid = row_codec::read_header(old_bytes).version_id;
 
         // Step 3: Update indexes
         // Remove old active entries
         let old_values = {
-            let old_data = self.store.read(old_ptr).unwrap();
+            let old_data = self.rows.get(&old_vid).unwrap();
             self.decode_values(old_data)
         };
         self.remove_unique_entries(group_id, &old_values);
         self.remove_node_ref_entries(group_id, row_id, &old_values);
 
-        self.pk_index.insert(key, Some(new_ptr));
-        self.history_index.entry(key).or_default().push(new_ptr);
-        self.version_index.insert(new_vid, new_ptr);
-        self.temporal_index.entry(now).or_default().push(new_ptr);
+        // Commit and store new version
+        row_codec::set_committed(&mut new_bytes);
+        self.rows.insert(new_vid, new_bytes);
+        self.dirty = true;
+
+        self.pk_index.insert(key, Some(new_vid));
+        self.history_index.entry(key).or_default().push(new_vid);
+        self.temporal_index.entry(now).or_default().push(new_vid);
         self.insert_unique_entries(group_id, row_id, &values);
         self.insert_node_ref_entries(group_id, row_id, &values);
 
-        // Step 4: Set committed flag on new version
-        let committed_bytes = self.store.read_mut(new_ptr).unwrap();
-        row_codec::set_committed(committed_bytes);
-
-        // Step 5: Bump generation
+        // Step 4: Bump generation
         self.next_version_id += 1;
         self.generation += 1;
 
@@ -416,16 +378,16 @@ impl Table {
     /// Delete: close version in place.
     pub fn delete(&mut self, group_id: GroupId, row_id: RowId) -> Result<RowVersionId, TableError> {
         let key = (group_id, row_id);
-        let ptr = self.active_ptr(key)?;
+        let vid = self.active_vid(key)?;
         let now = current_timestamp();
 
-        let bytes = self.store.read_mut(ptr).unwrap();
+        let bytes = self.rows.get_mut(&vid).unwrap();
         row_codec::write_valid_until(bytes, now);
-        let vid = row_codec::read_header(bytes).version_id;
+        self.dirty = true;
 
         // Remove active entries
         let values = {
-            let data = self.store.read(ptr).unwrap();
+            let data = self.rows.get(&vid).unwrap();
             self.decode_values(data)
         };
         self.remove_unique_entries(group_id, &values);
@@ -463,12 +425,12 @@ impl Table {
     /// Scan active rows for a group.
     pub fn scan_active(&self, group_id: GroupId) -> Vec<DecodedRow> {
         let mut results = Vec::new();
-        for (&(gid, _rid), opt_ptr) in &self.pk_index {
+        for (&(gid, _rid), opt_vid) in &self.pk_index {
             if gid != group_id {
                 continue;
             }
-            if let Some(ptr) = opt_ptr {
-                if let Some(data) = self.store.read(*ptr) {
+            if let Some(vid) = opt_vid {
+                if let Some(data) = self.rows.get(vid) {
                     results.push(row_codec::decode_row(
                         &self.layout,
                         data,
@@ -483,12 +445,12 @@ impl Table {
     /// Point-in-time query: rows active at a specific timestamp for a group.
     pub fn scan_as_of(&self, group_id: GroupId, timestamp: Timestamp) -> Vec<DecodedRow> {
         let mut results = Vec::new();
-        for (&(gid, _rid), ptrs) in &self.history_index {
+        for (&(gid, _rid), vids) in &self.history_index {
             if gid != group_id {
                 continue;
             }
-            for ptr in ptrs.iter().rev() {
-                if let Some(bytes) = self.store.read(*ptr) {
+            for vid in vids.iter().rev() {
+                if let Some(bytes) = self.rows.get(vid) {
                     let hdr = row_codec::read_header(bytes);
                     if hdr.valid_from <= timestamp && hdr.valid_until.is_none_or(|u| u > timestamp)
                     {
@@ -508,12 +470,12 @@ impl Table {
     /// Full history (WHEN ALL) for a group.
     pub fn scan_all(&self, group_id: GroupId) -> Vec<DecodedRow> {
         let mut results = Vec::new();
-        for (&(gid, _rid), ptrs) in &self.history_index {
+        for (&(gid, _rid), vids) in &self.history_index {
             if gid != group_id {
                 continue;
             }
-            for ptr in ptrs {
-                if let Some(data) = self.store.read(*ptr) {
+            for vid in vids {
+                if let Some(data) = self.rows.get(vid) {
                     results.push(row_codec::decode_row(
                         &self.layout,
                         data,
@@ -537,12 +499,12 @@ impl Table {
         let mut results = Vec::new();
         // Must check ALL versions, not just those with valid_from in range,
         // because a row with valid_from < start may still be active during the range.
-        for (&(gid, _rid), ptrs) in &self.history_index {
+        for (&(gid, _rid), vids) in &self.history_index {
             if gid != group_id {
                 continue;
             }
-            for ptr in ptrs {
-                if let Some(data) = self.store.read(*ptr) {
+            for vid in vids {
+                if let Some(data) = self.rows.get(vid) {
                     let hdr = row_codec::read_header(data);
                     // Overlap check: valid_from <= end AND (valid_until is None OR valid_until >= start)
                     if hdr.valid_from <= end && hdr.valid_until.is_none_or(|vu| vu >= start) {
@@ -577,8 +539,8 @@ impl Table {
     /// Single row by RowId (active version).
     pub fn get_active(&self, group_id: GroupId, row_id: RowId) -> Option<DecodedRow> {
         let key = (group_id, row_id);
-        let ptr = (*self.pk_index.get(&key)?)?;
-        let data = self.store.read(ptr)?;
+        let vid = (*self.pk_index.get(&key)?)?;
+        let data = self.rows.get(&vid)?;
         Some(row_codec::decode_row(
             &self.layout,
             data,
@@ -639,11 +601,11 @@ impl Table {
     }
 
     /// Read a single column from a row without decoding the full row.
-    pub fn read_column(&self, ptr: RowPointer, col_idx: usize) -> Option<CellValue> {
+    pub fn read_column(&self, version_id: RowVersionId, col_idx: usize) -> Option<CellValue> {
         if col_idx >= self.schema.columns.len() {
             return None;
         }
-        let bytes = self.store.read(ptr)?;
+        let bytes = self.rows.get(&version_id)?;
         Some(row_codec::read_column(
             &self.layout,
             bytes,
@@ -700,11 +662,7 @@ impl Table {
     }
 
     pub fn total_version_count(&self) -> usize {
-        self.store.live_row_count()
-    }
-
-    pub fn page_count(&self) -> usize {
-        self.store.page_count()
+        self.rows.len()
     }
 
     pub fn next_version_id(&self) -> RowVersionId {
@@ -715,44 +673,57 @@ impl Table {
         self.next_row_id
     }
 
-    pub fn store(&self) -> &PageStore {
-        &self.store
+    /// Whether the table has been modified since the last persist.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
-    pub fn store_mut(&mut self) -> &mut PageStore {
-        &mut self.store
+    /// Clear the dirty flag after a successful persist.
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Iterate all rows (version_id, bytes). Used by persistence.
+    pub fn iter_rows(&self) -> impl Iterator<Item = (RowVersionId, &[u8])> {
+        self.rows.iter().map(|(&vid, data)| (vid, data.as_slice()))
     }
 
     pub fn stats(&self) -> &crate::stats::TableStats {
         &self.stats
     }
 
-    /// Remove stale entries from history_index, version_index, and temporal_index
-    /// that point to dead (compacted) rows. Call after compaction.
+    /// Remove a set of row versions from storage. Used by compaction.
+    pub fn remove_versions(&mut self, version_ids: &[RowVersionId]) {
+        for vid in version_ids {
+            self.rows.remove(vid);
+        }
+        if !version_ids.is_empty() {
+            self.dirty = true;
+        }
+    }
+
+    /// Remove stale entries from history_index and temporal_index
+    /// that reference removed rows. Call after compaction.
     pub fn clean_stale_index_entries(&mut self) {
-        // Clean history_index: remove pointers to dead rows
-        for ptrs in self.history_index.values_mut() {
-            ptrs.retain(|ptr| self.store.read(*ptr).is_some());
+        // Clean history_index: remove version ids for removed rows
+        for vids in self.history_index.values_mut() {
+            vids.retain(|vid| self.rows.contains_key(vid));
         }
         // Remove empty entries
-        self.history_index.retain(|_, ptrs| !ptrs.is_empty());
-
-        // Clean version_index
-        self.version_index
-            .retain(|_, ptr| self.store.read(*ptr).is_some());
+        self.history_index.retain(|_, vids| !vids.is_empty());
 
         // Clean temporal_index
-        for ptrs in self.temporal_index.values_mut() {
-            ptrs.retain(|ptr| self.store.read(*ptr).is_some());
+        for vids in self.temporal_index.values_mut() {
+            vids.retain(|vid| self.rows.contains_key(vid));
         }
-        self.temporal_index.retain(|_, ptrs| !ptrs.is_empty());
+        self.temporal_index.retain(|_, vids| !vids.is_empty());
     }
 
     // -- Internal helpers --
 
-    fn active_ptr(&self, key: (GroupId, RowId)) -> Result<RowPointer, TableError> {
+    fn active_vid(&self, key: (GroupId, RowId)) -> Result<RowVersionId, TableError> {
         match self.pk_index.get(&key) {
-            Some(Some(ptr)) => Ok(*ptr),
+            Some(Some(vid)) => Ok(*vid),
             Some(None) => Err(TableError::RowAlreadyDeleted(key.1)),
             None => Err(TableError::RowNotFound(key.1)),
         }
@@ -907,9 +878,9 @@ impl Table {
         };
 
         // Populate index from existing active rows
-        for (&(group_id, row_id), ptr_opt) in &self.pk_index {
-            if let Some(ptr) = ptr_opt {
-                if let Some(row_bytes) = self.store.read(*ptr) {
+        for (&(group_id, row_id), vid_opt) in &self.pk_index {
+            if let Some(vid) = vid_opt {
+                if let Some(row_bytes) = self.rows.get(vid) {
                     if !row_codec::is_committed(row_bytes) {
                         continue;
                     }

@@ -28,8 +28,6 @@ pub enum TableError {
     UniqueConstraintViolation(Vec<String>),
     #[error("primary key violation")]
     PrimaryKeyViolation,
-    #[error("row too large: encoded size {size} exceeds max inline payload {max}")]
-    RowTooLarge { size: usize, max: usize },
     #[error("import error: {0}")]
     ImportError(String),
     #[error("persistence error: {0}")]

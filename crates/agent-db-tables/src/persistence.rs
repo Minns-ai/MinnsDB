@@ -1,23 +1,22 @@
 //! ReDB persistence for temporal tables.
 //!
-//! Pages are stored as raw 8KB blobs — no per-field serialization overhead.
+//! Rows are stored individually keyed by (table_id, version_id).
 //!
 //! ReDB key formats:
-//! - table_schemas:  [table_id: 8B BE]                 -> msgpack(TableSchema)
-//! - table_pages:    [table_id: 8B BE][page_id: 4B BE] -> raw [u8; 8192]
-//! - table_meta:     [table_id: 8B BE]                 -> msgpack(TableMeta)
+//! - table_schemas:  [table_id: 8B BE]                     -> msgpack(TableSchema)
+//! - table_rows:     [table_id: 8B BE][version_id: 8B BE]  -> raw row bytes
+//! - table_meta:     [table_id: 8B BE]                     -> msgpack(TableMeta)
 
 use agent_db_storage::{BatchOperation, RedbBackend};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::TableCatalog;
 use crate::error::TableError;
-use crate::page::Page;
 use crate::table::Table;
 use crate::types::*;
 
 const TABLE_SCHEMAS: &str = "table_schemas";
-const TABLE_PAGES: &str = "table_pages";
+const TABLE_ROWS: &str = "table_rows";
 const TABLE_META: &str = "table_meta";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,8 +27,7 @@ pub struct TableMeta {
     pub generation: u64,
 }
 
-/// Persist a single table (dirty pages + schema + meta) atomically.
-/// Call `update_checksums()` on the table's store before this if checksums are needed.
+/// Persist a single table (all rows + schema + meta) atomically.
 pub fn persist_table(backend: &RedbBackend, table: &Table) -> Result<(), TableError> {
     let table_id = table.schema.table_id;
     let schema_key = table_id.to_be_bytes().to_vec();
@@ -45,18 +43,16 @@ pub fn persist_table(backend: &RedbBackend, table: &Table) -> Result<(), TableEr
         value: schema_bytes,
     });
 
-    // Dirty pages as raw 8KB blobs
-    for &page_id in table.store().dirty_pages() {
-        if let Some(page) = table.store().get_page(page_id) {
-            let mut key = Vec::with_capacity(12);
-            key.extend_from_slice(&table_id.to_be_bytes());
-            key.extend_from_slice(&page_id.to_be_bytes());
-            ops.push(BatchOperation::Put {
-                table_name: TABLE_PAGES.into(),
-                key,
-                value: page.as_bytes_readonly().to_vec(),
-            });
-        }
+    // All rows
+    for (vid, row_bytes) in table.iter_rows() {
+        let mut key = Vec::with_capacity(16);
+        key.extend_from_slice(&table_id.to_be_bytes());
+        key.extend_from_slice(&vid.to_be_bytes());
+        ops.push(BatchOperation::Put {
+            table_name: TABLE_ROWS.into(),
+            key,
+            value: row_bytes.to_vec(),
+        });
     }
 
     // Meta
@@ -93,7 +89,7 @@ pub fn persist_catalog(
         next_table_id: catalog.next_table_id(),
         generation: 0,
     };
-    let meta_key = 0u64.to_be_bytes(); // special key for catalog-level meta
+    let meta_key = 0u64.to_be_bytes();
     let meta_bytes = rmp_serde::to_vec(&catalog_meta)
         .map_err(|e| TableError::PersistenceError(e.to_string()))?;
     backend
@@ -101,9 +97,8 @@ pub fn persist_catalog(
         .map_err(|e| TableError::PersistenceError(e.to_string()))?;
 
     for table in catalog.tables_mut() {
-        table.store_mut().update_checksums();
         persist_table(backend, table)?;
-        table.store_mut().clear_dirty();
+        table.clear_dirty();
     }
     Ok(())
 }
@@ -137,18 +132,17 @@ pub fn load_catalog(backend: &RedbBackend) -> Result<TableCatalog, TableError> {
         let schema: crate::schema::TableSchema = rmp_serde::from_slice(schema_bytes)
             .map_err(|e| TableError::PersistenceError(e.to_string()))?;
 
-        // Load pages for this table
+        // Load rows for this table
         let prefix = table_id.to_be_bytes();
-        let page_entries = backend
-            .scan_prefix_raw(TABLE_PAGES, &prefix[..])
+        let row_entries = backend
+            .scan_prefix_raw(TABLE_ROWS, &prefix[..])
             .map_err(|e| TableError::PersistenceError(e.to_string()))?;
 
-        let mut pages = Vec::new();
-        for (_key, page_data) in page_entries {
-            if page_data.len() == PAGE_SIZE {
-                let mut arr = Box::new([0u8; PAGE_SIZE]);
-                arr.copy_from_slice(&page_data);
-                pages.push(Page::from_bytes(arr));
+        let mut persisted_rows = Vec::new();
+        for (key, row_data) in row_entries {
+            if key.len() == 16 {
+                let vid = u64::from_be_bytes(key[8..16].try_into().unwrap());
+                persisted_rows.push((vid, row_data));
             }
         }
 
@@ -165,7 +159,13 @@ pub fn load_catalog(backend: &RedbBackend) -> Result<TableCatalog, TableError> {
             (1, 1, 0)
         };
 
-        let table = Table::from_persisted(schema, pages, next_version_id, next_row_id, generation)?;
+        let table = Table::from_persisted(
+            schema,
+            persisted_rows,
+            next_version_id,
+            next_row_id,
+            generation,
+        )?;
         catalog.insert_table(table);
     }
 
