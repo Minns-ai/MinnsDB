@@ -19,6 +19,7 @@ fn make_ingest(messages: Vec<(&str, &str)>) -> crate::conversation::types::Conve
                     metadata: Default::default(),
                 })
                 .collect(),
+            timestamp: None,
             contains_fact: None,
             fact_id: None,
             fact_quote: None,
@@ -60,6 +61,7 @@ fn test_split_into_turns() {
                         metadata: Default::default(),
                     },
                 ],
+                timestamp: None,
                 contains_fact: None,
                 fact_id: None,
                 fact_quote: None,
@@ -80,6 +82,7 @@ fn test_split_into_turns() {
                         metadata: Default::default(),
                     },
                 ],
+                timestamp: None,
                 contains_fact: None,
                 fact_id: None,
                 fact_quote: None,
@@ -105,6 +108,7 @@ fn test_split_into_turns() {
 #[test]
 fn test_format_turn_transcript() {
     let turn = ConversationTurn {
+        session_timestamp: None,
         messages: vec![
             ConversationMessage {
                 role: "user".to_string(),

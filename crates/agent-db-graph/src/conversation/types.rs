@@ -35,6 +35,12 @@ pub struct ConversationSession {
     #[serde(default)]
     pub topic: Option<String>,
     pub messages: Vec<ConversationMessage>,
+    /// Session timestamp as a date string (e.g. "2023/05/28 (Sun) 21:04").
+    /// When provided, facts extracted from this session are anchored to this
+    /// time instead of the current wall clock. The LLM prompt includes this
+    /// date so relative references ("two months ago") can be resolved.
+    #[serde(default)]
+    pub timestamp: Option<String>,
     /// Benchmark metadata (ignored during ingestion).
     #[serde(default)]
     pub contains_fact: Option<bool>,

@@ -24,6 +24,7 @@ fn make_test_ingest(case_id: &str, messages: Vec<(&str, &str)>) -> ConversationI
                     metadata: Default::default(),
                 })
                 .collect(),
+            timestamp: None,
             contains_fact: None,
             fact_id: None,
             fact_quote: None,
@@ -195,6 +196,7 @@ async fn test_conversation_pipeline_multi_session() {
                     content: "Alice: Paid €50 for lunch - split with Bob".to_string(),
                     metadata: Default::default(),
                 }],
+                timestamp: None,
                 contains_fact: None,
                 fact_id: None,
                 fact_quote: None,
@@ -208,6 +210,7 @@ async fn test_conversation_pipeline_multi_session() {
                     content: "Carol: Paid €80 for dinner - split with Alice".to_string(),
                     metadata: Default::default(),
                 }],
+                timestamp: None,
                 contains_fact: None,
                 fact_id: None,
                 fact_quote: None,

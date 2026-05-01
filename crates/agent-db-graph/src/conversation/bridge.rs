@@ -616,6 +616,7 @@ mod tests {
                         metadata: Default::default(),
                     })
                     .collect(),
+                timestamp: None,
                 contains_fact: None,
                 fact_id: None,
                 fact_quote: None,
@@ -691,6 +692,7 @@ mod tests {
                         metadata: Default::default(),
                     })
                     .collect(),
+                timestamp: None,
                 contains_fact: None,
                 fact_id: None,
                 fact_quote: None,

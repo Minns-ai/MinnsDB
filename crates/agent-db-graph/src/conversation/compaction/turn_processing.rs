@@ -22,6 +22,8 @@ pub struct ConversationTurn {
     pub messages: Vec<ConversationMessage>,
     pub session_index: usize,
     pub turn_index: usize,
+    /// Session timestamp string, if provided (e.g. "2023/05/28").
+    pub session_timestamp: Option<String>,
 }
 
 // ────────── Turn Splitting ──────────
@@ -53,6 +55,7 @@ pub fn split_into_turns(data: &ConversationIngest) -> Vec<ConversationTurn> {
                 messages: turn_msgs,
                 session_index: session_idx,
                 turn_index: global_turn,
+                session_timestamp: session.timestamp.clone(),
             });
             global_turn += 1;
         }

@@ -199,6 +199,7 @@ impl GraphEngine {
                 session_id,
                 topic: None,
                 messages,
+                timestamp: None,
                 contains_fact: None,
                 fact_id: None,
                 fact_quote: None,

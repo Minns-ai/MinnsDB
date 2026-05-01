@@ -60,6 +60,9 @@ pub struct SessionInput {
     pub topic: Option<String>,
     /// Ordered messages in the session.
     pub messages: Vec<MessageInput>,
+    /// Session timestamp (e.g. "2023/05/28 (Sun) 21:04").
+    #[serde(default)]
+    pub timestamp: Option<String>,
     /// Benchmark metadata: whether this session contains a key fact.
     #[serde(default)]
     pub contains_fact: Option<bool>,
@@ -143,6 +146,7 @@ pub async fn ingest_conversation(
                         metadata: m.metadata,
                     })
                     .collect(),
+                timestamp: s.timestamp,
                 contains_fact: s.contains_fact,
                 fact_id: s.fact_id,
                 fact_quote: s.fact_quote,
@@ -411,6 +415,7 @@ pub async fn accept_message(
             session_id: session_id.clone(),
             topic: None,
             messages: vec![message.clone()],
+            timestamp: None,
             contains_fact: None,
             fact_id: None,
             fact_quote: None,

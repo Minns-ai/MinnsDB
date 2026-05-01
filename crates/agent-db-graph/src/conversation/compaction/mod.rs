@@ -129,10 +129,74 @@ pub async fn run_compaction_with_context(
         hasher.finish()
     };
 
-    let base_ts: u64 = std::time::SystemTime::now()
+    let wall_clock_ts: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
+
+    // Parse a session timestamp string into nanoseconds since epoch.
+    // Supports formats like "2023/05/28 (Sun) 21:04" or "2023-05-28T21:04:00".
+    fn parse_session_ts(s: &str) -> Option<u64> {
+        // Strip day-of-week in parens: "2023/05/28 (Sun) 21:04" → "2023/05/28 21:04"
+        let cleaned = s.replace('/', "-").replace(['(', ')'], "");
+        // Remove day names
+        let cleaned = cleaned
+            .replace("Mon", "")
+            .replace("Tue", "")
+            .replace("Wed", "")
+            .replace("Thu", "")
+            .replace("Fri", "")
+            .replace("Sat", "")
+            .replace("Sun", "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Try "YYYY-MM-DD HH:MM"
+        let parts: Vec<&str> = cleaned.splitn(2, ' ').collect();
+        let date_parts: Vec<u32> = parts
+            .first()?
+            .split('-')
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        if date_parts.len() != 3 {
+            return None;
+        }
+        let (y, m, d) = (date_parts[0], date_parts[1], date_parts[2]);
+
+        let (hour, min) = if let Some(time_str) = parts.get(1) {
+            let tp: Vec<u32> = time_str.split(':').filter_map(|p| p.parse().ok()).collect();
+            (
+                tp.first().copied().unwrap_or(0),
+                tp.get(1).copied().unwrap_or(0),
+            )
+        } else {
+            (0, 0)
+        };
+
+        // Days from epoch (rough but consistent for ordering)
+        let days = (y as u64) * 365 + (m as u64) * 30 + d as u64;
+        let secs = days * 86400 + hour as u64 * 3600 + min as u64 * 60;
+        Some(secs * 1_000_000_000)
+    }
+
+    // Compute per-session base timestamps
+    let session_base_timestamps: Vec<u64> = data
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| {
+            session
+                .timestamp
+                .as_deref()
+                .and_then(parse_session_ts)
+                .unwrap_or(wall_clock_ts + i as u64 * 60 * 1_000_000_000)
+        })
+        .collect();
+
+    let base_ts = session_base_timestamps
+        .first()
+        .copied()
+        .unwrap_or(wall_clock_ts);
 
     // ── Phase 1: Per-turn extraction with rolling context + graph state ──
     // Batch adjacent turns in pairs (2 user+assistant exchanges per LLM call)
@@ -181,12 +245,17 @@ pub async fn run_compaction_with_context(
             messages: Vec::new(),
             session_index: batch[0].session_index,
             turn_index: batch_start_idx,
+            session_timestamp: batch[0].session_timestamp.clone(),
         };
         for turn in batch {
             merged_turn.messages.extend(turn.messages.clone());
         }
 
-        let messages_text = format_messages(&merged_turn);
+        let mut messages_text = String::new();
+        if let Some(ref ts) = merged_turn.session_timestamp {
+            messages_text.push_str(&format!("[Session date: {}]\n", ts));
+        }
+        messages_text.push_str(&format_messages(&merged_turn));
         let cat_block = engine.domain_registry.prompt_category_block();
         let cat_enum = engine.domain_registry.prompt_category_enum();
 
@@ -251,7 +320,11 @@ pub async fn run_compaction_with_context(
 
         if !facts_combined.is_empty() {
             let mut facts = facts_combined;
-            let turn_base = base_ts + batch_start_idx as u64 * TURN_GAP;
+            let session_ts = session_base_timestamps
+                .get(merged_turn.session_index)
+                .copied()
+                .unwrap_or(base_ts);
+            let turn_base = session_ts + batch_start_idx as u64 * TURN_GAP;
 
             // Inject group_id and request-level metadata into each fact so they flow to graph edges.
             for fact in facts.iter_mut() {
