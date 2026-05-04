@@ -91,8 +91,10 @@ mod table_defs {
     // Temporal tables
     /// Key: [table_id: 8B BE] -> msgpack(TableSchema)
     pub const TABLE_SCHEMAS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("table_schemas");
-    /// Key: [table_id: 8B BE][page_id: 4B BE] -> raw [u8; 8192]
+    /// Key: [table_id: 8B BE][page_id: 4B BE] -> raw [u8; 8192] (legacy, unused)
     pub const TABLE_PAGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("table_pages");
+    /// Key: [table_id: 8B BE][version_id: 8B BE] -> raw row bytes
+    pub const TABLE_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("table_rows");
     /// Key: [table_id: 8B BE] -> msgpack(TableMeta)
     pub const TABLE_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("table_meta");
 
@@ -133,6 +135,7 @@ pub mod table_names {
     pub const WORLD_MODEL: &str = "world_model";
     pub const TABLE_SCHEMAS: &str = "table_schemas";
     pub const TABLE_PAGES: &str = "table_pages";
+    pub const TABLE_ROWS: &str = "table_rows";
     pub const TABLE_META: &str = "table_meta";
     pub const MODULE_REGISTRY: &str = "module_registry";
     pub const MODULE_BLOBS: &str = "module_blobs";
@@ -306,6 +309,9 @@ impl RedbBackend {
                 .open_table(table_defs::TABLE_PAGES)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
             let _ = write_txn
+                .open_table(table_defs::TABLE_ROWS)
+                .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+            let _ = write_txn
                 .open_table(table_defs::TABLE_META)
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         }
@@ -361,6 +367,7 @@ impl RedbBackend {
             table_names::WORLD_MODEL => table_defs::WORLD_MODEL,
             table_names::TABLE_SCHEMAS => table_defs::TABLE_SCHEMAS,
             table_names::TABLE_PAGES => table_defs::TABLE_PAGES,
+            table_names::TABLE_ROWS => table_defs::TABLE_ROWS,
             table_names::TABLE_META => table_defs::TABLE_META,
             table_names::MODULE_REGISTRY => table_defs::MODULE_REGISTRY,
             table_names::MODULE_BLOBS => table_defs::MODULE_BLOBS,
