@@ -180,7 +180,15 @@ impl LlmClient for AnthropicLlmClient {
             .send()
             .await?;
 
+        let status = resp.status();
         let json: serde_json::Value = resp.json().await?;
+
+        if !status.is_success() {
+            let err_msg = json["error"]["message"].as_str().unwrap_or("unknown error");
+            tracing::error!("Anthropic API error ({}): {}", status, err_msg);
+            return Err(anyhow::anyhow!("Anthropic API error: {} {}", status, err_msg));
+        }
+
         let content = json["content"][0]["text"]
             .as_str()
             .unwrap_or("")
