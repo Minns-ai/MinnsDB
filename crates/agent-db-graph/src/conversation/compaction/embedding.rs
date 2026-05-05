@@ -222,6 +222,34 @@ pub(crate) async fn embed_nodes_and_create_claims(
             _ => crate::claims::ClaimType::Fact,
         };
 
+        // Check if this fact's graph edge was already superseded.
+        // If so, mark the claim as stale from the start.
+        let edge_valid_until = {
+            let inf = engine.inference.read().await;
+            let graph = inf.graph();
+            let subj_lower = fact.subject.to_lowercase();
+            let obj_lower = fact.object.to_lowercase();
+            // Find the edge matching this fact's subject→object
+            graph.get_concept_node(&subj_lower).and_then(|node| {
+                graph.get_edges_from(node.id).iter().find_map(|edge| {
+                    let target_name = graph_projection::concept_name_of(graph, edge.target)
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    if target_name == obj_lower {
+                        edge.valid_until
+                    } else {
+                        None
+                    }
+                })
+            })
+        };
+
+        let claim_status = if edge_valid_until.is_some() {
+            crate::claims::ClaimStatus::Superseded
+        } else {
+            crate::claims::ClaimStatus::Active
+        };
+
         let claim = crate::claims::DerivedClaim {
             id: claim_id,
             claim_text: fact.statement.clone(),
@@ -240,7 +268,7 @@ pub(crate) async fn embed_nodes_and_create_claims(
             created_at: now,
             last_accessed: now,
             access_count: 0,
-            status: crate::claims::ClaimStatus::Active,
+            status: claim_status,
             support_count: 1,
             metadata: HashMap::new(),
             claim_type,
@@ -253,7 +281,7 @@ pub(crate) async fn embed_nodes_and_create_claims(
             category: fact.category.clone(),
             temporal_type: crate::claims::TemporalType::Dynamic,
             valid_from: Some(base_ts + i as u64 * 1_000),
-            valid_until: None,
+            valid_until: edge_valid_until,
         };
 
         if let Ok(()) = claim_store.store(&claim) {
