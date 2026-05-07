@@ -644,6 +644,69 @@ impl OntologyRegistry {
         }
     }
 
+    /// Infer the ontology category from a raw predicate and statement.
+    ///
+    /// When the LLM returns `"other"` or no category, this method checks
+    /// the predicate and statement against each registered property's
+    /// `rdfs:comment`, `canonical_predicate`, and `rdfs:label` to find
+    /// the best match. Returns `None` if no property matches.
+    pub fn infer_category(&self, predicate: &str, statement: &str) -> Option<String> {
+        let props = self.properties.read().unwrap();
+        let pred_lower = predicate.to_lowercase().replace('_', " ");
+        let stmt_lower = statement.to_lowercase();
+
+        let mut best_match: Option<(String, u32)> = None;
+
+        for prop in props.values() {
+            if prop.sub_property_of.is_some() {
+                continue; // only match top-level categories
+            }
+            let mut score: u32 = 0;
+
+            // Check canonical predicate
+            if !prop.canonical_predicate.is_empty() {
+                let canon = prop.canonical_predicate.to_lowercase().replace('_', " ");
+                if pred_lower.contains(&canon) || canon.contains(&pred_lower) {
+                    score += 10;
+                }
+            }
+
+            // Check comment for predicate/statement overlap
+            if !prop.comment.is_empty() {
+                let comment_lower = prop.comment.to_lowercase();
+                // Split comment into keyword phrases
+                for phrase in comment_lower.split([',', ';']) {
+                    let phrase = phrase.trim();
+                    if phrase.len() < 3 {
+                        continue;
+                    }
+                    if pred_lower.contains(phrase) || phrase.contains(&pred_lower) {
+                        score += 5;
+                    }
+                    if stmt_lower.contains(phrase) {
+                        score += 3;
+                    }
+                }
+            }
+
+            // Check label
+            if !prop.label.is_empty() {
+                let label_lower = prop.label.to_lowercase();
+                if stmt_lower.contains(&label_lower) {
+                    score += 2;
+                }
+            }
+
+            match &best_match {
+                Some((_, s)) if score <= *s => {},
+                _ if score > 0 => best_match = Some((prop.id.clone(), score)),
+                _ => {},
+            }
+        }
+
+        best_match.map(|(id, _)| id)
+    }
+
     // ── Backward compatibility with DomainRegistry ──
 
     /// Synchronous predicate canonicalization.

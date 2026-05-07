@@ -30,7 +30,15 @@ impl GraphEngine {
         timestamp: u64,
     ) {
         let group_id = &fact.group_id;
-        let category = fact.category.as_deref().unwrap_or("other");
+        let raw_category = fact.category.as_deref().unwrap_or("other");
+        let category = if raw_category == "other" || self.ontology.resolve(raw_category).is_none() {
+            self.ontology
+                .infer_category(&fact.predicate, &fact.statement)
+                .unwrap_or_else(|| raw_category.to_string())
+        } else {
+            raw_category.to_string()
+        };
+        let category = category.as_str();
         let is_financial = self.ontology.is_append_only(category);
 
         // 2. Edge type: canonicalize predicate BEFORE taking the write lock.
