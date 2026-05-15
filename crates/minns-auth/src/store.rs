@@ -45,6 +45,26 @@ impl KeyStore {
         Some(raw_key)
     }
 
+    pub fn set_root_key_if_empty(&mut self, raw_key: &str) -> Result<bool, AuthError> {
+        if !self.keys.is_empty() {
+            return Ok(false);
+        }
+        if !key::is_valid_format(raw_key) {
+            return Err(AuthError::InvalidFormat);
+        }
+        let hash = key::hash_key(raw_key);
+        let record = ApiKeyRecord {
+            key_hash: hash,
+            name: "root".into(),
+            group_id: None, // admin — all groups
+            permissions: vec![key::permissions::ADMIN.into()],
+            created_at: current_timestamp(),
+            enabled: true,
+        };
+        self.keys.insert(hash, record);
+        Ok(true)
+    }
+
     /// Create a new API key. Returns the raw key (caller must save it).
     pub fn create_key(
         &mut self,
@@ -200,6 +220,31 @@ mod tests {
 
         // Second call returns None
         assert!(store.init_root_key_if_empty().is_none());
+    }
+
+    #[test]
+    fn test_set_root_key_if_empty() {
+        let (raw, _) = key::generate_key();
+
+        let mut store = KeyStore::new();
+        assert!(store.set_root_key_if_empty(&raw).unwrap());
+        let record = store.verify(&raw).unwrap();
+        assert_eq!(record.name, "root");
+        assert_eq!(record.group_id, None);
+        assert!(record.has_permission(key::permissions::ADMIN));
+
+        // Second call is a no-op (keys already exist).
+        let (raw2, _) = key::generate_key();
+        assert!(!store.set_root_key_if_empty(&raw2).unwrap());
+        assert!(store.verify(&raw2).is_err());
+
+        // Invalid format is rejected on an empty store.
+        let mut empty = KeyStore::new();
+        assert!(matches!(
+            empty.set_root_key_if_empty("not-a-key"),
+            Err(AuthError::InvalidFormat)
+        ));
+        assert_eq!(empty.count(), 0);
     }
 
     #[test]
