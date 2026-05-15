@@ -172,13 +172,34 @@ async fn main() -> anyhow::Result<()> {
         KeyStore::new()
     };
 
-    if let Some(root_key) = key_store.init_root_key_if_empty() {
-        info!("========================================");
-        info!("  ROOT API KEY (save this — shown once):");
-        info!("  {}", root_key);
-        info!("========================================");
-    } else {
-        info!("API keys loaded: {} keys", key_store.count());
+    let generate_and_log_root_key = |store: &mut KeyStore| {
+        if let Some(root_key) = store.init_root_key_if_empty() {
+            info!("========================================");
+            info!("  ROOT API KEY (save this — shown once):");
+            info!("  {}", root_key);
+            info!("========================================");
+        } else {
+            info!("API keys loaded: {} keys", store.count());
+        }
+    };
+    let provided_root_key = std::env::var("MINNS_ROOT_KEY")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+
+    match provided_root_key {
+        Some(provided) => match key_store.set_root_key_if_empty(&provided) {
+            Ok(true) => info!("Root API key installed from MINNS_ROOT_KEY"),
+            Ok(false) => info!(
+                "API keys loaded: {} keys (MINNS_ROOT_KEY ignored — keys already exist)",
+                key_store.count()
+            ),
+            Err(e) => {
+                tracing::error!("MINNS_ROOT_KEY is not a valid API key ({e}); ignoring it");
+                generate_and_log_root_key(&mut key_store);
+            },
+        },
+        None => generate_and_log_root_key(&mut key_store),
     }
 
     if auth_enabled {
