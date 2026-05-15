@@ -182,8 +182,13 @@ async fn main() -> anyhow::Result<()> {
             info!("API keys loaded: {} keys", store.count());
         }
     };
-    match std::env::var("MINNS_ROOT_KEY") {
-        Ok(provided) if !provided.is_empty() => match key_store.set_root_key_if_empty(&provided) {
+    let provided_root_key = std::env::var("MINNS_ROOT_KEY")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+
+    match provided_root_key {
+        Some(provided) => match key_store.set_root_key_if_empty(&provided) {
             Ok(true) => info!("Root API key installed from MINNS_ROOT_KEY"),
             Ok(false) => info!(
                 "API keys loaded: {} keys (MINNS_ROOT_KEY ignored — keys already exist)",
@@ -194,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
                 generate_and_log_root_key(&mut key_store);
             },
         },
-        _ => generate_and_log_root_key(&mut key_store),
+        None => generate_and_log_root_key(&mut key_store),
     }
 
     if auth_enabled {
