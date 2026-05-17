@@ -353,6 +353,12 @@ pub struct GraphEngineConfig {
     pub federated_search_url: Option<String>,
     pub federated_search_api_key: Option<String>,
     pub federated_search_timeout_ms: u64,
+
+    /// Configuration for the Qdrant-backed vector store. The engine opens
+    /// the four collections eagerly at construction and fails fast if the
+    /// backend is unreachable. Every deployment has a vector backend; there
+    /// is no off-state.
+    pub vectors_config: crate::vectors::VectorsConfig,
 }
 
 impl GraphEngineConfig {
@@ -623,6 +629,11 @@ pub struct GraphEngine {
 
     pub(crate) federated_search: Option<Arc<dyn crate::federated_search::FederatedSearchProvider>>,
 
+    /// Backend-agnostic vector index aggregate (nodes / edges / claims /
+    /// memories). Opened at engine construction; construction fails if the
+    /// backend is unreachable.
+    pub vectors: Arc<crate::vectors::Vectors>,
+
     /// Semaphore limiting concurrent background tasks (embeddings, refinement, consolidation).
     pub(crate) background_semaphore: Arc<tokio::sync::Semaphore>,
 }
@@ -826,6 +837,7 @@ impl Default for GraphEngineConfig {
             federated_search_url: None,
             federated_search_api_key: None,
             federated_search_timeout_ms: 3000,
+            vectors_config: crate::vectors::VectorsConfig::default(),
         }
     }
 }

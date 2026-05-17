@@ -657,6 +657,17 @@ impl GraphEngine {
 
         let domain_registry = Arc::new(crate::domain_schema::DomainRegistry::new(ontology.clone()));
 
+        // Open the Qdrant-backed vector store. Construction fails here if
+        // the backend is unreachable so a misconfigured deployment is caught
+        // at boot, not on the first retrieval call.
+        let vectors = Arc::new(
+            crate::vectors::Vectors::open(&config.vectors_config)
+                .await
+                .map_err(|e| {
+                    GraphError::OperationError(format!("Failed to open vector backend: {e}"))
+                })?,
+        );
+
         let engine = Self {
             inference,
             traversal,
@@ -723,6 +734,7 @@ impl GraphEngine {
             #[cfg(feature = "code-intelligence")]
             ast_parser,
             federated_search: federated_search_client,
+            vectors,
             background_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
         };
 
