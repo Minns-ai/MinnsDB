@@ -119,6 +119,7 @@ dependencies = [
  "smallvec",
  "strsim",
  "tempfile",
+ "testcontainers",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
