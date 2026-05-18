@@ -1495,7 +1495,7 @@ mod tests {
             updated_at: 1000 + id,
             properties: std::collections::HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         }
     }

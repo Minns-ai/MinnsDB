@@ -544,7 +544,7 @@ mod tests {
             updated_at: 1000,
             properties: std::collections::HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         };
         let mut key = Vec::with_capacity(9);
@@ -629,7 +629,7 @@ mod tests {
             updated_at: 1,
             properties: std::collections::HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         })
         .unwrap();

@@ -2965,7 +2965,7 @@ mod tests {
             updated_at: 100,
             properties: HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         };
         let id_alice = g.add_node(n_alice).unwrap();
@@ -2982,7 +2982,7 @@ mod tests {
             updated_at: 100,
             properties: HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         };
         let id_london = g.add_node(n_london).unwrap();
@@ -2999,7 +2999,7 @@ mod tests {
             updated_at: 200,
             properties: HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         };
         let id_berlin = g.add_node(n_berlin).unwrap();
@@ -3016,7 +3016,7 @@ mod tests {
             updated_at: 300,
             properties: HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         };
         let id_tokyo = g.add_node(n_tokyo).unwrap();

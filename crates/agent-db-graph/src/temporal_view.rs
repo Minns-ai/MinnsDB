@@ -270,7 +270,7 @@ mod tests {
             updated_at: created_at,
             properties: HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         }
     }

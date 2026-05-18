@@ -201,25 +201,46 @@ impl GraphEngine {
             vec![]
         };
 
-        // 1c. Hybrid node vector search: fuse BM25 node results with vector similarity
+        // 1c + 1d. Hybrid node and edge vector search, run concurrently. Node
+        // hits feed BM25 fusion directly; edge hits resolve to source+target
+        // nodes under the inference read lock below.
         if !query_embedding.is_empty() {
-            let inference = self.inference.read().await;
-            let graph = inference.graph();
-            let vector_hits =
-                graph
-                    .node_vector_index
-                    .search(&query_embedding, 20 * fetch_multiplier, 0.3);
+            let node_query = minns_vectors::Query::builder(query_embedding.clone())
+                .top_k(20 * fetch_multiplier)
+                .min_score(0.3)
+                .build();
+            let edge_query = minns_vectors::Query::builder(query_embedding.clone())
+                .top_k(10 * fetch_multiplier)
+                .min_score(0.4)
+                .build();
+
+            let (node_result, edge_result) = tokio::join!(
+                self.vectors.nodes.search(&node_query),
+                self.vectors.edges.search(&edge_query),
+            );
+
+            let vector_hits: Vec<(u64, f32)> = match node_result {
+                Ok(hits) => hits.into_iter().map(|h| (h.id as u64, h.score)).collect(),
+                Err(e) => {
+                    tracing::warn!("NLQ: node vector search failed: {e}");
+                    Vec::new()
+                },
+            };
             if !vector_hits.is_empty() {
                 explanation.push(format!("Node vector: {} results", vector_hits.len()));
                 ranked_lists.push(vector_hits);
             }
 
-            // 1d. Edge/triplet vector search: find edges whose "subject predicate object"
-            // text is semantically similar to the query. Resolve hits to source+target nodes.
-            let edge_hits =
-                graph
-                    .edge_vector_index
-                    .search(&query_embedding, 10 * fetch_multiplier, 0.4);
+            let edge_hits: Vec<(u64, f32)> = match edge_result {
+                Ok(hits) => hits.into_iter().map(|h| (h.id as u64, h.score)).collect(),
+                Err(e) => {
+                    tracing::warn!("NLQ: edge vector search failed: {e}");
+                    Vec::new()
+                },
+            };
+
+            let inference = self.inference.read().await;
+            let graph = inference.graph();
             if !edge_hits.is_empty() {
                 let mut triplet_node_hits: Vec<(u64, f32)> = Vec::new();
                 for &(edge_id, sim) in &edge_hits {

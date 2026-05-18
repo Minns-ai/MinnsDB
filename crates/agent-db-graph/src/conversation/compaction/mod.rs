@@ -478,7 +478,7 @@ pub async fn run_compaction_with_context(
                     .filter(|&nid| {
                         graph
                             .get_node(nid)
-                            .map(|n| !n.embedding.is_empty())
+                            .map(|n| n.has_embedding)
                             .unwrap_or(false)
                     })
                     .collect()
@@ -486,6 +486,7 @@ pub async fn run_compaction_with_context(
 
             if !candidate_node_ids.is_empty() {
                 let inference = engine.inference.clone();
+                let vectors = engine.vectors.clone();
                 let llm = llm_client.clone();
                 let embedder = embedding_client.clone();
                 let art_config = engine.config.art_config.clone();
@@ -494,6 +495,7 @@ pub async fn run_compaction_with_context(
                     let result = crate::active_retrieval_test::run_art_pass(
                         candidate_node_ids,
                         &inference,
+                        &vectors,
                         llm.as_ref(),
                         embedder.as_ref(),
                         &art_config,

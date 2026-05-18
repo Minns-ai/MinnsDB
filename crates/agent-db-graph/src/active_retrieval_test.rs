@@ -127,28 +127,47 @@ async fn generate_test_questions(
     }
 }
 
-/// Test whether a node appears in search results for a set of embedded questions.
-///
-/// For each question embedding, searches both node_vector_index and bm25_index.
-/// Returns (hits, misses).
+/// Run vector search for each question against the node store. Returns one
+/// hit list per question, where the hit list is the node ids of the top-k
+/// nearest neighbours.
+async fn vector_hits_for_questions(
+    vectors: &crate::vectors::Vectors,
+    question_embeddings: &[Vec<f32>],
+    top_k: usize,
+) -> Vec<Vec<NodeId>> {
+    let mut out = Vec::with_capacity(question_embeddings.len());
+    for emb in question_embeddings {
+        let query = minns_vectors::Query::builder(emb.clone())
+            .top_k(top_k)
+            .build();
+        let hits = match vectors.nodes.search(&query).await {
+            Ok(hits) => hits.into_iter().map(|h| h.id as NodeId).collect(),
+            Err(e) => {
+                tracing::warn!("ART: vector search failed: {e}");
+                Vec::new()
+            },
+        };
+        out.push(hits);
+    }
+    out
+}
+
+/// Test whether a node appears in search results for a set of embedded
+/// questions. Vector hits are precomputed (see [`vector_hits_for_questions`])
+/// so this function remains synchronous and lock-free under the inference
+/// read lock. Returns `(hits, misses)`.
 fn test_retrieval(
     graph: &crate::structures::Graph,
     target_node_id: NodeId,
-    question_embeddings: &[Vec<f32>],
+    vector_hits: &[Vec<NodeId>],
     question_texts: &[String],
     top_k: usize,
 ) -> (usize, usize) {
     let mut hits = 0usize;
     let mut misses = 0usize;
 
-    for (i, embedding) in question_embeddings.iter().enumerate() {
-        let mut found = false;
-
-        // Search vector index
-        let vector_results = graph.node_vector_index.search(embedding, top_k, 0.0);
-        if vector_results.iter().any(|(nid, _)| *nid == target_node_id) {
-            found = true;
-        }
+    for (i, vec_hits) in vector_hits.iter().enumerate() {
+        let mut found = vec_hits.contains(&target_node_id);
 
         // Search BM25 index
         if !found {
@@ -220,6 +239,7 @@ async fn generate_enhancement(
 /// Apply enhancement to a node: update properties, re-index BM25, re-embed.
 async fn apply_enhancement_to_graph(
     inference: &Arc<RwLock<GraphInference>>,
+    vectors: &Arc<crate::vectors::Vectors>,
     embedding_client: &dyn EmbeddingClient,
     node_id: NodeId,
     enhancement: &EnhancementResponse,
@@ -243,40 +263,49 @@ async fn apply_enhancement_to_graph(
         _ => return,
     };
 
-    // Apply changes to graph
-    let mut inf = inference.write().await;
-    let graph = inf.graph_mut();
+    // Apply graph mutations under the write lock, then drop before the
+    // async upsert so the network call does not hold the lock.
+    {
+        let mut inf = inference.write().await;
+        let graph = inf.graph_mut();
 
-    if let Some(node) = graph.get_node_mut(node_id) {
-        // Store enhancement in properties
-        node.properties.insert(
-            "art_enhanced_description".to_string(),
-            serde_json::Value::String(enhancement.enhanced_description.clone()),
-        );
-        node.properties.insert(
-            "art_keywords".to_string(),
-            serde_json::Value::Array(
-                enhancement
-                    .keywords
-                    .iter()
-                    .map(|k| serde_json::Value::String(k.clone()))
-                    .collect(),
-            ),
-        );
-        node.embedding = new_embedding.clone();
+        if let Some(node) = graph.get_node_mut(node_id) {
+            node.properties.insert(
+                "art_enhanced_description".to_string(),
+                serde_json::Value::String(enhancement.enhanced_description.clone()),
+            );
+            node.properties.insert(
+                "art_keywords".to_string(),
+                serde_json::Value::Array(
+                    enhancement
+                        .keywords
+                        .iter()
+                        .map(|k| serde_json::Value::String(k.clone()))
+                        .collect(),
+                ),
+            );
+            node.has_embedding = true;
+        }
+
+        // Re-index BM25 while we still hold the lock.
+        graph.bm25_index.remove_document(node_id);
+        let label = graph
+            .get_node(node_id)
+            .map(|n| n.label())
+            .unwrap_or_default();
+        let bm25_text = format!("{} {}", label, combined_text);
+        graph.bm25_index.index_document(node_id, &bm25_text);
     }
 
-    // Re-index BM25: remove old, add combined text
-    graph.bm25_index.remove_document(node_id);
-    let label = graph
-        .get_node(node_id)
-        .map(|n| n.label())
-        .unwrap_or_default();
-    let bm25_text = format!("{} {}", label, combined_text);
-    graph.bm25_index.index_document(node_id, &bm25_text);
-
-    // Update vector index
-    graph.node_vector_index.insert(node_id, new_embedding);
+    // Push the new embedding to the vector store outside the inference lock.
+    let point = minns_vectors::Point::new(
+        node_id as u128,
+        new_embedding,
+        minns_vectors::Payload::EMPTY,
+    );
+    if let Err(e) = vectors.nodes.upsert(vec![point]).await {
+        tracing::warn!("ART: node upsert failed for nid={node_id}: {e}");
+    }
 }
 
 /// Run a single ART pass over candidate nodes.
@@ -289,6 +318,7 @@ async fn apply_enhancement_to_graph(
 pub async fn run_art_pass(
     candidate_node_ids: Vec<NodeId>,
     inference: &Arc<RwLock<GraphInference>>,
+    vectors: &Arc<crate::vectors::Vectors>,
     llm: &dyn LlmClient,
     embedding_client: &dyn EmbeddingClient,
     config: &ArtConfig,
@@ -344,11 +374,13 @@ pub async fn run_art_pass(
             Err(_) => continue,
         };
 
-        // Step 3: Test retrieval
+        // Step 3: Test retrieval. Vector search is performed outside the
+        // inference lock; BM25 search happens inside it.
+        let vector_hits = vector_hits_for_questions(vectors, &embeddings, config.top_k).await;
         let (hits, misses) = {
             let inf = inference.read().await;
             let graph = inf.graph();
-            test_retrieval(graph, node_id, &embeddings, &questions, config.top_k)
+            test_retrieval(graph, node_id, &vector_hits, &questions, config.top_k)
         };
 
         result.total_hits += hits;
@@ -383,25 +415,19 @@ pub async fn run_art_pass(
             hit_rate * 100.0
         );
 
-        // Collect the queries that missed (check vector index under read lock)
-        let failing_queries: Vec<String> = {
-            let inf = inference.read().await;
-            let graph = inf.graph();
-            questions
-                .iter()
-                .zip(embeddings.iter())
-                .filter(|(_, emb)| {
-                    let vec_results = graph.node_vector_index.search(emb, config.top_k, 0.0);
-                    !vec_results.iter().any(|(nid, _)| *nid == node_id)
-                })
-                .map(|(q, _)| q.clone())
-                .collect()
-        };
+        // Collect the queries whose vector search did not return this node.
+        let failing_queries: Vec<String> = questions
+            .iter()
+            .zip(vector_hits.iter())
+            .filter(|(_, hits)| !hits.contains(&node_id))
+            .map(|(q, _)| q.clone())
+            .collect();
 
         if let Some(enhancement) =
             generate_enhancement(llm, &node_label, &node_props, &failing_queries).await
         {
-            apply_enhancement_to_graph(inference, embedding_client, node_id, &enhancement).await;
+            apply_enhancement_to_graph(inference, vectors, embedding_client, node_id, &enhancement)
+                .await;
             result.nodes_enhanced += 1;
         }
     }
@@ -446,8 +472,8 @@ mod tests {
     #[test]
     fn test_retrieval_empty_graph() {
         let graph = crate::structures::Graph::new();
-        let (hits, misses) =
-            test_retrieval(&graph, 0, &[vec![0.1, 0.2, 0.3]], &["test".to_string()], 10);
+        let vector_hits: Vec<Vec<NodeId>> = vec![Vec::new()];
+        let (hits, misses) = test_retrieval(&graph, 0, &vector_hits, &["test".to_string()], 10);
         assert_eq!(hits, 0);
         assert_eq!(misses, 1);
     }
