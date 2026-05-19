@@ -21,19 +21,45 @@ impl GraphEngine {
     pub async fn run_consolidation(&self) -> crate::consolidation::ConsolidationResult {
         // Infer goal labels for goalless buckets if LLM is available
         // Extract data under read lock, drop it, then make LLM call without holding lock
+        let all_memories = {
+            let store = self.memory_store.read().await;
+            store.list_all_memories()
+        };
         let goal_overrides = if let Some(ref llm) = self.unified_llm_client {
-            let all_memories = {
-                let store = self.memory_store.read().await;
-                store.list_all_memories()
-            };
             crate::consolidation::infer_goal_labels(llm.as_ref(), &all_memories).await
         } else {
             std::collections::HashMap::new()
         };
 
+        // Pre-fetch embeddings for every memory that claims to have one. The
+        // consolidation engine is pure and synchronous; doing the Qdrant
+        // fetch here keeps it that way. One RPC for the whole snapshot.
+        let memory_vectors = {
+            let ids: Vec<u128> = all_memories
+                .iter()
+                .filter(|m| m.has_summary_embedding)
+                .map(|m| m.id as u128)
+                .collect();
+            if ids.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                match self.vectors.memories.fetch(&ids).await {
+                    Ok(points) => points
+                        .into_iter()
+                        .zip(ids.iter())
+                        .filter_map(|(p, id)| p.map(|pt| (*id as u64, pt.vector)))
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!("Memory vector prefetch for consolidation failed: {e}");
+                        std::collections::HashMap::new()
+                    },
+                }
+            }
+        };
+
         let mut store = self.memory_store.write().await;
         let mut engine = self.consolidation_engine.write().await;
-        engine.run_consolidation(store.as_mut(), &goal_overrides)
+        engine.run_consolidation(store.as_mut(), &goal_overrides, &memory_vectors)
     }
 
     /// Get all memories for an agent
@@ -156,6 +182,33 @@ impl GraphEngine {
             graph.memory_index.clone()
         };
 
+        // Pre-compute Signal 1 (semantic) scores via Qdrant when an embedding
+        // is supplied. One Qdrant `search` RPC, top_k = per_signal_limit, so
+        // the pipeline itself stays pure and synchronous.
+        let semantic_scores = if !query.query_embedding.is_empty() {
+            let q = minns_vectors::Query::builder(query.query_embedding.clone())
+                .top_k(config.per_signal_limit)
+                .min_score(config.min_semantic_similarity)
+                .build();
+            match self.vectors.memories.search(&q).await {
+                Ok(hits) => {
+                    let map: std::collections::HashMap<crate::memory::MemoryId, f32> =
+                        hits.into_iter().map(|h| (h.id as u64, h.score)).collect();
+                    if map.is_empty() {
+                        None
+                    } else {
+                        Some(map)
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Memory vector search failed: {e}");
+                    None
+                },
+            }
+        } else {
+            None
+        };
+
         // Run the pipeline
         let bm25 = self.memory_bm25_index.read().await;
         let ranked = crate::retrieval::MemoryRetrievalPipeline::retrieve(
@@ -163,6 +216,7 @@ impl GraphEngine {
             &query,
             &config,
             Some(&*bm25),
+            semantic_scores.as_ref(),
             ppr_scores.as_ref(),
             Some(&memory_to_node),
         );

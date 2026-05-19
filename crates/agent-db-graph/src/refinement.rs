@@ -285,11 +285,13 @@ impl RefinementEngine {
     /// Run the full refinement pipeline for a newly formed memory:
     /// 1. LLM refine summary/takeaway/causal_note (if enabled)
     /// 2. Embed the summary (if enabled)
-    /// 3. Update the memory in the store
+    /// 3. Upsert the vector into the `memories` collection
+    /// 4. Persist the updated memory row (without the embedding inline)
     pub async fn refine_and_embed_memory(
         &self,
         memory_id: MemoryId,
         store: &Arc<RwLock<Box<dyn MemoryStore>>>,
+        memory_vectors: Arc<dyn minns_vectors::VectorStore>,
         embedding_client: Option<&Arc<dyn EmbeddingClient>>,
         event_data: Option<String>,
         community_context: Option<String>,
@@ -329,21 +331,36 @@ impl RefinementEngine {
             }
         }
 
-        // Step 2: Embed the summary
+        // Step 2 + 3: Embed the summary and push to the `memories` vector
+        // collection. The vector lives in Qdrant; the redb row only tracks
+        // whether an embedding exists (`has_summary_embedding`).
         if self.config.enable_summary_embedding {
             if let Some(client) = embedding_client {
                 match self
                     .embed_summary(&updated_memory.summary, client.as_ref())
                     .await
                 {
-                    Ok(embedding) => {
+                    Ok(embedding) if !embedding.is_empty() => {
                         debug!(
                             "Embedded memory {} summary ({} dims)",
                             memory_id,
                             embedding.len()
                         );
-                        updated_memory.summary_embedding = embedding;
+                        let point = minns_vectors::Point::new(
+                            memory_id as u128,
+                            embedding,
+                            minns_vectors::Payload::EMPTY,
+                        );
+                        match memory_vectors.upsert(vec![point]).await {
+                            Ok(()) => {
+                                updated_memory.has_summary_embedding = true;
+                            },
+                            Err(e) => {
+                                warn!("Memory vector upsert failed for {}: {}", memory_id, e);
+                            },
+                        }
                     },
+                    Ok(_) => {},
                     Err(e) => {
                         warn!("Embedding failed for memory {}: {}", memory_id, e);
                     },
@@ -351,7 +368,10 @@ impl RefinementEngine {
             }
         }
 
-        // Step 3: Update in store
+        // Step 4: Persist the updated memory row. Strip any inline context
+        // embedding so it does not bloat the redb payload — the vector
+        // lives in `memory_vectors` keyed by `memory_id`.
+        updated_memory.context.embeddings = None;
         {
             let mut s = store.write().await;
             s.store_consolidated_memory(updated_memory);

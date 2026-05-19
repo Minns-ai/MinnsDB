@@ -63,9 +63,12 @@ pub struct Memory {
     #[serde(default)]
     pub causal_note: String,
 
-    /// Embedding of the summary text for semantic retrieval
+    /// Whether the summary text has been embedded and pushed to the
+    /// `memories` vector collection. The vector itself lives in Qdrant
+    /// keyed by `memory_id`; this flag caches the "already embedded"
+    /// filter so the retrieval hot path can skip the network round trip.
     #[serde(default)]
-    pub summary_embedding: Vec<f32>,
+    pub has_summary_embedding: bool,
 
     // ========== Hierarchy Fields ==========
     /// Memory tier in the consolidation hierarchy
@@ -321,7 +324,7 @@ impl MemoryFormation {
             summary,
             takeaway,
             causal_note,
-            summary_embedding: Vec::new(), // Populated async by refinement pipeline
+            has_summary_embedding: false, // Populated async by refinement pipeline
             tier: MemoryTier::Episodic,
             consolidated_from: Vec::new(),
             schema_id: None,
@@ -840,6 +843,11 @@ impl MemoryFormation {
 
     /// Schema-first hierarchical retrieval.
     /// Returns memories preferring Schema > Semantic > Episodic within the limit.
+    ///
+    /// Scores on fingerprint match only — vector similarity for memories
+    /// lives in the `vectors.memories` Qdrant collection and is consulted
+    /// by the multi-signal retrieval pipeline. This helper is the cheap
+    /// in-memory fallback for callers that do not need semantic ranking.
     pub fn retrieve_hierarchical(
         &self,
         context: &EventContext,
@@ -847,15 +855,11 @@ impl MemoryFormation {
         min_similarity: f32,
         agent_id: Option<AgentId>,
     ) -> Vec<Memory> {
-        use agent_db_core::utils::cosine_similarity;
-
         let query_fp = if context.fingerprint != 0 {
             context.fingerprint
         } else {
             context.compute_fingerprint()
         };
-
-        let query_embedding = context.embeddings.as_deref().unwrap_or(&[]);
 
         // Score all active memories
         let mut scored: Vec<(f32, &Memory)> = self
@@ -864,23 +868,11 @@ impl MemoryFormation {
             .filter(|m| m.consolidation_status != ConsolidationStatus::Archived)
             .filter(|m| agent_id.is_none_or(|aid| m.agent_id == aid))
             .filter_map(|m| {
-                // Compute similarity
-                let fp_sim = if m.context.fingerprint == query_fp {
+                let sim = if m.context.fingerprint == query_fp {
                     1.0f32
                 } else {
                     0.0
                 };
-                let emb_sim = if !query_embedding.is_empty() {
-                    let m_emb = m.context.embeddings.as_deref().unwrap_or(&[]);
-                    if !m_emb.is_empty() {
-                        cosine_similarity(query_embedding, m_emb)
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
-                let sim = fp_sim.max(emb_sim);
 
                 if sim >= min_similarity {
                     // Tier boost: Schema > Semantic > Episodic (multiplicative)
@@ -969,7 +961,7 @@ mod tests {
             summary: String::new(),
             takeaway: String::new(),
             causal_note: String::new(),
-            summary_embedding: Vec::new(),
+            has_summary_embedding: false,
             tier: MemoryTier::Episodic,
             consolidated_from: Vec::new(),
             schema_id: None,

@@ -101,6 +101,7 @@ impl GraphEngine {
                     let store_ref = self.memory_store.clone();
                     let refinement_ref = refinement.clone();
                     let embedding_client = self.embedding_client.clone();
+                    let memory_vectors = self.vectors.memories.clone();
                     let event_narrative = crate::event_content::build_event_narrative(&events);
                     let bm25_ref = self.memory_bm25_index.clone();
                     let audit_ref = self.memory_audit_log.clone();
@@ -137,6 +138,7 @@ impl GraphEngine {
                             .refine_and_embed_memory(
                                 memory_id,
                                 &store_ref,
+                                memory_vectors,
                                 embedding_client.as_ref(),
                                 Some(event_narrative),
                                 community_ctx,
@@ -203,24 +205,55 @@ impl GraphEngine {
                 let engine_ref = self.consolidation_engine.clone();
                 let bm25_ref = self.memory_bm25_index.clone();
                 let llm_ref = self.unified_llm_client.clone();
+                let memory_vectors_ref = self.vectors.memories.clone();
                 let bg_permit = self.background_semaphore.clone();
                 tokio::spawn(async move {
                     let _permit = bg_permit.acquire().await;
+                    // Snapshot memories under read lock; release before doing
+                    // any IO (LLM goal-label inference, Qdrant vector fetch).
+                    let all_memories = {
+                        let store = store_ref.read().await;
+                        store.list_all_memories()
+                    };
+
                     // Pre-pass: infer goal labels for goalless buckets via LLM
-                    // Extract data under read lock, drop it, then make LLM call without holding lock
                     let goal_overrides = if let Some(ref llm) = llm_ref {
-                        let all_memories = {
-                            let store = store_ref.read().await;
-                            store.list_all_memories()
-                        };
                         crate::consolidation::infer_goal_labels(llm.as_ref(), &all_memories).await
                     } else {
                         std::collections::HashMap::new()
                     };
 
+                    // Pre-fetch embeddings for every memory that claims one,
+                    // so the synchronous centroid math sees a stable snapshot.
+                    let memory_vectors = {
+                        let ids: Vec<u128> = all_memories
+                            .iter()
+                            .filter(|m| m.has_summary_embedding)
+                            .map(|m| m.id as u128)
+                            .collect();
+                        if ids.is_empty() {
+                            std::collections::HashMap::new()
+                        } else {
+                            match memory_vectors_ref.fetch(&ids).await {
+                                Ok(points) => points
+                                    .into_iter()
+                                    .zip(ids.iter())
+                                    .filter_map(|(p, id)| p.map(|pt| (*id as u64, pt.vector)))
+                                    .collect(),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Memory vector prefetch for consolidation failed: {e}"
+                                    );
+                                    std::collections::HashMap::new()
+                                },
+                            }
+                        }
+                    };
+
                     let mut store = store_ref.write().await;
                     let mut engine = engine_ref.write().await;
-                    let result = engine.run_consolidation(store.as_mut(), &goal_overrides);
+                    let result =
+                        engine.run_consolidation(store.as_mut(), &goal_overrides, &memory_vectors);
                     if result.semantic_created > 0 || result.schema_created > 0 {
                         tracing::info!(
                             "Consolidation pass: {} semantic created, {} schemas created, {} episodes consolidated, {} goals inferred",

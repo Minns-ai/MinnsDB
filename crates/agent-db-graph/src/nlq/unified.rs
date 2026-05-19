@@ -367,7 +367,7 @@ mod tests {
             summary: summary.to_string(),
             takeaway: String::new(),
             causal_note: String::new(),
-            summary_embedding: vec![],
+            has_summary_embedding: false,
             tier: crate::memory::MemoryTier::Semantic,
             consolidated_from: vec![],
             schema_id: None,

@@ -292,7 +292,7 @@ mod tests {
                 summary: summary.to_string(),
                 takeaway: String::new(),
                 causal_note: String::new(),
-                summary_embedding: Vec::new(),
+                has_summary_embedding: false,
                 tier: MemoryTier::Episodic,
                 consolidated_from: Vec::new(),
                 schema_id: None,

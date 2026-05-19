@@ -11,7 +11,6 @@ use super::temporal::{
 use crate::indexing::Bm25Index;
 use crate::memory::{calculate_context_similarity, Memory, MemoryId, MemoryTier};
 use agent_db_core::types::{AgentId, SessionId, Timestamp};
-use agent_db_core::utils::cosine_similarity;
 use agent_db_events::core::EventContext;
 use std::collections::HashMap;
 
@@ -85,6 +84,10 @@ impl MemoryRetrievalPipeline {
     /// * `query` — retrieval query parameters
     /// * `config` — scoring configuration
     /// * `bm25` — optional BM25 index (keyed by memory_id as NodeId)
+    /// * `semantic_scores` — optional precomputed `memory_id → cosine` map
+    ///   from the `vectors.memories` collection. The caller is expected to
+    ///   issue `vectors.memories.search(query_embedding)` and pass the
+    ///   resulting scores in. `None` skips Signal 1 entirely.
     /// * `ppr_scores` — optional PPR scores from graph (node_id → score)
     /// * `memory_to_node` — mapping from MemoryId to graph NodeId (for PPR lookup)
     ///
@@ -94,6 +97,7 @@ impl MemoryRetrievalPipeline {
         query: &MemoryRetrievalQuery,
         config: &MemoryRetrievalConfig,
         bm25: Option<&Bm25Index>,
+        semantic_scores: Option<&HashMap<MemoryId, f32>>,
         ppr_scores: Option<&HashMap<u64, f64>>,
         memory_to_node: Option<&rustc_hash::FxHashMap<u64, u64>>,
     ) -> Vec<(MemoryId, f32)> {
@@ -130,15 +134,12 @@ impl MemoryRetrievalPipeline {
 
         let mut ranked_lists: Vec<Vec<(MemoryId, f32)>> = Vec::new();
 
-        // Signal 1: Semantic (cosine on summary_embedding)
-        if !query.query_embedding.is_empty() {
+        // Signal 1: Semantic. Scores come precomputed from
+        // `vectors.memories.search`; this function is pure and does no IO.
+        if let Some(scores) = semantic_scores {
             let mut semantic: Vec<(MemoryId, f32)> = filtered
                 .iter()
-                .filter(|m| !m.summary_embedding.is_empty())
-                .map(|m| {
-                    let sim = cosine_similarity(&query.query_embedding, &m.summary_embedding);
-                    (m.id, sim)
-                })
+                .filter_map(|m| scores.get(&m.id).map(|s| (m.id, *s)))
                 .filter(|&(_, sim)| sim >= config.min_semantic_similarity)
                 .collect();
             semantic.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -196,14 +197,13 @@ impl MemoryRetrievalPipeline {
                 .iter()
                 .map(|m| {
                     let score = if config.enable_importance_decay {
-                        // Compute per-memory semantic relevance for importance
-                        let relevance = if !query.query_embedding.is_empty()
-                            && !m.summary_embedding.is_empty()
-                        {
-                            cosine_similarity(&query.query_embedding, &m.summary_embedding).max(0.0)
-                        } else {
-                            0.0
-                        };
+                        // Use the precomputed semantic score as relevance when
+                        // available. Falls back to 0.0 (importance ignored)
+                        // when no semantic scores were supplied.
+                        let relevance = semantic_scores
+                            .and_then(|s| s.get(&m.id).copied())
+                            .unwrap_or(0.0)
+                            .max(0.0);
                         let params = ImportanceDecayParams {
                             access_frequency: m.access_count as f32 / max_access,
                             relevance,
@@ -309,7 +309,7 @@ mod tests {
             summary: format!("Memory {}", id),
             takeaway: String::new(),
             causal_note: String::new(),
-            summary_embedding: Vec::new(),
+            has_summary_embedding: false,
             tier,
             consolidated_from: Vec::new(),
             schema_id: None,
@@ -347,7 +347,7 @@ mod tests {
         };
         let config = MemoryRetrievalConfig::default();
         let result =
-            MemoryRetrievalPipeline::retrieve(&candidates, &query, &config, None, None, None);
+            MemoryRetrievalPipeline::retrieve(&candidates, &query, &config, None, None, None, None);
         // Should still return results via temporal + access signals
         assert!(!result.is_empty());
         // Most recent should rank highest (temporal decay)
@@ -355,16 +355,19 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_retrieval_with_embeddings() {
-        let mut m1 = make_memory(1, MemoryTier::Episodic, 10);
-        m1.summary_embedding = vec![1.0, 0.0, 0.0];
-        let mut m2 = make_memory(2, MemoryTier::Episodic, 10);
-        m2.summary_embedding = vec![0.0, 1.0, 0.0];
+    fn test_memory_retrieval_with_semantic_scores() {
+        let m1 = make_memory(1, MemoryTier::Episodic, 10);
+        let m2 = make_memory(2, MemoryTier::Episodic, 10);
+
+        // Semantic scores would normally come from `vectors.memories.search`.
+        // Here we inject them directly to keep the pipeline test pure.
+        let semantic: HashMap<MemoryId, f32> =
+            [(1u64, 0.95f32), (2u64, 0.10f32)].into_iter().collect();
 
         let candidates = vec![m1, m2];
         let query = MemoryRetrievalQuery {
             query_text: String::new(),
-            query_embedding: vec![1.0, 0.0, 0.0], // Matches m1
+            query_embedding: vec![1.0, 0.0, 0.0],
             context: None,
             anchor_node: None,
             agent_id: None,
@@ -373,10 +376,17 @@ mod tests {
             limit: 10,
         };
         let config = MemoryRetrievalConfig::default();
-        let result =
-            MemoryRetrievalPipeline::retrieve(&candidates, &query, &config, None, None, None);
+        let result = MemoryRetrievalPipeline::retrieve(
+            &candidates,
+            &query,
+            &config,
+            None,
+            Some(&semantic),
+            None,
+            None,
+        );
         assert!(!result.is_empty());
-        // m1 should rank first due to perfect cosine match
+        // m1 should rank first due to higher semantic score
         assert_eq!(result[0].0, 1);
     }
 
@@ -387,7 +397,6 @@ mod tests {
         let mut m2 = make_memory(2, MemoryTier::Episodic, 10);
         m2.summary = "database migration completed".to_string();
 
-        // Build BM25 index keyed by memory_id
         let mut bm25 = Bm25Index::new();
         bm25.index_document(
             1,
@@ -417,6 +426,7 @@ mod tests {
             Some(&bm25),
             None,
             None,
+            None,
         );
         assert!(!result.is_empty());
         assert_eq!(result[0].0, 1);
@@ -424,7 +434,6 @@ mod tests {
 
     #[test]
     fn test_tier_boost() {
-        // Create memories at the same age so temporal is equal
         let m1 = make_memory(1, MemoryTier::Episodic, 10);
         let m2 = make_memory(2, MemoryTier::Schema, 10);
         let m3 = make_memory(3, MemoryTier::Semantic, 10);
@@ -442,9 +451,8 @@ mod tests {
         };
         let config = MemoryRetrievalConfig::default();
         let result =
-            MemoryRetrievalPipeline::retrieve(&candidates, &query, &config, None, None, None);
+            MemoryRetrievalPipeline::retrieve(&candidates, &query, &config, None, None, None, None);
 
-        // Schema should be boosted highest
         assert_eq!(result[0].0, 2, "Schema memory should rank first");
         assert_eq!(result[1].0, 3, "Semantic memory should rank second");
     }

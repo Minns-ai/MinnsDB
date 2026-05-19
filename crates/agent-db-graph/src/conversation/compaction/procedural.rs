@@ -38,7 +38,7 @@ pub fn build_procedural_memory(
             "Objective: {}. Status: {}",
             summary.objective, summary.progress_status
         ),
-        summary_embedding: Vec::new(),
+        has_summary_embedding: false,
         tier: MemoryTier::Episodic,
         consolidated_from: Vec::new(),
         schema_id: None,
