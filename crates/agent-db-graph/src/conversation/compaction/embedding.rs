@@ -300,7 +300,7 @@ pub(crate) async fn embed_nodes_and_create_claims(
                 &fact.statement,
             )],
             confidence: fact.confidence,
-            embedding,
+            has_embedding: !embedding.is_empty(),
             source_event_id: 0,
             episode_id: None,
             thread_id: None,
@@ -326,6 +326,21 @@ pub(crate) async fn embed_nodes_and_create_claims(
         };
 
         if let Ok(()) = claim_store.store(&claim) {
+            // Push the embedding (when present) into the vector store
+            // alongside the persisted claim. Failures are logged but not
+            // fatal — BM25 will still surface the claim.
+            if !embedding.is_empty() && claim_status == crate::claims::ClaimStatus::Active {
+                if let Err(e) = claim_store
+                    .update_embedding(claim_id, embedding.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        "COMPACTION: failed to upsert embedding for claim {}: {}",
+                        claim_id,
+                        e
+                    );
+                }
+            }
             // ── State anchor stamping ──
             // Mirror the anchor logic from integration_claims.rs so that
             // apply_state_anchor_filter() can detect stale compaction claims.

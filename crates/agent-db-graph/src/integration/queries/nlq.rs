@@ -308,7 +308,9 @@ impl GraphEngine {
                     store,
                     20,
                     &hybrid_config,
-                ) {
+                )
+                .await
+                {
                     if !claims.is_empty() {
                         // Convert claim IDs to node IDs
                         let claim_node_ids: Vec<(u64, f32)> = {

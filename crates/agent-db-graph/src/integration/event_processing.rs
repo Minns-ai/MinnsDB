@@ -148,8 +148,8 @@ impl GraphEngine {
                                                 .iter()
                                                 .filter_map(|&nid| {
                                                     let node = graph.get_node(nid)?;
-                                                    // Only embed nodes without embeddings
-                                                    if !node.embedding.is_empty() {
+                                                    // Skip nodes whose vector is already in Qdrant
+                                                    if node.has_embedding {
                                                         return None;
                                                     }
                                                     Some((nid, crate::code_graph::build_code_embedding_text(node)))
@@ -857,7 +857,6 @@ impl GraphEngine {
                                     avoidance_text,
                                     updated.supporting_evidence.clone(),
                                     0.5,
-                                    updated.embedding.clone(),
                                     updated.source_event_id,
                                     updated.episode_id,
                                     updated.thread_id.clone(),
@@ -881,6 +880,41 @@ impl GraphEngine {
                                         avoidance.id,
                                         claim_id
                                     );
+
+                                    // Inherit the source claim's embedding so
+                                    // the avoidance claim is immediately
+                                    // searchable without another embed RPC.
+                                    if updated.has_embedding {
+                                        match claim_store.fetch_embedding(*claim_id).await {
+                                            Ok(Some(vec)) => {
+                                                if let Err(e) = claim_store
+                                                    .update_embedding(avoidance.id, vec)
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        "Failed to inherit embedding for avoidance claim {}: {}",
+                                                        avoidance.id,
+                                                        e
+                                                    );
+                                                } else {
+                                                    avoidance.has_embedding = true;
+                                                }
+                                            },
+                                            Ok(None) => {
+                                                tracing::debug!(
+                                                    "Source claim {} has no vector to inherit",
+                                                    claim_id
+                                                );
+                                            },
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to fetch source embedding for claim {}: {}",
+                                                    claim_id,
+                                                    e
+                                                );
+                                            },
+                                        }
+                                    }
                                     // Stamp state anchors on the avoidance claim
                                     if let Some(ref subj) = avoidance.subject_entity {
                                         let inference_guard = self.inference.read().await;

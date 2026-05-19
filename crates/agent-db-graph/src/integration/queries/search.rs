@@ -40,7 +40,6 @@ impl GraphEngine {
 
         // Also search claim store BM25 index
         if let Some(ref store) = self.claim_store {
-            store.apply_pending();
             let claim_bm25 = store.bm25_index().read();
             let claim_hits = claim_bm25.search(query, limit);
             drop(claim_bm25);
@@ -132,6 +131,7 @@ impl GraphEngine {
             limit,
             &hybrid_config,
         )
+        .await
         .map_err(|e| {
             crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
         })?;

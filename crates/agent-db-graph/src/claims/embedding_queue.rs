@@ -98,7 +98,9 @@ impl EmbeddingQueue {
         let response = embedding_client.embed(request).await?;
 
         // Update claim with embedding
-        claim_store.update_embedding(claim.id, response.embedding)?;
+        claim_store
+            .update_embedding(claim.id, response.embedding)
+            .await?;
 
         info!(
             "Generated embedding for claim {} ({} dimensions, {} tokens)",
@@ -208,16 +210,42 @@ impl EmbeddingQueue {
             })
             .collect();
 
-        // Single batch call
+        // Single batch embed RPC
         let responses = embedding_client.embed_batch(requests).await?;
 
-        // Zip responses with claims and update store
+        // Build a batch of vector points and the corresponding redb updates.
+        // We split the work so the redb write happens for all claims (cheap,
+        // sync), then the vector upsert is a single RPC for the whole batch.
+        let mut points = Vec::with_capacity(responses.len());
+        let mut bm25_updates: Vec<(u64, String)> = Vec::with_capacity(responses.len());
         let mut updated = 0usize;
         for (claim, response) in claims.iter().zip(responses.into_iter()) {
-            if let Err(e) = claim_store.update_embedding(claim.id, response.embedding) {
-                error!("Failed to update embedding for claim {}: {}", claim.id, e);
-            } else {
-                updated += 1;
+            if response.embedding.is_empty() {
+                continue;
+            }
+            match claim_store.mark_has_embedding(claim.id) {
+                Ok(true) => {
+                    points.push(minns_vectors::Point::new(
+                        claim.id as u128,
+                        response.embedding,
+                        minns_vectors::Payload::EMPTY,
+                    ));
+                    bm25_updates.push((claim.id, claim.claim_text.clone()));
+                    updated += 1;
+                },
+                Ok(false) => {
+                    debug!("Claim {} no longer active; skipping embedding", claim.id);
+                },
+                Err(e) => {
+                    error!("Failed to mark embedding for claim {}: {}", claim.id, e);
+                },
+            }
+        }
+
+        if !points.is_empty() {
+            if let Err(e) = claim_store.upsert_vectors(points).await {
+                error!("Batch vector upsert failed: {}", e);
+                return Err(e);
             }
         }
 
@@ -246,121 +274,6 @@ impl EmbeddingQueue {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::claims::embeddings::openai_client_from_env;
-    use crate::claims::types::EvidenceSpan;
-    use crate::ClaimId;
-    use tempfile::tempdir;
-
-    fn create_test_claim(id: ClaimId, text: &str) -> DerivedClaim {
-        let evidence = vec![EvidenceSpan::new(0, 4, "test")];
-        DerivedClaim::new(
-            id,
-            text.to_string(),
-            evidence,
-            0.9,
-            vec![], // Empty embedding
-            123,
-            None,
-            None,
-            None,
-            None,
-        )
-    }
-
-    #[tokio::test]
-    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
-    async fn test_embedding_queue() {
-        let client = Arc::new(openai_client_from_env().expect("LLM_API_KEY required"));
-        let dims = client.dimensions();
-
-        let dir = tempdir().unwrap();
-        let store_path = dir.path().join("claims.redb");
-        let store = Arc::new(ClaimStore::new(&store_path).unwrap());
-
-        let queue = EmbeddingQueue::new(client, store.clone(), 1);
-
-        // Create and store a claim without embedding
-        let claim = create_test_claim(1, "Test claim about artificial intelligence");
-        store.store(&claim).unwrap();
-
-        // Verify it has no embedding
-        let retrieved = store.get(1).unwrap().unwrap();
-        assert!(retrieved.embedding.is_empty());
-
-        // Generate embedding
-        queue.generate_embedding(claim).await.unwrap();
-
-        // Verify embedding was added
-        let retrieved = store.get(1).unwrap().unwrap();
-        assert!(!retrieved.embedding.is_empty());
-        assert_eq!(retrieved.embedding.len(), dims);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
-    async fn test_process_pending_embeddings_batch() {
-        let client = Arc::new(openai_client_from_env().expect("LLM_API_KEY required"));
-
-        let dir = tempdir().unwrap();
-        let store_path = dir.path().join("claims.redb");
-        let store = Arc::new(ClaimStore::new(&store_path).unwrap());
-
-        let queue = EmbeddingQueue::new(client.clone(), store.clone(), 2);
-
-        // Create multiple claims without embeddings
-        for i in 1..=5 {
-            let claim = create_test_claim(i, &format!("Claim number {} about different topics", i));
-            store.store(&claim).unwrap();
-        }
-
-        // Process pending embeddings via batch API
-        let count = queue
-            .process_pending_embeddings(&store, &*client, 10)
-            .await
-            .unwrap();
-        assert_eq!(count, 5);
-
-        // Verify all claims now have embeddings
-        let claims_needing = store.get_claims_needing_embeddings(10).unwrap();
-        assert_eq!(claims_needing.len(), 0);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
-    async fn test_batch_embed_20_claims() {
-        let client = Arc::new(openai_client_from_env().expect("LLM_API_KEY required"));
-        let dims = client.dimensions();
-
-        let dir = tempdir().unwrap();
-        let store_path = dir.path().join("claims.redb");
-        let store = Arc::new(ClaimStore::new(&store_path).unwrap());
-
-        let queue = EmbeddingQueue::new(client.clone(), store.clone(), 1);
-
-        // Store 20 claims without embeddings
-        for i in 1..=20 {
-            let claim =
-                create_test_claim(i, &format!("Batch claim number {} about topic {}", i, i));
-            store.store(&claim).unwrap();
-        }
-
-        let count = queue
-            .process_pending_embeddings(&store, &*client, 100)
-            .await
-            .unwrap();
-        assert_eq!(count, 20);
-
-        // All 20 should have embeddings now
-        let remaining = store.get_claims_needing_embeddings(100).unwrap();
-        assert_eq!(remaining.len(), 0);
-
-        // Verify embeddings are correct dimension
-        for i in 1..=20u64 {
-            let claim = store.get(i).unwrap().unwrap();
-            assert_eq!(claim.embedding.len(), dims);
-        }
-    }
-}
+// Tests live in `tests/claims_integration.rs` and exercise the queue end-to-end
+// against a real Qdrant container and (when `LLM_API_KEY` is set) a real
+// embedding client.

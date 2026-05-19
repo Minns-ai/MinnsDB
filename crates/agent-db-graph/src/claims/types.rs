@@ -270,8 +270,12 @@ pub struct DerivedClaim {
     /// Confidence score [0.0, 1.0]
     pub confidence: f32,
 
-    /// Claim embedding for semantic search
-    pub embedding: Vec<f32>,
+    /// Whether this claim has an embedding stored in the `claims` vector
+    /// collection. The vector itself lives in Qdrant; this flag is a cheap
+    /// in-memory bool so callers can identify "needs embedding" without a
+    /// network round trip.
+    #[serde(default)]
+    pub has_embedding: bool,
 
     /// Source event this was derived from
     #[serde_as(as = "DisplayFromStr")]
@@ -491,14 +495,17 @@ pub enum RejectionReason {
 }
 
 impl DerivedClaim {
-    /// Create a new claim with current timestamp
+    /// Create a new claim with current timestamp.
+    ///
+    /// The vector (if any) is stored separately via
+    /// `ClaimStore::update_embedding` after construction; `has_embedding`
+    /// starts `false`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: ClaimId,
         claim_text: String,
         supporting_evidence: Vec<EvidenceSpan>,
         confidence: f32,
-        embedding: Vec<f32>,
         source_event_id: EventId,
         episode_id: Option<EpisodeId>,
         thread_id: Option<ThreadId>,
@@ -515,7 +522,7 @@ impl DerivedClaim {
             claim_text,
             supporting_evidence,
             confidence,
-            embedding,
+            has_embedding: false,
             source_event_id,
             episode_id,
             thread_id,
@@ -811,7 +818,6 @@ mod tests {
             "Test claim".to_string(),
             vec![], // No evidence
             0.9,
-            vec![0.1, 0.2, 0.3],
             123,
             None,
             None,
@@ -832,7 +838,6 @@ mod tests {
             "Person named John exists".to_string(),
             evidence,
             0.9,
-            vec![0.1, 0.2, 0.3],
             123,
             None,
             None,
@@ -876,7 +881,6 @@ mod tests {
             "Fresh claim".to_string(),
             vec![EvidenceSpan::new(0, 5, "Fresh")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -894,7 +898,6 @@ mod tests {
             "Expired claim".to_string(),
             vec![EvidenceSpan::new(0, 7, "Expired")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -917,7 +920,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -936,7 +938,6 @@ mod tests {
             "Default".to_string(),
             vec![EvidenceSpan::new(0, 7, "Default")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -956,7 +957,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -975,7 +975,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -994,7 +993,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1016,7 +1014,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1039,7 +1036,6 @@ mod tests {
             "Test2".to_string(),
             vec![EvidenceSpan::new(0, 5, "Test2")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1060,7 +1056,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1086,7 +1081,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1127,7 +1121,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1156,7 +1149,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1176,7 +1168,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1205,7 +1196,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1316,7 +1306,6 @@ mod tests {
             "Paris is the capital of France".to_string(),
             vec![EvidenceSpan::new(0, 5, "Paris")],
             0.95,
-            vec![],
             100,
             None,
             None,
@@ -1335,7 +1324,6 @@ mod tests {
             "2+2=4".to_string(),
             vec![EvidenceSpan::new(0, 5, "2+2=4")],
             0.99,
-            vec![],
             100,
             None,
             None,
@@ -1353,7 +1341,6 @@ mod tests {
             "Static but expired".to_string(),
             vec![EvidenceSpan::new(0, 6, "Static")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1376,7 +1363,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1428,7 +1414,6 @@ mod tests {
             "Test".to_string(),
             vec![EvidenceSpan::new(0, 4, "Test")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1447,7 +1432,6 @@ mod tests {
             "User works at Google".to_string(),
             vec![EvidenceSpan::new(0, 4, "User")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1470,7 +1454,6 @@ mod tests {
             "Alice works at Google".to_string(),
             vec![EvidenceSpan::new(0, 5, "Alice")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1497,7 +1480,6 @@ mod tests {
             "I prefer Rust over Python".to_string(),
             vec![EvidenceSpan::new(0, 1, "I")],
             0.85,
-            vec![],
             200,
             None,
             None,
@@ -1537,7 +1519,6 @@ mod tests {
             "Something happened".to_string(),
             vec![EvidenceSpan::new(0, 9, "Something")],
             0.5,
-            vec![],
             300,
             None,
             None,
@@ -1560,7 +1541,6 @@ mod tests {
             "Alice likes pizza".to_string(),
             vec![EvidenceSpan::new(0, 5, "Alice")],
             0.9,
-            vec![],
             100,
             None,
             None,
@@ -1589,7 +1569,6 @@ mod tests {
             "Earth orbits the Sun".to_string(),
             vec![EvidenceSpan::new(0, 5, "Earth")],
             1.0,
-            vec![],
             100,
             None,
             None,
@@ -1610,7 +1589,6 @@ mod tests {
             "Alice is in New York".to_string(),
             vec![EvidenceSpan::new(0, 5, "Alice")],
             0.8,
-            vec![],
             100,
             None,
             None,

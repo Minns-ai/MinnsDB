@@ -34,9 +34,6 @@ pub struct MaintenanceConfig {
     pub claim_contradiction_threshold: f32,
 
     // ── Claim store caps (enforced in the maintenance loop) ──
-    /// Maximum embeddings to keep in the in-memory vector index (0 = unlimited).
-    pub max_vector_index_size: usize,
-
     /// Whether to purge inactive (Dormant/Rejected/Superseded) claims from disk.
     pub purge_inactive_claims: bool,
 
@@ -54,7 +51,6 @@ impl Default for MaintenanceConfig {
             strategy_max_stale_hours: 72.0, // 3 days
             claim_dedup_threshold: 0.92,
             claim_contradiction_threshold: 0.85,
-            max_vector_index_size: 50_000,
             purge_inactive_claims: true,
             invalidated_edge_retention_days: 0,
         }
@@ -174,11 +170,13 @@ pub async fn check_claim_dedup(
     }
 
     // Find the most similar existing claim
-    let similar =
-        match claim_store.find_similar(new_embedding, 1, config.claim_contradiction_threshold) {
-            Ok(results) => results,
-            Err(_) => return ClaimDedupDecision::NewClaim,
-        };
+    let similar = match claim_store
+        .find_similar(new_embedding, 1, config.claim_contradiction_threshold)
+        .await
+    {
+        Ok(results) => results,
+        Err(_) => return ClaimDedupDecision::NewClaim,
+    };
 
     let Some((existing_id, similarity)) = similar.first().copied() else {
         return ClaimDedupDecision::NewClaim;
@@ -319,44 +317,6 @@ pub fn purge_old_invalidated_edges(
 mod tests {
     use super::*;
 
-    /// Mock LLM that always answers "yes" (conflict) for testing.
-    struct MockConflictLlm;
-
-    #[async_trait::async_trait]
-    impl crate::llm_client::LlmClient for MockConflictLlm {
-        async fn complete(
-            &self,
-            _request: crate::llm_client::LlmRequest,
-        ) -> anyhow::Result<crate::llm_client::LlmResponse> {
-            Ok(crate::llm_client::LlmResponse {
-                content: "yes".to_string(),
-                tokens_used: 1,
-            })
-        }
-        fn model_name(&self) -> &str {
-            "mock-conflict"
-        }
-    }
-
-    /// Mock LLM that always answers "no" (no conflict) for testing.
-    struct MockNoConflictLlm;
-
-    #[async_trait::async_trait]
-    impl crate::llm_client::LlmClient for MockNoConflictLlm {
-        async fn complete(
-            &self,
-            _request: crate::llm_client::LlmRequest,
-        ) -> anyhow::Result<crate::llm_client::LlmResponse> {
-            Ok(crate::llm_client::LlmResponse {
-                content: "no".to_string(),
-                tokens_used: 1,
-            })
-        }
-        fn model_name(&self) -> &str {
-            "mock-no-conflict"
-        }
-    }
-
     #[test]
     fn test_contradiction_detection() {
         assert!(is_contradiction(
@@ -380,83 +340,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn test_dedup_decision_new_when_empty_embedding() {
-        let config = MaintenanceConfig::default();
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::claims::store::ClaimStore::new(dir.path().join("claims.redb")).unwrap();
-        let llm = MockNoConflictLlm;
-
-        let decision = check_claim_dedup(&store, "some text", &[], &config, &llm).await;
-        assert!(matches!(decision, ClaimDedupDecision::NewClaim));
-    }
-
-    #[tokio::test]
-    async fn test_dedup_detects_duplicate() {
-        let config = MaintenanceConfig::default();
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::claims::store::ClaimStore::new(dir.path().join("claims.redb")).unwrap();
-        let llm = MockNoConflictLlm;
-
-        // Store an existing claim
-        let existing = crate::claims::types::DerivedClaim::new(
-            1,
-            "I like Adidas shoes".to_string(),
-            vec![crate::claims::types::EvidenceSpan::new(0, 5, "I lik")],
-            0.9,
-            vec![1.0, 0.0, 0.0],
-            100,
-            None,
-            None,
-            None,
-            None,
-        );
-        store.store(&existing).unwrap();
-
-        // Query with nearly identical embedding
-        let decision = check_claim_dedup(
-            &store,
-            "I like Adidas sneakers",
-            &[0.99, 0.01, 0.0],
-            &config,
-            &llm,
-        )
-        .await;
-        assert!(matches!(decision, ClaimDedupDecision::Duplicate { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_dedup_detects_contradiction() {
-        let config = MaintenanceConfig::default();
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::claims::store::ClaimStore::new(dir.path().join("claims.redb")).unwrap();
-        let llm = MockConflictLlm; // answers "yes" to conflict check
-
-        // Store an existing claim
-        let existing = crate::claims::types::DerivedClaim::new(
-            1,
-            "I like Adidas shoes".to_string(),
-            vec![crate::claims::types::EvidenceSpan::new(0, 5, "I lik")],
-            0.9,
-            vec![1.0, 0.0, 0.0],
-            100,
-            None,
-            None,
-            None,
-            None,
-        );
-        store.store(&existing).unwrap();
-
-        // Query with embedding that gives cosine similarity ~0.88 vs [1,0,0]
-        // (above contradiction threshold 0.85, below dedup threshold 0.92)
-        let decision = check_claim_dedup(
-            &store,
-            "I do not like Adidas shoes",
-            &[0.88, 0.475, 0.0],
-            &config,
-            &llm,
-        )
-        .await;
-        assert!(matches!(decision, ClaimDedupDecision::Contradiction { .. }));
-    }
+    // Dedup/contradiction behaviour against a real Qdrant + ClaimStore is
+    // covered by `tests/claims_integration.rs` via the shared testcontainers
+    // fixture.
 }
