@@ -131,6 +131,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/embeddings/process",
             post(handlers::process_embeddings),
         )
+        .route(
+            "/api/memory-embeddings/process",
+            post(handlers::process_memory_embeddings),
+        )
         // Structured Memory
         .route(
             "/api/structured-memory",
