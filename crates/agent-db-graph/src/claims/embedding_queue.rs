@@ -213,39 +213,44 @@ impl EmbeddingQueue {
         // Single batch embed RPC
         let responses = embedding_client.embed_batch(requests).await?;
 
-        // Build a batch of vector points and the corresponding redb updates.
-        // We split the work so the redb write happens for all claims (cheap,
-        // sync), then the vector upsert is a single RPC for the whole batch.
+        // Build the vector batch. The upsert happens *before* the redb
+        // flag flip so a failed upsert leaves `has_embedding = false` on
+        // every claim in the batch — the next pass will retry the lot.
         let mut points = Vec::with_capacity(responses.len());
-        let mut bm25_updates: Vec<(u64, String)> = Vec::with_capacity(responses.len());
-        let mut updated = 0usize;
+        let mut upserted_ids: Vec<super::types::ClaimId> = Vec::with_capacity(responses.len());
         for (claim, response) in claims.iter().zip(responses.into_iter()) {
             if response.embedding.is_empty() {
                 continue;
             }
-            match claim_store.mark_has_embedding(claim.id) {
-                Ok(true) => {
-                    points.push(minns_vectors::Point::new(
-                        claim.id as u128,
-                        response.embedding,
-                        minns_vectors::Payload::EMPTY,
-                    ));
-                    bm25_updates.push((claim.id, claim.claim_text.clone()));
-                    updated += 1;
-                },
-                Ok(false) => {
-                    debug!("Claim {} no longer active; skipping embedding", claim.id);
-                },
-                Err(e) => {
-                    error!("Failed to mark embedding for claim {}: {}", claim.id, e);
-                },
-            }
+            points.push(minns_vectors::Point::new(
+                claim.id as u128,
+                response.embedding,
+                minns_vectors::Payload::EMPTY,
+            ));
+            upserted_ids.push(claim.id);
         }
 
-        if !points.is_empty() {
-            if let Err(e) = claim_store.upsert_vectors(points).await {
-                error!("Batch vector upsert failed: {}", e);
-                return Err(e);
+        if points.is_empty() {
+            return Ok(0);
+        }
+
+        // One Qdrant RPC for the whole batch. Failure aborts before any
+        // redb mutation, so retries are safe.
+        if let Err(e) = claim_store.upsert_vectors(points).await {
+            error!("Batch vector upsert failed: {}", e);
+            return Err(e);
+        }
+
+        // Flag the rows that made it into Qdrant. `mark_has_embedding`
+        // returns false for claims that have become inactive in the
+        // interim — those rows stay flagged off and the orphan vector is
+        // benign (status filters block it from search results).
+        let mut updated = 0usize;
+        for cid in &upserted_ids {
+            match claim_store.mark_has_embedding(*cid) {
+                Ok(true) => updated += 1,
+                Ok(false) => debug!("Claim {} no longer active after embed", cid),
+                Err(e) => error!("Failed to mark embedding for claim {}: {}", cid, e),
             }
         }
 

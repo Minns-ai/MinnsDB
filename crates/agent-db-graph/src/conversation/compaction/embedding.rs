@@ -300,7 +300,10 @@ pub(crate) async fn embed_nodes_and_create_claims(
                 &fact.statement,
             )],
             confidence: fact.confidence,
-            has_embedding: !embedding.is_empty(),
+            // Start with the flag off; `update_embedding` below flips it
+            // only after the Qdrant upsert succeeds, so a failed upsert
+            // leaves the claim in the "needs embedding" set.
+            has_embedding: false,
             source_event_id: 0,
             episode_id: None,
             thread_id: None,

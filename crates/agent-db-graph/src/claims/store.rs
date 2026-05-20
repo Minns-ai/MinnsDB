@@ -431,55 +431,51 @@ impl ClaimStore {
     /// mark `has_embedding = true`. No-op if the claim does not exist or
     /// the embedding is empty.
     ///
-    /// **Cost:** one redb write txn (sync) plus one Qdrant `upsert` RPC
-    /// (async, single point). For batches, prefer
-    /// [`ClaimStore::mark_has_embedding`] + [`ClaimStore::upsert_vectors`]
-    /// which collapses N RPCs into one.
+    /// **Cost:** one Qdrant `upsert` RPC plus one redb write txn. For
+    /// batches, prefer [`ClaimStore::upsert_vectors`] +
+    /// [`ClaimStore::mark_has_embedding`] which collapse N RPCs into one.
     ///
-    /// **Atomicity:** redb commits the `has_embedding = true` flag before
-    /// the Qdrant upsert. If the future is dropped or Qdrant rejects the
-    /// upsert, redb claims the vector exists but Qdrant does not have it.
-    /// The Qdrant error *is* propagated (unlike the delete path), so the
-    /// caller observes the inconsistency. Callers may want to retry the
-    /// upsert or reset `has_embedding`.
+    /// **Ordering:** the Qdrant upsert happens *first*. Only after Qdrant
+    /// returns `Ok` do we flip `has_embedding = true` in redb. This makes
+    /// failure self-healing — an upsert error returns `Err`, redb still
+    /// says `has_embedding = false`, and `get_claims_needing_embeddings`
+    /// will pick the claim up on the next pass.
     pub async fn update_embedding(&self, claim_id: ClaimId, embedding: Vec<f32>) -> Result<()> {
         if embedding.is_empty() {
             return Ok(());
         }
 
-        // Read-modify-write the claim record. Capture whether the claim is
-        // active so we can decide on the vector upsert below.
-        let should_upsert = {
-            let write_txn = self.db.begin_write()?;
-            let active = {
-                let mut table = write_txn.open_table(CLAIMS_TABLE)?;
-                let maybe_claim: Option<DerivedClaim> = if let Some(value) = table.get(claim_id)? {
-                    Some(rmp_serde::from_slice(value.value())?)
-                } else {
-                    None
-                };
-                if let Some(mut claim) = maybe_claim {
-                    claim.has_embedding = true;
-                    let active = claim.status == ClaimStatus::Active;
-                    let serialized = rmp_serde::to_vec(&claim)?;
-                    table.insert(claim_id, serialized.as_slice())?;
-                    active
-                } else {
-                    false
-                }
-            };
-            write_txn.commit()?;
-            active
+        // Check whether the claim exists and is active before paying for an
+        // RPC. A missing/inactive claim is a no-op.
+        let claim_active = {
+            let read_txn = self.db.begin_read()?;
+            let table = read_txn.open_table(CLAIMS_TABLE)?;
+            match table.get(claim_id)? {
+                Some(v) => {
+                    let claim: DerivedClaim = rmp_serde::from_slice(v.value())?;
+                    claim.status == ClaimStatus::Active
+                },
+                None => false,
+            }
         };
-
-        if should_upsert {
-            let point = Point::new(claim_id as u128, embedding, Payload::EMPTY);
-            self.vectors
-                .upsert(vec![point])
-                .await
-                .map_err(|e| anyhow::anyhow!("claim vector upsert failed: {e}"))?;
-            debug!("Upserted embedding for claim {}", claim_id);
+        if !claim_active {
+            return Ok(());
         }
+
+        // Upsert the vector first. On failure redb stays untouched and the
+        // claim remains in the "needs embedding" set for retry.
+        let point = Point::new(claim_id as u128, embedding, Payload::EMPTY);
+        self.vectors
+            .upsert(vec![point])
+            .await
+            .map_err(|e| anyhow::anyhow!("claim vector upsert failed: {e}"))?;
+
+        // Vector is durable; flip the flag in redb. The claim could have
+        // been marked inactive in the gap between the active check and
+        // this write; we still flip the flag for accuracy (the next status
+        // transition will delete the vector via `update_status`).
+        let _ = self.mark_has_embedding(claim_id)?;
+        debug!("Upserted embedding for claim {}", claim_id);
 
         Ok(())
     }
@@ -637,14 +633,34 @@ impl ClaimStore {
         drop(read_txn);
 
         let count = to_dormant.len();
-        for cid in to_dormant {
-            self.update_status(cid, ClaimStatus::Dormant).await?;
+        if count == 0 {
+            return Ok(0);
         }
 
-        if count > 0 {
-            info!("Expired {} stale claims to Dormant", count);
+        // Mark every expiring claim Dormant in redb and drop it from BM25.
+        // We collect the IDs that were actually Active so the vector
+        // delete batches only those.
+        let mut dormant_ids: Vec<ClaimId> = Vec::with_capacity(count);
+        for cid in &to_dormant {
+            if self.write_status_inner(*cid, ClaimStatus::Dormant, None)? {
+                self.bm25_index.write().remove_document(*cid);
+                dormant_ids.push(*cid);
+            }
         }
 
+        // One Qdrant delete RPC for the whole batch.
+        if !dormant_ids.is_empty() {
+            let ids_u128: Vec<u128> = dormant_ids.iter().map(|&i| i as u128).collect();
+            if let Err(e) = self.vectors.delete(&ids_u128).await {
+                tracing::warn!(
+                    "Vector batch delete failed for {} expired claims: {}",
+                    dormant_ids.len(),
+                    e
+                );
+            }
+        }
+
+        info!("Expired {} stale claims to Dormant", count);
         Ok(count)
     }
 }

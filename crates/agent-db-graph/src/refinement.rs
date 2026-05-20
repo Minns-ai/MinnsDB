@@ -334,6 +334,11 @@ impl RefinementEngine {
         // Step 2 + 3: Embed the summary and push to the `memories` vector
         // collection. The vector lives in Qdrant; the redb row only tracks
         // whether an embedding exists (`has_summary_embedding`).
+        //
+        // **Ordering:** the Qdrant upsert is awaited first. The redb flag
+        // flips to `true` only on a successful upsert, so a failed upsert
+        // leaves the memory in the "needs embedding" set for the next
+        // refinement pass.
         if self.config.enable_summary_embedding {
             if let Some(client) = embedding_client {
                 match self
