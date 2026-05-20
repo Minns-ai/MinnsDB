@@ -1,0 +1,20 @@
+# cargo-audit configuration.
+#
+# https://docs.rs/cargo-audit/latest/cargo_audit/config/index.html
+#
+# Each entry in `ignore` is an active decision, not a "we forgot about it".
+# Re-evaluate every entry whenever you bump the dependency in question.
+
+[advisories]
+ignore = [
+    # tokio-tar 0.3.1 — PAX extended header parsing bug, file smuggling.
+    # Path: testcontainers 0.23.3 → tokio-tar 0.3.1.
+    # testcontainers is a dev-dependency, used only by the Qdrant fixture
+    # in crates/agent-db-graph/tests/common/. It is not linked into any
+    # release binary. The upstream tokio-tar advisory says "no fixed
+    # upgrade available", so the realistic options are: ignore here, or
+    # rip out testcontainers and run docker via shell from the fixture.
+    # Revisit when testcontainers ships against a patched tar
+    # implementation, or when tokio-tar publishes a fix.
+    "RUSTSEC-2025-0111",
+]
