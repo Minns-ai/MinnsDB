@@ -13,8 +13,35 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Vectors is a required field on GraphEngine since Stage 2 of the
+    # vector-storage migration. Every test that builds a GraphEngine
+    # opens the Qdrant backend at boot, so the test run needs a Qdrant
+    # listening on localhost:6334. The service container below provides
+    # one for the lifetime of this job.
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.13.0
+        ports:
+          - 6334:6334
+          - 6333:6333
+        # No --health-cmd: the qdrant image is distroless so it has no
+        # shell or curl to run a healthcheck with. We poll readiness from
+        # the test step instead.
     steps:
     - uses: actions/checkout@v4
+
+    - name: Wait for Qdrant to accept gRPC connections
+      run: |
+        for i in $(seq 1 30); do
+          if (echo > /dev/tcp/127.0.0.1/6334) 2>/dev/null; then
+            echo "Qdrant ready after ${i}s"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "Qdrant did not become reachable on 6334" >&2
+        exit 1
+      shell: bash
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@1.83.0
