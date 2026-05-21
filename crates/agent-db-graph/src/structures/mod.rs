@@ -11,7 +11,6 @@ mod graph_persistence;
 mod graph_query;
 mod node;
 mod types;
-mod vector_index;
 
 #[cfg(test)]
 mod tests;
@@ -31,9 +30,6 @@ pub use node::{
 
 // Edge types
 pub use edge::{EdgeType, GoalRelationType, GraphEdge, InteractionType};
-
-// Vector index
-pub use vector_index::NodeVectorIndex;
 
 // Graph
 pub(crate) use graph::edge_text_for_bm25;

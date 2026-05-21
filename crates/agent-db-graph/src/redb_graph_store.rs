@@ -1584,7 +1584,7 @@ mod tests {
                 props
             },
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         }
     }

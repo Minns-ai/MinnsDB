@@ -343,7 +343,7 @@ impl ClaimExtractionQueue {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs();
-                            let _ = claim_store.supersede(existing_id, now);
+                            let _ = claim_store.supersede(existing_id, now).await;
 
                             // Fall through to store the new (superseding) claim below,
                             // with metadata linking back to the old one.
@@ -362,13 +362,11 @@ impl ClaimExtractionQueue {
                     llm_claim.claim_text,
                     evidence,
                     max_support_score,
-                    claim_embedding,
                     request.event_id,
                     request.episode_id,
                     request.thread_id.clone(),
                     request.user_id.clone(),
-                    request.workspace_id.clone(),
-                );
+                    request.workspace_id.clone(),);
 
                 // ── Set claim type, subject entity, and category from LLM output ────
                 claim.claim_type =
@@ -476,8 +474,24 @@ impl ClaimExtractionQueue {
                         .insert("object_entity".to_string(), obj.clone());
                 }
 
-                // Store claim
+                // Persist the claim row (sync) and its embedding (async,
+                // single upsert per claim). The vector is the one we
+                // generated above for the geometric support check, so this
+                // adds no extra embedding RPC.
                 claim_store.store(&claim)?;
+                if !claim_embedding.is_empty() {
+                    if let Err(e) = claim_store
+                        .update_embedding(claim.id, claim_embedding.clone())
+                        .await
+                    {
+                        warn!(
+                            "Failed to upsert embedding for claim {}: {}",
+                            claim.id, e
+                        );
+                    } else {
+                        claim.has_embedding = true;
+                    }
+                }
                 accepted_claims.push(claim);
             }
 
@@ -640,30 +654,6 @@ impl Default for ClaimExtractionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claims::llm_client::MockClient;
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    #[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
-    async fn test_queue_creation() {
-        let dir = tempdir().unwrap();
-        let store_path = dir.path().join("claims.redb");
-
-        let embedding_client = Arc::new(
-            crate::claims::embeddings::openai_client_from_env().expect("LLM_API_KEY required"),
-        );
-        let client = Arc::new(MockClient::new());
-        let store = Arc::new(ClaimStore::new(&store_path).unwrap());
-        let config = ClaimExtractionConfig::default();
-
-        let unified_llm: Arc<dyn crate::llm_client::LlmClient> =
-            Arc::new(crate::llm_client::OpenAiLlmClient::new(
-                std::env::var("LLM_API_KEY").expect("LLM_API_KEY required"),
-                "gpt-4o-mini".to_string(),
-            ));
-        let _queue =
-            ClaimExtractionQueue::new(client, embedding_client, store, 1, config, unified_llm);
-    }
 
     #[test]
     fn test_normalize_entity_basic() {

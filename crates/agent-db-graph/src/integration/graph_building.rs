@@ -1,14 +1,12 @@
 use super::*;
 
 impl GraphEngine {
-    /// Embed a list of nodes asynchronously (fire-and-forget).
+    /// Embed a batch of nodes asynchronously (fire-and-forget).
     ///
-    /// Takes a list of `(node_id, text_to_embed)` pairs.
-    /// Each node gets its embedding stored on the node and indexed
-    /// in the `node_vector_index` for semantic search.
-    ///
-    /// This uses the same embedding client and pattern as the pipeline.
-    /// Safe to call from both `&self` (pipeline) and `Arc<Self>` (server handlers).
+    /// Takes `(node_id, text_to_embed)` pairs. Performs one batch embedding
+    /// call, one inference write-lock acquisition to mark `has_embedding`,
+    /// and one batch upsert to the `nodes` vector collection. Errors are
+    /// logged but not propagated since this runs as a background task.
     pub fn embed_nodes_async(&self, nodes: Vec<(NodeId, String)>) {
         if nodes.is_empty() {
             return;
@@ -17,31 +15,59 @@ impl GraphEngine {
             Some(ec) => ec.clone(),
             None => return,
         };
+        let vectors = self.vectors.clone();
         let inference_ref = self.inference.clone();
         let bg_permit = self.background_semaphore.clone();
         tokio::spawn(async move {
             let _permit = bg_permit.acquire().await;
-            for (nid, text) in nodes {
-                match ec
-                    .embed(crate::claims::EmbeddingRequest {
-                        text,
-                        context: None,
-                    })
-                    .await
-                {
-                    Ok(resp) if !resp.embedding.is_empty() => {
-                        let mut inf = inference_ref.write().await;
-                        let graph = inf.graph_mut();
-                        if let Some(node) = graph.get_node_mut(nid) {
-                            node.embedding = resp.embedding.clone();
-                        }
-                        graph.node_vector_index.insert(nid, resp.embedding);
-                    },
-                    Ok(_) => {},
-                    Err(e) => {
-                        tracing::debug!("Node embedding failed for nid={}: {}", nid, e);
-                    },
+
+            let requests: Vec<crate::claims::EmbeddingRequest> = nodes
+                .iter()
+                .map(|(_, text)| crate::claims::EmbeddingRequest {
+                    text: text.clone(),
+                    context: None,
+                })
+                .collect();
+
+            let responses = match ec.embed_batch(requests).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!("Node embedding batch failed: {e}");
+                    return;
+                },
+            };
+
+            let mut points = Vec::with_capacity(responses.len());
+            let mut ids_to_mark = Vec::with_capacity(responses.len());
+            for ((nid, _), resp) in nodes.iter().zip(responses.into_iter()) {
+                if !resp.embedding.is_empty() {
+                    points.push(minns_vectors::Point::new(
+                        *nid as u128,
+                        resp.embedding,
+                        minns_vectors::Payload::EMPTY,
+                    ));
+                    ids_to_mark.push(*nid);
                 }
+            }
+            if points.is_empty() {
+                return;
+            }
+
+            {
+                let mut inf = inference_ref.write().await;
+                let graph = inf.graph_mut();
+                for nid in &ids_to_mark {
+                    if let Some(node) = graph.get_node_mut(*nid) {
+                        node.has_embedding = true;
+                    }
+                }
+            }
+
+            if let Err(e) = vectors.nodes.upsert(points).await {
+                tracing::warn!(
+                    "Node batch upsert failed ({} points): {e}",
+                    ids_to_mark.len()
+                );
             }
         });
     }

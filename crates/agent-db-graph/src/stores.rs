@@ -596,7 +596,7 @@ impl MemoryStore for RedbMemoryStore {
             summary,
             takeaway,
             causal_note,
-            summary_embedding: Vec::new(),
+            has_summary_embedding: false,
             tier: crate::memory::MemoryTier::Episodic,
             consolidated_from: Vec::new(),
             schema_id: None,
@@ -753,20 +753,17 @@ impl MemoryStore for RedbMemoryStore {
             candidates.retain(|m| m.agent_id == aid);
         }
 
-        // Filter by similarity threshold using embeddings when available
+        // Similarity here is fingerprint-only: persisted memories no longer
+        // carry inline context embeddings (those live in
+        // `vectors.memories`). Callers that need vector similarity should
+        // use the multi-signal pipeline
+        // (`GraphEngine::retrieve_memories_multi_signal`), which pre-fetches
+        // semantic scores from Qdrant before scoring candidates.
         candidates.retain(|m| {
             let similarity = if m.context.fingerprint == context.fingerprint {
                 1.0
             } else {
-                match (
-                    context.embeddings.as_deref(),
-                    m.context.embeddings.as_deref(),
-                ) {
-                    (Some(q), Some(e)) if !q.is_empty() && !e.is_empty() => {
-                        agent_db_core::utils::cosine_similarity(q, e)
-                    },
-                    _ => 0.0,
-                }
+                0.0
             };
             similarity >= min_similarity
         });
@@ -1120,8 +1117,6 @@ impl MemoryStore for RedbMemoryStore {
         } else {
             context.compute_goal_bucket_id()
         };
-        let query_emb = context.embeddings.as_deref().unwrap_or(&[]);
-
         // Use goal bucket index for a targeted scan when goals are available.
         // Fall back to full scan only when no goal bucket exists.
         let candidates: Vec<Memory> = if query_bucket != 0 {
@@ -1135,8 +1130,10 @@ impl MemoryStore for RedbMemoryStore {
             .filter(|m| m.consolidation_status != crate::memory::ConsolidationStatus::Archived)
             .filter(|m| agent_id.is_none_or(|aid| m.agent_id == aid))
             .filter_map(|m| {
-                // Memories in the same goal bucket get a baseline similarity of 0.5
-                // since they share the same goal set even if fingerprints differ.
+                // Persisted memories no longer carry inline context
+                // embeddings, so this path scores on fingerprint + goal
+                // bucket only. Vector similarity is the multi-signal
+                // pipeline's job (it pre-fetches scores from Qdrant).
                 let bucket_sim = if query_bucket != 0 && m.context.goal_bucket_id == query_bucket {
                     0.5f32
                 } else {
@@ -1147,17 +1144,7 @@ impl MemoryStore for RedbMemoryStore {
                 } else {
                     0.0
                 };
-                let emb_sim = if !query_emb.is_empty() {
-                    let m_emb = m.context.embeddings.as_deref().unwrap_or(&[]);
-                    if !m_emb.is_empty() {
-                        agent_db_core::utils::cosine_similarity(query_emb, m_emb)
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
-                let sim = fp_sim.max(emb_sim).max(bucket_sim);
+                let sim = fp_sim.max(bucket_sim);
                 if sim >= min_similarity {
                     let tier_boost = match m.tier {
                         crate::memory::MemoryTier::Schema => 3.0_f32,
@@ -2161,7 +2148,7 @@ mod tests {
             summary: "test memory".to_string(),
             takeaway: String::new(),
             causal_note: String::new(),
-            summary_embedding: Vec::new(),
+            has_summary_embedding: false,
             tier: MemoryTier::Episodic,
             consolidated_from: Vec::new(),
             schema_id: None,

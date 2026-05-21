@@ -915,7 +915,7 @@ impl GraphEngine {
                     .iter()
                     .filter_map(|(name, &nid)| {
                         graph.get_node(nid).and_then(|node| {
-                            if node.embedding.is_empty() {
+                            if !node.has_embedding {
                                 Some((nid, name.to_string()))
                             } else {
                                 None
@@ -928,28 +928,55 @@ impl GraphEngine {
                 if let Some(ref ec) = self.embedding_client {
                     let ec = ec.clone();
                     let inference_ref = self.inference.clone();
+                    let vectors = self.vectors.clone();
                     tokio::spawn(async move {
-                        for (nid, text) in nodes_to_embed {
-                            match ec
-                                .embed(crate::claims::EmbeddingRequest {
-                                    text,
-                                    context: None,
-                                })
-                                .await
-                            {
-                                Ok(resp) if !resp.embedding.is_empty() => {
-                                    let mut inf = inference_ref.write().await;
-                                    let graph = inf.graph_mut();
-                                    if let Some(node) = graph.get_node_mut(nid) {
-                                        node.embedding = resp.embedding.clone();
-                                    }
-                                    graph.node_vector_index.insert(nid, resp.embedding);
-                                },
-                                Ok(_) => {},
-                                Err(e) => {
-                                    tracing::debug!("Node embedding failed for nid={}: {}", nid, e);
-                                },
+                        let requests: Vec<crate::claims::EmbeddingRequest> = nodes_to_embed
+                            .iter()
+                            .map(|(_, text)| crate::claims::EmbeddingRequest {
+                                text: text.clone(),
+                                context: None,
+                            })
+                            .collect();
+
+                        let responses = match ec.embed_batch(requests).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::debug!("Concept-node embedding batch failed: {e}");
+                                return;
+                            },
+                        };
+
+                        let mut points = Vec::with_capacity(responses.len());
+                        let mut ids_to_mark = Vec::with_capacity(responses.len());
+                        for ((nid, _), resp) in nodes_to_embed.iter().zip(responses.into_iter()) {
+                            if !resp.embedding.is_empty() {
+                                points.push(minns_vectors::Point::new(
+                                    *nid as u128,
+                                    resp.embedding,
+                                    minns_vectors::Payload::EMPTY,
+                                ));
+                                ids_to_mark.push(*nid);
                             }
+                        }
+                        if points.is_empty() {
+                            return;
+                        }
+
+                        {
+                            let mut inf = inference_ref.write().await;
+                            let graph = inf.graph_mut();
+                            for nid in &ids_to_mark {
+                                if let Some(node) = graph.get_node_mut(*nid) {
+                                    node.has_embedding = true;
+                                }
+                            }
+                        }
+
+                        if let Err(e) = vectors.nodes.upsert(points).await {
+                            tracing::warn!(
+                                "Concept-node batch upsert failed ({} points): {e}",
+                                ids_to_mark.len()
+                            );
                         }
                     });
                 }

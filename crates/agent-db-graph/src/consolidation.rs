@@ -106,11 +106,19 @@ impl ConsolidationEngine {
     ///
     /// `goal_overrides` maps `goal_bucket_id` to an LLM-inferred goal label,
     /// used when episodes have no explicit `active_goals`.
-    /// Pass an empty map to skip overrides (sync-only codepath).
+    ///
+    /// `memory_vectors` is a precomputed map from `MemoryId` to embedding
+    /// vector, populated by the caller via
+    /// `vectors.memories.fetch(&[ids])`. The consolidation engine itself
+    /// is pure and synchronous; the IO for vector fetch is owned by the
+    /// caller so the centroid math runs over a stable in-memory snapshot.
+    /// Pass an empty map to disable embedding-based grouping; the engine
+    /// will fall back to fingerprint or skip the group entirely.
     pub fn run_consolidation(
         &mut self,
         store: &mut dyn MemoryStore,
         goal_overrides: &HashMap<u64, String>,
+        memory_vectors: &HashMap<MemoryId, Vec<f32>>,
     ) -> ConsolidationResult {
         let mut result = ConsolidationResult::default();
 
@@ -221,9 +229,11 @@ impl ConsolidationEngine {
             let groups = match self.config.schema_grouping_mode {
                 SchemaGroupingMode::ExactFingerprint => self.group_by_fingerprint(&eligible),
                 SchemaGroupingMode::EmbeddingCentroid => {
-                    self.group_by_embedding_centroid(&eligible)
+                    self.group_by_embedding_centroid(&eligible, memory_vectors)
                 },
-                SchemaGroupingMode::EmbeddingMutual => self.group_by_embedding_mutual(&eligible),
+                SchemaGroupingMode::EmbeddingMutual => {
+                    self.group_by_embedding_mutual(&eligible, memory_vectors)
+                },
             };
 
             let groups_cap = groups
@@ -310,7 +320,11 @@ impl ConsolidationEngine {
 
     /// EmbeddingCentroid: greedy centroid-based clustering.
     /// Seed ordering: strength desc, formed_at desc, id desc.
-    fn group_by_embedding_centroid<'a>(&self, eligible: &[&'a Memory]) -> Vec<Vec<&'a Memory>> {
+    fn group_by_embedding_centroid<'a>(
+        &self,
+        eligible: &[&'a Memory],
+        memory_vectors: &HashMap<MemoryId, Vec<f32>>,
+    ) -> Vec<Vec<&'a Memory>> {
         let mut sorted: Vec<&'a Memory> = eligible.to_vec();
         // Seed ordering: strength desc, formed_at desc, id desc
         sorted.sort_by(|a, b| {
@@ -333,7 +347,7 @@ impl ConsolidationEngine {
             }
 
             let seed = sorted[seed_idx];
-            let seed_emb = Self::get_embedding(seed);
+            let seed_emb = Self::get_embedding(seed, memory_vectors);
             if seed_emb.is_empty() {
                 continue;
             }
@@ -356,7 +370,7 @@ impl ConsolidationEngine {
                 scanned += 1;
 
                 let cand = sorted[cand_idx];
-                let cand_emb = Self::get_embedding(cand);
+                let cand_emb = Self::get_embedding(cand, memory_vectors);
                 if cand_emb.is_empty() {
                     continue;
                 }
@@ -387,7 +401,11 @@ impl ConsolidationEngine {
 
     /// EmbeddingMutual: complete-link clustering.
     /// Candidate must meet threshold against every existing member.
-    fn group_by_embedding_mutual<'a>(&self, eligible: &[&'a Memory]) -> Vec<Vec<&'a Memory>> {
+    fn group_by_embedding_mutual<'a>(
+        &self,
+        eligible: &[&'a Memory],
+        memory_vectors: &HashMap<MemoryId, Vec<f32>>,
+    ) -> Vec<Vec<&'a Memory>> {
         let mut sorted: Vec<&'a Memory> = eligible.to_vec();
         sorted.sort_by(|a, b| {
             b.strength
@@ -400,8 +418,11 @@ impl ConsolidationEngine {
         let mut assigned: Vec<bool> = vec![false; sorted.len()];
         let mut groups: Vec<Vec<&'a Memory>> = Vec::new();
 
-        // Pre-compute embeddings
-        let embeddings: Vec<Vec<f32>> = sorted.iter().map(|m| Self::get_embedding(m)).collect();
+        // Pre-compute embeddings from the caller-provided fetched map.
+        let embeddings: Vec<Vec<f32>> = sorted
+            .iter()
+            .map(|m| Self::get_embedding(m, memory_vectors))
+            .collect();
 
         for seed_idx in 0..sorted.len() {
             if assigned[seed_idx] {
@@ -453,18 +474,10 @@ impl ConsolidationEngine {
         groups
     }
 
-    /// Get the best available embedding for a memory.
-    /// Prefers summary_embedding; falls back to context.embeddings.
-    fn get_embedding(memory: &Memory) -> Vec<f32> {
-        if !memory.summary_embedding.is_empty() {
-            return memory.summary_embedding.clone();
-        }
-        if let Some(ref emb) = memory.context.embeddings {
-            if !emb.is_empty() {
-                return emb.clone();
-            }
-        }
-        Vec::new()
+    /// Get the embedding for a memory from the prefetched map. Returns an
+    /// empty vec when no embedding is available.
+    fn get_embedding(memory: &Memory, vectors: &HashMap<MemoryId, Vec<f32>>) -> Vec<f32> {
+        vectors.get(&memory.id).cloned().unwrap_or_default()
     }
 
     // ---- Synthesis helpers ----
@@ -639,7 +652,7 @@ impl ConsolidationEngine {
             summary: summary_parts.join(" "),
             takeaway: consolidated_takeaway,
             causal_note: consolidated_causal,
-            summary_embedding: Vec::new(),
+            has_summary_embedding: false,
             tier: MemoryTier::Semantic,
             consolidated_from: source_ids,
             schema_id: None,
@@ -794,7 +807,7 @@ impl ConsolidationEngine {
             summary,
             takeaway,
             causal_note,
-            summary_embedding: Vec::new(),
+            has_summary_embedding: false,
             tier: MemoryTier::Schema,
             consolidated_from: source_ids,
             schema_id: None,
@@ -1033,7 +1046,7 @@ mod tests {
             summary: format!("Episode {} happened", id),
             takeaway: format!("Lesson from episode {}", id),
             causal_note: format!("Because of X in episode {}", id),
-            summary_embedding: Vec::new(),
+            has_summary_embedding: false,
             tier: MemoryTier::Episodic,
             consolidated_from: Vec::new(),
             schema_id: None,
@@ -1077,7 +1090,7 @@ mod tests {
         assert_eq!(store.list_all_memories().len(), 4);
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &HashMap::new());
 
         assert_eq!(
             result.semantic_created, 1,
@@ -1160,7 +1173,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 200);
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &HashMap::new());
 
         assert_eq!(result.schema_created, 1, "Should create 1 schema");
         assert_eq!(result.consolidated_semantic_ids.len(), 3);
@@ -1219,7 +1232,7 @@ mod tests {
         let mut engine = ConsolidationEngine::new(config.clone(), 100);
 
         // Single pass: Phase 1 creates 3 semantics, Phase 2 immediately creates a schema from them
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &HashMap::new());
         assert_eq!(
             result.semantic_created, 3,
             "Should create 3 semantics from 9 episodics (3 chunks of 3)"
@@ -1288,7 +1301,7 @@ mod tests {
                 summary: format!("Episode {} happened", i),
                 takeaway: format!("Lesson from episode {}", i),
                 causal_note: format!("Because of X in episode {}", i),
-                summary_embedding: Vec::new(),
+                has_summary_embedding: false,
                 tier: MemoryTier::Episodic,
                 consolidated_from: Vec::new(),
                 schema_id: None,
@@ -1309,7 +1322,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &HashMap::new());
 
         // With chunking: 4 episodics / threshold 3 = 1 full chunk of 3
         assert_eq!(
@@ -1348,7 +1361,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &HashMap::new());
 
         assert_eq!(
             result.semantic_created, 0,
@@ -1380,7 +1393,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &HashMap::new());
 
         assert_eq!(
             result.semantic_created, 3,
@@ -1409,19 +1422,23 @@ mod tests {
         assert_eq!(schemas.len(), 1);
     }
 
+    /// Build a semantic memory plus its embedding entry. Returns the
+    /// `Memory` for the store and a `(MemoryId, Vec<f32>)` pair the caller
+    /// can drop into the `memory_vectors` map passed to
+    /// [`ConsolidationEngine::run_consolidation`].
     fn make_semantic_with_embedding(
         id: MemoryId,
         goal_bucket: u64,
         fingerprint: u64,
         embedding: Vec<f32>,
-    ) -> Memory {
+    ) -> (Memory, (MemoryId, Vec<f32>)) {
         let ctx = EventContext {
             fingerprint,
             goal_bucket_id: goal_bucket,
             ..Default::default()
         };
 
-        Memory {
+        let memory = Memory {
             id,
             agent_id: 1,
             session_id: 0,
@@ -1429,7 +1446,7 @@ mod tests {
             summary: format!("Semantic memory {}", id),
             takeaway: format!("Pattern {}", id),
             causal_note: String::new(),
-            summary_embedding: embedding,
+            has_summary_embedding: !embedding.is_empty(),
             tier: MemoryTier::Semantic,
             consolidated_from: vec![id * 10, id * 10 + 1],
             schema_id: None,
@@ -1445,7 +1462,8 @@ mod tests {
             memory_type: MemoryType::Semantic,
             metadata: HashMap::new(),
             expires_at: None,
-        }
+        };
+        (memory, (id, embedding))
     }
 
     #[test]
@@ -1470,12 +1488,16 @@ mod tests {
         let emb2 = vec![0.98, 0.1, 0.0]; // cosine ~0.995 with emb1
         let emb3 = vec![0.95, 0.15, 0.0]; // cosine ~0.988 with emb1
 
-        store.store_consolidated_memory(make_semantic_with_embedding(50, 42, 1000, emb1));
-        store.store_consolidated_memory(make_semantic_with_embedding(51, 42, 2000, emb2));
-        store.store_consolidated_memory(make_semantic_with_embedding(52, 42, 3000, emb3));
+        let (m1, v1) = make_semantic_with_embedding(50, 42, 1000, emb1);
+        let (m2, v2) = make_semantic_with_embedding(51, 42, 2000, emb2);
+        let (m3, v3) = make_semantic_with_embedding(52, 42, 3000, emb3);
+        store.store_consolidated_memory(m1);
+        store.store_consolidated_memory(m2);
+        store.store_consolidated_memory(m3);
+        let vectors: HashMap<MemoryId, Vec<f32>> = [v1, v2, v3].into_iter().collect();
 
         let mut engine = ConsolidationEngine::new(config, 200);
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &vectors);
 
         assert_eq!(
             result.schema_created, 1,
@@ -1517,12 +1539,16 @@ mod tests {
         let emb2 = vec![0.98, 0.1, 0.0];
         let emb3 = vec![0.95, 0.15, 0.0];
 
-        store.store_consolidated_memory(make_semantic_with_embedding(50, 42, 1000, emb1));
-        store.store_consolidated_memory(make_semantic_with_embedding(51, 42, 2000, emb2));
-        store.store_consolidated_memory(make_semantic_with_embedding(52, 42, 3000, emb3));
+        let (m1, v1) = make_semantic_with_embedding(50, 42, 1000, emb1);
+        let (m2, v2) = make_semantic_with_embedding(51, 42, 2000, emb2);
+        let (m3, v3) = make_semantic_with_embedding(52, 42, 3000, emb3);
+        store.store_consolidated_memory(m1);
+        store.store_consolidated_memory(m2);
+        store.store_consolidated_memory(m3);
+        let vectors: HashMap<MemoryId, Vec<f32>> = [v1, v2, v3].into_iter().collect();
 
         let mut engine = ConsolidationEngine::new(config, 200);
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &vectors);
 
         assert_eq!(
             result.schema_created, 1,
@@ -1579,7 +1605,7 @@ mod tests {
                 summary: format!("Episode {} happened", i),
                 takeaway: format!("Lesson from episode {}", i),
                 causal_note: format!("Because of X in episode {}", i),
-                summary_embedding: Vec::new(),
+                has_summary_embedding: false,
                 tier: MemoryTier::Episodic,
                 consolidated_from: Vec::new(),
                 schema_id: None,
@@ -1600,7 +1626,7 @@ mod tests {
         }
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store, &HashMap::new());
+        let result = engine.run_consolidation(&mut store, &HashMap::new(), &HashMap::new());
 
         assert_eq!(result.semantic_created, 1);
 
@@ -1651,7 +1677,7 @@ mod tests {
         overrides.insert(888u64, "Set up CI/CD pipeline for the project".to_string());
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store, &overrides);
+        let result = engine.run_consolidation(&mut store, &overrides, &HashMap::new());
 
         assert_eq!(result.semantic_created, 1);
 
@@ -1714,7 +1740,7 @@ mod tests {
                 summary: format!("Episode {} happened", i),
                 takeaway: format!("Lesson from episode {}", i),
                 causal_note: format!("Because of X in episode {}", i),
-                summary_embedding: Vec::new(),
+                has_summary_embedding: false,
                 tier: MemoryTier::Episodic,
                 consolidated_from: Vec::new(),
                 schema_id: None,
@@ -1739,7 +1765,7 @@ mod tests {
         overrides.insert(555u64, "LLM inferred something else".to_string());
 
         let mut engine = ConsolidationEngine::new(config, 100);
-        let result = engine.run_consolidation(&mut store, &overrides);
+        let result = engine.run_consolidation(&mut store, &overrides, &HashMap::new());
 
         assert_eq!(result.semantic_created, 1);
 

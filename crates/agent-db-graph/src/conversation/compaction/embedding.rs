@@ -84,7 +84,7 @@ pub(crate) async fn embed_nodes_and_create_claims(
             .iter()
             .filter_map(|(name, &nid)| {
                 graph.get_node(nid).and_then(|node| {
-                    if node.embedding.is_empty() {
+                    if !node.has_embedding {
                         Some((nid, name.to_string()))
                     } else {
                         None
@@ -99,27 +99,49 @@ pub(crate) async fn embed_nodes_and_create_claims(
             "COMPACTION: embedding {} concept nodes for vector search",
             nodes_to_embed.len()
         );
-        for (nid, text) in &nodes_to_embed {
-            match embedding_client
-                .embed(crate::claims::EmbeddingRequest {
-                    text: text.clone(),
-                    context: None,
-                })
-                .await
-            {
-                Ok(resp) if !resp.embedding.is_empty() => {
-                    let mut inf = engine.inference.write().await;
-                    let graph = inf.graph_mut();
-                    if let Some(node) = graph.get_node_mut(*nid) {
-                        node.embedding = resp.embedding.clone();
+        let requests: Vec<crate::claims::EmbeddingRequest> = nodes_to_embed
+            .iter()
+            .map(|(_, text)| crate::claims::EmbeddingRequest {
+                text: text.clone(),
+                context: None,
+            })
+            .collect();
+
+        match embedding_client.embed_batch(requests).await {
+            Ok(responses) => {
+                let mut points = Vec::with_capacity(responses.len());
+                let mut ids_to_mark = Vec::with_capacity(responses.len());
+                for ((nid, _), resp) in nodes_to_embed.iter().zip(responses.into_iter()) {
+                    if !resp.embedding.is_empty() {
+                        points.push(minns_vectors::Point::new(
+                            *nid as u128,
+                            resp.embedding,
+                            minns_vectors::Payload::EMPTY,
+                        ));
+                        ids_to_mark.push(*nid);
                     }
-                    graph.node_vector_index.insert(*nid, resp.embedding);
-                },
-                Ok(_) => {},
-                Err(e) => {
-                    tracing::debug!("COMPACTION: node embedding failed for '{}': {}", text, e);
-                },
-            }
+                }
+                if !points.is_empty() {
+                    {
+                        let mut inf = engine.inference.write().await;
+                        let graph = inf.graph_mut();
+                        for nid in &ids_to_mark {
+                            if let Some(node) = graph.get_node_mut(*nid) {
+                                node.has_embedding = true;
+                            }
+                        }
+                    }
+                    if let Err(e) = engine.vectors.nodes.upsert(points).await {
+                        tracing::warn!(
+                            "COMPACTION: node batch upsert failed ({} points): {e}",
+                            ids_to_mark.len()
+                        );
+                    }
+                }
+            },
+            Err(e) => {
+                tracing::debug!("COMPACTION: node embedding batch failed: {e}");
+            },
         }
     }
 
@@ -160,24 +182,43 @@ pub(crate) async fn embed_nodes_and_create_claims(
                 "COMPACTION: embedding {} edge triplets for vector search",
                 edges_to_embed.len()
             );
-            for (eid, text) in &edges_to_embed {
-                match embedding_client
-                    .embed(crate::claims::EmbeddingRequest {
-                        text: text.clone(),
-                        context: None,
-                    })
-                    .await
-                {
-                    Ok(resp) if !resp.embedding.is_empty() => {
-                        let mut inf = engine.inference.write().await;
-                        let graph = inf.graph_mut();
-                        graph.edge_vector_index.insert(*eid, resp.embedding);
-                    },
-                    Ok(_) => {},
-                    Err(e) => {
-                        tracing::debug!("COMPACTION: edge embedding failed for '{}': {}", text, e);
-                    },
-                }
+            let requests: Vec<crate::claims::EmbeddingRequest> = edges_to_embed
+                .iter()
+                .map(|(_, text)| crate::claims::EmbeddingRequest {
+                    text: text.clone(),
+                    context: None,
+                })
+                .collect();
+
+            match embedding_client.embed_batch(requests).await {
+                Ok(responses) => {
+                    let points: Vec<minns_vectors::Point> = edges_to_embed
+                        .iter()
+                        .zip(responses.into_iter())
+                        .filter_map(|((eid, _), resp)| {
+                            if resp.embedding.is_empty() {
+                                None
+                            } else {
+                                Some(minns_vectors::Point::new(
+                                    *eid as u128,
+                                    resp.embedding,
+                                    minns_vectors::Payload::EMPTY,
+                                ))
+                            }
+                        })
+                        .collect();
+                    if !points.is_empty() {
+                        let n = points.len();
+                        if let Err(e) = engine.vectors.edges.upsert(points).await {
+                            tracing::warn!(
+                                "COMPACTION: edge batch upsert failed ({n} points): {e}"
+                            );
+                        }
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!("COMPACTION: edge embedding batch failed: {e}");
+                },
             }
         }
     }
@@ -259,7 +300,10 @@ pub(crate) async fn embed_nodes_and_create_claims(
                 &fact.statement,
             )],
             confidence: fact.confidence,
-            embedding,
+            // Start with the flag off; `update_embedding` below flips it
+            // only after the Qdrant upsert succeeds, so a failed upsert
+            // leaves the claim in the "needs embedding" set.
+            has_embedding: false,
             source_event_id: 0,
             episode_id: None,
             thread_id: None,
@@ -285,6 +329,21 @@ pub(crate) async fn embed_nodes_and_create_claims(
         };
 
         if let Ok(()) = claim_store.store(&claim) {
+            // Push the embedding (when present) into the vector store
+            // alongside the persisted claim. Failures are logged but not
+            // fatal — BM25 will still surface the claim.
+            if !embedding.is_empty() && claim_status == crate::claims::ClaimStatus::Active {
+                if let Err(e) = claim_store
+                    .update_embedding(claim_id, embedding.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        "COMPACTION: failed to upsert embedding for claim {}: {}",
+                        claim_id,
+                        e
+                    );
+                }
+            }
             // ── State anchor stamping ──
             // Mirror the anchor logic from integration_claims.rs so that
             // apply_state_anchor_filter() can detect stale compaction claims.

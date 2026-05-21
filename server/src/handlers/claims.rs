@@ -152,6 +152,51 @@ pub async fn process_embeddings(
     }))
 }
 
+// POST /api/memory-embeddings/process - Backfill missing memory summary
+// embeddings.
+//
+// Used after an export/import upgrade where memory rows arrived without
+// their Qdrant vectors. Poll this endpoint until `processed` is 0 and
+// `pending` is 0 to know the backfill is drained.
+pub async fn process_memory_embeddings(
+    State(state): State<AppState>,
+    Query(params): Query<PaginationQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    info!(
+        "Processing pending memory embeddings (batch_size={})",
+        params.limit
+    );
+
+    let limit = params.limit;
+    let result = state
+        .write_lanes
+        .submit_and_await(0, |tx| WriteJob::GenericWrite {
+            operation: Box::new(move |engine: Arc<agent_db_graph::GraphEngine>| {
+                Box::pin(async move {
+                    let processed = engine
+                        .process_pending_memory_embeddings(limit)
+                        .await
+                        .map_err(|e| format!("Failed to process memory embeddings: {}", e))?;
+                    let pending_more = engine.has_pending_memory_embeddings().await;
+                    Ok(serde_json::json!({
+                        "processed": processed,
+                        "pending": pending_more,
+                    }))
+                })
+            }),
+            result_tx: tx,
+        })
+        .await?;
+
+    info!(
+        "Memory embedding backfill: processed={} pending_more={}",
+        result["processed"].as_u64().unwrap_or(0),
+        result["pending"].as_bool().unwrap_or(false)
+    );
+
+    Ok(Json(result))
+}
+
 // GET /api/claims/:id - Get a specific claim
 pub async fn get_claim(
     State(state): State<AppState>,

@@ -223,20 +223,35 @@ impl GraphEngine {
             (None, None)
         };
 
+        // Open the Qdrant-backed vector store before any subsystem that uses
+        // it (claim_store, the engine itself). A misconfigured backend is
+        // caught at boot rather than on the first retrieval call.
+        let vectors = Arc::new(
+            crate::vectors::Vectors::open(&config.vectors_config)
+                .await
+                .map_err(|e| {
+                    GraphError::OperationError(format!("Failed to open vector backend: {e}"))
+                })?,
+        );
+
         // Initialize claim extraction components if semantic memory is enabled
         let (claim_queue, claim_store, _claims_llm_client, embedding_client) = if config
             .enable_semantic_memory
         {
             tracing::info!("Initializing claim extraction pipeline");
 
-            // Create claim store
+            // Create claim store backed by the `claims` vector collection.
             let store = if let Some(path) = &config.claim_storage_path {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                let store = crate::claims::ClaimStore::new(path).map_err(|e| {
-                    GraphError::OperationError(format!("Failed to initialize claim storage: {}", e))
-                })?;
+                let store =
+                    crate::claims::ClaimStore::new(path, vectors.claims.clone()).map_err(|e| {
+                        GraphError::OperationError(format!(
+                            "Failed to initialize claim storage: {}",
+                            e
+                        ))
+                    })?;
                 Some(Arc::new(store))
             } else {
                 None
@@ -723,6 +738,7 @@ impl GraphEngine {
             #[cfg(feature = "code-intelligence")]
             ast_parser,
             federated_search: federated_search_client,
+            vectors,
             background_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
         };
 

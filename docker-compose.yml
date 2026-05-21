@@ -1,6 +1,36 @@
 version: "3.8"
 
 services:
+  # Qdrant vector store — sidecar for MinnsDB's embedding collections
+  # (nodes / edges / claims / memories). The MinnsDB service refuses to
+  # start if this container is unreachable, so it is a hard dependency.
+  qdrant:
+    image: qdrant/qdrant:v1.13.0
+    container_name: minns-qdrant
+    restart: unless-stopped
+    ports:
+      # gRPC (used by the Rust client). Bind to loopback only so the
+      # vector store is not exposed publicly.
+      - "127.0.0.1:6334:6334"
+      # HTTP/REST is opt-in for debugging; comment out in production.
+      - "127.0.0.1:6333:6333"
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      # Set an API key in your .env file if you want to require auth
+      # between MinnsDB and Qdrant. Leave empty for trusted local-only.
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6334' || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - minns-network
+
   # MinnsDB Main Service
   # Note: NER service runs on separate server
   minnsdb:
@@ -9,6 +39,9 @@ services:
       dockerfile: Dockerfile
     container_name: minnsdb
     image: minnsdb:latest
+    depends_on:
+      qdrant:
+        condition: service_healthy
 
     ports:
       - "3000:3000"
@@ -28,6 +61,12 @@ services:
       # NER Service Configuration (external server)
       - NER_SERVICE_URL=${NER_SERVICE_URL:-http://localhost:8081/ner}
       - NER_REQUEST_TIMEOUT_MS=${NER_REQUEST_TIMEOUT_MS:-5000}
+      # Vector store (Qdrant sidecar above). The hostname `qdrant`
+      # resolves on the `minns-network` bridge; override QDRANT_URL when
+      # pointing at an external Qdrant cluster.
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6334}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT_COLLECTION_PREFIX=${QDRANT_COLLECTION_PREFIX:-}
 
     volumes:
       - minns-data:/data
@@ -46,6 +85,8 @@ services:
 
 volumes:
   minns-data:
+    driver: local
+  qdrant-data:
     driver: local
 
 networks:

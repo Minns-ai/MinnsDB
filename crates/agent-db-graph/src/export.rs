@@ -312,14 +312,24 @@ pub fn import_from_reader<R: Read>(
         // Process by tag
         match tag {
             wire_v2::TAG_MEMORY => {
-                // Deserialize for secondary index building
-                let (_ver, payload) = agent_db_storage::unwrap_versioned(&value);
-                let memory: Memory = rmp_serde::from_slice(payload)
+                // Deserialize for secondary index building. Embedding flags
+                // are reset to false here because the source database's
+                // vectors live in a *different* Qdrant collection (different
+                // cluster, different prefix). The destination will re-embed
+                // from text via the background embedding queue.
+                let (ver, payload) = agent_db_storage::unwrap_versioned(&value);
+                let mut memory: Memory = rmp_serde::from_slice(payload)
                     .map_err(|e| ImportError::Other(format!("deserialize memory: {}", e)))?;
+                memory.has_summary_embedding = false;
+                memory.context.embeddings = None;
+                let reset_payload = rmp_serde::to_vec(&memory).map_err(|e| {
+                    ImportError::Other(format!("re-serialize memory after flag reset: {}", e))
+                })?;
+                let reset_value = agent_db_storage::wrap_versioned(ver, &reset_payload);
                 ops.push(BatchOperation::Put {
                     table_name: table_names::MEMORY_RECORDS.to_string(),
                     key: key.clone(),
-                    value,
+                    value: reset_value,
                 });
                 let index_ops = build_memory_index_ops(&memory)
                     .map_err(|e| ImportError::Other(format!("memory index: {}", e)))?;
@@ -341,10 +351,30 @@ pub fn import_from_reader<R: Read>(
                 stats.strategies_imported += 1;
             },
             wire_v2::TAG_GRAPH_NODE => {
+                // Same flag reset as TAG_MEMORY: the source's node vectors
+                // live in a different Qdrant collection, so we cannot let
+                // the destination believe the embeddings are already there.
+                // The new vector backend will be re-populated by the node
+                // embedding pipeline on first access.
+                let (ver, payload) = agent_db_storage::unwrap_versioned(&value);
+                let mut node: crate::structures::GraphNode = rmp_serde::from_slice(payload)
+                    .map_err(|e| ImportError::Other(format!("deserialize graph node: {}", e)))?;
+                let reset_value = if node.has_embedding {
+                    node.has_embedding = false;
+                    let reset_payload = rmp_serde::to_vec(&node).map_err(|e| {
+                        ImportError::Other(format!(
+                            "re-serialize graph node after flag reset: {}",
+                            e
+                        ))
+                    })?;
+                    agent_db_storage::wrap_versioned(ver, &reset_payload)
+                } else {
+                    value
+                };
                 ops.push(BatchOperation::Put {
                     table_name: table_names::GRAPH_NODES.to_string(),
                     key,
-                    value,
+                    value: reset_value,
                 });
                 stats.graph_nodes_imported += 1;
             },
@@ -544,7 +574,7 @@ mod tests {
             updated_at: 1000,
             properties: std::collections::HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         };
         let mut key = Vec::with_capacity(9);
@@ -629,7 +659,7 @@ mod tests {
             updated_at: 1,
             properties: std::collections::HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
             group_id: String::new(),
         })
         .unwrap();

@@ -5,6 +5,8 @@
 //!
 //! These tests gracefully skip on API quota/rate-limit errors (429).
 
+mod common;
+
 use agent_db_events::core::{EventContext, EventType};
 use agent_db_events::Event;
 use agent_db_graph::claims::EmbeddingClient;
@@ -56,6 +58,7 @@ async fn test_real_claims_pipeline_end_to_end() {
     };
 
     let dir = tempdir().unwrap();
+    let vc = common::qdrant_fixture::test_vectors_config().await;
 
     let config = GraphEngineConfig {
         enable_semantic_memory: true,
@@ -70,6 +73,7 @@ async fn test_real_claims_pipeline_end_to_end() {
         claim_min_confidence: 0.5, // Lower threshold so we're more likely to get claims
         claim_max_per_input: 5,
         enable_embedding_generation: true,
+        vectors_config: vc,
         ..Default::default()
     };
 
@@ -192,14 +196,20 @@ async fn test_real_claims_pipeline_end_to_end() {
 /// simple queries like "alice" and "user".
 ///
 /// Uses real OpenAI embeddings for meaningful semantic search testing.
+///
+/// Drives [`ClaimStore`] against the shared Qdrant testcontainer fixture so
+/// the vector store is exercised end-to-end alongside the OpenAI embedding
+/// client.
 #[tokio::test]
-#[ignore = "requires LLM_API_KEY — run with: cargo test --ignored"]
+#[ignore = "requires LLM_API_KEY and Docker — run with: cargo test --ignored"]
 async fn test_hybrid_claims_search_finds_alice_and_user() {
     use agent_db_graph::claims::types::{DerivedClaim, EvidenceSpan};
     use agent_db_graph::claims::{
         openai_client_from_env, ClaimStore, EmbeddingClient, EmbeddingRequest, HybridClaimSearch,
         HybridSearchConfig, OpenAiEmbeddingClient,
     };
+    use agent_db_graph::vectors::Vectors;
+    use std::sync::Arc;
 
     let Some(client) = openai_client_from_env() else {
         eprintln!("Skipping test: OpenAI client not configured");
@@ -207,10 +217,15 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     };
     let dir = tempdir().unwrap();
 
-    let store = ClaimStore::new(dir.path().join("claims.redb")).unwrap();
+    // Spin up the shared Qdrant fixture and open the `claims` collection.
+    let vc = common::qdrant_fixture::test_vectors_config().await;
+    let vectors = Vectors::open(&vc)
+        .await
+        .expect("open vectors fixture for claims integration test");
+    let store =
+        ClaimStore::new(dir.path().join("claims.redb"), Arc::clone(&vectors.claims)).unwrap();
 
     // Helper: generate embedding for text using real OpenAI embeddings.
-    // Returns None on quota/rate-limit errors.
     async fn embed(client: &OpenAiEmbeddingClient, text: &str) -> Option<Vec<f32>> {
         match client
             .embed(EmbeddingRequest {
@@ -244,7 +259,6 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
             text.to_string(),
             vec![EvidenceSpan::new(0, 10, &text[..10])],
             0.9,
-            emb,
             100 + id as u128,
             None,
             None,
@@ -252,6 +266,10 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
             None,
         );
         store.store(&claim).unwrap();
+        store
+            .update_embedding(id, emb)
+            .await
+            .expect("upsert embedding for hybrid search test");
     }
 
     let config = HybridSearchConfig::default(); // Hybrid mode
@@ -260,7 +278,9 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     let Some(query_emb) = embed(&client, "alice").await else {
         return;
     };
-    let results = HybridClaimSearch::search("alice", &query_emb, &store, 10, &config).unwrap();
+    let results = HybridClaimSearch::search("alice", &query_emb, &store, 10, &config)
+        .await
+        .unwrap();
     assert!(!results.is_empty(), "'alice' should return results");
     assert_eq!(results[0].0, 1, "claim 1 should be top result for 'alice'");
 
@@ -268,7 +288,9 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     let Some(query_emb) = embed(&client, "user").await else {
         return;
     };
-    let results = HybridClaimSearch::search("user", &query_emb, &store, 10, &config).unwrap();
+    let results = HybridClaimSearch::search("user", &query_emb, &store, 10, &config)
+        .await
+        .unwrap();
     assert!(!results.is_empty(), "'user' should return results");
     assert_eq!(results[0].0, 2, "claim 2 should be top result for 'user'");
 
@@ -276,7 +298,9 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     let Some(query_emb) = embed(&client, "rust").await else {
         return;
     };
-    let results = HybridClaimSearch::search("rust", &query_emb, &store, 10, &config).unwrap();
+    let results = HybridClaimSearch::search("rust", &query_emb, &store, 10, &config)
+        .await
+        .unwrap();
     assert!(!results.is_empty(), "'rust' should return results");
     assert_eq!(results[0].0, 3, "claim 3 should be top result for 'rust'");
 
@@ -284,8 +308,9 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     let Some(query_emb) = embed(&client, "refund order").await else {
         return;
     };
-    let results =
-        HybridClaimSearch::search("refund order", &query_emb, &store, 10, &config).unwrap();
+    let results = HybridClaimSearch::search("refund order", &query_emb, &store, 10, &config)
+        .await
+        .unwrap();
     assert!(!results.is_empty(), "'refund order' should return results");
     assert_eq!(results[0].0, 2, "claim 2 should match 'refund order'");
 
@@ -296,12 +321,12 @@ async fn test_hybrid_claims_search_finds_alice_and_user() {
     };
     let results =
         HybridClaimSearch::search("IDE theme preferences", &query_emb, &store, 10, &config)
+            .await
             .unwrap();
     assert!(
         !results.is_empty(),
         "'IDE theme preferences' should return results"
     );
-    // With real embeddings, claim 1 about dark mode should rank highly
     let ids: Vec<u64> = results.iter().map(|r| r.0).collect();
     assert!(
         ids.contains(&1),

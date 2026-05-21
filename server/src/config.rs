@@ -22,6 +22,38 @@ pub fn create_engine_config() -> anyhow::Result<GraphEngineConfig> {
     config.storage_backend = StorageBackend::Persistent;
     config.redb_path = PathBuf::from("./data/minns.redb");
 
+    // Configure the Qdrant-backed vector store. Defaults match the local
+    // sidecar in docker-compose.yml. Override via QDRANT_URL /
+    // QDRANT_API_KEY / QDRANT_COLLECTION_PREFIX to point at an external
+    // Qdrant instance or to namespace collections by prefix.
+    if let Ok(url) = env::var("QDRANT_URL") {
+        config.vectors_config.url = url;
+    }
+    if let Ok(key) = env::var("QDRANT_API_KEY") {
+        if !key.is_empty() {
+            config.vectors_config.api_key = Some(key);
+        }
+    }
+    if let Ok(prefix) = env::var("QDRANT_COLLECTION_PREFIX") {
+        if !prefix.is_empty() {
+            config.vectors_config.collection_prefix = prefix;
+        }
+    }
+    info!(
+        "  Qdrant: url={} prefix={} api_key={}",
+        config.vectors_config.url,
+        if config.vectors_config.collection_prefix.is_empty() {
+            "(none)".to_string()
+        } else {
+            config.vectors_config.collection_prefix.clone()
+        },
+        if config.vectors_config.api_key.is_some() {
+            "set"
+        } else {
+            "unset"
+        },
+    );
+
     // Apply profile-specific limits
     if is_free {
         // FREE PROFILE: Reduced limits

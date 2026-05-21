@@ -69,11 +69,17 @@ impl GraphEngine {
             store.get_stats()
         };
 
-        // Claim stats
-        let (claim_count, claim_embeddings_indexed) = match &self.claim_store {
-            Some(store) => (store.count().unwrap_or(0), store.vector_index_size()),
-            None => (0, 0),
+        // Claim stats.
+        //
+        // `embeddings_indexed` is the number of points in the `claims`
+        // vector collection. `count()` is an admin/diagnostic path on the
+        // VectorStore trait, so calling it here is fine; we don't hit it on
+        // the hot retrieval loop.
+        let claim_count = match &self.claim_store {
+            Some(store) => store.count().unwrap_or(0),
+            None => 0,
         };
+        let claim_embeddings_indexed = self.vectors.claims.count().await.unwrap_or(0);
 
         // Graph stats
         let graph_stats = self.get_graph_stats().await;

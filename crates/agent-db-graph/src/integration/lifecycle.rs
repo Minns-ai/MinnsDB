@@ -304,10 +304,14 @@ impl GraphEngine {
                     inf.enforce_memory_caps();
                 }
 
-                // 8. Claim store maintenance (expire stale, cap vector index, purge disk)
+                // 8. Claim store maintenance (expire stale, purge disk)
+                //
+                // The vector store sizing is managed by Qdrant itself (HNSW
+                // params, quantization, segment merges), so there is no
+                // longer an in-process cap to enforce here.
                 if let Some(ref claim_store) = engine.claim_store {
                     // Expire claims past their TTL
-                    match claim_store.expire_stale_claims() {
+                    match claim_store.expire_stale_claims().await {
                         Ok(expired) if expired > 0 => {
                             tracing::info!("Maintenance: expired {} stale claims", expired);
                         },
@@ -315,14 +319,6 @@ impl GraphEngine {
                             tracing::warn!("Maintenance: claim expiry failed: {}", e);
                         },
                         _ => {},
-                    }
-
-                    // Enforce vector index cap
-                    let max_idx = mc.max_vector_index_size;
-                    if max_idx > 0 {
-                        if let Err(e) = claim_store.enforce_vector_index_cap(max_idx) {
-                            tracing::warn!("Maintenance: vector index cap failed: {}", e);
-                        }
                     }
 
                     // Purge inactive claims from disk

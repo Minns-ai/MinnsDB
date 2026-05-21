@@ -234,6 +234,10 @@ pub mod subscription;
 
 pub mod federated_search;
 
+// Backend-agnostic vector index aggregate (nodes / edges / claims / memories)
+pub mod vectors;
+pub use vectors::{Vectors, VectorsConfig};
+
 // Export/Import
 pub use export::{ExportError, ImportError, ImportMode, ImportStats};
 pub use stores::{build_memory_index_ops, build_strategy_index_ops};

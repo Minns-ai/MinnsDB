@@ -312,7 +312,6 @@ mod tests {
             text.to_string(),
             evidence,
             0.9,
-            vec![0.1, 0.2, 0.3],
             event_id,
             None,
             None,
@@ -1226,6 +1225,7 @@ impl GraphEngine {
             fetch_k,
             &hybrid_config,
         )
+        .await
         .map_err(|e| {
             crate::GraphError::OperationError(format!("Failed to search claims: {}", e))
         })?;

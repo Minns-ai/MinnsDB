@@ -34,10 +34,12 @@ pub struct GraphNode {
     /// Cached degree for performance
     pub degree: u32,
 
-    /// Optional embedding vector for semantic similarity search.
-    /// Empty if not yet embedded.
+    /// Whether this node has been embedded and pushed to the vector store.
+    /// The actual vector lives in the `nodes` Qdrant collection; this flag
+    /// is a cheap in-memory bool so callers can filter "already-embedded"
+    /// without a network round trip.
     #[serde(default)]
-    pub embedding: Vec<f32>,
+    pub has_embedding: bool,
 }
 
 /// Number of distinct `NodeType` variants. Keep in sync with `NodeType::discriminant()`.
@@ -304,7 +306,7 @@ impl GraphNode {
             group_id: String::new(),
             properties: HashMap::new(),
             degree: 0,
-            embedding: Vec::new(),
+            has_embedding: false,
         }
     }
 

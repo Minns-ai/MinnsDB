@@ -16,7 +16,6 @@ use super::adj_list::AdjList;
 use super::edge::{EdgeType, GraphEdge};
 use super::node::GraphNode;
 use super::types::{EdgeId, NodeId};
-use super::vector_index::NodeVectorIndex;
 
 /// Graph structure with optimized storage and indexing.
 ///
@@ -83,14 +82,6 @@ pub struct Graph {
 
     /// BM25 full-text search index
     pub(crate) bm25_index: crate::indexing::Bm25Index,
-
-    /// Node vector index for semantic similarity search on graph nodes
-    pub(crate) node_vector_index: NodeVectorIndex,
-
-    /// Edge/triplet vector index for semantic similarity search on graph edges.
-    /// Stores embeddings of "subject predicate object" triplet text, keyed by EdgeId.
-    /// Enables triplet scoring: query vs full triplet context.
-    pub(crate) edge_vector_index: NodeVectorIndex,
 
     /// String interner for deduplicating repeated string values
     pub(crate) interner: Interner,
@@ -222,8 +213,6 @@ impl Graph {
             claim_index: FxHashMap::default(),
             concept_index: HashMap::new(),
             bm25_index: crate::indexing::Bm25Index::new(),
-            node_vector_index: NodeVectorIndex::new(),
-            edge_vector_index: NodeVectorIndex::new(),
             interner: Interner::new(),
             stats: GraphStats::default(),
             max_graph_size,

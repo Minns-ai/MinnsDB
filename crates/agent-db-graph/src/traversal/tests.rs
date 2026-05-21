@@ -18,7 +18,7 @@ fn make_node_at(id: NodeId, created_at: u64) -> GraphNode {
         updated_at: created_at,
         properties: HashMap::new(),
         degree: 0,
-        embedding: Vec::new(),
+        has_embedding: false,
         group_id: String::new(),
     }
 }

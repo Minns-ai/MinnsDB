@@ -1,0 +1,19 @@
+[package]
+name = "minns-vectors"
+description = "Backend-agnostic vector store trait with a Qdrant implementation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+qdrant-client = "1.18"
+
+[dev-dependencies]
+tokio = { workspace = true }
+testcontainers = "0.23"
