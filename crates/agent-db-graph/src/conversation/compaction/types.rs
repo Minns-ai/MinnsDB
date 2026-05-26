@@ -18,8 +18,17 @@ pub(crate) const MIN_PLAYBOOK_CONFIDENCE: f32 = 0.4;
 // ────────── Extraction Response Types ──────────
 
 /// LLM extraction response (deserialized from JSON).
+///
+/// `facts` is `#[serde(default)]` because the post-batch compaction prompt
+/// no longer asks the LLM to produce them — cascade already extracted facts
+/// per batch (see `compaction_goals_and_summary_prompt` and the comment on
+/// `run_compaction_with_context` for why we trimmed the prompt). The field
+/// stays on the struct for any caller that still uses the wider prompt
+/// (`compaction_system_prompt`), but the slim path will deserialise into
+/// an empty Vec without complaining.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionResponse {
+    #[serde(default)]
     pub facts: Vec<ExtractedFact>,
     pub goals: Vec<ExtractedGoal>,
     pub procedural_summary: Option<ProceduralSummary>,

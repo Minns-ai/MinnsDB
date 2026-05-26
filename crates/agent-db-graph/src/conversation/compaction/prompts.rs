@@ -2,6 +2,13 @@
 
 // ────────── Main Compaction System Prompt ──────────
 
+/// Full facts + goals + procedural-summary extraction prompt.
+///
+/// Currently unused — the post-batch compaction pass now uses
+/// `compaction_goals_and_summary_prompt` because per-batch cascade already
+/// produces facts. This wider variant is kept for callers that explicitly
+/// want a single LLM call to produce all three.
+#[allow(dead_code)]
 pub(crate) fn compaction_system_prompt(categories: &str, category_enum: &str) -> String {
     format!(
         r#"You are an information extraction system. Given a conversation transcript, extract:
@@ -71,6 +78,52 @@ Example:
   "procedural_summary": null
 }}"#
     )
+}
+
+// ────────── Slim Post-Batch Compaction Prompt ──────────
+
+/// Goals + procedural-summary only. The wider `compaction_system_prompt`
+/// also asks the LLM to extract facts, but cascade has already done that
+/// per-batch by the time this prompt runs — the facts output is wasted
+/// tokens (both input instructions and output bytes). This trimmed variant
+/// keeps the two pieces only this pass can produce: cross-conversation
+/// goals and the procedural summary.
+pub(crate) fn compaction_goals_and_summary_prompt() -> String {
+    r#"You are an information extraction system. Given a conversation transcript, extract:
+
+1. "goals": User objectives or intentions detected across the conversation.
+   Each: { "description": "...", "status": "active"|"completed"|"abandoned", "owner": "user|<name>" }
+
+2. "procedural_summary": Structured session summary, or null if the conversation has no procedural content.
+   {
+     "objective": "...",
+     "progress_status": "completed"|"in_progress"|"blocked"|"abandoned",
+     "steps": [{ "step_number": 1, "action": "...", "result": "...", "outcome": "success"|"failure"|"partial"|"pending" }],
+     "overall_summary": "...",
+     "takeaway": "..."
+   }
+
+Rules:
+- Goals are user intent over the whole conversation, not single messages.
+- Look for cross-message inferences: combine multiple turns to discover the underlying goal.
+- A conversation without clear intent or procedural work should have empty goals and null procedural_summary.
+- Output ONLY valid JSON. Do NOT include a "facts" field — facts are extracted in a separate pass.
+
+Example:
+{
+  "goals": [
+    { "description": "Decide on a new dietary plan with the doctor's input", "status": "active", "owner": "user" }
+  ],
+  "procedural_summary": {
+    "objective": "Move from vegetarian to pescatarian",
+    "progress_status": "in_progress",
+    "steps": [
+      { "step_number": 1, "action": "Consulted doctor", "result": "Recommended adding fish for omega-3", "outcome": "success" }
+    ],
+    "overall_summary": "User updated dietary preference after medical guidance.",
+    "takeaway": "Diet change driven by health recommendation."
+  }
+}"#.to_string()
 }
 
 // ────────── Per-Turn Extraction Prompt ──────────

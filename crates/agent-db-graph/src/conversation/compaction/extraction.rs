@@ -1,6 +1,11 @@
 //! LLM extraction functions — single-call fact extraction, financial extraction, playbooks.
 
-use super::prompts::{compaction_system_prompt, PLAYBOOK_SYSTEM_PROMPT, TURN_EXTRACTION_PROMPT};
+use super::prompts::{
+    compaction_goals_and_summary_prompt, PLAYBOOK_SYSTEM_PROMPT, TURN_EXTRACTION_PROMPT,
+};
+// `compaction_system_prompt` is still exported from `prompts` for any caller
+// that explicitly wants the full facts+goals+summary extraction; the
+// post-batch path here uses the slim variant above.
 use super::turn_processing::format_transcript;
 use super::types::*;
 use crate::conversation::types::ConversationIngest;
@@ -22,7 +27,19 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
 
 // ────────── Full-Transcript Extraction ──────────
 
-/// Call the LLM to extract facts, goals, and procedural summary from a transcript.
+/// Call the LLM to extract goals + procedural summary from a transcript.
+///
+/// Used by the post-batch compaction pass. Facts are NOT extracted here —
+/// the per-batch cascade already extracted them, and re-running fact
+/// extraction over the full transcript just wastes input + output tokens.
+/// `CompactionResponse.facts` is `#[serde(default)]` so the slim prompt
+/// (which doesn't ask for facts) deserialises into an empty Vec rather
+/// than a parse error.
+///
+/// `category_block` / `category_enum` are kept on the signature for
+/// callers that may want the full-facts variant in future; the current
+/// implementation does not use them (goals + summary don't need the
+/// category enumeration).
 ///
 /// Returns `None` on any failure (fail-open).
 pub async fn extract_compaction(
@@ -37,21 +54,27 @@ pub async fn extract_compaction(
 
 /// Extract compaction from a pre-formatted transcript string.
 ///
-/// Returns `None` on any failure (fail-open).
+/// Returns `None` on any failure (fail-open). See `extract_compaction` for
+/// the slim-prompt rationale.
 pub async fn extract_compaction_from_transcript(
     llm: &dyn LlmClient,
     transcript: &str,
-    category_block: &str,
-    category_enum: &str,
+    _category_block: &str,
+    _category_enum: &str,
 ) -> Option<CompactionResponse> {
     if transcript.is_empty() {
         return None;
     }
 
     let request = LlmRequest {
-        system_prompt: compaction_system_prompt(category_block, category_enum),
+        // Slim prompt — goals + procedural_summary only. Facts were already
+        // extracted per-batch by cascade.
+        system_prompt: compaction_goals_and_summary_prompt(),
         user_prompt: transcript.to_string(),
         temperature: 0.0,
+        // 2048 was sized for the full facts+goals+summary response. The
+        // slim variant is much smaller, but leaving the budget as-is costs
+        // nothing — the LLM stops at the JSON terminator.
         max_tokens: 2048,
         json_mode: true,
     };
