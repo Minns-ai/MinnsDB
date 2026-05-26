@@ -292,14 +292,20 @@ pub async fn ingest_conversation(
                         //    the response returns.
                         let compaction_result =
                             if engine.config.enable_conversation_compaction {
+                                let compaction_started = std::time::Instant::now();
                                 let cr = agent_db_graph::conversation::run_compaction(
                                     &engine,
                                     &ingest_data_clone,
                                     &case_id,
                                 )
                                 .await;
+                                // Total includes both LLM phases and the
+                                // sequential graph writes — the number the
+                                // caller actually waited on. The per-phase
+                                // breakdown lands on its own lines from
+                                // inside compaction (target = "compaction").
                                 tracing::info!(
-                                    "Compaction case_id={}: facts={} goals={} goals_deduped={} steps={} memory={} updated={} deleted={} playbooks={}",
+                                    "Compaction case_id={}: facts={} goals={} goals_deduped={} steps={} memory={} updated={} deleted={} playbooks={} total_ms={}",
                                     case_id,
                                     cr.facts_extracted,
                                     cr.goals_extracted,
@@ -309,6 +315,7 @@ pub async fn ingest_conversation(
                                     cr.memories_updated,
                                     cr.memories_deleted,
                                     cr.playbooks_extracted,
+                                    compaction_started.elapsed().as_millis() as u64,
                                 );
                                 Some(cr)
                             } else {

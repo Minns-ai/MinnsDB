@@ -11,6 +11,12 @@ pub async fn nlq_query(
     State(state): State<AppState>,
     Json(request): Json<NlqRequest>,
 ) -> Result<Json<NlqResponseBody>, ApiError> {
+    // Total wall-time including read-gate wait. The engine reports its own
+    // `execution_time_ms` which covers planning + graph execution; the
+    // delta against `total_ms` is mostly read-gate contention + the
+    // per-request related-context retrieval below.
+    let request_started = std::time::Instant::now();
+
     let _permit = state
         .read_gate
         .acquire()
@@ -100,6 +106,17 @@ pub async fn nlq_query(
     } else {
         (vec![], vec![])
     };
+
+    tracing::info!(
+        target: "nlq",
+        path = "/api/nlq",
+        federated = fed_sources.is_some(),
+        engine_ms = response.execution_time_ms,
+        total_ms = request_started.elapsed().as_millis() as u64,
+        rows = result_count,
+        entities = entities.len(),
+        "nlq.request"
+    );
 
     Ok(Json(NlqResponseBody {
         answer: response.answer,

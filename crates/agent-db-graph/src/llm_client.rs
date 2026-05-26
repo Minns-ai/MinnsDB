@@ -68,6 +68,13 @@ impl LlmClient for OpenAiLlmClient {
             body["response_format"] = serde_json::json!({ "type": "json_object" });
         }
 
+        // Total wall-time across the retry loop. This is the number that
+        // matters to a caller waiting on the response — including any
+        // backoffs we incurred on 429/5xx. Logged once on return so each
+        // LLM round-trip leaves exactly one timing line per caller.
+        let started = std::time::Instant::now();
+        let prompt_chars = request.system_prompt.len() + request.user_prompt.len();
+
         // Retry with exponential backoff for rate limits (429) and server errors (5xx)
         let mut last_err = String::new();
         for attempt in 0..4u32 {
@@ -114,6 +121,17 @@ impl LlmClient for OpenAiLlmClient {
             }
             if !status.is_success() {
                 let err_msg = json["error"]["message"].as_str().unwrap_or("unknown error");
+                tracing::warn!(
+                    target: "llm",
+                    provider = "openai",
+                    model = %self.model,
+                    status = %status,
+                    attempts = attempt + 1,
+                    prompt_chars = prompt_chars,
+                    ms = started.elapsed().as_millis() as u64,
+                    "llm.call failed: {}",
+                    err_msg
+                );
                 return Err(anyhow::anyhow!("OpenAI API error {}: {}", status, err_msg));
             }
 
@@ -123,12 +141,33 @@ impl LlmClient for OpenAiLlmClient {
                 .to_string();
             let tokens_used = json["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32;
 
+            tracing::info!(
+                target: "llm",
+                provider = "openai",
+                model = %self.model,
+                attempts = attempt + 1,
+                prompt_chars = prompt_chars,
+                tokens_used = tokens_used,
+                ms = started.elapsed().as_millis() as u64,
+                "llm.call ok"
+            );
+
             return Ok(LlmResponse {
                 content,
                 tokens_used,
             });
         }
 
+        tracing::warn!(
+            target: "llm",
+            provider = "openai",
+            model = %self.model,
+            attempts = 4,
+            prompt_chars = prompt_chars,
+            ms = started.elapsed().as_millis() as u64,
+            "llm.call exhausted: {}",
+            last_err
+        );
         Err(anyhow::anyhow!(
             "OpenAI API failed after 4 attempts: {}",
             last_err
@@ -170,6 +209,12 @@ impl LlmClient for AnthropicLlmClient {
             ]
         });
 
+        // Mirror the OpenAI side: one timing line per round-trip, captured
+        // regardless of success/failure so we always have the wall-time the
+        // caller actually waited on.
+        let started = std::time::Instant::now();
+        let prompt_chars = request.system_prompt.len() + request.user_prompt.len();
+
         let resp = self
             .http
             .post("https://api.anthropic.com/v1/messages")
@@ -198,6 +243,17 @@ impl LlmClient for AnthropicLlmClient {
             .unwrap_or("")
             .to_string();
         let tokens_used = json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+
+        tracing::info!(
+            target: "llm",
+            provider = "anthropic",
+            model = %self.model,
+            attempts = 1,
+            prompt_chars = prompt_chars,
+            tokens_used = tokens_used,
+            ms = started.elapsed().as_millis() as u64,
+            "llm.call ok"
+        );
 
         Ok(LlmResponse {
             content,

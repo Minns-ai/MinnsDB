@@ -238,6 +238,13 @@ pub async fn run_compaction_with_context(
         case_id
     );
 
+    // Phase-level timers. Surfaced as structured fields on the existing
+    // summary lines so we can tell *where* the synchronous wait went —
+    // parallel LLM extraction vs sequential graph writes vs the post-batch
+    // goals+summary call. Each phase logs its own duration; the handler
+    // logs the overall total.
+    let phase1_started = std::time::Instant::now();
+
     // ── Phase 1: extract all batches in parallel ─────────────────────────
     //
     // Previously this was a `for batch in &batches` loop with the extraction
@@ -374,6 +381,16 @@ pub async fn run_compaction_with_context(
     // sequential write phase below sees batches in the order the user
     // uttered them (depends_on stamping reads the prior batch's writes).
     extracted.sort_by_key(|(idx, _, _, _, _)| *idx);
+
+    tracing::info!(
+        target: "compaction",
+        case_id = %case_id,
+        phase = "extract",
+        batches = batches.len(),
+        ms = phase1_started.elapsed().as_millis() as u64,
+        "compaction.phase done"
+    );
+    let phase2_started = std::time::Instant::now();
 
     // ── Phase 2: apply writes sequentially per batch ─────────────────────
     //
@@ -576,6 +593,15 @@ pub async fn run_compaction_with_context(
 
     result.llm_success = true;
 
+    tracing::info!(
+        target: "compaction",
+        case_id = %case_id,
+        phase = "write",
+        facts = result.facts_extracted,
+        ms = phase2_started.elapsed().as_millis() as u64,
+        "compaction.phase done"
+    );
+
     // ── Run community detection so DRIFT search has data ──
     if engine.config.enable_louvain && !all_extracted_facts.is_empty() {
         tracing::info!("COMPACTION: triggering community detection after per-turn extraction");
@@ -669,6 +695,7 @@ pub async fn run_compaction_with_context(
     };
 
     // Extract goals + procedural summary from full transcript
+    let goals_started = std::time::Instant::now();
     let goal_extraction = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         extract_compaction_from_transcript(
@@ -679,6 +706,14 @@ pub async fn run_compaction_with_context(
         ),
     )
     .await;
+    tracing::info!(
+        target: "compaction",
+        case_id = %case_id,
+        phase = "goals_summary",
+        ok = goal_extraction.is_ok(),
+        ms = goals_started.elapsed().as_millis() as u64,
+        "compaction.phase done"
+    );
 
     if let Ok(Some(response)) = goal_extraction {
         result.goals_extracted = response.goals.len();
