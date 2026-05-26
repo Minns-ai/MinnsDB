@@ -18,6 +18,10 @@ agent-db-ast = { path = "../agent-db-ast", optional = true }
 agent-db-tables = { path = "../agent-db-tables" }
 minns-vectors = { path = "../minns-vectors" }
 tokio = { version = "1.28", features = ["full"] }
+# `futures` for `join_all` — in-task fan-out of N borrowed futures where
+# tokio::task::JoinSet won't work because spawning requires 'static and
+# we want to keep `&self`-taking engine methods (e.g. detect_edge_conflicts).
+futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_with = "3.0"

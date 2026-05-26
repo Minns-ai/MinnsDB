@@ -434,16 +434,32 @@ pub async fn run_compaction_with_context(
             //   2. The supersession cascade triggers correctly when a new
             //      location replaces an old one, catching old depends_on edges
 
-            // Phase A: write single-valued facts (they establish state)
+            // Phase A: write single-valued facts (they establish state).
+            //
+            // Writes are kept sequential so Phase B's depends_on stamping sees
+            // the accumulated graph state — write_fact_to_graph mutates the
+            // graph and the next fact may need to read those mutations.
+            // Conflict detection, however, is per-fact and idempotent: each
+            // call reads candidates filtered by the fact's category and
+            // invalidates only the edges that contradict THAT fact. Different
+            // facts touch disjoint edge sets, so the LLM calls can fan out
+            // in parallel with `join_all` (in-task concurrency — no spawn).
+            let mut sv_facts_with_ts: Vec<(&ExtractedFact, u64)> = Vec::new();
             let mut sv_offset = 0u64;
             for fact in facts.iter() {
                 let cat = fact.category.as_deref().unwrap_or("");
                 if engine.ontology.is_single_valued(cat) {
                     let fact_ts = turn_base + sv_offset * 1_000;
                     engine.write_fact_to_graph(fact, fact_ts).await;
-                    engine.detect_edge_conflicts(fact, fact_ts).await;
+                    sv_facts_with_ts.push((fact, fact_ts));
                     sv_offset += 1;
                 }
+            }
+            if !sv_facts_with_ts.is_empty() {
+                let detections = sv_facts_with_ts
+                    .iter()
+                    .map(|(fact, ts)| engine.detect_edge_conflicts(fact, *ts));
+                futures::future::join_all(detections).await;
             }
 
             // Phase B: stamp depends_on on multi-valued facts using
@@ -500,16 +516,25 @@ pub async fn run_compaction_with_context(
                 }
             }
 
-            // Phase C: write multi-valued facts (with correct depends_on)
+            // Phase C: write multi-valued facts (with correct depends_on).
+            // Same shape as Phase A — writes sequential, conflict detection
+            // fanned out via join_all afterwards.
+            let mut mv_facts_with_ts: Vec<(&ExtractedFact, u64)> = Vec::new();
             let mut mv_offset = sv_offset;
             for fact in facts.iter() {
                 let cat = fact.category.as_deref().unwrap_or("");
                 if !engine.ontology.is_single_valued(cat) {
                     let fact_ts = turn_base + mv_offset * 1_000;
                     engine.write_fact_to_graph(fact, fact_ts).await;
-                    engine.detect_edge_conflicts(fact, fact_ts).await;
+                    mv_facts_with_ts.push((fact, fact_ts));
                     mv_offset += 1;
                 }
+            }
+            if !mv_facts_with_ts.is_empty() {
+                let detections = mv_facts_with_ts
+                    .iter()
+                    .map(|(fact, ts)| engine.detect_edge_conflicts(fact, *ts));
+                futures::future::join_all(detections).await;
             }
 
             // Update rolling context
