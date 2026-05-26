@@ -17,4 +17,17 @@ ignore = [
     # Revisit when testcontainers ships against a patched tar
     # implementation, or when tokio-tar publishes a fix.
     "RUSTSEC-2025-0111",
+
+    # rand 0.9.2 — "Rand is unsound with a custom logger using
+    # `rand::rng()`". The unsoundness only triggers if a user-supplied
+    # logging implementation reaches back into `rand::rng()` during a
+    # log call (very unusual). We do not install any custom logger
+    # that does this; the only logging surface is `tracing` with the
+    # default subscribers, which doesn't touch rand.
+    # Path: qdrant-client 1.18 → reqwest 0.12 → quinn 0.11 → quinn-proto
+    # 0.11 → rand 0.9.2. We can't upgrade rand directly; needs the
+    # qdrant-client / reqwest chain to ship against a newer rand.
+    # Revisit when qdrant-client bumps reqwest, or when rand publishes
+    # a patched 0.9.x.
+    "RUSTSEC-2026-0097",
 ]

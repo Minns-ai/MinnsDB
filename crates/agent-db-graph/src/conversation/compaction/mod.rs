@@ -299,7 +299,12 @@ pub async fn run_compaction_with_context(
                 },
                 _ => format!("turn {}", batch_start_idx),
             };
-            BatchInput { idx, merged_turn, messages_text, label }
+            BatchInput {
+                idx,
+                merged_turn,
+                messages_text,
+                label,
+            }
         })
         .collect();
 
@@ -308,8 +313,13 @@ pub async fn run_compaction_with_context(
     // at MAX_PARALLEL_BATCHES * (cascade + financial) so we don't surge past
     // the provider's rate limit on payloads with many batches.
     let extraction_semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_BATCHES));
-    let mut join_set: JoinSet<(usize, ConversationTurn, String, Option<Vec<ExtractedFact>>, Vec<ExtractedFact>)> =
-        JoinSet::new();
+    let mut join_set: JoinSet<(
+        usize,
+        ConversationTurn,
+        String,
+        Option<Vec<ExtractedFact>>,
+        Vec<ExtractedFact>,
+    )> = JoinSet::new();
     for bi in batch_inputs.into_iter() {
         let llm = Arc::clone(&llm);
         let rolling = initial_rolling_ctx.clone();
@@ -334,12 +344,23 @@ pub async fn run_compaction_with_context(
                 ),
                 extract_financial_facts_llm(llm.as_ref(), &bi.messages_text)
             );
-            (bi.idx, bi.merged_turn, bi.label, turn_facts, ner_financial_facts)
+            (
+                bi.idx,
+                bi.merged_turn,
+                bi.label,
+                turn_facts,
+                ner_financial_facts,
+            )
         });
     }
 
-    let mut extracted: Vec<(usize, ConversationTurn, String, Option<Vec<ExtractedFact>>, Vec<ExtractedFact>)> =
-        Vec::new();
+    let mut extracted: Vec<(
+        usize,
+        ConversationTurn,
+        String,
+        Option<Vec<ExtractedFact>>,
+        Vec<ExtractedFact>,
+    )> = Vec::new();
     while let Some(joined) = join_set.join_next().await {
         match joined {
             Ok(tuple) => extracted.push(tuple),
