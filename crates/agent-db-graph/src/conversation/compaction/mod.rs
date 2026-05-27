@@ -58,6 +58,15 @@ use crate::memory::Memory;
 use crate::memory_classifier::{classify_memory_updates, resolve_target, MemoryAction};
 use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+
+/// Maximum number of batches whose LLM extraction runs concurrently. The
+/// per-batch cascade is 3 sequential calls + 1 financial; at 4 batches that
+/// puts up to 16 in-flight LLM requests, which is comfortably under the
+/// provider rate limits we've observed in practice while still giving the
+/// ~4× wall-clock win on a multi-batch ingest.
+const MAX_PARALLEL_BATCHES: usize = 4;
 
 use cascade::extract_turn_facts_cascade;
 use embedding::embed_nodes_and_create_claims;
@@ -75,9 +84,14 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 use extraction::{extract_compaction_from_transcript, extract_financial_facts_llm};
-use procedural::{attach_playbooks, handle_procedural_memory, handle_procedural_memory_fallback};
+// attach_playbooks is intentionally not imported here — the per-ingest
+// playbook extraction has been removed (see the long comment in
+// run_compaction_with_context). The function is preserved in `procedural`
+// for the future trigger that should drive it.
+use procedural::{handle_procedural_memory, handle_procedural_memory_fallback};
 use turn_processing::{format_messages, TURN_GAP};
-use types::MIN_PLAYBOOK_CONFIDENCE;
+// MIN_PLAYBOOK_CONFIDENCE is preserved in `types` for the eventual
+// re-introduction of playbook extraction on a non-ingest trigger.
 
 /// Run LLM-driven compaction on a conversation ingest.
 ///
@@ -224,61 +238,131 @@ pub async fn run_compaction_with_context(
         case_id
     );
 
-    for batch in &batches {
-        let batch_start_idx = batch[0].turn_index;
+    // ── Phase 1: extract all batches in parallel ─────────────────────────
+    //
+    // Previously this was a `for batch in &batches` loop with the extraction
+    // serialised one batch at a time, so a 3-batch payload paid 3× the
+    // per-batch latency (≈3 cascade calls + 1 financial each) end to end.
+    // Each batch's LLM calls are independent — the only cross-batch signals
+    // that mattered were `rolling_facts` and `known_entities`, which fed
+    // into the cascade prompt of the NEXT batch. We trade that incremental
+    // context for parallelism: every batch sees the same initial rolling
+    // facts + known entities (whatever flowed in via `prior_summary`), and
+    // the cascade is told from one snapshot of the graph. The quality loss
+    // is small in practice (batches within a single ingest are usually
+    // about the same conversation) and the wall-clock win is roughly the
+    // batch count, capped at MAX_PARALLEL_BATCHES.
+    let initial_known: Vec<String> = known_entities.iter().cloned().collect();
+    let initial_rolling_ctx = if rolling_facts.is_empty() {
+        None
+    } else {
+        Some(rolling_facts.join("\n"))
+    };
+    let initial_graph_ctx = {
+        let inf = engine.inference.read().await;
+        build_graph_context_for_turn(inf.graph(), &initial_known)
+    };
+    let cat_block = engine.domain_registry.prompt_category_block();
+    let cat_enum = engine.domain_registry.prompt_category_enum();
 
-        // Query graph for current entity states
-        let known_entities_vec: Vec<String> = known_entities.iter().cloned().collect();
-        let graph_ctx = {
-            let inf = engine.inference.read().await;
-            build_graph_context_for_turn(inf.graph(), &known_entities_vec)
-        };
+    // Build a (batch_idx, merged_turn, messages_text, label) tuple per batch
+    // so the parallel async block has everything it needs without borrowing
+    // anything across the await.
+    struct BatchInput {
+        idx: usize,
+        merged_turn: ConversationTurn,
+        messages_text: String,
+        label: String,
+    }
+    let batch_inputs: Vec<BatchInput> = batches
+        .iter()
+        .enumerate()
+        .map(|(idx, batch)| {
+            let batch_start_idx = batch[0].turn_index;
+            let mut merged_turn = ConversationTurn {
+                messages: Vec::new(),
+                session_index: batch[0].session_index,
+                turn_index: batch_start_idx,
+                session_timestamp: batch[0].session_timestamp.clone(),
+            };
+            for turn in batch {
+                merged_turn.messages.extend(turn.messages.clone());
+            }
+            let mut messages_text = String::new();
+            if let Some(ref ts) = merged_turn.session_timestamp {
+                messages_text.push_str(&format!("[Session date: {}]\n", ts));
+            }
+            messages_text.push_str(&format_messages(&merged_turn));
+            let label = match batch.last() {
+                Some(last) if batch.len() > 1 => {
+                    format!("batch {}-{}", batch_start_idx, last.turn_index)
+                },
+                _ => format!("turn {}", batch_start_idx),
+            };
+            BatchInput { idx, merged_turn, messages_text, label }
+        })
+        .collect();
 
-        let rolling_ctx = if rolling_facts.is_empty() {
-            None
-        } else {
-            Some(rolling_facts.join("\n"))
-        };
+    // Drive the extractions with a JoinSet bounded by a semaphore. JoinSet
+    // gives us tokio-native fan-out; the semaphore caps in-flight LLM calls
+    // at MAX_PARALLEL_BATCHES * (cascade + financial) so we don't surge past
+    // the provider's rate limit on payloads with many batches.
+    let extraction_semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_BATCHES));
+    let mut join_set: JoinSet<(usize, ConversationTurn, String, Option<Vec<ExtractedFact>>, Vec<ExtractedFact>)> =
+        JoinSet::new();
+    for bi in batch_inputs.into_iter() {
+        let llm = Arc::clone(&llm);
+        let rolling = initial_rolling_ctx.clone();
+        let known = initial_known.clone();
+        let graph_ctx_owned = initial_graph_ctx.clone();
+        let cb = cat_block.clone();
+        let ce = cat_enum.clone();
+        let permit_arc = Arc::clone(&extraction_semaphore);
+        join_set.spawn(async move {
+            // Permit is held for the lifetime of this task. acquire_owned()
+            // can only fail if the semaphore is closed, which we never do.
+            let _permit = permit_arc.acquire_owned().await.expect("semaphore closed");
+            let (turn_facts, ner_financial_facts) = tokio::join!(
+                extract_turn_facts_cascade(
+                    llm.as_ref(),
+                    &bi.messages_text,
+                    rolling.as_deref(),
+                    &graph_ctx_owned,
+                    &known,
+                    &cb,
+                    &ce,
+                ),
+                extract_financial_facts_llm(llm.as_ref(), &bi.messages_text)
+            );
+            (bi.idx, bi.merged_turn, bi.label, turn_facts, ner_financial_facts)
+        });
+    }
 
-        // Merge batch turns into a single transcript
-        let mut merged_turn = ConversationTurn {
-            messages: Vec::new(),
-            session_index: batch[0].session_index,
-            turn_index: batch_start_idx,
-            session_timestamp: batch[0].session_timestamp.clone(),
-        };
-        for turn in batch {
-            merged_turn.messages.extend(turn.messages.clone());
-        }
-
-        let mut messages_text = String::new();
-        if let Some(ref ts) = merged_turn.session_timestamp {
-            messages_text.push_str(&format!("[Session date: {}]\n", ts));
-        }
-        messages_text.push_str(&format_messages(&merged_turn));
-        let cat_block = engine.domain_registry.prompt_category_block();
-        let cat_enum = engine.domain_registry.prompt_category_enum();
-
-        // Extract facts: LLM cascade + LLM financial extraction in parallel
-        let (turn_facts, ner_financial_facts) = tokio::join!(
-            extract_turn_facts_cascade(
-                llm.as_ref(),
-                &messages_text,
-                rolling_ctx.as_deref(),
-                &graph_ctx,
-                &known_entities_vec,
-                &cat_block,
-                &cat_enum,
-            ),
-            extract_financial_facts_llm(llm.as_ref(), &messages_text)
-        );
-
-        let batch_label = match batch.last() {
-            Some(last) if batch.len() > 1 => {
-                format!("batch {}-{}", batch_start_idx, last.turn_index)
+    let mut extracted: Vec<(usize, ConversationTurn, String, Option<Vec<ExtractedFact>>, Vec<ExtractedFact>)> =
+        Vec::new();
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(tuple) => extracted.push(tuple),
+            Err(e) => {
+                tracing::warn!("COMPACTION extraction task panicked: {}", e);
             },
-            _ => format!("turn {}", batch_start_idx),
-        };
+        }
+    }
+
+    // JoinSet returns in completion order; restore submission order so the
+    // sequential write phase below sees batches in the order the user
+    // uttered them (depends_on stamping reads the prior batch's writes).
+    extracted.sort_by_key(|(idx, _, _, _, _)| *idx);
+
+    // ── Phase 2: apply writes sequentially per batch ─────────────────────
+    //
+    // The graph writes (Phase A → B → C inside each batch) must remain in
+    // order: a later batch's depends_on stamping reads single-valued state
+    // written by the earlier batch, and supersession cascades fire on
+    // monotonic timestamps. So we collect extractions concurrently above
+    // but apply them one at a time here.
+    for (_batch_idx, merged_turn, batch_label, turn_facts, ner_financial_facts) in extracted {
+        let batch_start_idx = merged_turn.turn_index;
 
         match &turn_facts {
             None => {
@@ -808,54 +892,23 @@ pub async fn run_compaction_with_context(
             }
         }
 
-        // ── Playbook extraction ──
-        if !response.goals.is_empty() {
-            let enriched_pb_transcript = if engine.config.enable_context_enrichment {
-                let goal_store = engine.goal_store.read().await;
-                let mut existing = Vec::new();
-                for goal in &response.goals {
-                    for (id, _score) in goal_store.find_similar(&goal.description, 3) {
-                        if let Some(entry) = goal_store.get(id) {
-                            if let Some(ref pb) = entry.playbook {
-                                existing.push((entry.description.clone(), pb.clone()));
-                            }
-                        }
-                    }
-                }
-                drop(goal_store);
-                if existing.is_empty() {
-                    full_transcript.clone()
-                } else {
-                    let ctx = crate::context_enrichment::build_playbook_context(
-                        &existing,
-                        engine.config.enrichment_config.max_similar_playbooks,
-                    );
-                    format!(
-                        "{}\n\n[Prior Playbook Experience]\n{}",
-                        full_transcript, ctx
-                    )
-                }
-            } else {
-                full_transcript.clone()
-            };
-
-            if let Ok(Some(pb_response)) = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                extract_playbooks(llm.as_ref(), &enriched_pb_transcript, &response.goals),
-            )
-            .await
-            {
-                let quality_playbooks: Vec<_> = pb_response
-                    .playbooks
-                    .into_iter()
-                    .filter(|pb| {
-                        pb.confidence >= MIN_PLAYBOOK_CONFIDENCE && !pb.steps_taken.is_empty()
-                    })
-                    .collect();
-                result.playbooks_extracted = quality_playbooks.len();
-                attach_playbooks(engine, &quality_playbooks, case_id).await;
-            }
-        }
+        // ── Playbook extraction: REMOVED from the per-ingest path ──
+        //
+        // Previously, every conversation ingest that produced any goals
+        // fired a synchronous LLM call here to extract action-sequence
+        // playbooks (with a 30-second internal timeout — already double the
+        // edge proxy's 15s budget). That was a structural mistake: most
+        // ingests produce no new playbook patterns, and even when they do,
+        // playbooks are a cross-goal cross-case abstraction that doesn't
+        // need to materialise in the same response cycle as the ingest
+        // that contributed one data point.
+        //
+        // `extract_playbooks` and `attach_playbooks` still exist — they
+        // should be re-invoked from a separate trigger (a goal-store
+        // threshold, a scheduled rollup pass, or an explicit endpoint),
+        // not from inside the ingest hot path. `result.playbooks_extracted`
+        // stays in the response schema for wire compatibility; it just
+        // always reports 0 until the new trigger lands.
     }
 
     result

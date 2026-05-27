@@ -245,6 +245,11 @@ async fn store_new_procedural_memory(
 // ────────── Playbook Attachment ──────────
 
 /// Attach extracted playbooks to GoalStore entries and graph node properties.
+///
+/// Currently has no in-tree caller — the per-ingest playbook extraction was
+/// removed (see `run_compaction_with_context`). Kept here for the future
+/// trigger (goal-store threshold / scheduled rollup / explicit endpoint).
+#[allow(dead_code)]
 pub(crate) async fn attach_playbooks(
     engine: &crate::integration::GraphEngine,
     playbooks: &[GoalPlaybook],

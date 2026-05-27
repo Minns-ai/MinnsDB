@@ -10,6 +10,9 @@ use std::collections::HashMap;
 pub(crate) const MIN_PLAYBOOK_TRANSCRIPT_LEN: usize = 200;
 
 /// Minimum confidence for an extracted playbook to be attached.
+/// Currently unused — per-ingest playbook extraction was removed; the
+/// constant is kept for the future trigger that should drive it.
+#[allow(dead_code)]
 pub(crate) const MIN_PLAYBOOK_CONFIDENCE: f32 = 0.4;
 
 // ────────── Extraction Response Types ──────────
