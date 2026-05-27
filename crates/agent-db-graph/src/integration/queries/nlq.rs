@@ -405,16 +405,91 @@ impl GraphEngine {
             (None, crate::nlq::llm_hint::detect_temporal_frame(question))
         };
 
+        tracing::info!(
+            target: "nlq",
+            temporal_frame = ?temporal_frame,
+            "nlq.temporal_frame classified"
+        );
+
         // 5b. Temporal validity filter: only apply for Current temporal frame.
-        // Historical/Comparative/Timeless queries need access to superseded state.
+        // Historical / First / Last / Comparative / Timeless queries all need
+        // access to superseded state (Luna's adoption stays visible even after
+        // Max supersedes it for "which pet did I get first").
         let superseded_targets = if temporal_frame == crate::nlq::llm_hint::TemporalFrame::Current {
             let inference = self.inference.read().await;
             let graph = inference.graph();
             apply_temporal_validity_filter(&mut fused, graph)
         } else {
-            tracing::info!("Skipping temporal filter for {:?} frame", temporal_frame);
+            tracing::info!(
+                target: "nlq",
+                temporal_frame = ?temporal_frame,
+                "nlq.skip_temporal_filter"
+            );
             std::collections::HashSet::new()
         };
+
+        // 5b-bis. For First / Last frames, reorder the fused list by edge
+        // valid_from so the answer LLM sees the chronologically-leading
+        // candidate at the top regardless of how retrieval ranked it.
+        // Without this, "which pet did I get first" can correctly include
+        // both adoption edges in the pool but still surface the most
+        // recently-adopted one first (recency-biased embedding similarity).
+        match temporal_frame {
+            crate::nlq::llm_hint::TemporalFrame::First
+            | crate::nlq::llm_hint::TemporalFrame::Last => {
+                let ascending =
+                    matches!(temporal_frame, crate::nlq::llm_hint::TemporalFrame::First);
+                let inference = self.inference.read().await;
+                let graph = inference.graph();
+                // Compute each fused node's "anchor time" = earliest valid_from
+                // (for First) or latest valid_from (for Last) of any active
+                // incident edge. Nodes with no temporal anchor sort to the end.
+                let mut anchored: Vec<(u64, f32, Option<u64>)> = fused
+                    .into_iter()
+                    .map(|(nid, score)| {
+                        let mut best: Option<u64> = None;
+                        for edge in graph
+                            .get_edges_from(nid)
+                            .iter()
+                            .chain(graph.get_edges_to(nid).iter())
+                        {
+                            if let Some(vf) = edge.valid_from {
+                                best = match (best, ascending) {
+                                    (None, _) => Some(vf),
+                                    (Some(cur), true) if vf < cur => Some(vf),
+                                    (Some(cur), false) if vf > cur => Some(vf),
+                                    _ => best,
+                                };
+                            }
+                        }
+                        (nid, score, best)
+                    })
+                    .collect();
+                // Sort: anchored items first, ordered ASC/DESC by anchor; then
+                // unanchored items in their original score order.
+                anchored.sort_by(|a, b| match (a.2, b.2) {
+                    (Some(ta), Some(tb)) => {
+                        if ascending {
+                            ta.cmp(&tb)
+                        } else {
+                            tb.cmp(&ta)
+                        }
+                    },
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal),
+                });
+                fused = anchored
+                    .into_iter()
+                    .map(|(nid, score, _)| (nid, score))
+                    .collect();
+                explanation.push(format!(
+                    "Temporal ordering: {} by valid_from",
+                    if ascending { "ASC" } else { "DESC" }
+                ));
+            },
+            _ => {},
+        }
 
         // 5b2. State-anchor filter: remove claims whose state_anchor metadata
         // disagrees with the current projected entity state. Only for Current frame.
