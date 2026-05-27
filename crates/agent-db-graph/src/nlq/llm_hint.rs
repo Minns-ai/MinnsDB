@@ -78,14 +78,37 @@ pub struct LlmHintResponse {
     pub intent_hint: IntentHint,
     #[serde(default)]
     pub temporal_frame: TemporalFrame,
+    /// Subject the question is about — usually `"user"` for first-person
+    /// questions ("which pet did I get first"), but can be any entity name
+    /// the question references. Optional: when missing, the planner falls
+    /// back to UnifiedRetrieval (it can't project without knowing which
+    /// entity to walk).
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// The relation / predicate the question targets — e.g. `"adopted"`,
+    /// `"lives_in"`, `"works_at"`. Bare predicate is preferred over the
+    /// `category:predicate` form; the projection layer matches both.
+    /// Optional for the same reason as `subject`.
+    #[serde(default)]
+    pub predicate: Option<String>,
 }
 
 const SYSTEM_PROMPT: &str = concat!(
-    "You classify graph database queries. Output strict JSON with exactly three fields:\n",
+    "You classify graph database queries. Output strict JSON with up to five fields:\n",
     "- \"structure_hint\": one of \"ledger\", \"tree\", \"state_machine\", \"preference_list\", \"generic_graph\"\n",
     "- \"intent_hint\": one of \"balance\", \"aggregate_balance\", \"current_state\", \"children\", \"ranking\", ",
     "\"path\", \"neighbors\", \"similarity\", \"aggregate\", \"temporal\", \"subgraph\", \"knowledge\", \"unknown\"\n",
-    "- \"temporal_frame\": one of \"current\", \"historical\", \"first\", \"last\", \"comparative\", \"timeless\"\n\n",
+    "- \"temporal_frame\": one of \"current\", \"historical\", \"first\", \"last\", \"comparative\", \"timeless\"\n",
+    "- \"subject\": OPTIONAL string — the entity the question is about. For first-person ",
+    "questions (\"which pet did I get first?\", \"où est-ce que je vis?\") this is the literal ",
+    "string \"user\". For third-person questions name the entity explicitly (\"who is Sarah's manager?\" ",
+    "→ \"sarah\"). Omit when no clear single subject is referenced (\"how many cities have been mentioned?\").\n",
+    "- \"predicate\": OPTIONAL string — the relation / property the question targets. ",
+    "Use the bare predicate where possible: \"adopted\", \"lives_in\", \"works_at\", \"prefers\", ",
+    "\"knows\". Multilingual: emit the English predicate even when the question is in another ",
+    "language (\"我最早领养的宠物是什么?\" → predicate \"adopted\"). Omit when the question ",
+    "isn't asking about a specific relation (\"tell me about the user\", \"what do you know about ",
+    "Sarah?\").\n\n",
     "Classify the temporal frame by the *semantics* of the question, not by surface keywords. ",
     "Questions in any language (English, French, Chinese, Spanish, German, …) map to these six frames ",
     "based on what's being asked:\n",
@@ -374,6 +397,8 @@ mod tests {
             structure_hint: StructureHint::StateMachine,
             intent_hint: IntentHint::CurrentState,
             temporal_frame: TemporalFrame::Current,
+            subject: None,
+            predicate: None,
         };
         let intent = intent_from_hint(&hint);
         assert!(matches!(
@@ -390,6 +415,8 @@ mod tests {
             structure_hint: StructureHint::GenericGraph,
             intent_hint: IntentHint::Path,
             temporal_frame: TemporalFrame::Current,
+            subject: None,
+            predicate: None,
         };
         let intent = intent_from_hint(&hint);
         assert!(matches!(intent, QueryIntent::FindPath { .. }));
@@ -422,6 +449,8 @@ mod tests {
             structure_hint: StructureHint::GenericGraph,
             intent_hint: IntentHint::Knowledge,
             temporal_frame: TemporalFrame::Current,
+            subject: None,
+            predicate: None,
         };
         let intent = intent_from_hint(&hint);
         assert!(matches!(intent, QueryIntent::KnowledgeQuery));

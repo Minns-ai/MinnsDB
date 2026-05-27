@@ -82,7 +82,13 @@ pub fn format_unified_results(
         if !seen_entities.insert(entity_name.to_lowercase()) {
             continue;
         }
-        // Use successor-state projection for authoritative current state
+
+        // Use successor-state projection for authoritative current state.
+        // Historical / first / last queries are handled by the structured
+        // dispatch path (project_state_machine + walk_state_machine in the
+        // planner). When we reach this formatter we are in the
+        // UnifiedRetrieval fallback path, where current state is the right
+        // surface — the structured path would have intercepted otherwise.
         let projected =
             graph_projection::project_entity_state(graph, entity_name, u64::MAX, ontology);
         for slot in projected.slots.values() {

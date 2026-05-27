@@ -51,6 +51,7 @@ impl GraphEngine {
             group_id,
             metadata_filter,
             federated_sources,
+            None, // federated path has not pre-classified — let the unified path do it
         )
         .await
     }
@@ -125,6 +126,61 @@ impl GraphEngine {
             question.to_string()
         };
 
+        // Classify once; route via planner. Structured plans answer
+        // directly from a graph-derived projection; UnifiedRetrieval is the
+        // fallback that runs the full BM25 + vector + claims + synthesis
+        // pipeline. The classified hint is reused if we fall through so we
+        // don't pay for a second LLM classification call.
+        let precomputed_hint = self.classify_question(&effective_question).await;
+        if let Some(ref hint) = precomputed_hint {
+            let plan = crate::nlq::planner::plan(hint);
+            tracing::info!(
+                target: "nlq",
+                variant = plan.variant_name(),
+                temporal_frame = ?hint.temporal_frame,
+                subject = ?hint.subject,
+                predicate = ?hint.predicate,
+                "nlq.plan"
+            );
+            match plan {
+                crate::nlq::planner::NlqPlan::StateMachineWalk {
+                    subject,
+                    predicate,
+                    frame,
+                    intent,
+                } => {
+                    return self
+                        .answer_state_machine_walk(
+                            &effective_question,
+                            &subject,
+                            &predicate,
+                            &frame,
+                            &intent,
+                        )
+                        .await;
+                },
+                crate::nlq::planner::NlqPlan::ActiveEdgeFetch {
+                    subject,
+                    predicate,
+                    intent,
+                } => {
+                    return self
+                        .answer_active_edge_fetch(
+                            &effective_question,
+                            &subject,
+                            &predicate,
+                            &intent,
+                        )
+                        .await;
+                },
+                crate::nlq::planner::NlqPlan::UnifiedRetrieval { reason: _ } => {
+                    // Fall through to the unified retrieval path below,
+                    // passing the already-computed hint so the unified
+                    // path skips its own classify_with_llm call.
+                },
+            }
+        }
+
         self.execute_unified_query(
             &effective_question,
             pagination,
@@ -133,8 +189,177 @@ impl GraphEngine {
             group_id,
             metadata_filter,
             None,
+            precomputed_hint,
         )
         .await
+    }
+
+    /// Classify a question using the LLM hint classifier with a 3s timeout.
+    /// Returns `None` when no LLM client is configured or the classifier
+    /// times out / fails — the caller falls through to UnifiedRetrieval.
+    async fn classify_question(
+        &self,
+        question: &str,
+    ) -> Option<crate::nlq::llm_hint::LlmHintResponse> {
+        let llm_client = self.unified_llm_client.as_ref()?;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::nlq::llm_hint::classify_with_llm(llm_client.as_ref(), question),
+        )
+        .await
+        {
+            Ok(Ok(Some(hint))) => Some(hint),
+            Ok(Ok(None)) => None,
+            Ok(Err(e)) => {
+                tracing::debug!("LLM classification failed (non-fatal): {}", e);
+                None
+            },
+            Err(_) => {
+                tracing::debug!("LLM classification timed out");
+                None
+            },
+        }
+    }
+
+    /// Answer a `StateMachineWalk` plan: project a state machine from the
+    /// graph for `(subject, predicate)`, walk it according to the frame,
+    /// and surface the result as an `NlqResponse`. No LLM synthesis call —
+    /// the answer is deterministic from the projection.
+    async fn answer_state_machine_walk(
+        &self,
+        question: &str,
+        subject: &str,
+        predicate: &str,
+        frame: &crate::nlq::llm_hint::TemporalFrame,
+        intent: &crate::nlq::llm_hint::IntentHint,
+    ) -> GraphResult<crate::nlq::NlqResponse> {
+        use crate::conversation::graph_projection::project_state_machine;
+        use crate::nlq::walkers::walk_state_machine;
+
+        let start = std::time::Instant::now();
+
+        let sm = {
+            let inference = self.inference.read().await;
+            project_state_machine(inference.graph(), subject, predicate)
+        };
+
+        let answer = walk_state_machine(
+            &sm,
+            frame,
+            intent,
+            crate::nlq::walkers::DEFAULT_HISTORICAL_LIMIT,
+        );
+
+        let phrased = phrase_state_machine_answer(subject, predicate, frame, &answer);
+
+        tracing::info!(
+            target: "nlq",
+            path = "state_machine_walk",
+            subject = subject,
+            predicate = predicate,
+            frame = ?frame,
+            history_len = sm.history.len(),
+            answer_value = %answer.value,
+            ms = start.elapsed().as_millis() as u64,
+            "nlq.structured_answer"
+        );
+
+        Ok(crate::nlq::NlqResponse {
+            answer: phrased,
+            query_used: crate::traversal::GraphQuery::PageRank {
+                iterations: 0,
+                damping_factor: 0.0,
+            },
+            result: crate::traversal::QueryResult::Rankings(vec![]),
+            intent: crate::nlq::intent::QueryIntent::KnowledgeQuery,
+            confidence: 0.95,
+            execution_time_ms: start.elapsed().as_millis() as u64,
+            explanation: vec![
+                "Structured: project_state_machine + walk".to_string(),
+                format!(
+                    "subject={subject} predicate={predicate} frame={:?} history={}",
+                    frame,
+                    sm.history.len()
+                ),
+                format!("question={question}"),
+            ],
+            total_count: sm.history.len(),
+            entities_resolved: vec![],
+        })
+    }
+
+    /// Answer an `ActiveEdgeFetch` plan: read `(subject, predicate)` current
+    /// state directly via `project_entity_state` — no trajectory build.
+    async fn answer_active_edge_fetch(
+        &self,
+        question: &str,
+        subject: &str,
+        predicate: &str,
+        _intent: &crate::nlq::llm_hint::IntentHint,
+    ) -> GraphResult<crate::nlq::NlqResponse> {
+        use crate::conversation::graph_projection::project_entity_state;
+
+        let start = std::time::Instant::now();
+
+        // Walk only active edges via the existing fast-path projection.
+        let predicate_lower = predicate.to_lowercase();
+        let value = {
+            let inference = self.inference.read().await;
+            let projected =
+                project_entity_state(inference.graph(), subject, u64::MAX, Some(&self.ontology));
+            projected
+                .slots
+                .values()
+                .find(|slot| {
+                    let assoc_lower = slot.association_type.to_lowercase();
+                    assoc_lower == predicate_lower
+                        || assoc_lower.split(':').any(|p| p == predicate_lower)
+                })
+                .map(|slot| {
+                    slot.value
+                        .clone()
+                        .unwrap_or_else(|| slot.target_name.clone())
+                })
+                .unwrap_or_default()
+        };
+
+        let phrased = if value.is_empty() {
+            format!(
+                "No current {predicate} found for {subject} (the active-edge \
+                 projection returned no matching slot)."
+            )
+        } else {
+            format!("{subject} currently {predicate} {value}.")
+        };
+
+        tracing::info!(
+            target: "nlq",
+            path = "active_edge_fetch",
+            subject = subject,
+            predicate = predicate,
+            answer_value = %value,
+            ms = start.elapsed().as_millis() as u64,
+            "nlq.structured_answer"
+        );
+
+        Ok(crate::nlq::NlqResponse {
+            answer: phrased,
+            query_used: crate::traversal::GraphQuery::PageRank {
+                iterations: 0,
+                damping_factor: 0.0,
+            },
+            result: crate::traversal::QueryResult::Rankings(vec![]),
+            intent: crate::nlq::intent::QueryIntent::KnowledgeQuery,
+            confidence: 0.95,
+            execution_time_ms: start.elapsed().as_millis() as u64,
+            explanation: vec![
+                "Structured: project_entity_state (active edge only)".to_string(),
+                format!("subject={subject} predicate={predicate}"),
+                format!("question={question}"),
+            ],
+            total_count: if value.is_empty() { 0 } else { 1 },
+            entities_resolved: vec![],
+        })
     }
 
     /// Execute a unified multi-source query (BM25 + memory + claims + graph + optional DRIFT).
@@ -150,6 +375,11 @@ impl GraphEngine {
         group_id: &str,
         metadata_filter: &std::collections::HashMap<String, serde_json::Value>,
         federated_sources: Option<&Vec<String>>,
+        // When `Some`, the classifier was already run by the caller (e.g.
+        // `natural_language_query_scoped` after the planner returned
+        // UnifiedRetrieval) and the hint can be reused. Avoids paying for
+        // a second classification LLM call per query on the fallback path.
+        precomputed_hint: Option<crate::nlq::llm_hint::LlmHintResponse>,
     ) -> GraphResult<crate::nlq::NlqResponse> {
         let start = std::time::Instant::now();
         let mut explanation = vec!["Unified NLQ pipeline activated".to_string()];
@@ -378,9 +608,15 @@ impl GraphEngine {
         // 5. Fuse via RRF
         let mut fused = crate::retrieval::multi_list_rrf(&ranked_lists, 60.0);
 
-        // 5a. Classify query intent + temporal frame (LLM, fallback to rule-based).
-        // Must run BEFORE temporal filter so we know whether to apply it.
-        let (llm_hint, temporal_frame) = if let Some(ref llm_client) = self.unified_llm_client {
+        // 5a. Classify query intent + temporal frame. Reuse the
+        // caller-provided hint when available (the planner pre-classifies
+        // and routes UnifiedRetrieval back here — re-classifying would
+        // burn a second LLM call per fallback query). Only call the
+        // classifier when we have no hint to start from.
+        let (llm_hint, temporal_frame) = if let Some(hint) = precomputed_hint {
+            let frame = hint.temporal_frame.clone();
+            (Some(hint), frame)
+        } else if let Some(ref llm_client) = self.unified_llm_client {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 crate::nlq::llm_hint::classify_with_llm(llm_client.as_ref(), question),
@@ -836,5 +1072,52 @@ impl GraphEngine {
             total_count,
             entities_resolved: vec![],
         })
+    }
+}
+
+/// Phrase a walker answer as a single English sentence keyed off the frame.
+/// Deterministic — no LLM call. Keeps the structured path fast and gives
+/// the same wording for the same projection state.
+fn phrase_state_machine_answer(
+    subject: &str,
+    predicate: &str,
+    frame: &crate::nlq::llm_hint::TemporalFrame,
+    answer: &crate::nlq::walkers::StateMachineAnswer,
+) -> String {
+    use crate::nlq::llm_hint::TemporalFrame;
+
+    if answer.all_values.is_empty() && answer.value.is_empty() {
+        return format!(
+            "No {predicate} record found for {subject} (the state-machine \
+             projection has no matching transitions)."
+        );
+    }
+
+    match frame {
+        TemporalFrame::First => format!(
+            "{subject}'s first {predicate} target was {value}.",
+            value = answer.value,
+        ),
+        TemporalFrame::Last => format!(
+            "{subject}'s most recent {predicate} target was {value}.",
+            value = answer.value,
+        ),
+        TemporalFrame::Historical | TemporalFrame::Comparative => {
+            if answer.all_values.is_empty() {
+                format!("{subject}'s {predicate} history: {}.", answer.value)
+            } else {
+                format!(
+                    "{subject}'s {predicate} history (oldest → newest): {}.",
+                    answer.all_values.join(", "),
+                )
+            }
+        },
+        TemporalFrame::Current | TemporalFrame::Timeless => {
+            if answer.value.is_empty() {
+                format!("{subject} has no current {predicate}.")
+            } else {
+                format!("{subject} currently {predicate} {}.", answer.value)
+            }
+        },
     }
 }

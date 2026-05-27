@@ -7,7 +7,14 @@
 //! Temporal state is resolved using a dual check: the edge with the highest
 //! `valid_from` for a given entity+category AND `valid_until.is_none()` is
 //! definitionally current. This unifies with graph edge supersession.
+//!
+//! For temporal queries that need to walk the full history of a state-like
+//! predicate ("first", "last", "Nth", "all over time"), `project_state_machine`
+//! derives a `StateMachine` (entity + current_state + history) directly from
+//! the graph on demand. The graph is the source of truth; the projection is a
+//! typed view over it, built per query.
 
+use crate::structured_memory::{MemoryProvenance, StateMachine, StateTransition};
 use crate::structures::{EdgeType, Graph, NodeId, NodeType};
 use std::collections::HashMap;
 
@@ -211,6 +218,108 @@ pub fn build_entity_timeline_summary(graph: &Graph, entity_name: &str) -> Option
     }
 
     Some(lines.join("\n"))
+}
+
+/// Match an edge's full `association_type` string (e.g. `"location:lives_in"`)
+/// against an LLM-emitted predicate (e.g. `"lives_in"` / `"lived_in"` / the
+/// full `"location:lives_in"`). The LLM is multilingual and may emit either
+/// the bare predicate or the full edge-type string; both must match.
+fn predicate_matches_assoc(assoc: &str, predicate_lower: &str) -> bool {
+    let assoc_lower = assoc.to_lowercase();
+    if assoc_lower == predicate_lower {
+        return true;
+    }
+    let mut parts = assoc_lower.splitn(2, ':');
+    let cat = parts.next().unwrap_or("");
+    let pred = parts.next().unwrap_or("");
+    cat == predicate_lower || pred == predicate_lower
+}
+
+/// Project a `(entity, predicate)` slice of the graph into a `StateMachine`.
+///
+/// Walks every outgoing Association edge for `entity_name` whose
+/// `association_type` matches `predicate` (full match, category, or suffix —
+/// see `predicate_matches_assoc`), sorts the resulting edges by `valid_from`
+/// ascending, and builds a `StateMachine` whose `history` is the ordered
+/// trajectory of targets and whose `current_state` is the latest target with
+/// `valid_until = None` (or empty if the state has ended without
+/// replacement — "I used to have a job, now I'm unemployed").
+///
+/// The graph is the source of truth. This projection is read-only and built
+/// per query — never stored. Cost is O(outgoing_degree × log(degree)) for the
+/// sort.
+///
+/// Use for `TemporalFrame::First / Last / Nth / Historical / Comparative`.
+/// For `Current`, `project_entity_state` is the cheaper path — it filters to
+/// active edges only and never walks the full trajectory.
+pub fn project_state_machine(graph: &Graph, entity_name: &str, predicate: &str) -> StateMachine {
+    let mut sm = StateMachine {
+        entity: entity_name.to_string(),
+        current_state: String::new(),
+        history: Vec::new(),
+        provenance: MemoryProvenance::EpisodePipeline,
+    };
+
+    let Some(&node_id) = graph.concept_index.get(entity_name) else {
+        return sm;
+    };
+
+    let predicate_lower = predicate.to_lowercase();
+
+    // Collect matching outgoing edges. We keep (target, valid_from, valid_until)
+    // so we can both build history and determine current_state in one pass.
+    let mut matches: Vec<(String, u64, Option<u64>)> = Vec::new();
+    for edge in graph.get_edges_from(node_id) {
+        let EdgeType::Association {
+            association_type, ..
+        } = &edge.edge_type
+        else {
+            continue;
+        };
+        if !predicate_matches_assoc(association_type, &predicate_lower) {
+            continue;
+        }
+        let target_name = match concept_name_of(graph, edge.target) {
+            Some(n) if !n.is_empty() => n,
+            _ => continue,
+        };
+        let vf = edge.valid_from.unwrap_or(0);
+        matches.push((target_name, vf, edge.valid_until));
+    }
+
+    // Chronological trajectory.
+    matches.sort_by_key(|(_, vf, _)| *vf);
+
+    // Pre-compute current_state by borrowing — clone only the one string we
+    // actually need to return.
+    sm.current_state = matches
+        .iter()
+        .rev()
+        .find(|(_, _, vu)| vu.is_none())
+        .map(|(t, _, _)| t.clone())
+        .unwrap_or_default();
+
+    // Build history by *moving* each target name into the transition's
+    // `to` field — no clones in the loop body. `from` and `trigger` are
+    // left empty for projection-built state machines: nothing on the
+    // projection / walker path reads them, and `from` would only ever
+    // duplicate the previous `to` (derivable from history[i-1].to if a
+    // caller ever needs it). For manually-built state machines via
+    // `state_transition()`, the existing API still fills both fields.
+    //
+    // This drops per-transition allocations from 3 to 1 (just the target
+    // name itself, which came from the graph and we already own).
+    sm.history.reserve(matches.len());
+    for (target, vf, _) in matches {
+        sm.history.push(StateTransition {
+            from: String::new(),
+            to: target,
+            timestamp: vf,
+            trigger: String::new(),
+        });
+    }
+
+    sm
 }
 
 /// Compute net balances from financial Association edges in the graph.

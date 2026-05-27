@@ -83,6 +83,31 @@ pub struct StateTransition {
     pub trigger: String,
 }
 
+/// Owned state-machine projection.
+///
+/// Sibling to the `MemoryTemplate::StateMachine` enum variant — same fields,
+/// standalone struct so projection / walker code can pass it around without
+/// going through the enum wrapper. The two are kept in sync by hand; if a
+/// field is ever added to one it must be added to the other.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateMachine {
+    pub entity: String,
+    pub current_state: String,
+    pub history: Vec<StateTransition>,
+    pub provenance: MemoryProvenance,
+}
+
+impl From<StateMachine> for MemoryTemplate {
+    fn from(sm: StateMachine) -> Self {
+        MemoryTemplate::StateMachine {
+            entity: sm.entity,
+            current_state: sm.current_state,
+            history: sm.history,
+            provenance: sm.provenance,
+        }
+    }
+}
+
 /// A single preference item with optional score.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreferenceItem {

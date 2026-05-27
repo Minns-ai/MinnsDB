@@ -17,9 +17,11 @@ pub mod feedback;
 pub mod formatter;
 pub mod intent;
 pub mod llm_hint;
+pub mod planner;
 pub mod template;
 pub mod unified;
 pub mod validator;
+pub mod walkers;
 
 use crate::structures::Graph;
 use crate::traversal::{GraphQuery, GraphTraversal, QueryResult};
