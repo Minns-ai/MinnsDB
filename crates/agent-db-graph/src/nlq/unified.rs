@@ -40,6 +40,9 @@ pub fn format_unified_results(
     memories: &[Memory],
     ontology: Option<&crate::ontology::OntologyRegistry>,
     superseded_targets: &std::collections::HashSet<String>,
+    // Edge-vector hits surfaced as NL sentences. (text, score, valid_from).
+    // Already sorted by score DESC by the caller.
+    semantic_edge_facts: &[(String, f32, Option<u64>)],
 ) -> String {
     // Extract meaningful content from fused results
     let mut content_items: Vec<ContentItem> = Vec::new();
@@ -271,11 +274,33 @@ pub fn format_unified_results(
     }
 
     // Build output
-    if content_items.is_empty() && state_facts.is_empty() && memories.is_empty() {
+    if content_items.is_empty()
+        && state_facts.is_empty()
+        && semantic_edge_facts.is_empty()
+        && memories.is_empty()
+    {
         return "No relevant information found.".to_string();
     }
 
     let mut parts = Vec::new();
+
+    // Semantic edge facts — natural-language sentences from edges that the
+    // query vector matched against. This is the load-bearing answer signal
+    // for "Where does the user live?", "What is the user's job?", etc.
+    // when the question-side predicate doesn't textually match the edge's
+    // category:predicate string (the LLM cascade extracted "resides_in" /
+    // "transferred to" / "relocated to"; the user asked "live"). The
+    // embedding bridges the lexical gap; this section is what carries the
+    // matched sentence into the answer LLM's prompt.
+    if !semantic_edge_facts.is_empty() {
+        const MAX_EDGE_FACTS: usize = 8;
+        let mut section =
+            vec!["Relevant facts (semantic match from edge vector search):".to_string()];
+        for (text, score, _valid_from) in semantic_edge_facts.iter().take(MAX_EDGE_FACTS) {
+            section.push(format!("- {} [score {:.2}]", text, score));
+        }
+        parts.push(section.join("\n"));
+    }
 
     // Entity state facts from graph edges (highest priority, clearly labeled as current)
     if !state_facts.is_empty() {
@@ -402,6 +427,7 @@ mod tests {
             &[],
             None,
             &std::collections::HashSet::new(),
+            &[],
         );
         assert_eq!(result, "No relevant information found.");
     }
@@ -425,6 +451,7 @@ mod tests {
             &[],
             None,
             &std::collections::HashSet::new(),
+            &[],
         );
         assert!(result.contains("Alice"));
         assert!(result.contains("Person"));
@@ -450,6 +477,7 @@ mod tests {
             &[],
             None,
             &std::collections::HashSet::new(),
+            &[],
         );
         assert!(
             result.contains("Alice prefers dark roast coffee"),
@@ -478,6 +506,7 @@ mod tests {
             &[],
             None,
             &std::collections::HashSet::new(),
+            &[],
         );
         assert_eq!(result, "No relevant information found.");
     }
@@ -493,6 +522,7 @@ mod tests {
             &[mem],
             None,
             &std::collections::HashSet::new(),
+            &[],
         );
         assert!(result.contains("Related context:"));
         assert!(result.contains("Alice prefers coffee"));
@@ -520,6 +550,7 @@ mod tests {
             &[mem],
             None,
             &std::collections::HashSet::new(),
+            &[],
         );
         // Should not show duplicate content
         let count = result.matches("Alice likes coffee").count();
@@ -553,6 +584,7 @@ mod tests {
             &[mem],
             None,
             &std::collections::HashSet::new(),
+            &[],
         );
         assert!(
             result.contains("Customer reported late delivery"),

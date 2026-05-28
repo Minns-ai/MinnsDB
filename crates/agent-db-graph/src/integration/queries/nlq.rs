@@ -431,6 +431,12 @@ impl GraphEngine {
             vec![]
         };
 
+        // Edge facts surfaced to the synthesis context — NL sentences built
+        // from matched edges' rich text, NOT just their endpoint node IDs.
+        // Filled inside the edge-search branch below, consumed when building
+        // the synthesis prompt.
+        let mut edge_facts_for_synthesis: Vec<(String, f32, Option<u64>)> = Vec::new();
+
         // 1c + 1d. Hybrid node and edge vector search, run concurrently. Node
         // hits feed BM25 fusion directly; edge hits resolve to source+target
         // nodes under the inference read lock below.
@@ -473,6 +479,21 @@ impl GraphEngine {
             let graph = inference.graph();
             if !edge_hits.is_empty() {
                 let mut triplet_node_hits: Vec<(u64, f32)> = Vec::new();
+                // ALSO surface the matched edges as natural-language fact lines
+                // to the synthesis context — built from the same rich text the
+                // embedding was computed on. Without this, the matched edge's
+                // statement is thrown away; only the source / target node IDs
+                // survive into the fused ranking, and the answer LLM never
+                // sees the sentence that actually answers the question.
+                //
+                // Failure case before this fix: "Where does the user live?"
+                // matched the edge "User recently transferred to the NYC
+                // office. [current]" via vector search, but the formatter
+                // pulled "user" and "nyc office" as nodes and dropped the
+                // sentence. The LLM had no fact stating where the user
+                // currently lives, and either said "no info" or matched on
+                // the wrong predicate.
+                let mut semantic_edge_facts: Vec<(String, f32, Option<u64>)> = Vec::new();
                 for &(edge_id, sim) in &edge_hits {
                     if let Some(edge) = graph.edges.get(edge_id) {
                         // When scoped, skip edges that don't match group_id or metadata
@@ -492,6 +513,37 @@ impl GraphEngine {
                         let penalty = if edge.valid_until.is_some() { 0.1 } else { 1.0 };
                         triplet_node_hits.push((edge.source, sim * penalty));
                         triplet_node_hits.push((edge.target, sim * 0.8 * penalty));
+
+                        // Build the same NL sentence the edge was embedded
+                        // with. Reuses the helper that compaction uses so the
+                        // synthesis sentence and the embedding subject agree.
+                        let crate::structures::EdgeType::Association {
+                            association_type, ..
+                        } = &edge.edge_type
+                        else {
+                            continue;
+                        };
+                        let source_name = crate::conversation::graph_projection::concept_name_of(
+                            graph,
+                            edge.source,
+                        )
+                        .unwrap_or_default();
+                        let target_name = crate::conversation::graph_projection::concept_name_of(
+                            graph,
+                            edge.target,
+                        )
+                        .unwrap_or_default();
+                        if source_name.is_empty() || target_name.is_empty() {
+                            continue;
+                        }
+                        let rich = crate::conversation::compaction::embedding::build_rich_edge_text(
+                            &source_name,
+                            association_type,
+                            &target_name,
+                            &edge.properties,
+                            edge.valid_until.is_none(),
+                        );
+                        semantic_edge_facts.push((rich, sim * penalty, edge.valid_from));
                     }
                 }
                 if !triplet_node_hits.is_empty() {
@@ -502,6 +554,17 @@ impl GraphEngine {
                     ));
                     ranked_lists.push(triplet_node_hits);
                 }
+                // Sort by score DESC so the top match appears first in the
+                // synthesis prompt. The formatter caps display to a small N.
+                semantic_edge_facts
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                if !semantic_edge_facts.is_empty() {
+                    explanation.push(format!(
+                        "Semantic edge facts: {} candidates",
+                        semantic_edge_facts.len()
+                    ));
+                }
+                edge_facts_for_synthesis = semantic_edge_facts;
             }
         }
 
@@ -824,6 +887,7 @@ impl GraphEngine {
                 &memories,
                 Some(&self.ontology),
                 &superseded_targets,
+                &edge_facts_for_synthesis,
             );
             match dynamic_projection {
                 Some(proj) if !proj.is_empty() => {

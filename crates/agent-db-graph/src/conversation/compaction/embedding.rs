@@ -12,7 +12,11 @@ use std::collections::HashMap;
 /// Uses the original `statement` property (a self-contained natural language
 /// proposition) when available, and appends qualifiers: temporal signal,
 /// dependency, current/historical status.
-fn build_rich_edge_text(
+///
+/// Made `pub(crate)` so the NLQ retrieval path can format edge hits using
+/// the same text the embedding was computed on — that way the answer LLM
+/// sees the same NL sentence that scored the cosine match.
+pub(crate) fn build_rich_edge_text(
     source: &str,
     association_type: &str,
     target: &str,

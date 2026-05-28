@@ -21,7 +21,7 @@
 //! - [`embedding`] — Post-compaction embedding and claim creation
 
 mod cascade;
-mod embedding;
+pub(crate) mod embedding;
 pub mod events;
 pub mod extraction;
 pub mod procedural;
