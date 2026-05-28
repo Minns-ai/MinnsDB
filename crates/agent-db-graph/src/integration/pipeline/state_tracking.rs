@@ -609,71 +609,157 @@ impl GraphEngine {
                         None => continue,
                     };
 
-                    // Check for idempotency: if there's already an active edge
-                    // with the same type pointing to the same target, skip it.
-                    // This prevents edge bloat when the same episode is reprocessed.
+                    // Classify the update against existing active edges for
+                    // this same property. The classifier returns one of four
+                    // verdicts (Independent / Reaffirmation / Evolution /
+                    // Contradiction); cascade-driven supersession of OTHER
+                    // properties is handled separately below.
+                    let kind = contradiction::classify_update(
+                        graph,
+                        &self.ontology,
+                        entity_nid,
+                        state_nid,
+                        &assoc_type,
+                        sc.timestamp,
+                        supersession_key,
+                    );
+
+                    // Cascade-trigger supersession on dependent properties is
+                    // orthogonal to the UpdateKind: even a Reaffirmation may
+                    // need to seal the cascade-dependent edges from earlier
+                    // life-context (e.g., habits tied to a prior location).
                     let is_cascade_trigger = self.ontology.triggers_cascade(supersession_key);
-                    let mut already_exists = false;
-                    let mut edges_to_supersede: Vec<EdgeId> = Vec::new();
-                    for edge in graph.get_edges_from(entity_nid).iter() {
-                        if let EdgeType::Association {
-                            association_type, ..
-                        } = &edge.edge_type
-                        {
-                            if edge.valid_until.is_none() {
-                                if association_type == &assoc_type {
-                                    if edge.target == state_nid {
-                                        // Exact same active edge already exists — idempotent skip
-                                        already_exists = true;
-                                    } else {
-                                        // Different target — must supersede
-                                        edges_to_supersede.push(edge.id);
-                                    }
-                                } else if is_cascade_trigger {
-                                    // Ontology-driven cascade: supersede edges whose
-                                    // category is cascade-dependent.
-                                    let edge_category: String = if let Some(rest) =
-                                        association_type.strip_prefix("state:")
-                                    {
-                                        self.ontology
-                                            .decode_legacy_state_assoc(association_type)
-                                            .map(|(cat, _)| cat)
-                                            .unwrap_or_else(|| rest.to_string())
-                                    } else {
-                                        association_type.split(':').next().unwrap_or("").to_string()
-                                    };
-                                    if self.ontology.is_cascade_dependent(&edge_category) {
-                                        edges_to_supersede.push(edge.id);
-                                    }
+                    let cascade_eids: Vec<EdgeId> = if is_cascade_trigger {
+                        graph
+                            .get_edges_from(entity_nid)
+                            .iter()
+                            .filter_map(|e| {
+                                if e.valid_until.is_some() {
+                                    return None;
                                 }
+                                let assoc = match &e.edge_type {
+                                    EdgeType::Association {
+                                        association_type, ..
+                                    } if association_type != &assoc_type => association_type,
+                                    _ => return None,
+                                };
+                                let edge_category = if let Some(rest) = assoc.strip_prefix("state:")
+                                {
+                                    self.ontology
+                                        .decode_legacy_state_assoc(assoc)
+                                        .map(|(cat, _)| cat)
+                                        .unwrap_or_else(|| rest.to_string())
+                                } else {
+                                    assoc.split(':').next().unwrap_or("").to_string()
+                                };
+                                if self.ontology.is_cascade_dependent(&edge_category) {
+                                    Some(e.id)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Dispatch the verdict before mutating the graph.
+                    let mut skip_new_edge = false;
+                    match &kind {
+                        contradiction::UpdateKind::Reaffirmation { existing_eid } => {
+                            // Same value already active — refresh confirmation
+                            // timestamp instead of writing a duplicate edge.
+                            if let Some(e) = graph.edges.get_mut(*existing_eid) {
+                                e.observation_count = e.observation_count.saturating_add(1);
+                                e.properties.insert(
+                                    "last_confirmed_at".to_string(),
+                                    serde_json::Value::Number(sc.timestamp.into()),
+                                );
+                                graph.dirty_edges.insert(*existing_eid);
+                            }
+                            skip_new_edge = true;
+                            tracing::info!(
+                                "PHASE_B REAFFIRM '{}' entity={} -> state='{}' eid={} (last_confirmed_at refreshed)",
+                                assoc_type, sc.entity, sc.new_state, existing_eid
+                            );
+                        },
+                        contradiction::UpdateKind::Evolution { superseded_eids } => {
+                            for eid in superseded_eids {
+                                if let Some(e) = graph.edges.get_mut(*eid) {
+                                    e.valid_until = Some(sc.timestamp);
+                                    graph.dirty_edges.insert(*eid);
+                                    state_edges_superseded += 1;
+                                }
+                            }
+                            if !superseded_eids.is_empty() {
+                                tracing::info!(
+                                    "PHASE_B EVOLUTION '{}' entity={} superseded {} active edges -> '{}'",
+                                    assoc_type,
+                                    entity_nid,
+                                    superseded_eids.len(),
+                                    sc.new_state
+                                );
+                            }
+                        },
+                        contradiction::UpdateKind::Contradiction {
+                            reason,
+                            conflicting_eids,
+                        } => {
+                            // Flag the existing edges disputed but keep them
+                            // active. The new edge (created below) also gets
+                            // flagged so the NLQ layer can surface the conflict.
+                            for eid in conflicting_eids {
+                                if let Some(e) = graph.edges.get_mut(*eid) {
+                                    e.properties.insert(
+                                        "disputed".to_string(),
+                                        serde_json::Value::Bool(true),
+                                    );
+                                    e.properties.insert(
+                                        "disputed_reason".to_string(),
+                                        serde_json::Value::String(reason.tag().to_string()),
+                                    );
+                                    graph.dirty_edges.insert(*eid);
+                                }
+                            }
+                            tracing::warn!(
+                                "PHASE_B CONTRADICTION ({}) '{}' entity={} '{}' vs existing — flagged {} edge(s) disputed",
+                                reason.tag(),
+                                assoc_type,
+                                sc.entity,
+                                sc.new_state,
+                                conflicting_eids.len()
+                            );
+                        },
+                        contradiction::UpdateKind::Independent => {},
+                    }
+
+                    // Cascade supersession applies regardless of the
+                    // primary-property verdict — e.g., a location reaffirmation
+                    // shouldn't, but a location evolution should still take
+                    // dependent edges with it. We gate on the verdict so
+                    // Reaffirmation/Independent leave dependents alone.
+                    let cascade_should_fire = matches!(
+                        &kind,
+                        contradiction::UpdateKind::Evolution { .. }
+                            | contradiction::UpdateKind::Contradiction { .. }
+                    );
+                    if cascade_should_fire && !cascade_eids.is_empty() {
+                        tracing::info!(
+                            "PHASE_B cascade superseding {} dependent edges from entity nid={}",
+                            cascade_eids.len(),
+                            entity_nid
+                        );
+                        for eid in &cascade_eids {
+                            if let Some(e) = graph.edges.get_mut(*eid) {
+                                e.valid_until = Some(sc.timestamp);
+                                graph.dirty_edges.insert(*eid);
+                                state_edges_superseded += 1;
                             }
                         }
                     }
 
-                    if already_exists && edges_to_supersede.is_empty() {
-                        tracing::info!(
-                            "PHASE_B SKIP (idempotent) '{}' entity={} -> state='{}' already active",
-                            assoc_type,
-                            sc.entity,
-                            sc.new_state
-                        );
+                    if skip_new_edge {
                         continue;
-                    }
-
-                    if !edges_to_supersede.is_empty() {
-                        tracing::info!(
-                            "PHASE_B superseding {} active '{}' edges from entity nid={}",
-                            edges_to_supersede.len(),
-                            assoc_type,
-                            entity_nid
-                        );
-                    }
-                    for eid in &edges_to_supersede {
-                        if let Some(e) = graph.edges.get_mut(*eid) {
-                            e.valid_until = Some(sc.timestamp);
-                            graph.dirty_edges.insert(*eid);
-                            state_edges_superseded += 1;
-                        }
                     }
 
                     // Create new state edge
@@ -700,6 +786,17 @@ impl GraphEngine {
                         edge.properties.insert(
                             "category".to_string(),
                             serde_json::Value::String(cat.clone()),
+                        );
+                    }
+                    // If the verdict was Contradiction, the new edge enters
+                    // the graph already flagged so downstream queries can
+                    // distinguish disputed state from agreed-upon state.
+                    if let contradiction::UpdateKind::Contradiction { reason, .. } = &kind {
+                        edge.properties
+                            .insert("disputed".to_string(), serde_json::Value::Bool(true));
+                        edge.properties.insert(
+                            "disputed_reason".to_string(),
+                            serde_json::Value::String(reason.tag().to_string()),
                         );
                     }
                     let new_eid = graph.add_edge(edge);

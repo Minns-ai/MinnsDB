@@ -1,9 +1,58 @@
 // crates/agent-db-graph/src/integration/pipeline/conflict_detection.rs
 //
 // LLM-based fact conflict detection and resolution.
-// Finds existing edges that contradict a new fact and invalidates them.
+//
+// For each candidate existing fact, the LLM returns one of four verdicts:
+//   SUPERSEDES — new fact replaces old (state evolved, life event).
+//   CONTRADICTS — new and old disagree but neither is clearly newer.
+//   REAFFIRMS — new fact restates old (paraphrase / different wording).
+//   NONE — facts are independent.
+//
+// Each verdict drives a different graph mutation. SUPERSEDES seals the
+// old edge with `valid_until`; CONTRADICTS flags both edges `disputed`
+// (kept active so callers can surface the conflict); REAFFIRMS leaves
+// both edges alone; NONE is a no-op.
 
+use super::contradiction::ContradictionReason;
 use super::*;
+use serde::Deserialize;
+
+/// One verdict per existing candidate. Format matches the JSON the LLM
+/// produces; unknown verdict strings deserialise to `Verdict::None` so a
+/// hallucinated label can't corrupt the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub(crate) enum Verdict {
+    Supersedes,
+    Contradicts,
+    Reaffirms,
+    #[serde(other)]
+    None,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct LlmVerdict {
+    /// 1-indexed position in the candidate list shown to the LLM.
+    pub(crate) index: usize,
+    pub(crate) verdict: Verdict,
+}
+
+/// Parse the LLM's verdict array. Returns an empty Vec if the payload is
+/// malformed — never propagates a parse error into the pipeline.
+pub(crate) fn parse_verdicts(content: &str) -> Vec<LlmVerdict> {
+    let trimmed = content.trim();
+    // Accept either a bare array or `{"verdicts": [...]}` shape.
+    if let Ok(arr) = serde_json::from_str::<Vec<LlmVerdict>>(trimmed) {
+        return arr;
+    }
+    #[derive(Deserialize)]
+    struct Wrapper {
+        verdicts: Vec<LlmVerdict>,
+    }
+    serde_json::from_str::<Wrapper>(trimmed)
+        .map(|w| w.verdicts)
+        .unwrap_or_default()
+}
 
 impl GraphEngine {
     /// Detect and resolve conflicts between a new fact and existing edges.
@@ -144,61 +193,112 @@ impl GraphEngine {
             .join("\n");
 
         let prompt = format!(
-            "Given a NEW fact and EXISTING facts about the same person, identify which existing facts are \
-            CONTRADICTED, SUPERSEDED, or NO LONGER TRUE because of the new fact.\n\n\
+            "Given a NEW fact and EXISTING facts about the same person, classify each existing \
+            fact's relationship to the new fact with exactly one verdict.\n\n\
             EXISTING FACTS:\n{existing}\n\n\
             NEW FACT: {new_fact}\n\n\
-            A fact is superseded when:\n\
-            - It describes the SAME attribute/role/activity but with a different value \
-              (e.g., new location replaces old location)\n\
-            - It describes a routine, habit, or activity tied to a previous location/context \
-              that has changed (e.g., \"visits Tsukiji Market\" is superseded when the person \
-              moves away from Tokyo)\n\
-            - It directly contradicts the new fact (e.g., \"likes X\" vs \"dislikes X\")\n\
-            - The new fact makes the old fact no longer applicable \
-              (e.g., \"Saturday brunch at local cafe\" superseded by \"Saturday sunrise yoga at beach\")\n\n\
-            A fact is NOT superseded when:\n\
-            - Both can be true simultaneously (e.g., \"works with Alice\" and \"works with Bob\")\n\
-            - They describe different attributes (e.g., \"likes coffee\" and \"lives in NYC\")\n\
-            - The old fact is a permanent trait unaffected by the change\n\n\
-            Return a JSON array of the numbers of superseded facts. Empty array [] if none.\n\
+            Verdicts:\n\
+            - SUPERSEDES: the new fact replaces the existing one because state legitimately \
+              changed (new location, life event, ended routine, opposite preference at a later \
+              time). The existing fact was true then but is not true now.\n\
+            - CONTRADICTS: the new fact and existing fact disagree without a clear temporal \
+              ordering. Both are claimed but only one can be right. Examples: conflicting \
+              biographical facts, mutually exclusive values from different sources.\n\
+            - REAFFIRMS: the new fact restates the existing fact in different words. Same \
+              meaning, no change.\n\
+            - NONE: the facts are independent or compatible.\n\n\
+            Examples:\n\
+            - existing \"lives in London\", new \"moved to NYC\" → SUPERSEDES\n\
+            - existing \"works with Alice\", new \"works with Bob\" → NONE\n\
+            - existing \"likes coffee\", new \"enjoys coffee\" → REAFFIRMS\n\
+            - existing \"born in Paris\", new \"born in Lyon\" → CONTRADICTS\n\n\
+            Return a JSON array of objects with the candidate's 1-based index and verdict. \
+            Omit candidates whose verdict is NONE.\n\
+            Example: [{{\"index\": 1, \"verdict\": \"SUPERSEDES\"}}, {{\"index\": 3, \"verdict\": \"REAFFIRMS\"}}]\n\
             Output ONLY the JSON array.",
             existing = existing_facts, new_fact = new_statement
         );
 
         let request = crate::llm_client::LlmRequest {
             system_prompt:
-                "You detect factual contradictions. Output only a JSON array of numbers."
+                "You classify factual relationships. Output only a JSON array of verdicts."
                     .to_string(),
             user_prompt: prompt,
             temperature: 0.0,
-            max_tokens: 50,
+            max_tokens: 150,
             json_mode: true,
         };
 
         match tokio::time::timeout(std::time::Duration::from_secs(10), llm.complete(request)).await
         {
             Ok(Ok(response)) => {
-                // Parse the JSON array of conflicting fact indices
-                if let Ok(indices) = serde_json::from_str::<Vec<usize>>(&response.content) {
-                    if !indices.is_empty() {
-                        let mut inference = self.inference.write().await;
-                        let graph = inference.graph_mut();
-                        for idx in indices {
-                            if idx > 0 && idx <= conflict_candidates.len() {
-                                let (eid, old_stmt) = &conflict_candidates[idx - 1]; // 1-indexed
-                                if let Some(e) = graph.edges.get_mut(*eid) {
-                                    e.valid_until = Some(timestamp);
-                                    graph.dirty_edges.insert(*eid);
-                                }
-                                tracing::info!(
-                                    "write_fact_to_graph CONFLICT (LLM) invalidated eid={} old='{}' new='{}'",
-                                    eid,
-                                    old_stmt.get(..60).unwrap_or(old_stmt),
-                                    new_statement.get(..60).unwrap_or(new_statement)
-                                );
+                let verdicts = parse_verdicts(&response.content);
+                if verdicts.is_empty() {
+                    return;
+                }
+                let mut inference = self.inference.write().await;
+                let graph = inference.graph_mut();
+                for v in verdicts {
+                    if v.index == 0 || v.index > conflict_candidates.len() {
+                        continue;
+                    }
+                    let (eid, old_stmt) = &conflict_candidates[v.index - 1]; // 1-indexed
+                    match v.verdict {
+                        Verdict::Supersedes => {
+                            if let Some(e) = graph.edges.get_mut(*eid) {
+                                e.valid_until = Some(timestamp);
+                                graph.dirty_edges.insert(*eid);
                             }
-                        }
+                            tracing::info!(
+                                "write_fact_to_graph SUPERSEDES (LLM) sealed eid={} old='{}' new='{}'",
+                                eid,
+                                old_stmt.get(..60).unwrap_or(old_stmt),
+                                new_statement.get(..60).unwrap_or(new_statement)
+                            );
+                        },
+                        Verdict::Contradicts => {
+                            // Mark the existing edge disputed but leave it
+                            // active. The new fact will be written by the
+                            // normal path and also flagged via the metadata
+                            // hand-off below.
+                            if let Some(e) = graph.edges.get_mut(*eid) {
+                                e.properties
+                                    .insert("disputed".to_string(), serde_json::Value::Bool(true));
+                                e.properties.insert(
+                                    "disputed_reason".to_string(),
+                                    serde_json::Value::String(
+                                        ContradictionReason::LogicalConflict.tag().to_string(),
+                                    ),
+                                );
+                                graph.dirty_edges.insert(*eid);
+                            }
+                            tracing::warn!(
+                                "write_fact_to_graph CONTRADICTS (LLM) flagged disputed eid={} old='{}' new='{}'",
+                                eid,
+                                old_stmt.get(..60).unwrap_or(old_stmt),
+                                new_statement.get(..60).unwrap_or(new_statement)
+                            );
+                        },
+                        Verdict::Reaffirms => {
+                            // No structural change; bump observation_count
+                            // and refresh `last_confirmed_at` so downstream
+                            // freshness signals reflect the repeated mention.
+                            if let Some(e) = graph.edges.get_mut(*eid) {
+                                e.observation_count = e.observation_count.saturating_add(1);
+                                e.properties.insert(
+                                    "last_confirmed_at".to_string(),
+                                    serde_json::Value::Number(timestamp.into()),
+                                );
+                                graph.dirty_edges.insert(*eid);
+                            }
+                            tracing::debug!(
+                                "write_fact_to_graph REAFFIRMS (LLM) eid={} old='{}' new='{}'",
+                                eid,
+                                old_stmt.get(..60).unwrap_or(old_stmt),
+                                new_statement.get(..60).unwrap_or(new_statement)
+                            );
+                        },
+                        Verdict::None => {},
                     }
                 }
             },
@@ -209,5 +309,46 @@ impl GraphEngine {
                 tracing::debug!("Conflict detection LLM call timed out");
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_verdicts_bare_array() {
+        let raw =
+            r#"[{"index": 1, "verdict": "SUPERSEDES"}, {"index": 3, "verdict": "CONTRADICTS"}]"#;
+        let v = parse_verdicts(raw);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].index, 1);
+        assert_eq!(v[0].verdict, Verdict::Supersedes);
+        assert_eq!(v[1].index, 3);
+        assert_eq!(v[1].verdict, Verdict::Contradicts);
+    }
+
+    #[test]
+    fn parse_verdicts_wrapped() {
+        let raw = r#"{"verdicts": [{"index": 2, "verdict": "REAFFIRMS"}]}"#;
+        let v = parse_verdicts(raw);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].verdict, Verdict::Reaffirms);
+    }
+
+    #[test]
+    fn parse_verdicts_unknown_label_becomes_none() {
+        // LLM hallucinates an unrecognised verdict — must not corrupt
+        // downstream graph mutations.
+        let raw = r#"[{"index": 1, "verdict": "DEFENESTRATES"}]"#;
+        let v = parse_verdicts(raw);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].verdict, Verdict::None);
+    }
+
+    #[test]
+    fn parse_verdicts_malformed_returns_empty() {
+        assert!(parse_verdicts("not json").is_empty());
+        assert!(parse_verdicts("").is_empty());
     }
 }

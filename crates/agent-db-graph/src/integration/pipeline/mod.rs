@@ -6,6 +6,7 @@
 use super::*;
 
 mod conflict_detection;
+mod contradiction;
 mod episode_lifecycle;
 mod episode_memory;
 mod episode_strategy;
