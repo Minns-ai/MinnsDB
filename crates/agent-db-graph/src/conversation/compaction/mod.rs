@@ -223,17 +223,26 @@ pub async fn run_compaction_with_context(
     let mut known_entities: HashSet<String> = HashSet::new();
     let mut all_extracted_facts: Vec<ExtractedFact> = Vec::new();
 
-    // Batch turns in pairs: [0,1], [2,3], [4,5], ...
-    let batches: Vec<Vec<&ConversationTurn>> = turns
-        .iter()
-        .collect::<Vec<_>>()
-        .chunks(2)
-        .map(|c| c.to_vec())
-        .collect();
+    // Capture turn count before move below — the tracing line and the
+    // later `goal_base_ts` calculation both need it.
+    let total_turn_count = turns.len();
+
+    // Adaptive batching by token budget (see turn_processing.rs::
+    // batch_turns_by_token_budget). Replaces the historical fixed
+    // `.chunks(2)` pairing — which over-batched dense conversations
+    // (forcing many small cascade calls per 8-session scenario) and
+    // under-packed sparse ones. Token-greedy matches the LLM context
+    // budget directly: dense scenarios produce ~2-3 larger batches
+    // instead of 4-5 tiny ones, halving the cascade-prompt overhead.
+    //
+    // Owned form (Vec<Vec<ConversationTurn>>) so the downstream JoinSet
+    // tasks can move each batch into the spawned future. Avoids
+    // borrow/index gymnastics.
+    let batches: Vec<Vec<ConversationTurn>> = turn_processing::batch_turns_by_token_budget(turns);
 
     tracing::info!(
         "COMPACTION per-turn extraction: {} turns in {} batches for case_id={}",
-        turns.len(),
+        total_turn_count,
         batches.len(),
         case_id
     );
@@ -909,7 +918,7 @@ pub async fn run_compaction_with_context(
                         procedural_summary: response.procedural_summary.clone(),
                     };
 
-                    let goal_base_ts = base_ts + (turns.len() as u64 + 1) * TURN_GAP;
+                    let goal_base_ts = base_ts + (total_turn_count as u64 + 1) * TURN_GAP;
                     let events = compaction_to_events(
                         &filtered_response,
                         case_id,
