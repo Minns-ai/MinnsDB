@@ -192,10 +192,17 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/agents", get(handlers::list_agents))
         // Single message endpoint
         .route("/api/messages", post(handlers::accept_message))
-        // Conversation Ingestion (batch)
+        // Conversation Ingestion (batch). Async by default — returns 202
+        // + job_id; pass `?wait=true` for legacy synchronous behaviour.
         .route(
             "/api/conversations/ingest",
             post(handlers::ingest_conversation),
+        )
+        // Job status + subscribe (paired with async /api/conversations/ingest)
+        .route("/api/jobs/{id}", get(handlers::jobs::get_job))
+        .route(
+            "/api/jobs/{id}/subscribe",
+            get(handlers::jobs::subscribe_job),
         )
         // Ontology
         .route(

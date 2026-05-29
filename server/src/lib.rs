@@ -4,6 +4,7 @@ pub mod auth_middleware;
 pub mod config;
 pub mod errors;
 pub mod handlers;
+pub mod jobs;
 pub mod models;
 pub mod read_gate;
 pub mod routes;

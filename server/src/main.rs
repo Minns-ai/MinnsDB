@@ -6,6 +6,7 @@ mod auth_middleware;
 mod config;
 mod errors;
 mod handlers;
+mod jobs;
 mod models;
 mod read_gate;
 mod routes;
@@ -227,6 +228,7 @@ async fn main() -> anyhow::Result<()> {
         engine: engine.clone(),
         write_lanes: write_lanes.clone(),
         read_gate,
+        jobs: jobs::JobStore::new(),
         seq_tracker,
         started_at: Instant::now(),
         subscription_manager,

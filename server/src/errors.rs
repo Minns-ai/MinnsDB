@@ -13,6 +13,7 @@ pub struct ErrorResponse {
     pub details: Option<String>,
 }
 
+#[derive(Debug)]
 #[allow(dead_code)]
 pub enum ApiError {
     Internal(String),

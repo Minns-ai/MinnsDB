@@ -11,6 +11,7 @@ pub mod export_import;
 pub mod graph;
 pub mod graph_import;
 pub mod health;
+pub mod jobs;
 pub mod memories;
 pub mod modules;
 pub mod nlq;

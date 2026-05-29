@@ -15,21 +15,24 @@
 //! pipeline (BM25 + memory + claims + graph entity resolution with RRF fusion).
 
 use crate::errors::ApiError;
+use crate::jobs::{self, JobState, SubmitOutcome};
 use crate::state::AppState;
 use crate::write_lanes::WriteJob;
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Request / Response models
 // ---------------------------------------------------------------------------
 
 /// Ingest request for `POST /api/conversations/ingest`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct ConversationIngestRequest {
     /// Optional case identifier; auto-generated if omitted.
     #[serde(default)]
@@ -51,7 +54,7 @@ pub struct ConversationIngestRequest {
 }
 
 /// A single conversation session within an ingest request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct SessionInput {
     /// Unique session identifier.
     pub session_id: String,
@@ -75,7 +78,7 @@ pub struct SessionInput {
 }
 
 /// A single message in a conversation session.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct MessageInput {
     /// `"user"` or `"assistant"`.
     pub role: String,
@@ -93,11 +96,37 @@ pub struct MessageInput {
 /// Maximum number of conversation states to keep in memory.
 const MAX_CONVERSATION_STATES: usize = 1000;
 
+/// Query parameters for `POST /api/conversations/ingest`.
+///
+/// Defaults to **async** (returns 202 + job_id immediately) so multi-agent
+/// callers never block on the ~30 s LLM pipeline. Legacy callers that
+/// want the original synchronous behaviour pass `?wait=true`.
+#[derive(Debug, Deserialize, Default)]
+pub struct IngestQueryParams {
+    /// `true` → hold the connection until the pipeline completes and return
+    /// the full result body. `false` (default) → return 202 with a job_id
+    /// and process in the background.
+    #[serde(default)]
+    pub wait: Option<bool>,
+}
+
 /// POST /api/conversations/ingest — ingest conversation sessions.
+///
+/// **Default behaviour is asynchronous.** Returns 202 + `{job_id, status_url,
+/// subscribe_url}` immediately; the LLM pipeline runs in the background and
+/// the caller polls `/api/jobs/{id}` or subscribes via WS at
+/// `/api/jobs/{id}/subscribe`. Pass `?wait=true` to get the original
+/// synchronous response body (held until the pipeline completes).
+///
+/// Identical payloads (same content hash) submitted within the job TTL
+/// reuse the existing job: a repeat synchronous call returns the cached
+/// response immediately; a repeat async call returns the same job_id so
+/// pollers/subscribers see the same source of truth.
 pub async fn ingest_conversation(
     State(state): State<AppState>,
+    Query(params): Query<IngestQueryParams>,
     Json(request): Json<ConversationIngestRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     // Validate request size limits to prevent DoS
     if request.sessions.len() > 100 {
         return Err(ApiError::BadRequest(
@@ -113,8 +142,6 @@ pub async fn ingest_conversation(
     }
 
     // Hard fail: LLM is required for conversation ingest.
-    // Without it, no facts can be extracted and the graph would contain only
-    // raw Conversation events with no structure.
     if state.engine.unified_llm_client().is_none() {
         return Err(ApiError::BadRequest(
             "LLM client is required for conversation ingest. \
@@ -125,7 +152,176 @@ pub async fn ingest_conversation(
     }
 
     let case_id = request.case_id.clone().unwrap_or_else(uuid_v4_simple);
+    let wait = params.wait.unwrap_or(false);
 
+    // Content-hash dedupe. Repeat submissions of the same payload reuse
+    // the existing job rather than re-running the 30s pipeline.
+    //
+    // Hash covers the case_id together with a canonical JSON
+    // serialisation so two distinct case_ids with otherwise-identical
+    // sessions still get separate jobs (case_id partitions tenant state
+    // inside the engine). Same case_id + same payload always dedupes
+    // within the job TTL window.
+    let payload_json = serde_json::to_vec(&request)
+        .map_err(|e| ApiError::Internal(format!("ingest payload serialize failed: {e}")))?;
+    let hash = jobs::content_hash(&(&case_id, payload_json));
+
+    match state.jobs.submit(hash) {
+        Ok(SubmitOutcome::Created { id }) => {
+            spawn_ingest_pipeline(state.clone(), id.clone(), case_id.clone(), request);
+            if wait {
+                Ok(wait_for_job(&state, &id).await?)
+            } else {
+                Ok((StatusCode::ACCEPTED, Json(job_handoff(&id))).into_response())
+            }
+        },
+        Ok(SubmitOutcome::Existing {
+            id,
+            state: job_state,
+        }) => match job_state {
+            JobState::Done { response } => {
+                info!("Ingest dedupe hit (Done) case_id={} job_id={}", case_id, id);
+                Ok((StatusCode::OK, Json(response)).into_response())
+            },
+            JobState::Queued | JobState::Processing => {
+                info!(
+                    "Ingest dedupe hit ({:?}) case_id={} job_id={}",
+                    job_state, case_id, id
+                );
+                if wait {
+                    Ok(wait_for_job(&state, &id).await?)
+                } else {
+                    Ok((StatusCode::ACCEPTED, Json(job_handoff(&id))).into_response())
+                }
+            },
+            JobState::Failed { error } => {
+                warn!(
+                    "Ingest dedupe hit (Failed) case_id={} job_id={} err={} — retrying",
+                    case_id, id, error
+                );
+                state.jobs.transition(&id, JobState::Queued);
+                spawn_ingest_pipeline(state.clone(), id.clone(), case_id.clone(), request);
+                if wait {
+                    Ok(wait_for_job(&state, &id).await?)
+                } else {
+                    Ok((StatusCode::ACCEPTED, Json(job_handoff(&id))).into_response())
+                }
+            },
+        },
+        Err(jobs::JobError::QueueFull { retry_after }) => {
+            // Bounded queue rejected the submission — surface as 429 +
+            // Retry-After so callers back off rather than timing out.
+            let body = json!({
+                "error": "job_queue_full",
+                "message": "ingest job queue is at capacity; retry after the suggested delay",
+                "retry_after_seconds": retry_after.as_secs(),
+            });
+            let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from(retry_after.as_secs()),
+            );
+            Ok(resp)
+        },
+        Err(jobs::JobError::NotFound) => {
+            Err(ApiError::Internal("unexpected NotFound on submit".into()))
+        },
+    }
+}
+
+/// Build the 202 handoff body. Same shape regardless of how the job was
+/// created so clients have one happy path.
+fn job_handoff(id: &str) -> serde_json::Value {
+    json!({
+        "job_id": id,
+        "status": "queued",
+        "status_url": format!("/api/jobs/{}", id),
+        "subscribe_url": format!("/api/jobs/{}/subscribe", id),
+    })
+}
+
+/// Synchronous wait path: subscribe to the broadcast channel and return
+/// the final response body when the job hits Done/Failed. Polling
+/// fallback covers the race where the job completed between submit and
+/// subscribe.
+async fn wait_for_job(state: &AppState, id: &str) -> Result<Response, ApiError> {
+    if let Ok(initial) = state.jobs.get(id) {
+        match initial {
+            JobState::Done { response } => {
+                return Ok((StatusCode::OK, Json(response)).into_response());
+            },
+            JobState::Failed { error } => {
+                return Err(ApiError::Internal(format!("ingest failed: {}", error)));
+            },
+            JobState::Queued | JobState::Processing => {},
+        }
+    }
+    let mut rx = state
+        .jobs
+        .subscribe(id)
+        .map_err(|_| ApiError::Internal("job vanished before subscribe".into()))?;
+    loop {
+        match rx.recv().await {
+            Ok(JobState::Done { response }) => {
+                return Ok((StatusCode::OK, Json(response)).into_response());
+            },
+            Ok(JobState::Failed { error }) => {
+                return Err(ApiError::Internal(format!("ingest failed: {}", error)));
+            },
+            Ok(_) => continue,
+            Err(_) => match state.jobs.get(id) {
+                Ok(JobState::Done { response }) => {
+                    return Ok((StatusCode::OK, Json(response)).into_response());
+                },
+                Ok(JobState::Failed { error }) => {
+                    return Err(ApiError::Internal(format!("ingest failed: {}", error)));
+                },
+                _ => {
+                    return Err(ApiError::Internal(
+                        "job channel closed before completion".into(),
+                    ))
+                },
+            },
+        }
+    }
+}
+
+/// Spawn the actual ingest pipeline as a detached tokio task, recording
+/// the outcome back to the JobStore so synchronous waiters and async
+/// pollers see the same result.
+fn spawn_ingest_pipeline(
+    state: AppState,
+    job_id: String,
+    case_id: String,
+    request: ConversationIngestRequest,
+) {
+    tokio::spawn(async move {
+        state.jobs.transition(&job_id, JobState::Processing);
+        match run_ingest_pipeline(&state, case_id.clone(), request).await {
+            Ok(response) => {
+                state.jobs.transition(&job_id, JobState::Done { response });
+            },
+            Err(e) => {
+                // ApiError doesn't impl Display; Debug is the supported
+                // formatter for surfacing into log + job state.
+                let msg = format!("{:?}", e);
+                warn!("ingest pipeline error case_id={} err={}", case_id, msg);
+                state
+                    .jobs
+                    .transition(&job_id, JobState::Failed { error: msg });
+            },
+        }
+    });
+}
+
+/// The actual ingest pipeline body. Extracted from the legacy
+/// synchronous handler so the async + sync paths share one
+/// implementation — anything that worked before keeps working.
+pub(crate) async fn run_ingest_pipeline(
+    state: &AppState,
+    case_id: String,
+    request: ConversationIngestRequest,
+) -> Result<serde_json::Value, ApiError> {
     info!("Ingesting conversation case_id={}", case_id);
 
     // Convert request into domain types (pure data transform, no engine access)
@@ -347,7 +543,7 @@ pub async fn ingest_conversation(
             })
         .await?;
 
-    Ok(Json(result))
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +551,7 @@ pub async fn ingest_conversation(
 // ---------------------------------------------------------------------------
 
 /// Request body for `POST /api/messages`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct SingleMessageRequest {
     /// Message role: `"user"` or `"assistant"`.
     pub role: String,
