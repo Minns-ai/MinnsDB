@@ -40,9 +40,17 @@ impl Default for DriftConfig {
             max_followup_results: 10,
             max_followup_queries: 3,
             synthesis_temperature: 0.3,
-            synthesis_max_tokens: 512,
+            // Cap the final user-facing synthesis at ~70 English words.
+            // 512 tokens used to produce multi-section markdown essays
+            // for trivial yes/no recommendation questions; 96 forces a
+            // short, direct answer that the matching DRIFT system
+            // prompts now also ask for explicitly.
+            synthesis_max_tokens: 96,
             timeout_secs: 30,
             fact_summary_temperature: 0.1,
+            // Fact-summary phase is INTERNAL (its output feeds the
+            // synthesis prompt as context, not the user) — leaving its
+            // budget at 512 so the synthesis layer has full coverage.
             fact_summary_max_tokens: 512,
         }
     }
@@ -342,30 +350,40 @@ pub async fn drift_synthesis(
         context.push_str("\n... (truncated)");
     }
 
-    // Frame-specific synthesis instructions
+    // Frame-specific synthesis instructions. All four prompts now share
+    // the same length + formatting contract that `synthesis.rs` enforces
+    // on the non-DRIFT path: ONE to TWO sentences, no markdown, no
+    // "Conclusion" or "Summary" sections. For recommendation questions
+    // ("can I…", "should I…") the first clause is Yes or No followed by
+    // the single most relevant current fact. Without this the
+    // Timeless-branch prompt produced multi-section markdown essays
+    // that bypassed the synthesis.rs verbosity cap entirely.
+    const STYLE_RULES: &str = "Answer in ONE to TWO sentences. No markdown headers. \
+        No bullet points. No 'Summary:' or 'Conclusion:' sections. Write plain prose. \
+        For recommendation questions, start with Yes or No and cite the single most \
+        relevant current fact.";
     let system = match temporal_context.temporal_frame.as_str() {
-        "Current" => {
-            "Answer the user's question based on the provided context. \
-             Use ONLY facts marked CURRENT in the fact sheet. Ignore HISTORICAL facts \
+        "Current" => format!(
+            "{} Use ONLY facts marked CURRENT in the fact sheet. Ignore HISTORICAL facts \
              unless the question explicitly asks about history. The current state section \
-             is authoritative. Be specific and concise."
-        },
-        "Historical" => {
-            "Answer the user's question based on the provided context. \
-             Include the timeline of changes. Reference both current and historical facts. \
-             Be specific about when things changed."
-        },
-        "Comparative" => {
-            "Answer the user's question by comparing past and present state. \
-             Use the entity timelines to show what changed and when. \
-             Highlight differences between then and now."
-        },
-        _ => {
-            "Answer the user's question comprehensively based on the provided context. \
-             Be specific and reference the information given. If the context doesn't fully \
-             answer the question, say what is known and what is missing."
-        },
+             is authoritative.",
+            STYLE_RULES
+        ),
+        "Historical" => format!(
+            "{} Reference the timeline of changes from the context.",
+            STYLE_RULES
+        ),
+        "Comparative" => format!(
+            "{} Briefly compare past and present state from the entity timelines.",
+            STYLE_RULES
+        ),
+        _ => format!(
+            "{} If the context does not answer the question, say 'I don't have enough \
+             information' and stop.",
+            STYLE_RULES
+        ),
     };
+    let system = system.as_str();
 
     let user = format!("Context:\n{}\n\nQuestion: {}", context, question);
 

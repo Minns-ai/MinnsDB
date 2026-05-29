@@ -399,7 +399,7 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::episodes::EpisodeOutcome;
-    use crate::structures::{ConceptType, GraphNode, NodeType};
+    use crate::structures::{ConceptType, EdgeType, GraphEdge, GraphNode, NodeType};
 
     /// Create a minimal test Memory with only the summary populated.
     fn test_memory(id: u64, summary: &str) -> Memory {
@@ -609,5 +609,104 @@ mod tests {
             "Should not show raw memory ID. Got: {}",
             result
         );
+    }
+
+    /// Regression for v2.5.4: when an entity has two active sibling
+    /// edges on the same category prefix (e.g. health:follows_diet and
+    /// health:previously_followed_diet, both `valid_until=None`), the
+    /// "Current state:" section must list the slot with the larger
+    /// `valid_from` first — *deterministically*, run after run. The
+    /// previous HashMap iteration order made the demo answer "vegetarian"
+    /// when "pescatarian" was the newer fact.
+    #[test]
+    fn current_state_lists_newest_slot_first_deterministically() {
+        let mut graph = Graph::new();
+        let user_id = graph
+            .add_node(GraphNode::new(NodeType::Concept {
+                concept_name: "User".to_string(),
+                concept_type: ConceptType::Person,
+                confidence: 1.0,
+            }))
+            .unwrap();
+        let veg_id = graph
+            .add_node(GraphNode::new(NodeType::Concept {
+                concept_name: "vegetarian".to_string(),
+                concept_type: ConceptType::NamedEntity,
+                confidence: 1.0,
+            }))
+            .unwrap();
+        let pesc_id = graph
+            .add_node(GraphNode::new(NodeType::Concept {
+                concept_name: "pescatarian".to_string(),
+                concept_type: ConceptType::NamedEntity,
+                confidence: 1.0,
+            }))
+            .unwrap();
+
+        // Older sibling: previously_followed_diet (vegetarian) at t=100.
+        let mut older = GraphEdge::new(
+            user_id,
+            veg_id,
+            EdgeType::Association {
+                association_type: "health:previously_followed_diet".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.9,
+            },
+            0.9,
+        );
+        older.valid_from = Some(100);
+        graph.add_edge(older).expect("add older edge");
+
+        // Newer sibling: follows_diet (pescatarian) at t=200.
+        let mut newer = GraphEdge::new(
+            user_id,
+            pesc_id,
+            EdgeType::Association {
+                association_type: "health:follows_diet".to_string(),
+                evidence_count: 1,
+                statistical_significance: 0.9,
+            },
+            0.9,
+        );
+        newer.valid_from = Some(200);
+        graph.add_edge(newer).expect("add newer edge");
+
+        // Run the formatter many times — pre-fix this would flap on
+        // HashMap order. The fix sorts by valid_from DESC + edge_id DESC
+        // so the ordering is identical every run.
+        // `format_unified_results` seeds entities from the `fused` list,
+        // so we surface the user concept node with a high score.
+        let fused = [(user_id, 0.99)];
+        for _ in 0..50 {
+            let result = format_unified_results(
+                &fused,
+                "what does the user eat",
+                &graph,
+                &[],
+                None,
+                &std::collections::HashSet::new(),
+                &[],
+            );
+            // Both slots must be present.
+            assert!(
+                result.contains("pescatarian"),
+                "result missing pescatarian: {}",
+                result
+            );
+            assert!(
+                result.contains("vegetarian"),
+                "result missing vegetarian: {}",
+                result
+            );
+            // And the newer one must come first.
+            let pesc_pos = result.find("pescatarian").expect("pescatarian present");
+            let veg_pos = result.find("vegetarian").expect("vegetarian present");
+            assert!(
+                pesc_pos < veg_pos,
+                "pescatarian (newer, valid_from=200) must appear before vegetarian \
+                 (older, valid_from=100) in deterministic newest-first order. Got:\n{}",
+                result
+            );
+        }
     }
 }
