@@ -62,6 +62,12 @@ RUN useradd -m -u 1000 -s /bin/bash minns && \
 COPY --from=builder --chown=minns:minns \
     /build/target/release/minnsdb-server /app/server
 
+# Copy OWL/RDFS ontology TTL files. Lives outside /app/data on purpose:
+# operators bind-mount /app/data for persistent state, and that mount
+# would shadow any files we copied under that subtree. The server reads
+# this path via `MINNS_ONTOLOGY_PATH` (set below).
+COPY --chown=minns:minns data/ontology /app/ontology
+
 # Set permissions
 RUN chmod +x /app/server
 
@@ -87,6 +93,10 @@ ENV SERVER_HOST=0.0.0.0
 ENV SERVER_PORT=3000
 ENV STORAGE_BACKEND=persistent
 ENV REDB_PATH=/data/minns.redb
+
+# OWL/RDFS ontology directory (TTL files baked into the image above).
+# Override at runtime if you ship your own ontology via a volume.
+ENV MINNS_ONTOLOGY_PATH=/app/ontology
 
 # NER Service Configuration (override at runtime)
 ENV NER_SERVICE_URL=http://localhost:8081/ner

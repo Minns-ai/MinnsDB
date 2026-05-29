@@ -659,16 +659,44 @@ impl GraphEngine {
                 as Arc<dyn crate::federated_search::FederatedSearchProvider>)
         });
 
-        // Load OWL/RDFS ontology from TTL files (data/ontology/ by default)
-        let ontology_path = std::path::PathBuf::from("data/ontology");
+        // Load OWL/RDFS ontology from TTL files. Path order:
+        //   1. `MINNS_ONTOLOGY_PATH` env var if set (production override)
+        //   2. `data/ontology` relative to CWD (dev / repo-root run)
+        // An empty ontology silently disables the embedding categoriser
+        // and the predicate canonicalizer, so this load is load-bearing —
+        // we log INFO with the resolved path and the property count so
+        // the failure mode is visible in the boot log instead of buried
+        // in a downstream "0 canonical and 0 category embeddings" line.
+        let ontology_path = std::env::var("MINNS_ONTOLOGY_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("data/ontology"));
         let ontology = Arc::new(
             crate::ontology::OntologyRegistry::load_from_directory(&ontology_path).unwrap_or_else(
                 |e| {
-                    tracing::warn!("Failed to load ontology: {}, starting empty", e);
+                    tracing::warn!(
+                        "Failed to load ontology from {:?}: {} — starting empty",
+                        ontology_path,
+                        e
+                    );
                     crate::ontology::OntologyRegistry::new()
                 },
             ),
         );
+        let onto_count = ontology.top_level_property_descriptors().len();
+        if onto_count == 0 {
+            tracing::warn!(
+                "Ontology loaded with 0 top-level properties from {:?} — embedding \
+                 categoriser and predicate canonicalizer will be no-ops. Check that \
+                 TTL files exist at the resolved path.",
+                ontology_path
+            );
+        } else {
+            tracing::info!(
+                "Ontology loaded from {:?}: {} top-level properties",
+                ontology_path,
+                onto_count
+            );
+        }
 
         let domain_registry = Arc::new(crate::domain_schema::DomainRegistry::new(ontology.clone()));
 
