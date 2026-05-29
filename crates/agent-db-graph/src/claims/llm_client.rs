@@ -215,8 +215,8 @@ Rules:
    - "object_entity": The target entity of the predicate.
      If no clear object exists (e.g., "User is happy"), set to null.
 7. Assign a "category" from: personal, preferences, work, health, education, finance,
-   travel, food, hobbies, technology, relationships, goals, habits, lifestyle, opinions, other.
-   Use the closest match. If none fits, use "other".
+   travel, food, hobbies, technology, relationships, goals, habits, lifestyle, opinions.
+   Pick the closest match — every claim must commit to one of the categories above.
 8. Classify temporal stability as "temporal_type":
    - "static"    — stable real-world facts unlikely to change ("Paris is the capital of France", "Python was created by Guido van Rossum")
    - "dynamic"   — facts that can change over time ("Alice lives in NYC", "The price is $10", "I prefer dark mode")

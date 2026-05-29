@@ -42,10 +42,12 @@ pub(crate) fn compaction_system_prompt(categories: &str, category_enum: &str) ->
 
    Category determines supersession:
 {categories}
-   - "other": anything else
 
-   If you use a category not in the list above, include "cardinality_hint": "single"|"multi"|"append"
-   to indicate: single = one value at a time (newest supersedes all), multi = multiple values coexist, append = never supersede.
+   Pick the closest category from the list above. Do NOT use "other" — every
+   fact must commit to a registered category, even if the fit is approximate.
+   If absolutely no category in the list fits, propose a new category name in
+   the `category` field and include "cardinality_hint": "single"|"multi"|"append"
+   (single = newest supersedes all, multi = multiple values coexist, append = never supersede).
 
    For multi-valued categories (routine, preference, relationship), the predicate must describe
    the SPECIFIC role or type of that fact — never use the category name itself as the predicate.
@@ -183,14 +185,15 @@ CRITICAL RULES:
    "I switched jobs" → is_update: true (supersedes previous work)
    "I started running" → is_update: false (new habit, doesn't replace anything)
 
-5. CATEGORY determines supersession:
+5. CATEGORY determines supersession. Pick the closest match from the
+   registered category list; do NOT fall back to "other". If a fact
+   approximately fits a category, commit to it.
    - "location": where someone lives, moved to
    - "routine": daily habits, regular activities
    - "preference": likes, dislikes, favorites
    - "relationship": connections between people
    - "work": job, employer, role
    - "financial": payments, debts, expenses
-   - "other": anything else
 
 6. FINANCIAL facts — extract structured payment details:
    - "subject": the payer
@@ -232,14 +235,15 @@ pub(crate) fn cascade_relationship_prompt(categories: &str, category_enum: &str)
 
 Categories:
 {categories}
-- "other": anything else
+
+Pick the closest match from the list above. Do NOT use "other" — every
+relationship must commit to a registered category. If absolutely none fits,
+propose a new category name and include "cardinality_hint": "single"|"multi"|"append"
+(single = newest supersedes all, multi = multiple values coexist, append = never supersede).
 
 For multi-valued categories (routine, preference, relationship), the predicate must describe
 the SPECIFIC role or type — never use the category name itself as the predicate.
 Derive the predicate from the context: time-of-day, frequency, activity type, relationship role, etc.
-
-If you use a category not in the list above, include "cardinality_hint": "single"|"multi"|"append"
-to indicate: single = one value at a time (newest supersedes all), multi = multiple values coexist, append = never supersede.
 
 When the speaker refers to themselves, always use "user" as subject or object.
 
@@ -254,12 +258,14 @@ pub(crate) fn cascade_fact_prompt(category_enum: &str) -> String {
 Each statement must be understandable without conversation context.
 Mark is_update=true for state changes. Add depends_on for location-dependent facts.
 
+Pick the closest category from the enum below. Do NOT use "other" — every
+fact must commit to a registered category. If absolutely none fits, propose
+a new category name and include "cardinality_hint": "single"|"multi"|"append"
+(single = newest supersedes all, multi = multiple values coexist, append = never supersede).
+
 For multi-valued categories (routine, preference, relationship), the predicate must describe
 the SPECIFIC role or type — never use the category name itself as the predicate.
 Derive the predicate from the context: time-of-day, frequency, activity type, relationship role, etc.
-
-If you use a category not in the list above, include "cardinality_hint": "single"|"multi"|"append"
-to indicate: single = one value at a time (newest supersedes all), multi = multiple values coexist, append = never supersede.
 
 When the speaker refers to themselves, always use "user" as subject or object.
 

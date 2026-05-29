@@ -30,15 +30,78 @@ impl GraphEngine {
         timestamp: u64,
     ) {
         let group_id = &fact.group_id;
-        let raw_category = fact.category.as_deref().unwrap_or("other");
-        let category = if raw_category == "other" || self.ontology.resolve(raw_category).is_none() {
-            self.ontology
+        let raw_category = fact.category.as_deref().unwrap_or("");
+        let llm_picked_real = !raw_category.is_empty()
+            && raw_category != "other"
+            && self.ontology.resolve(raw_category).is_some();
+
+        // Always-run embedding categoriser. The previous fast-path
+        // ("trust the LLM when its category resolves") missed the case
+        // where the LLM picked a plausible-but-wrong category — the
+        // embedding lookup is the ground-truth check. The classifier
+        // returns None when no embedding client is available, which is
+        // when we fall back to the synchronous substring `infer_category`.
+        let embedding_pick: Option<(String, f32)> =
+            if let Some(ref pc) = self.predicate_canonicalizer {
+                pc.classify_category(&fact.predicate, &fact.statement).await
+            } else {
+                None
+            };
+
+        let category_string = match (&embedding_pick, llm_picked_real) {
+            // LLM and embedding agree, OR embedding score is too low to
+            // override → trust the LLM (it had full conversation context
+            // and committed to a real category).
+            (Some((emb_cat, score)), true)
+                if emb_cat == raw_category
+                    || *score < crate::domain_schema::CATEGORY_OVERRIDE_THRESHOLD =>
+            {
+                raw_category.to_string()
+            },
+            // Disagreement above the override threshold → embedding wins.
+            // Log so we can audit how often this fires.
+            (Some((emb_cat, score)), true) => {
+                tracing::warn!(
+                    "category override: LLM='{}' embedding='{}' score={:.3} stmt='{}'",
+                    raw_category,
+                    emb_cat,
+                    score,
+                    fact.statement.get(..80).unwrap_or(&fact.statement)
+                );
+                emb_cat.clone()
+            },
+            // LLM picked something unusable (hallucinated category or
+            // legacy "other"). Use the embedding pick if it has any
+            // meaningful signal at all; otherwise fall through to the
+            // substring categoriser below.
+            (Some((emb_cat, score)), false)
+                if *score >= crate::domain_schema::CATEGORY_MIN_SIGNAL =>
+            {
+                tracing::info!(
+                    "category embedding fill: LLM='{}' embedding='{}' score={:.3}",
+                    raw_category,
+                    emb_cat,
+                    score
+                );
+                emb_cat.clone()
+            },
+            // Embedding had no signal AND LLM is real → keep LLM pick.
+            (_, true) => raw_category.to_string(),
+            // No embedding signal and LLM pick is unusable → fall back to
+            // the legacy substring matcher and finally to the raw LLM
+            // string so downstream behaviour stays defined.
+            _ => self
+                .ontology
                 .infer_category(&fact.predicate, &fact.statement)
-                .unwrap_or_else(|| raw_category.to_string())
-        } else {
-            raw_category.to_string()
+                .unwrap_or_else(|| {
+                    if raw_category.is_empty() {
+                        "other".to_string()
+                    } else {
+                        raw_category.to_string()
+                    }
+                }),
         };
-        let category = category.as_str();
+        let category = category_string.as_str();
         let is_financial = self.ontology.is_append_only(category);
 
         // 2. Edge type: canonicalize predicate BEFORE taking the write lock.

@@ -164,14 +164,32 @@ impl GraphEngine {
                     predicate,
                     intent,
                 } => {
-                    return self
+                    // ActiveEdgeFetch is the symbolic fast path. It matches
+                    // the projected slot's `association_type` against the
+                    // planner's predicate by string compare — which is
+                    // exactly the chokepoint that misses when extraction
+                    // wrote the edge under a different predicate (e.g.
+                    // "relocated to" vs "lives_in"). When the projection
+                    // returns no slot, we fall through to the embedding-
+                    // based unified retrieval instead of giving the user
+                    // a "no matching slot" wall.
+                    let resp = self
                         .answer_active_edge_fetch(
                             &effective_question,
                             &subject,
                             &predicate,
                             &intent,
                         )
-                        .await;
+                        .await?;
+                    if resp.total_count > 0 {
+                        return Ok(resp);
+                    }
+                    tracing::info!(
+                        target: "nlq",
+                        subject = subject,
+                        predicate = predicate,
+                        "nlq.active_edge_fetch_empty_falling_back_to_unified"
+                    );
                 },
                 crate::nlq::planner::NlqPlan::UnifiedRetrieval { reason: _ } => {
                     // Fall through to the unified retrieval path below,

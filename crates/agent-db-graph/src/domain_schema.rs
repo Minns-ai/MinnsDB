@@ -264,6 +264,18 @@ pub fn restore_learned_slots_from_graph(graph: &crate::structures::Graph) -> Vec
 /// Cosine similarity threshold for matching a raw predicate to a canonical one.
 const SIMILARITY_THRESHOLD: f32 = 0.70;
 
+/// Cosine similarity threshold for overriding the LLM's category pick with
+/// the embedding classifier's pick. Higher than the predicate threshold
+/// because category is upstream of every supersession/contradiction
+/// decision — we want strong confidence before overriding the model.
+pub(crate) const CATEGORY_OVERRIDE_THRESHOLD: f32 = 0.75;
+
+/// Lower-bound similarity below which the embedding classifier is treated
+/// as having no useful signal. Used when the LLM picked a category the
+/// ontology doesn't recognise — we'd rather pass the LLM's pick through
+/// than guess wildly from a near-zero similarity.
+pub(crate) const CATEGORY_MIN_SIGNAL: f32 = 0.40;
+
 /// Embedding-based predicate canonicalizer.
 ///
 /// Pre-embeds canonical predicates for single-valued domains, then uses cosine
@@ -278,6 +290,12 @@ pub struct PredicateCanonicalizer {
     /// Pre-computed embeddings for canonical predicates.
     /// Key: "category:canonical_predicate" (e.g., "location:lives_in")
     canonical_embeddings: RwLock<HashMap<String, Vec<f32>>>,
+    /// Pre-computed embeddings for entire categories — one vector per
+    /// top-level property, derived from its label, comment, and
+    /// canonical predicate. Used by `classify_category` to map an
+    /// arbitrary predicate+statement to the closest registered category.
+    /// Key: property id (e.g., "location").
+    category_embeddings: RwLock<HashMap<String, Vec<f32>>>,
     /// Cache of resolved raw→canonical mappings.
     /// Key: "category:raw_predicate", Value: canonical_predicate (or raw if no match).
     resolution_cache: RwLock<HashMap<String, String>>,
@@ -295,6 +313,7 @@ impl PredicateCanonicalizer {
             embedding_client,
             ontology,
             canonical_embeddings: RwLock::new(HashMap::new()),
+            category_embeddings: RwLock::new(HashMap::new()),
             resolution_cache: RwLock::new(HashMap::new()),
             initialized: RwLock::new(false),
         }
@@ -342,12 +361,101 @@ impl PredicateCanonicalizer {
             }
         }
 
+        // Embed each top-level category as a rich description: label,
+        // comment, and canonical predicate together. Comments in the TTL
+        // include synonym lists (e.g. "where someone lives, moved to,
+        // resides") which give the embedding model enough surface area
+        // to map arbitrary raw predicates from any language onto the
+        // right category by cosine similarity alone.
+        let mut category_embeddings = self.category_embeddings.write().await;
+        let descriptors = self.ontology.top_level_property_descriptors();
+        for (id, label, comment, canonical) in &descriptors {
+            // Skip empty descriptors — a property with no label, comment,
+            // and canonical predicate has nothing to anchor an embedding
+            // against and would just add noise to the classifier.
+            if label.is_empty() && comment.is_empty() && canonical.is_empty() {
+                continue;
+            }
+            let text = format!("{} {} {}", label, comment, canonical.replace('_', " "))
+                .trim()
+                .to_string();
+            let request = crate::claims::EmbeddingRequest {
+                text,
+                context: Some(format!("ontology category {}", id)),
+            };
+            match self.embedding_client.embed(request).await {
+                Ok(resp) => {
+                    category_embeddings.insert(id.clone(), resp.embedding);
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to embed category '{}': {}", id, e);
+                },
+            }
+        }
+
         tracing::info!(
-            "PredicateCanonicalizer initialized with {} canonical embeddings",
-            embeddings.len()
+            "PredicateCanonicalizer initialized with {} canonical and {} category embeddings",
+            embeddings.len(),
+            category_embeddings.len(),
         );
 
         *init = true;
+    }
+
+    /// Classify the most likely ontology category for an LLM-emitted
+    /// `(raw_predicate, statement)` pair by cosine similarity against the
+    /// pre-embedded category descriptors.
+    ///
+    /// Returns `(property_id, similarity)` for the best match, or `None`
+    /// when no category has been embedded (no embedding client at boot,
+    /// initialisation failed for every property, etc).
+    ///
+    /// The caller decides whether to act on the similarity score —
+    /// `CATEGORY_OVERRIDE_THRESHOLD` is the default cutoff for overriding
+    /// a disagreeing LLM, `CATEGORY_MIN_SIGNAL` is the floor below which
+    /// the embedding signal should be discarded entirely.
+    pub async fn classify_category(
+        &self,
+        raw_predicate: &str,
+        statement: &str,
+    ) -> Option<(String, f32)> {
+        self.ensure_initialized().await;
+
+        // Embed the raw predicate together with the source statement so
+        // sparse predicates ("relocated to") get disambiguated by the
+        // surrounding context, and so the model has a multilingual
+        // signal even when the predicate alone is too short to localise.
+        let text = format!("{} {}", raw_predicate.replace('_', " "), statement);
+        let request = crate::claims::EmbeddingRequest {
+            text,
+            context: Some("classify against ontology categories".to_string()),
+        };
+        let query_embedding = match self.embedding_client.embed(request).await {
+            Ok(resp) => resp.embedding,
+            Err(e) => {
+                tracing::debug!(
+                    "classify_category embed failed for predicate '{}': {}",
+                    raw_predicate,
+                    e
+                );
+                return None;
+            },
+        };
+
+        let category_embeddings = self.category_embeddings.read().await;
+        if category_embeddings.is_empty() {
+            return None;
+        }
+
+        let mut best: Option<(String, f32)> = None;
+        for (id, vec) in category_embeddings.iter() {
+            let sim = agent_db_core::utils::cosine_similarity(&query_embedding, vec);
+            match &best {
+                Some((_, best_sim)) if sim <= *best_sim => {},
+                _ => best = Some((id.clone(), sim)),
+            }
+        }
+        best
     }
 
     /// Async predicate canonicalization using embedding similarity.
@@ -496,8 +604,10 @@ mod tests {
         let reg = DomainRegistry::new(onto);
         reg.register_category("pets", Cardinality::Multi, "", false);
         let enum_str = reg.prompt_category_enum();
-        // Should contain ontology-loaded categories
-        assert!(enum_str.contains("other"));
+        // Should contain the dynamically-registered category and no
+        // "other" escape hatch.
+        assert!(enum_str.contains("pets"));
+        assert!(!enum_str.contains("other"));
     }
 
     #[test]
@@ -629,5 +739,116 @@ mod tests {
         reg.register_category("pets", Cardinality::Multi, "", false);
         // record_usage is a no-op in ontology mode
         reg.record_usage("pets");
+    }
+
+    // ────────── Embedding category classifier tests ──────────
+    //
+    // The classifier is exercised against a deterministic stub embedding
+    // client. Each registered category gets a unique unit vector; the
+    // query text is mapped to whichever category's keywords it contains.
+    // This isolates the cosine-similarity wiring from the embedding
+    // model itself — the tests assert the classifier picks the right
+    // category, not that any particular model agrees with us.
+
+    use crate::claims::embeddings::{
+        Embedding, EmbeddingClient, EmbeddingRequest, EmbeddingResponse,
+    };
+
+    /// Deterministic stub. Inspects the request text for category keywords
+    /// and returns a one-hot vector in the corresponding slot. Cosine
+    /// similarity then picks out the right category exactly.
+    struct StubEmbeddingClient {
+        dim: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingClient for StubEmbeddingClient {
+        async fn embed(&self, request: EmbeddingRequest) -> anyhow::Result<EmbeddingResponse> {
+            let lower = request.text.to_lowercase();
+            // Map keywords to dimension indices. Each category gets a
+            // unique slot so the embedding for "location stuff" and the
+            // embedding for "relocated to NYC" both light up slot 0 and
+            // cosine to ~1.0.
+            let mut v: Embedding = vec![0.0; self.dim];
+            if lower.contains("location")
+                || lower.contains("lives")
+                || lower.contains("relocated")
+                || lower.contains("moved to")
+                || lower.contains("resides")
+            {
+                v[0] = 1.0;
+            } else if lower.contains("financial")
+                || lower.contains("payment")
+                || lower.contains("paid")
+            {
+                v[1] = 1.0;
+            } else if lower.contains("preference")
+                || lower.contains("likes")
+                || lower.contains("loves")
+            {
+                v[2] = 1.0;
+            } else {
+                // Unknown text gets no signal in any keyword slot. The
+                // stub doesn't try to model "semantic dissimilarity →
+                // low cosine" because that's a real-embedding-model
+                // property, not something a fixed-slot stub can fake
+                // without large dimensions to avoid hash collisions.
+            }
+            Ok(EmbeddingResponse {
+                embedding: v,
+                model: "stub".to_string(),
+                tokens_used: 0,
+            })
+        }
+
+        fn dimensions(&self) -> usize {
+            self.dim
+        }
+
+        fn model_name(&self) -> &str {
+            "stub"
+        }
+    }
+
+    fn stub_canonicalizer() -> PredicateCanonicalizer {
+        PredicateCanonicalizer::new(Arc::new(StubEmbeddingClient { dim: 8 }), test_ontology())
+    }
+
+    #[tokio::test]
+    async fn classify_category_picks_location_for_moved_to() {
+        let pc = stub_canonicalizer();
+        let pick = pc
+            .classify_category("relocated to", "User relocated to New York")
+            .await;
+        let (id, score) = pick.expect("classifier returned None");
+        assert_eq!(id, "location");
+        assert!(score > 0.99, "expected ~1.0 cosine, got {}", score);
+    }
+
+    #[tokio::test]
+    async fn classify_category_picks_financial_for_payment() {
+        let pc = stub_canonicalizer();
+        let (id, score) = pc
+            .classify_category("paid", "User paid 50 dollars for dinner")
+            .await
+            .expect("classifier returned None");
+        assert_eq!(id, "financial");
+        assert!(score > 0.99);
+    }
+
+    #[tokio::test]
+    async fn classify_category_cached_init_runs_once() {
+        let pc = stub_canonicalizer();
+        // Two back-to-back calls should reuse the already-initialised
+        // category_embeddings map (no panic, both return Some).
+        let a = pc
+            .classify_category("relocated to", "User relocated to Berlin")
+            .await
+            .expect("first call");
+        let b = pc
+            .classify_category("relocated to", "User relocated to Berlin")
+            .await
+            .expect("second call");
+        assert_eq!(a.0, b.0);
     }
 }

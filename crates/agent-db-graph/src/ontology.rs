@@ -544,6 +544,12 @@ impl OntologyRegistry {
     /// Only includes top-level properties (no sub-properties) to keep the
     /// LLM's choices clean and predictable. Sub-properties are resolved
     /// internally via `resolve_to_parent()`.
+    ///
+    /// No "other" escape hatch — when "other" was present the LLM would
+    /// quietly route into it for anything it wasn't 100% sure about, which
+    /// then bypassed the embedding-based categoriser downstream. Forcing
+    /// the LLM to commit to a real category surfaces uncertainty as a
+    /// disagreement signal we can act on at write time.
     pub fn prompt_category_enum(&self) -> String {
         let props = self.properties.read().unwrap();
         let mut cats: Vec<String> = props
@@ -552,7 +558,6 @@ impl OntologyRegistry {
             .map(|p| p.id.clone())
             .collect();
         cats.sort();
-        cats.push("other".to_string());
         cats.join("|")
     }
 
@@ -784,6 +789,26 @@ impl OntologyRegistry {
             .values()
             .filter(|p| self.is_single_valued(&p.id) && !p.canonical_predicate.is_empty())
             .map(|p| (p.id.clone(), p.canonical_predicate.clone()))
+            .collect()
+    }
+
+    /// Returns (id, label, comment, canonical_predicate) for every top-level
+    /// property (sub-properties excluded). Used by the embedding categoriser
+    /// to build one descriptive vector per category so an arbitrary
+    /// raw-predicate+statement pair can be routed to the closest match.
+    pub fn top_level_property_descriptors(&self) -> Vec<(String, String, String, String)> {
+        let props = self.properties.read().unwrap();
+        props
+            .values()
+            .filter(|p| p.sub_property_of.is_none())
+            .map(|p| {
+                (
+                    p.id.clone(),
+                    p.label.clone(),
+                    p.comment.clone(),
+                    p.canonical_predicate.clone(),
+                )
+            })
             .collect()
     }
 
@@ -1497,7 +1522,10 @@ pub(crate) mod tests {
         let enum_str = reg.prompt_category_enum();
         assert!(enum_str.contains("location"));
         assert!(enum_str.contains("financial"));
-        assert!(enum_str.contains("other"));
+        // No "other" escape hatch: forces the LLM to commit to a real
+        // category and routes uncertainty into the embedding classifier
+        // at write time instead of a silent catch-all bucket.
+        assert!(!enum_str.contains("other"));
     }
 
     #[test]
