@@ -37,8 +37,13 @@ test-*.mjs
 *.test.ts
 *.spec.ts
 
-# Data files (should be mounted as volumes)
+# Data files (runtime state — should be mounted as volumes).
+# Whitelist `data/ontology` because TTL files are static config baked
+# into the image; the Dockerfile copies them to /app/ontology so they
+# aren't shadowed by the /app/data bind-mount at runtime.
 data/
+!data/ontology
+!data/ontology/**
 *.redb
 *.wal
 *.log
