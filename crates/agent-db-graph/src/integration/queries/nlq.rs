@@ -320,19 +320,35 @@ impl GraphEngine {
         let start = std::time::Instant::now();
 
         // Walk only active edges via the existing fast-path projection.
+        // `projected.slots` is a HashMap — iteration order is randomised
+        // per process, which meant two slots matching the same predicate
+        // could surface either value non-deterministically (e.g. health
+        // sub-properties like `follows_diet` and `previously_followed_diet`
+        // both staying active and the older one winning). Sort matching
+        // slots by `valid_from` DESC (newest first) with edge_id as a
+        // tie-break so the answer is reproducible across runs.
         let predicate_lower = predicate.to_lowercase();
         let value = {
             let inference = self.inference.read().await;
             let projected =
                 project_entity_state(inference.graph(), subject, u64::MAX, Some(&self.ontology));
-            projected
+            let mut matches: Vec<&crate::conversation::graph_projection::ProjectedSlot> = projected
                 .slots
                 .values()
-                .find(|slot| {
+                .filter(|slot| {
                     let assoc_lower = slot.association_type.to_lowercase();
                     assoc_lower == predicate_lower
                         || assoc_lower.split(':').any(|p| p == predicate_lower)
                 })
+                .collect();
+            matches.sort_by(|a, b| {
+                b.valid_from
+                    .unwrap_or(0)
+                    .cmp(&a.valid_from.unwrap_or(0))
+                    .then_with(|| b.edge_id.cmp(&a.edge_id))
+            });
+            matches
+                .first()
                 .map(|slot| {
                     slot.value
                         .clone()

@@ -92,9 +92,22 @@ pub fn format_unified_results(
         // planner). When we reach this formatter we are in the
         // UnifiedRetrieval fallback path, where current state is the right
         // surface — the structured path would have intercepted otherwise.
+        //
+        // Iterate slots in deterministic newest-first order. HashMap's
+        // randomised iteration meant the top-5 cap could surface an older
+        // sibling sub-property (e.g. previously_followed_diet) before the
+        // current one, biasing the synthesis LLM toward the wrong fact.
         let projected =
             graph_projection::project_entity_state(graph, entity_name, u64::MAX, ontology);
-        for slot in projected.slots.values() {
+        let mut ordered_slots: Vec<&graph_projection::ProjectedSlot> =
+            projected.slots.values().collect();
+        ordered_slots.sort_by(|a, b| {
+            b.valid_from
+                .unwrap_or(0)
+                .cmp(&a.valid_from.unwrap_or(0))
+                .then_with(|| b.edge_id.cmp(&a.edge_id))
+        });
+        for slot in ordered_slots {
             let assoc = &slot.association_type;
             let value = slot.value.as_deref().unwrap_or(&slot.target_name);
 

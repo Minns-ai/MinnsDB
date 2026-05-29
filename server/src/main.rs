@@ -54,7 +54,13 @@ async fn main() -> anyhow::Result<()> {
     let num_lanes = std::env::var("WRITE_LANE_COUNT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| (num_cpus::get() / 2).clamp(2, 8));
+        // Defaults tuned for multi-agent / SaaS load rather than dev. Each
+        // ingest is LLM-bound (~30s, ~10 round-trips) so lane count caps
+        // simultaneous LLM throughput against the provider's rate limits;
+        // 8 concurrent ingests at gpt-4o-mini's typical 10k RPM tier
+        // sits well under saturation while giving real parallelism on a
+        // 2-CPU box. Override via WRITE_LANES.
+        .unwrap_or_else(|| num_cpus::get().max(8));
     let lane_capacity = std::env::var("WRITE_LANE_CAPACITY")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -74,7 +80,11 @@ async fn main() -> anyhow::Result<()> {
     let read_permits = std::env::var("READ_GATE_PERMITS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| num_cpus::get() * 2);
+        // NLQ queries also fan out to LLM (hint + synthesis) but are
+        // cheaper than ingest. 32 concurrent readers on a 2-CPU box
+        // gives multi-agent headroom; raise via READ_GATE_PERMITS for
+        // bigger boxes.
+        .unwrap_or_else(|| (num_cpus::get() * 8).max(32));
     let read_gate = Arc::new(read_gate::ReadGate::new(read_permits));
     info!("Read gate: {} permits", read_permits);
 

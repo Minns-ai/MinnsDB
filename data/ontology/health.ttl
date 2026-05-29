@@ -42,12 +42,17 @@ eg:medication a owl:ObjectProperty ;
     rdfs:seeAlso schema:Drug .
 
 # ── Sub-property: diet (dietary plan or restriction) ──────────
+# Functional: a person follows ONE diet at a time. Vegetarian → pescatarian
+# is supersession, not coexistence. Without this marker the LLM was free
+# to emit both `follows_diet` and `previously_followed_diet` as live edges
+# and downstream slot ordering picked the older value non-deterministically.
 eg:diet a owl:ObjectProperty ;
     rdfs:label "Diet" ;
     rdfs:comment "dietary plan, food restriction, nutrition" ;
     rdfs:subPropertyOf eg:health ;
     rdfs:domain eg:Person ;
-    rdfs:seeAlso schema:Diet .
+    rdfs:seeAlso schema:Diet ;
+    a owl:FunctionalProperty .
 
 # ── Sub-property: fitness (exercise activity) ─────────────────
 eg:fitness a owl:ObjectProperty ;
