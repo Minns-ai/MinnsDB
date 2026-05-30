@@ -198,10 +198,12 @@ pub fn create_router(state: AppState) -> Router {
             "/api/conversations/ingest",
             post(handlers::ingest_conversation),
         )
-        // Job status + subscribe (paired with async /api/conversations/ingest)
-        .route("/api/jobs/{id}", get(handlers::jobs::get_job))
+        // Job status + subscribe (paired with async /api/conversations/ingest).
+        // Path-param syntax `:id` matches the rest of this router (axum 0.7);
+        // the axum 0.8 `{id}` form compiles but is treated as a literal.
+        .route("/api/jobs/:id", get(handlers::jobs::get_job))
         .route(
-            "/api/jobs/{id}/subscribe",
+            "/api/jobs/:id/subscribe",
             get(handlers::jobs::subscribe_job),
         )
         // Ontology
