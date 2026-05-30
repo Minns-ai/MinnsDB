@@ -53,6 +53,7 @@ async fn build_test_app() -> Router {
         engine,
         write_lanes,
         read_gate,
+        jobs: minnsdb_server::jobs::JobStore::new(),
         seq_tracker,
         started_at: Instant::now(),
         subscription_manager,
