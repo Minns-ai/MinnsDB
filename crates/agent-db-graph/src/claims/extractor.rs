@@ -5,7 +5,7 @@ use super::llm_client::{LlmClient, LlmExtractionRequest};
 use super::store::ClaimStore;
 use super::types::*;
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -186,29 +186,72 @@ impl ClaimExtractionQueue {
                     }
                 }
 
-                // Pre-compute claim embedding (used in both fallback and scoring)
-                let claim_embedding = embedding_client
-                    .embed(EmbeddingRequest {
-                        text: llm_claim.claim_text.clone(),
+                // Decide upfront which sentences we'll need embeddings
+                // for. If entity overlap already picked candidates, only
+                // those need embedding. Otherwise the fallback path will
+                // score every context sentence to pick the top 3, so all
+                // of them need embedding.
+                //
+                // Build ONE batch — claim text + every needed sentence —
+                // and call embed_batch once. The previous implementation
+                // fired one HTTP round-trip per sentence (claim text +
+                // fallback loop + scoring loop), which for ~10-50
+                // sentences per claim was several seconds of pure
+                // latency on the critical path.
+                let need_fallback_pool = candidate_sentences.is_empty()
+                    && !context_sentence_entities.is_empty();
+                let sentences_for_batch: Vec<_> = if need_fallback_pool {
+                    context_sentence_entities.iter().collect()
+                } else {
+                    candidate_sentences
+                        .iter()
+                        .map(|(idx, _sent, _score)| &context_sentence_entities[*idx])
+                        .collect()
+                };
+
+                // First item is the claim text; remainder are sentences.
+                let mut batch_requests = Vec::with_capacity(1 + sentences_for_batch.len());
+                batch_requests.push(EmbeddingRequest {
+                    text: llm_claim.claim_text.clone(),
+                    context: None,
+                });
+                for sent in &sentences_for_batch {
+                    batch_requests.push(EmbeddingRequest {
+                        text: sent.text.clone(),
                         context: None,
-                    })
-                    .await?
-                    .embedding;
+                    });
+                }
+                let batch_responses = embedding_client.embed_batch(batch_requests).await?;
+                let claim_embedding = batch_responses[0].embedding.clone();
+                // Map sentence index in `context_sentence_entities` → its
+                // cached embedding for O(1) lookup in the scoring loop.
+                let mut sentence_embeddings: HashMap<usize, Vec<f32>> =
+                    HashMap::with_capacity(sentences_for_batch.len());
+                if need_fallback_pool {
+                    // Indexed by position in context_sentence_entities,
+                    // which we iterated in order above.
+                    for (i, resp) in batch_responses.iter().skip(1).enumerate() {
+                        sentence_embeddings.insert(i, resp.embedding.clone());
+                    }
+                } else {
+                    // Indexed by candidate_sentences' original indices.
+                    for ((sent_idx, _sent, _score), resp) in candidate_sentences
+                        .iter()
+                        .zip(batch_responses.iter().skip(1))
+                    {
+                        sentence_embeddings.insert(*sent_idx, resp.embedding.clone());
+                    }
+                }
 
                 // fallback to top-k sentences by semantic similarity if none found
-                if candidate_sentences.is_empty() && !context_sentence_entities.is_empty() {
+                if need_fallback_pool {
                     let mut scored_sentences = Vec::new();
                     for (i, sent) in context_sentence_entities.iter().enumerate() {
-                        let sent_embedding = embedding_client
-                            .embed(EmbeddingRequest {
-                                text: sent.text.clone(),
-                                context: None,
-                            })
-                            .await?
-                            .embedding;
-
+                        let sent_embedding = sentence_embeddings
+                            .get(&i)
+                            .expect("fallback path embedded every context sentence");
                         let sim =
-                            VectorSimilarity::cosine_similarity(&claim_embedding, &sent_embedding);
+                            VectorSimilarity::cosine_similarity(&claim_embedding, sent_embedding);
                         scored_sentences.push((i, sent.clone(), sim));
                     }
 
@@ -231,13 +274,22 @@ impl ClaimExtractionQueue {
                 let mut best_diagnostics = None;
 
                 for (sent_idx, sent, _initial_sim) in candidate_sentences {
-                    let sent_embedding = embedding_client
-                        .embed(EmbeddingRequest {
-                            text: sent.text.clone(),
-                            context: None,
-                        })
-                        .await?
-                        .embedding;
+                    // Fetch the cached embedding. In the fallback path we
+                    // embedded every context sentence; in the entity-overlap
+                    // path we embedded exactly the candidate sentences.
+                    // Either way the index is in the map. If a future change
+                    // breaks that invariant we re-embed on demand rather
+                    // than panic, so the scorer degrades gracefully.
+                    let sent_embedding = match sentence_embeddings.get(&sent_idx).cloned() {
+                        Some(e) => e,
+                        None => embedding_client
+                            .embed(EmbeddingRequest {
+                                text: sent.text.clone(),
+                                context: None,
+                            })
+                            .await?
+                            .embedding,
+                    };
 
                     let similarity =
                         VectorSimilarity::cosine_similarity(&claim_embedding, &sent_embedding);
