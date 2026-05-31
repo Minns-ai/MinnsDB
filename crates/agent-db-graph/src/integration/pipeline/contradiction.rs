@@ -3,7 +3,7 @@
 // Update classification: distinguish *evolution* (state legitimately changed
 // over time), *contradiction* (two facts disagree at overlapping times),
 // *reaffirmation* (new fact restates an active fact), and *independent*
-// (nothing to reconcile). The EvoKG distinction in one place.
+// (nothing to reconcile). All four outcomes live behind one classifier.
 //
 // Both `state_tracking.rs` and `fact_writing.rs` call `classify_update`
 // before they mutate the graph, then dispatch on the returned `UpdateKind`.
