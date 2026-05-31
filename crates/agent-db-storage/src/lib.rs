@@ -31,12 +31,14 @@ pub mod error {
     pub type StorageResult<T> = Result<T, StorageError>;
 }
 
+pub mod commit_coordinator;
 pub mod redb_backend;
 pub mod schema;
 pub mod versioned;
 pub mod wal;
 
 // Re-export commonly used items
+pub use commit_coordinator::{BatcherConfig, CommitCoordinator, CommitFuture, CoordinatorError};
 pub use error::{StorageError, StorageResult};
 pub use redb_backend::{table_names, BatchOperation, ForEachError, RedbBackend, RedbConfig};
 pub use schema::{check_schema_version, stamp_schema_version, SchemaError, SchemaVersion};
