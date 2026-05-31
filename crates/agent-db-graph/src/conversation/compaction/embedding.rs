@@ -233,23 +233,45 @@ pub(crate) async fn embed_nodes_and_create_claims(
         None => return,
     };
 
-    let mut claims_created = 0usize;
-    for (i, fact) in facts.iter().enumerate() {
-        // Embed the fact statement
-        let embedding = match embedding_client
-            .embed(crate::claims::EmbeddingRequest {
-                text: fact.statement.clone(),
-                context: Some(format!(
-                    "{} {} {}",
-                    fact.subject, fact.predicate, fact.object
-                )),
-            })
-            .await
-        {
-            Ok(resp) => resp.embedding,
-            Err(_) => vec![], // store claim without embedding — BM25 still works
-        };
+    // Embed every fact's statement in ONE batched HTTP call.
+    //
+    // The previous implementation called `.embed(...)` once per fact
+    // inside the loop below, costing N sequential round-trips to the
+    // embedding provider. With N ~10-50 facts per ingest and ~100 ms
+    // per round-trip, that was ~1-5 s of pure network latency on the
+    // critical path. `embed_batch` collapses it into one HTTP call.
+    //
+    // On batch failure every claim still gets stored with an empty
+    // embedding, matching the per-call fallback semantics — BM25
+    // continues to surface the claim, vector search just doesn't.
+    let embedding_requests: Vec<crate::claims::EmbeddingRequest> = facts
+        .iter()
+        .map(|fact| crate::claims::EmbeddingRequest {
+            text: fact.statement.clone(),
+            context: Some(format!(
+                "{} {} {}",
+                fact.subject, fact.predicate, fact.object
+            )),
+        })
+        .collect();
+    let fact_embeddings: Vec<Vec<f32>> = match embedding_client
+        .embed_batch(embedding_requests)
+        .await
+    {
+        Ok(responses) => responses.into_iter().map(|r| r.embedding).collect(),
+        Err(e) => {
+            tracing::debug!(
+                "COMPACTION: fact batch embedding failed ({} facts): {e} — storing claims without embeddings",
+                facts.len()
+            );
+            // Empty vec per fact preserves the iteration alignment used
+            // by the zip below; downstream code checks `embedding.is_empty()`.
+            vec![Vec::new(); facts.len()]
+        },
+    };
 
+    let mut claims_created = 0usize;
+    for (i, (fact, embedding)) in facts.iter().zip(fact_embeddings.into_iter()).enumerate() {
         let claim_id = match claim_store.next_id() {
             Ok(id) => id,
             Err(_) => continue,
