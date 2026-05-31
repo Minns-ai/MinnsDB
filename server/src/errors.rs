@@ -28,6 +28,27 @@ pub enum ApiError {
     GatewayTimeout(String),
 }
 
+/// Human-readable rendering for log lines and persisted JobState bodies.
+/// Use this in preference to `{:?}` (Debug) anywhere the message lands
+/// in user-visible output — Debug leaks the enum-variant name into the
+/// payload, which is internal implementation detail.
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, msg) = match self {
+            ApiError::Internal(m) => ("internal", m),
+            ApiError::BadRequest(m) => ("bad_request", m),
+            ApiError::NotFound(m) => ("not_found", m),
+            ApiError::NotImplemented(m) => ("not_implemented", m),
+            ApiError::ServiceUnavailable(m) => ("service_unavailable", m),
+            ApiError::TooManyRequests(m) => ("too_many_requests", m),
+            ApiError::GatewayTimeout(m) => ("gateway_timeout", m),
+        };
+        write!(f, "{}: {}", kind, msg)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message, details) = match self {

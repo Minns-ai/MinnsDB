@@ -104,10 +104,16 @@ const MAX_CONVERSATION_STATES: usize = 1000;
 #[derive(Debug, Deserialize, Default)]
 pub struct IngestQueryParams {
     /// `true` → hold the connection until the pipeline completes and return
-    /// the full result body. `false` (default) → return 202 with a job_id
-    /// and process in the background.
+    /// the full result body. `false` (default, also when omitted) →
+    /// return 202 with a job_id and process in the background.
+    ///
+    /// Modelled as a plain `bool` rather than `Option<bool>` because there
+    /// are only two meaningful states (block vs return immediately); the
+    /// previous tri-state allowed `Some(false)` and `None` to mean the
+    /// same thing, which is exactly the invalid-states case rule 42 of
+    /// `apirDesignRules.md` calls out.
     #[serde(default)]
-    pub wait: Option<bool>,
+    pub wait: bool,
 }
 
 /// POST /api/conversations/ingest — ingest conversation sessions.
@@ -152,7 +158,7 @@ pub async fn ingest_conversation(
     }
 
     let case_id = request.case_id.clone().unwrap_or_else(uuid_v4_simple);
-    let wait = params.wait.unwrap_or(false);
+    let wait = params.wait;
 
     // Content-hash dedupe. Repeat submissions of the same payload reuse
     // the existing job rather than re-running the 30s pipeline.
@@ -269,6 +275,11 @@ async fn wait_for_job(state: &AppState, id: &str) -> Result<Response, ApiError> 
                 return Err(ApiError::Internal(format!("ingest failed: {}", error)));
             },
             Ok(_) => continue,
+            // Broadcast dropped (lagged or sender closed). Re-check the
+            // store: a terminal state is still serveable, a non-terminal
+            // state means the broadcaster genuinely went away (e.g. the
+            // task panicked) — surface that distinctly rather than
+            // claiming the channel closed before completion.
             Err(_) => match state.jobs.get(id) {
                 Ok(JobState::Done { response }) => {
                     return Ok((StatusCode::OK, Json(response)).into_response());
@@ -276,19 +287,49 @@ async fn wait_for_job(state: &AppState, id: &str) -> Result<Response, ApiError> 
                 Ok(JobState::Failed { error }) => {
                     return Err(ApiError::Internal(format!("ingest failed: {}", error)));
                 },
-                _ => {
-                    return Err(ApiError::Internal(
-                        "job channel closed before completion".into(),
-                    ))
+                Ok(JobState::Queued) | Ok(JobState::Processing) => {
+                    return Err(ApiError::Internal(format!(
+                        "ingest job {} lost its broadcast channel while still {} — \
+                         worker may have panicked. Poll /api/jobs/{} for current state.",
+                        id,
+                        match state.jobs.get(id) {
+                            Ok(JobState::Queued) => "queued",
+                            _ => "processing",
+                        },
+                        id
+                    )));
+                },
+                Err(_) => {
+                    return Err(ApiError::NotFound(format!(
+                        "ingest job {} evicted before completion",
+                        id
+                    )));
                 },
             },
         }
     }
 }
 
+/// Hard upper bound on a single ingest pipeline run. Without this, an
+/// LLM hang (OpenAI degradation, network partition, deadlock) leaves
+/// the job stuck in `Processing` forever, holding an inflight slot
+/// against `JOB_QUEUE_MAX_INFLIGHT`. At default 128 inflight the queue
+/// can wedge on a single bad batch of requests.
+///
+/// The number is generous (10 min): a worst-case 8-session compaction
+/// fans out ~10 LLM calls and lands in ~30s on a healthy provider; 10
+/// min covers exponential backoff + degraded-provider failover before
+/// we declare the job dead.
+const INGEST_PIPELINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Spawn the actual ingest pipeline as a detached tokio task, recording
 /// the outcome back to the JobStore so synchronous waiters and async
 /// pollers see the same result.
+///
+/// Wraps the pipeline in a hard `INGEST_PIPELINE_TIMEOUT` so a hung LLM
+/// cannot occupy an inflight slot indefinitely. On timeout the job is
+/// marked `Failed` with a categorised error and the slot frees up for
+/// the next submission.
 fn spawn_ingest_pipeline(
     state: AppState,
     job_id: String,
@@ -297,15 +338,31 @@ fn spawn_ingest_pipeline(
 ) {
     tokio::spawn(async move {
         state.jobs.transition(&job_id, JobState::Processing);
-        match run_ingest_pipeline(&state, case_id.clone(), request).await {
-            Ok(response) => {
+        let outcome = tokio::time::timeout(
+            INGEST_PIPELINE_TIMEOUT,
+            run_ingest_pipeline(&state, case_id.clone(), request),
+        )
+        .await;
+        match outcome {
+            Ok(Ok(response)) => {
                 state.jobs.transition(&job_id, JobState::Done { response });
             },
-            Err(e) => {
-                // ApiError doesn't impl Display; Debug is the supported
-                // formatter for surfacing into log + job state.
-                let msg = format!("{:?}", e);
+            Ok(Err(e)) => {
+                // Display avoids leaking the Debug enum-variant name
+                // into the externally-visible JobState body. Renders as
+                // "internal: <msg>", "bad_request: <msg>", etc.
+                let msg = e.to_string();
                 warn!("ingest pipeline error case_id={} err={}", case_id, msg);
+                state
+                    .jobs
+                    .transition(&job_id, JobState::Failed { error: msg });
+            },
+            Err(_elapsed) => {
+                let msg = format!(
+                    "ingest pipeline timed out after {} s (LLM hang or provider degradation)",
+                    INGEST_PIPELINE_TIMEOUT.as_secs()
+                );
+                warn!("ingest pipeline TIMEOUT case_id={}", case_id);
                 state
                     .jobs
                     .transition(&job_id, JobState::Failed { error: msg });

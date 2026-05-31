@@ -219,28 +219,29 @@ impl JobStore {
     /// Sweep terminal jobs older than `TERMINAL_TTL` and enforce
     /// `MAX_TOTAL_JOBS`. Called inline on submit; cheap because the
     /// map is small in steady state.
+    ///
+    /// Uses `HashMap::retain` for the TTL sweep (one pass, no Vec
+    /// allocation) per the design-rules guidance against unnecessary
+    /// allocation on hot paths. The overflow trim still allocates a
+    /// small `(id, ts)` Vec to sort by age — unavoidable because
+    /// `retain` has no ordering hook — but that branch only fires when
+    /// `jobs.len() > MAX_TOTAL_JOBS = 10_000`, which is the hard
+    /// safety-net case.
     fn evict_expired(&self) {
         let now = Instant::now();
         let mut jobs = self.inner.jobs.lock();
         let mut by_hash = self.inner.by_hash.lock();
 
-        // TTL sweep on terminal jobs.
-        let expired: Vec<String> = jobs
-            .iter()
-            .filter(|(_, e)| {
-                e.state.is_terminal() && now.duration_since(e.created_at) > TERMINAL_TTL
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &expired {
-            jobs.remove(id);
-        }
+        // TTL sweep on terminal jobs, in place.
+        jobs.retain(|_, e| {
+            !(e.state.is_terminal() && now.duration_since(e.created_at) > TERMINAL_TTL)
+        });
 
         // Hard cap. If we're still over the limit, drop oldest terminal
         // jobs first; non-terminal entries are spared because they
         // represent work in flight that the client expects to find.
         if jobs.len() > MAX_TOTAL_JOBS {
-            let mut by_age: Vec<(String, Instant)> = jobs
+            let mut by_age: Vec<(JobId, Instant)> = jobs
                 .iter()
                 .filter(|(_, e)| e.state.is_terminal())
                 .map(|(id, e)| (id.clone(), e.created_at))
