@@ -338,27 +338,32 @@ impl PredicateCanonicalizer {
         // Collect canonical predicates from ontology (all single-valued with non-empty canonical)
         let to_embed = self.ontology.single_valued_canonicals();
 
-        // Embed each canonical predicate with category context
-        for (category, predicate) in &to_embed {
-            let text = format!("{} {}", category, predicate.replace('_', " "));
-            let request = crate::claims::EmbeddingRequest {
-                text,
+        // Embed every canonical predicate in ONE batched HTTP call. The
+        // previous loop fired one round-trip per predicate (~10-20
+        // predicates × ~100ms each = 1-2 s) on every cold init of the
+        // canonicalizer, which lazily happens during the first ingest.
+        // Batching collapses that into one call.
+        let predicate_requests: Vec<crate::claims::EmbeddingRequest> = to_embed
+            .iter()
+            .map(|(category, predicate)| crate::claims::EmbeddingRequest {
+                text: format!("{} {}", category, predicate.replace('_', " ")),
                 context: Some(format!("predicate for {} domain", category)),
-            };
-            match self.embedding_client.embed(request).await {
-                Ok(resp) => {
+            })
+            .collect();
+        match self.embedding_client.embed_batch(predicate_requests).await {
+            Ok(responses) => {
+                for ((category, predicate), resp) in to_embed.iter().zip(responses.into_iter()) {
                     let key = format!("{}:{}", category, predicate);
                     embeddings.insert(key, resp.embedding);
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to embed canonical predicate '{}:{}': {}",
-                        category,
-                        predicate,
-                        e
-                    );
-                },
-            }
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to embed {} canonical predicates in batch: {}",
+                    to_embed.len(),
+                    e
+                );
+            },
         }
 
         // Embed each top-level category as a rich description: label,
@@ -369,28 +374,42 @@ impl PredicateCanonicalizer {
         // right category by cosine similarity alone.
         let mut category_embeddings = self.category_embeddings.write().await;
         let descriptors = self.ontology.top_level_property_descriptors();
-        for (id, label, comment, canonical) in &descriptors {
-            // Skip empty descriptors — a property with no label, comment,
-            // and canonical predicate has nothing to anchor an embedding
-            // against and would just add noise to the classifier.
-            if label.is_empty() && comment.is_empty() && canonical.is_empty() {
-                continue;
-            }
-            let text = format!("{} {} {}", label, comment, canonical.replace('_', " "))
-                .trim()
-                .to_string();
-            let request = crate::claims::EmbeddingRequest {
-                text,
-                context: Some(format!("ontology category {}", id)),
-            };
-            match self.embedding_client.embed(request).await {
-                Ok(resp) => {
-                    category_embeddings.insert(id.clone(), resp.embedding);
+        // Same batching reasoning as the canonical-predicates loop above:
+        // ~10-15 round-trips per init become one HTTP call.
+        //
+        // Skip empty descriptors before the batch — a property with no
+        // label, comment, or canonical predicate has nothing to anchor
+        // an embedding against and would just add noise.
+        let category_inputs: Vec<&(String, String, String, String)> = descriptors
+            .iter()
+            .filter(|(_id, label, comment, canonical)| {
+                !(label.is_empty() && comment.is_empty() && canonical.is_empty())
+            })
+            .collect();
+        let category_requests: Vec<crate::claims::EmbeddingRequest> = category_inputs
+            .iter()
+            .map(
+                |(id, label, comment, canonical)| crate::claims::EmbeddingRequest {
+                    text: format!("{} {} {}", label, comment, canonical.replace('_', " "))
+                        .trim()
+                        .to_string(),
+                    context: Some(format!("ontology category {}", id)),
                 },
-                Err(e) => {
-                    tracing::warn!("Failed to embed category '{}': {}", id, e);
-                },
-            }
+            )
+            .collect();
+        match self.embedding_client.embed_batch(category_requests).await {
+            Ok(responses) => {
+                for ((id, _, _, _), resp) in category_inputs.iter().zip(responses.into_iter()) {
+                    category_embeddings.insert((*id).clone(), resp.embedding);
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to embed {} ontology categories in batch: {}",
+                    category_inputs.len(),
+                    e
+                );
+            },
         }
 
         tracing::info!(
