@@ -224,12 +224,21 @@ fn run_batcher(
     shutdown: Arc<AtomicBool>,
 ) {
     let mut batch: Vec<Submission> = Vec::with_capacity(config.max_batch_size);
+    // Bounded poll interval so the shutdown flag is observed within
+    // 100ms of being set. Without this, a coordinator with no producers
+    // wedges on `rx.recv()` forever and `shutdown()`'s `handle.join()`
+    // hangs the calling test/thread.
+    let poll_interval = Duration::from_millis(100);
     loop {
-        // Block until the first submission arrives (or all senders
-        // dropped / shutdown signalled).
-        match rx.recv() {
+        if shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        // Block up to `poll_interval` for the first submission, then
+        // re-check the shutdown flag.
+        match rx.recv_timeout(poll_interval) {
             Ok(first) => batch.push(first),
-            Err(_) => return, // all senders dropped → exit
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         }
         if shutdown.load(Ordering::Acquire) {
             // Still process whatever's already queued (graceful drain),
