@@ -433,6 +433,28 @@ impl GraphEngine {
             _ => None,
         };
 
+        // Spawn the hint classifier concurrently with local retrieval. The
+        // classifier only consumes `question`, never the retrieval results,
+        // so it can run alongside BM25 + vector + claims + entity BFS below.
+        // We join the handle right before the post-fusion filters that
+        // actually consume the hint. Skipped when the caller already ran
+        // the classifier (precomputed_hint) or no LLM is wired in.
+        let hint_task = if precomputed_hint.is_some() {
+            None
+        } else if let Some(ref llm_client) = self.unified_llm_client {
+            let client = Arc::clone(llm_client);
+            let q = question.to_string();
+            Some(tokio::spawn(async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    crate::nlq::llm_hint::classify_with_llm(client.as_ref(), &q),
+                )
+                .await
+            }))
+        } else {
+            None
+        };
+
         // When metadata filtering is active, over-fetch so we have enough
         // results after filtering. The multiplier ensures we don't lose all
         // top results to non-matching metadata.
@@ -708,29 +730,29 @@ impl GraphEngine {
         // 5a. Classify query intent + temporal frame. Reuse the
         // caller-provided hint when available (the planner pre-classifies
         // and routes UnifiedRetrieval back here — re-classifying would
-        // burn a second LLM call per fallback query). Only call the
-        // classifier when we have no hint to start from.
+        // burn a second LLM call per fallback query). Otherwise join the
+        // hint_task spawned alongside retrieval; by this point the LLM
+        // call is usually finished, so the join is near-zero.
         let (llm_hint, temporal_frame) = if let Some(hint) = precomputed_hint {
             let frame = hint.temporal_frame.clone();
             (Some(hint), frame)
-        } else if let Some(ref llm_client) = self.unified_llm_client {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                crate::nlq::llm_hint::classify_with_llm(llm_client.as_ref(), question),
-            )
-            .await
-            {
-                Ok(Ok(Some(hint))) => {
+        } else if let Some(handle) = hint_task {
+            match handle.await {
+                Ok(Ok(Ok(Some(hint)))) => {
                     let frame = hint.temporal_frame.clone();
                     (Some(hint), frame)
                 },
-                Ok(Ok(None)) => (None, crate::nlq::llm_hint::detect_temporal_frame(question)),
-                Ok(Err(e)) => {
+                Ok(Ok(Ok(None))) => (None, crate::nlq::llm_hint::detect_temporal_frame(question)),
+                Ok(Ok(Err(e))) => {
                     tracing::debug!("LLM classification failed (non-fatal): {}", e);
                     (None, crate::nlq::llm_hint::detect_temporal_frame(question))
                 },
-                Err(_) => {
+                Ok(Err(_)) => {
                     tracing::debug!("LLM classification timed out");
+                    (None, crate::nlq::llm_hint::detect_temporal_frame(question))
+                },
+                Err(join_err) => {
+                    tracing::warn!("nlq hint_task join error: {join_err}");
                     (None, crate::nlq::llm_hint::detect_temporal_frame(question))
                 },
             }
@@ -993,10 +1015,44 @@ impl GraphEngine {
             retrieval_context
         };
 
+        // 7. Run DRIFT for cross-entity / multi-hop / exploration queries only.
+        // Simple current-state lookups are better served by the filtered synthesis
+        // below (fewer LLM calls, no stale community summary leakage).
+        // Skip DRIFT if the dynamic projection already answered the query.
+        // Computed BEFORE synthesis so a DRIFT-bound query can skip the
+        // unconditional synthesis call whose result DRIFT discards.
+        let use_drift = self.config.enable_drift_search && !had_dynamic_projection && {
+            match llm_hint.as_ref().map(|h| &h.intent_hint) {
+                // Multi-hop / cross-entity intents benefit from DRIFT's community context
+                Some(crate::nlq::llm_hint::IntentHint::Path)
+                | Some(crate::nlq::llm_hint::IntentHint::Subgraph)
+                | Some(crate::nlq::llm_hint::IntentHint::Aggregate)
+                | Some(crate::nlq::llm_hint::IntentHint::AggregateBalance)
+                | Some(crate::nlq::llm_hint::IntentHint::Similarity)
+                | Some(crate::nlq::llm_hint::IntentHint::Knowledge) => true,
+                // GenericGraph structure hint also suggests cross-entity traversal
+                _ => matches!(
+                    llm_hint.as_ref().map(|h| &h.structure_hint),
+                    Some(crate::nlq::llm_hint::StructureHint::GenericGraph)
+                ),
+            }
+        };
+
+        // Whether DRIFT will actually run end-to-end. When `use_drift` is true
+        // but no llm_client or community summaries are present, the DRIFT block
+        // below falls back to the synthesised answer, so we still need to run
+        // synthesis in that case. Reading `community_summaries` here is a brief
+        // read lock; the DRIFT block re-acquires it when it actually proceeds.
+        let drift_will_run = use_drift
+            && self.unified_llm_client.is_some()
+            && !self.community_summaries.read().await.is_empty();
+
         // 6b. LLM answer synthesis: produce a focused answer from retrieved context.
         // If the LLM is available, we ask it to answer the question using ONLY the
         // retrieved facts. This replaces the raw bullet-point dump with a direct answer.
         // Falls back to the raw retrieval context if LLM is unavailable or fails.
+        // Skipped when DRIFT will run, since its synthesis call replaces this
+        // answer and the result would be discarded anyway.
         const MAX_CONTEXT_CHARS: usize = 24_000;
         let synthesis_context = if retrieval_context.len() > MAX_CONTEXT_CHARS {
             let mut end = MAX_CONTEXT_CHARS;
@@ -1007,7 +1063,10 @@ impl GraphEngine {
         } else {
             &retrieval_context
         };
-        let answer = if retrieval_context != "No relevant information found." {
+        let answer = if drift_will_run {
+            // DRIFT path will own synthesis; placeholder is overwritten below.
+            retrieval_context.clone()
+        } else if retrieval_context != "No relevant information found." {
             let synth_client = self
                 .synthesis_llm_client
                 .as_ref()
@@ -1042,27 +1101,6 @@ impl GraphEngine {
             }
         } else {
             retrieval_context
-        };
-
-        // 7. Run DRIFT for cross-entity / multi-hop / exploration queries only.
-        // Simple current-state lookups are better served by the filtered synthesis
-        // above (fewer LLM calls, no stale community summary leakage).
-        // Skip DRIFT if the dynamic projection already answered the query.
-        let use_drift = self.config.enable_drift_search && !had_dynamic_projection && {
-            match llm_hint.as_ref().map(|h| &h.intent_hint) {
-                // Multi-hop / cross-entity intents benefit from DRIFT's community context
-                Some(crate::nlq::llm_hint::IntentHint::Path)
-                | Some(crate::nlq::llm_hint::IntentHint::Subgraph)
-                | Some(crate::nlq::llm_hint::IntentHint::Aggregate)
-                | Some(crate::nlq::llm_hint::IntentHint::AggregateBalance)
-                | Some(crate::nlq::llm_hint::IntentHint::Similarity)
-                | Some(crate::nlq::llm_hint::IntentHint::Knowledge) => true,
-                // GenericGraph structure hint also suggests cross-entity traversal
-                _ => matches!(
-                    llm_hint.as_ref().map(|h| &h.structure_hint),
-                    Some(crate::nlq::llm_hint::StructureHint::GenericGraph)
-                ),
-            }
         };
         let (final_answer, drift_explanation) = if use_drift {
             if let Some(ref llm_client) = self.unified_llm_client {
