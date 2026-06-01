@@ -6,6 +6,29 @@
 
 use async_trait::async_trait;
 
+/// Build a `reqwest::Client` tuned for outbound LLM/embedding calls.
+///
+/// - 60s overall timeout: caps any single request even if app-level
+///   `tokio::time::timeout` wrappers are missing or removed.
+/// - 30s TCP keepalive: keeps idle pool connections alive across
+///   NAT/firewall timeouts so the next request does not pay a stale-socket
+///   retry. Without this, idle connections quietly die between requests
+///   and the next caller sees a transport error.
+///
+/// HTTP/2 is negotiated via ALPN automatically over HTTPS — both OpenAI
+/// and Anthropic endpoints serve HTTP/2, so multiplexing happens without
+/// explicit opt-in.
+///
+/// The default `pool_max_idle_per_host` (32) is left as-is; the read
+/// gate and write lane caps sit below that.
+pub fn build_default_llm_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        .build()
+        .expect("failed to build default LLM HTTP client")
+}
+
 /// Request to send to an LLM.
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
@@ -46,7 +69,7 @@ impl OpenAiLlmClient {
         Self {
             api_key,
             model,
-            http: reqwest::Client::new(),
+            http: build_default_llm_http_client(),
         }
     }
 }
@@ -192,7 +215,7 @@ impl AnthropicLlmClient {
         Self {
             api_key,
             model,
-            http: reqwest::Client::new(),
+            http: build_default_llm_http_client(),
         }
     }
 }

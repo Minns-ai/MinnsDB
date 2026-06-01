@@ -661,7 +661,7 @@ impl OpenAiMetadataNormalizer {
         Self {
             api_key,
             model,
-            http: reqwest::Client::new(),
+            http: crate::llm_client::build_default_llm_http_client(),
             cache: tokio::sync::Mutex::new(NormCache::new(500)),
         }
     }
@@ -729,7 +729,7 @@ impl AnthropicMetadataNormalizer {
         Self {
             api_key,
             model,
-            http: reqwest::Client::new(),
+            http: crate::llm_client::build_default_llm_http_client(),
             cache: tokio::sync::Mutex::new(NormCache::new(500)),
         }
     }

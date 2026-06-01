@@ -133,7 +133,7 @@ impl RefinementEngine {
         Self {
             config,
             api_key,
-            http_client: reqwest::Client::new(),
+            http_client: crate::llm_client::build_default_llm_http_client(),
         }
     }
 

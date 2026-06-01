@@ -21,7 +21,7 @@ impl OpenAiPlanningClient {
         Self {
             api_key,
             model,
-            client: reqwest::Client::new(),
+            client: crate::llm_client::build_default_llm_http_client(),
         }
     }
 }
@@ -106,7 +106,7 @@ impl AnthropicPlanningClient {
         Self {
             api_key,
             model,
-            client: reqwest::Client::new(),
+            client: crate::llm_client::build_default_llm_http_client(),
         }
     }
 }
