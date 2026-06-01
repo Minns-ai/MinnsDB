@@ -45,6 +45,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/docs", get(handlers::docs))
         // Health check
         .route("/api/health", get(handlers::health_check))
+        // Prometheus scrape endpoint (text/plain; version=0.0.4). Mounted on
+        // the main router rather than a separate port so deployments need
+        // only one open listener; scrape target lives at /metrics.
+        .route("/metrics", get(handlers::metrics_endpoint))
         // Events
         .route(
             "/api/events",

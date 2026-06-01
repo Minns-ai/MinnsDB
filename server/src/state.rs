@@ -7,6 +7,7 @@ use crate::write_lanes::WriteLanes;
 use agent_db_graph::subscription::manager::SubscriptionManager;
 use agent_db_graph::GraphEngine;
 use agent_db_tables::catalog::TableCatalog;
+use metrics_exporter_prometheus::PrometheusHandle;
 use minns_auth::store::KeyStore;
 use minns_wasm_runtime::registry::ModuleRegistry;
 use minns_wasm_runtime::runtime::WasmRuntime;
@@ -46,4 +47,6 @@ pub struct AppState {
     pub auth_enabled: bool,
     /// Limits concurrent exports to 1.
     pub export_semaphore: Arc<Semaphore>,
+    /// Prometheus exporter handle. Rendered on each scrape of `/metrics`.
+    pub metrics_handle: PrometheusHandle,
 }

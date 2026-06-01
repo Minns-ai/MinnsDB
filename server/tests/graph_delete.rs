@@ -65,6 +65,9 @@ async fn build_test_app() -> Router {
         key_store: Arc::new(tokio::sync::RwLock::new(minns_auth::store::KeyStore::new())),
         auth_enabled: false,
         export_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        metrics_handle: metrics_exporter_prometheus::PrometheusBuilder::new()
+            .build_recorder()
+            .handle(),
     };
 
     minnsdb_server::routes::create_router(state)

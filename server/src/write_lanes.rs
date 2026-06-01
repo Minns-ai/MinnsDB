@@ -181,7 +181,12 @@ impl WriteLanes {
         let mut lane_txs = Vec::with_capacity(num_lanes);
         let mut handles = Vec::with_capacity(num_lanes);
 
+        // Seed per-lane gauges so scrapes prior to first submit see a value.
+        metrics::gauge!("minns_write_lane_capacity").set(capacity as f64);
+        metrics::gauge!("minns_write_lane_count").set(num_lanes as f64);
         for lane_id in 0..num_lanes {
+            metrics::gauge!("minns_write_lane_in_flight", "lane" => lane_id.to_string()).set(0.0);
+
             let (tx, rx) = mpsc::channel(capacity);
             lane_txs.push(tx);
 
@@ -225,11 +230,15 @@ impl WriteLanes {
     /// or if the lanes have been cancelled.
     pub async fn submit(&self, routing_key: u64, job: WriteJob) -> Result<(), String> {
         let lane_index = (routing_key as usize) % self.num_lanes;
+        let lane_label = lane_index.to_string();
         self.metrics.total_submitted.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("minns_write_lane_submitted_total").increment(1);
 
         // Atomic check — no lock
         if self.cancel.is_cancelled() {
             self.metrics.total_rejected.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("minns_write_lane_rejected_total", "reason" => "cancelled")
+                .increment(1);
             return Err("Write lanes have been shut down".to_string());
         }
 
@@ -242,6 +251,12 @@ impl WriteLanes {
                 None => {
                     self.metrics.total_rejected.fetch_add(1, Ordering::Relaxed);
                     self.metrics.per_lane_rejected[lane_index].fetch_add(1, Ordering::Relaxed);
+                    metrics::counter!(
+                        "minns_write_lane_rejected_total",
+                        "reason" => "lane_dead",
+                        "lane" => lane_label,
+                    )
+                    .increment(1);
                     return Err(format!(
                         "Write lane {} is dead (senders dropped)",
                         lane_index
@@ -250,19 +265,40 @@ impl WriteLanes {
             }
         };
 
-        match tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(job)).await {
+        let submit_start = std::time::Instant::now();
+        let send_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(job)).await;
+        let wait = submit_start.elapsed();
+        metrics::histogram!("minns_write_lane_submit_seconds").record(wait.as_secs_f64());
+
+        match send_result {
             Ok(Ok(())) => {
                 self.metrics.per_lane_in_flight[lane_index].fetch_add(1, Ordering::Release);
+                let depth =
+                    self.metrics.per_lane_in_flight[lane_index].load(Ordering::Acquire) as f64;
+                metrics::gauge!("minns_write_lane_in_flight", "lane" => lane_label).set(depth);
                 Ok(())
             },
             Ok(Err(_)) => {
                 self.metrics.total_rejected.fetch_add(1, Ordering::Relaxed);
                 self.metrics.per_lane_rejected[lane_index].fetch_add(1, Ordering::Relaxed);
+                metrics::counter!(
+                    "minns_write_lane_rejected_total",
+                    "reason" => "worker_exited",
+                    "lane" => lane_label,
+                )
+                .increment(1);
                 Err(format!("Write lane {} is dead (worker exited)", lane_index))
             },
             Err(_) => {
                 self.metrics.total_rejected.fetch_add(1, Ordering::Relaxed);
                 self.metrics.per_lane_rejected[lane_index].fetch_add(1, Ordering::Relaxed);
+                metrics::counter!(
+                    "minns_write_lane_rejected_total",
+                    "reason" => "backpressure",
+                    "lane" => lane_label,
+                )
+                .increment(1);
                 Err(format!(
                     "Write lane {} is full (backpressure timeout after 5s)",
                     lane_index
@@ -394,11 +430,18 @@ async fn execute_job(
         },
     }
 
-    let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let elapsed = start.elapsed();
+    let elapsed_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
     metrics.per_lane_in_flight[lane_id].fetch_sub(1, Ordering::Release);
     metrics.per_lane_completed[lane_id].fetch_add(1, Ordering::Relaxed);
     metrics.total_completed.fetch_add(1, Ordering::Relaxed);
     metrics.write_latency.lock().record(elapsed_us);
+
+    let lane_label = lane_id.to_string();
+    let depth = metrics.per_lane_in_flight[lane_id].load(Ordering::Acquire) as f64;
+    ::metrics::gauge!("minns_write_lane_in_flight", "lane" => lane_label).set(depth);
+    ::metrics::counter!("minns_write_lane_completed_total").increment(1);
+    ::metrics::histogram!("minns_write_duration_seconds").record(elapsed.as_secs_f64());
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

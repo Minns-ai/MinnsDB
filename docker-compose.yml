@@ -44,8 +44,7 @@ services:
         condition: service_healthy
 
     ports:
-      - "3000:3000"
-      - "127.0.0.1:9090:9090"  # Metrics endpoint (not implemented)
+      - "3000:3000"  # API + /metrics (Prometheus scrape target)
 
     environment:
       - RUST_LOG=info

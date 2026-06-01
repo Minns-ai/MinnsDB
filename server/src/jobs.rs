@@ -115,6 +115,8 @@ impl JobStore {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_INFLIGHT);
+        metrics::gauge!("minns_jobs_max_inflight").set(max_inflight as f64);
+        metrics::gauge!("minns_jobs_in_flight").set(0.0);
         Self {
             inner: Arc::new(JobStoreInner {
                 jobs: Mutex::new(HashMap::new()),
@@ -136,6 +138,7 @@ impl JobStore {
         // can fetch it from the cached terminal state.
         if let Some(existing_id) = self.inner.by_hash.lock().get(&hash).cloned() {
             if let Some(entry) = self.inner.jobs.lock().get(&existing_id) {
+                metrics::counter!("minns_jobs_dedupe_hits_total").increment(1);
                 return Ok(SubmitOutcome::Existing {
                     id: existing_id,
                     state: entry.state.clone(),
@@ -156,6 +159,7 @@ impl JobStore {
             .filter(|e| !e.state.is_terminal())
             .count();
         if inflight >= self.inner.max_inflight {
+            metrics::counter!("minns_jobs_rejected_total", "reason" => "queue_full").increment(1);
             return Err(JobError::QueueFull {
                 retry_after: Duration::from_secs(5),
             });
@@ -173,6 +177,8 @@ impl JobStore {
         };
         self.inner.jobs.lock().insert(id.clone(), entry);
         self.inner.by_hash.lock().insert(hash, id.clone());
+        metrics::counter!("minns_jobs_accepted_total").increment(1);
+        metrics::gauge!("minns_jobs_in_flight").set(inflight as f64 + 1.0);
         Ok(SubmitOutcome::Created { id })
     }
 
@@ -185,12 +191,38 @@ impl JobStore {
             if entry.state.is_terminal() {
                 return;
             }
+            let was_queued = matches!(entry.state, JobState::Queued);
+            let elapsed = entry.created_at.elapsed();
+            let new_state = state.clone();
             entry.state = state.clone();
             // send returns Err only when there are no subscribers,
             // which is the common case (polling, not subscribing). The
             // broadcast channel still queues the value for late
             // subscribers up to its capacity.
             let _ = entry.tx.send(state);
+
+            // Emit metrics after the lock-touching work. `jobs` is still
+            // held but the macro calls are cheap registry lookups.
+            match &new_state {
+                JobState::Processing if was_queued => {
+                    metrics::histogram!("minns_jobs_queued_seconds").record(elapsed.as_secs_f64());
+                },
+                JobState::Done { .. } => {
+                    metrics::counter!("minns_jobs_completed_total", "status" => "done")
+                        .increment(1);
+                    metrics::histogram!("minns_jobs_total_seconds").record(elapsed.as_secs_f64());
+                    let inflight = jobs.values().filter(|e| !e.state.is_terminal()).count();
+                    metrics::gauge!("minns_jobs_in_flight").set(inflight as f64);
+                },
+                JobState::Failed { .. } => {
+                    metrics::counter!("minns_jobs_completed_total", "status" => "failed")
+                        .increment(1);
+                    metrics::histogram!("minns_jobs_total_seconds").record(elapsed.as_secs_f64());
+                    let inflight = jobs.values().filter(|e| !e.state.is_terminal()).count();
+                    metrics::gauge!("minns_jobs_in_flight").set(inflight as f64);
+                },
+                _ => {},
+            }
         }
     }
 

@@ -158,6 +158,10 @@ impl CommitCoordinator {
         let (tx, rx) = bounded::<Submission>(config.queue_capacity);
         let shutdown = Arc::new(AtomicBool::new(false));
         let batcher_shutdown = shutdown.clone();
+        // Seed gauges so scrapes prior to first submit see real values.
+        metrics::gauge!("minns_commit_coordinator_queue_depth").set(0.0);
+        metrics::gauge!("minns_commit_coordinator_queue_capacity")
+            .set(config.queue_capacity as f64);
         let handle = thread::Builder::new()
             .name("redb-commit-coordinator".to_string())
             .spawn(move || {
@@ -186,16 +190,39 @@ impl CommitCoordinator {
 
     fn enqueue(&self, ops: SubmissionOps) -> Result<CommitFuture, CoordinatorError> {
         if self.shutdown.load(Ordering::Acquire) {
+            metrics::counter!(
+                "minns_commit_coordinator_rejected_total",
+                "reason" => "shutdown",
+            )
+            .increment(1);
             return Err(CoordinatorError::Shutdown);
         }
         let (responder, rx) = oneshot::channel();
         let submission = Submission { ops, responder };
         match self.tx.try_send(submission) {
-            Ok(()) => Ok(rx),
-            Err(TrySendError::Full(_)) => Err(CoordinatorError::QueueFull {
-                retry_after: Duration::from_millis(50),
-            }),
-            Err(TrySendError::Disconnected(_)) => Err(CoordinatorError::Shutdown),
+            Ok(()) => {
+                metrics::counter!("minns_commit_coordinator_submitted_total").increment(1);
+                metrics::gauge!("minns_commit_coordinator_queue_depth").set(self.tx.len() as f64);
+                Ok(rx)
+            },
+            Err(TrySendError::Full(_)) => {
+                metrics::counter!(
+                    "minns_commit_coordinator_rejected_total",
+                    "reason" => "queue_full",
+                )
+                .increment(1);
+                Err(CoordinatorError::QueueFull {
+                    retry_after: Duration::from_millis(50),
+                })
+            },
+            Err(TrySendError::Disconnected(_)) => {
+                metrics::counter!(
+                    "minns_commit_coordinator_rejected_total",
+                    "reason" => "disconnected",
+                )
+                .increment(1);
+                Err(CoordinatorError::Shutdown)
+            },
         }
     }
 
@@ -275,6 +302,10 @@ fn run_batcher(
 
         // Commit the whole batch atomically.
         commit_batch(&backend, &mut batch);
+        // After drain, refresh the queue gauge so the next scrape sees
+        // the post-commit depth rather than the peak we observed before
+        // collecting this batch.
+        metrics::gauge!("minns_commit_coordinator_queue_depth").set(rx.len() as f64);
     }
 }
 
@@ -285,6 +316,7 @@ fn run_batcher(
 /// The batch vec is drained — callers reuse the allocation across
 /// batches so steady-state has zero per-batch growth.
 fn commit_batch(backend: &RedbBackend, batch: &mut Vec<Submission>) {
+    let waiters = batch.len();
     // Tally ops first so we allocate the right-sized vec exactly once.
     let total_ops: usize = batch
         .iter()
@@ -301,7 +333,15 @@ fn commit_batch(backend: &RedbBackend, batch: &mut Vec<Submission>) {
         }
     }
 
+    let commit_start = std::time::Instant::now();
     let result = backend.write_batch(flat);
+    let commit_elapsed = commit_start.elapsed();
+
+    let status = if result.is_ok() { "ok" } else { "error" };
+    metrics::histogram!("minns_commit_coordinator_commit_seconds", "status" => status)
+        .record(commit_elapsed.as_secs_f64());
+    metrics::histogram!("minns_commit_coordinator_batch_ops").record(total_ops as f64);
+    metrics::histogram!("minns_commit_coordinator_waiters_per_commit").record(waiters as f64);
 
     for sub in batch.drain(..) {
         let outcome = match &result {

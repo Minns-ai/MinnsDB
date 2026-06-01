@@ -32,16 +32,27 @@ pub struct ReadPermit {
 
 impl Drop for ReadPermit {
     fn drop(&mut self) {
-        let elapsed_us = u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let elapsed = self.start.elapsed();
+        let elapsed_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         self.metrics.in_flight.fetch_sub(1, Relaxed);
         self.metrics.completed.fetch_add(1, Relaxed);
         self.metrics.read_latency.lock().record(elapsed_us);
+
+        let in_flight = self.metrics.in_flight.load(Relaxed) as f64;
+        metrics::gauge!("minns_read_gate_in_flight").set(in_flight);
+        metrics::counter!("minns_read_gate_completed_total").increment(1);
+        metrics::histogram!("minns_read_duration_seconds").record(elapsed.as_secs_f64());
     }
 }
 
 impl ReadGate {
     /// Create a new read gate with `permits` concurrent read slots.
     pub fn new(permits: usize) -> Self {
+        // Seed the gauge so scrapes prior to the first acquire still see a
+        // value. `permits_total` is exposed as a separate gauge so dashboards
+        // can compute utilisation.
+        metrics::gauge!("minns_read_gate_in_flight").set(0.0);
+        metrics::gauge!("minns_read_gate_permits_total").set(permits as f64);
         Self {
             semaphore: Arc::new(Semaphore::new(permits)),
             permits_total: permits,
@@ -59,14 +70,20 @@ impl ReadGate {
     /// Acquire a read permit. Returns `Err` if the semaphore is exhausted
     /// after a 10-second timeout.
     pub async fn acquire(&self) -> Result<ReadPermit, String> {
-        match tokio::time::timeout(
+        let acquire_start = std::time::Instant::now();
+        let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             self.semaphore.clone().acquire_owned(),
         )
-        .await
-        {
+        .await;
+        let wait = acquire_start.elapsed();
+        metrics::histogram!("minns_read_gate_acquire_seconds").record(wait.as_secs_f64());
+
+        match result {
             Ok(Ok(permit)) => {
                 self.metrics.in_flight.fetch_add(1, Relaxed);
+                let in_flight = self.metrics.in_flight.load(Relaxed) as f64;
+                metrics::gauge!("minns_read_gate_in_flight").set(in_flight);
                 Ok(ReadPermit {
                     _permit: permit,
                     start: std::time::Instant::now(),
@@ -75,10 +92,14 @@ impl ReadGate {
             },
             Ok(Err(_)) => {
                 self.metrics.rejected.fetch_add(1, Relaxed);
+                metrics::counter!("minns_read_gate_rejected_total", "reason" => "closed")
+                    .increment(1);
                 Err("Read gate semaphore closed".to_string())
             },
             Err(_) => {
                 self.metrics.rejected.fetch_add(1, Relaxed);
+                metrics::counter!("minns_read_gate_rejected_total", "reason" => "timeout")
+                    .increment(1);
                 Err("Read gate exhausted (timeout after 10s)".to_string())
             },
         }

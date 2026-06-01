@@ -38,6 +38,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting MinnsDB REST API Server");
 
+    // ── Metrics recorder ─────────────────────────────────────────────────
+    // Install the global Prometheus recorder before any other state init so
+    // every counter/gauge/histogram call in the workspace lands in this
+    // recorder. The handle is rendered on each scrape of /metrics.
+    let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("failed to install Prometheus recorder");
+
     // Load configuration
     info!("Initializing GraphEngine with persistent storage...");
     let config = config::create_engine_config()?;
@@ -240,6 +248,7 @@ async fn main() -> anyhow::Result<()> {
         key_store: key_store.clone(),
         auth_enabled,
         export_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        metrics_handle,
     };
 
     // Build router

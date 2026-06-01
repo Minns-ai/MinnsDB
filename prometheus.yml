@@ -5,5 +5,5 @@ global:
 scrape_configs:
   - job_name: 'minnsdb'
     static_configs:
-      - targets: ['minnsdb:9090']
+      - targets: ['minnsdb:3000']
     metrics_path: '/metrics'
