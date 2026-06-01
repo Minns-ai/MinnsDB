@@ -1,5 +1,7 @@
-//! Axum middleware layer that enforces API key auth on all endpoints except /api/health.
-//! Only active when AppState.auth_enabled is true.
+//! Axum middleware layer that enforces API key auth on all endpoints
+//! except a small allow-list of public read-only telemetry surfaces:
+//! `/api/health`, `/metrics`, `/docs`, and the root path. Only active
+//! when `AppState.auth_enabled` is true.
 
 use axum::{
     body::Body,
@@ -13,8 +15,13 @@ use axum::{
 use crate::state::AppState;
 
 /// Middleware function: check Authorization header on every request.
-/// Skips /api/health (needed for load balancers and uptime monitors).
-/// When auth_enabled is false, all requests pass through.
+/// Skips a small allow-list of public read-only surfaces:
+/// - `/api/health` (load balancers, uptime monitors)
+/// - `/metrics` (Prometheus scrapers; aggregate counts only, no user data)
+/// - `/docs` (OpenAPI documentation, public by design)
+/// - root path
+///
+/// When `auth_enabled` is false, all requests pass through.
 pub async fn auth_layer(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -25,9 +32,13 @@ pub async fn auth_layer(
         return Ok(next.run(request).await);
     }
 
-    // Health endpoint is always open
+    // Public allow-list — read-only surfaces with no sensitive data.
     let path = request.uri().path().trim_end_matches('/');
-    if path == "/api/health" || path.is_empty() || path == "/docs" {
+    if path == "/api/health"
+        || path == "/metrics"
+        || path.is_empty()
+        || path == "/docs"
+    {
         return Ok(next.run(request).await);
     }
 
