@@ -546,6 +546,11 @@ pub struct GraphEngine {
     /// OWL/RDFS ontology registry (replaces hardcoded domain checks)
     pub(crate) ontology: Arc<crate::ontology::OntologyRegistry>,
 
+    /// Ontology evolution engine. Holds proposals and runs graph-scan-based
+    /// discovery on demand. Always on (no env flag); manual approval is the
+    /// safety control (auto-apply is not supported). Zero write-path cost.
+    pub(crate) ontology_evolution: Arc<RwLock<crate::ontology_evolution::OntologyEvolutionEngine>>,
+
     // ========== 10x/100x: Consolidation + Refinement ==========
     /// Consolidation engine for memory hierarchy
     pub(crate) consolidation_engine: Arc<RwLock<crate::consolidation::ConsolidationEngine>>,

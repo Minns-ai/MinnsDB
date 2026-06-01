@@ -163,54 +163,181 @@ impl super::GraphEngine {
         Ok(())
     }
 
-    /// Run behavior inference + hierarchy discovery (evolution pass).
+    /// Run behaviour inference: scan the graph for predicates not in the
+    /// ontology, propose OWL characteristics (functional / symmetric /
+    /// append-only / supersession-cascade) for those above `min_observations`.
+    /// Returns the IDs of newly created proposals.
+    ///
+    /// Acquires the inference read lock for the snapshot scan, releases it,
+    /// then takes the evolution write lock for proposal creation. No write
+    /// lock is held across the LLM call (this method has no LLM call).
     pub async fn run_ontology_evolution_pass(&self) -> Result<Vec<u64>, String> {
-        // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
-        tracing::warn!(
-            "run_ontology_evolution_pass: evolution engine not yet wired to GraphEngine"
-        );
-        Ok(Vec::new())
+        let stats = {
+            let inference = self.inference.read().await;
+            crate::ontology_evolution::OntologyEvolutionEngine::snapshot_predicate_stats(
+                inference.graph(),
+            )
+        };
+        let mut evolution = self.ontology_evolution.write().await;
+        let behaviours = evolution.infer_behaviours(&stats, &self.ontology);
+        if behaviours.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(evolution.create_proposals_from_inferred(&behaviours, &self.ontology, &stats))
     }
 
-    /// Run LLM-assisted hierarchy discovery for unknown predicates.
+    /// LLM-assisted hierarchy discovery: scan the graph, build a prompt
+    /// listing predicates not yet in the ontology, send to the LLM, then
+    /// parse the response into proposals. Returns proposal IDs.
+    ///
+    /// No evolution lock is held across the LLM call. The graph snapshot
+    /// is taken once at the start; the engine config (min_observations)
+    /// is read under a brief lock.
     pub async fn run_ontology_hierarchy_discovery(&self) -> Result<Vec<u64>, String> {
-        // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
-        tracing::warn!(
-            "run_ontology_hierarchy_discovery: evolution engine not yet wired to GraphEngine"
-        );
-        Ok(Vec::new())
+        let llm = match &self.unified_llm_client {
+            Some(client) => client.clone(),
+            None => {
+                tracing::debug!("No LLM client available, skipping hierarchy discovery");
+                return Ok(Vec::new());
+            },
+        };
+
+        // Snapshot stats once. Released before LLM call.
+        let stats = {
+            let inference = self.inference.read().await;
+            crate::ontology_evolution::OntologyEvolutionEngine::snapshot_predicate_stats(
+                inference.graph(),
+            )
+        };
+        let min_obs = self.ontology_evolution.read().await.min_observations();
+        let prompt =
+            crate::ontology_evolution::OntologyEvolutionEngine::build_hierarchy_discovery_prompt(
+                &stats,
+                &self.ontology,
+                min_obs,
+            );
+        let (system_prompt, user_prompt) = match prompt {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+
+        let request = crate::llm_client::LlmRequest {
+            system_prompt,
+            user_prompt,
+            temperature: 0.1,
+            max_tokens: 2000,
+            json_mode: true,
+        };
+        let response = llm
+            .complete(request)
+            .await
+            .map_err(|e| format!("Hierarchy discovery LLM call failed: {}", e))?;
+
+        // Parse + create proposals under the engine write lock.
+        let mut evolution = self.ontology_evolution.write().await;
+        Ok(evolution.parse_hierarchy_response(&response.content, &self.ontology, &stats))
     }
 
-    /// List ontology observations from the evolution engine.
+    /// List per-predicate stats derived from a fresh graph scan, plus
+    /// proposal-side aggregate counts. The endpoint keeps its historical
+    /// `/api/ontology/observations` name — under the new design these are
+    /// graph-derived predicate stats rather than per-edge observations.
     pub async fn list_ontology_observations(&self) -> (Vec<serde_json::Value>, serde_json::Value) {
-        // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
-        (Vec::new(), serde_json::json!({"total_observations": 0}))
+        let stats = {
+            let inference = self.inference.read().await;
+            crate::ontology_evolution::OntologyEvolutionEngine::snapshot_predicate_stats(
+                inference.graph(),
+            )
+        };
+        let observations: Vec<serde_json::Value> = stats
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "category": s.category,
+                    "predicate": s.predicate,
+                    "edge_count": s.edge_count,
+                    "forward_active": s.forward_active,
+                    "reverse_active": s.reverse_active,
+                    "superseded": s.superseded,
+                    "distinct_subjects": s.distinct_subjects,
+                    "single_value_subjects": s.single_value_subjects,
+                    "domain_types": s.domain_types,
+                    "range_types": s.range_types,
+                    "first_valid_from": s.first_valid_from,
+                    "last_valid_from": s.last_valid_from,
+                })
+            })
+            .collect();
+        let total_edges: u64 = stats.iter().map(|s| s.edge_count).sum();
+        let evolution = self.ontology_evolution.read().await;
+        let proposal_stats = evolution.stats();
+        let stats_json = serde_json::json!({
+            "tracked_predicates": stats.len(),
+            "total_edge_count": total_edges,
+            "pending_proposals": proposal_stats.pending_proposals,
+            "approved_proposals": proposal_stats.approved_proposals,
+            "rejected_proposals": proposal_stats.rejected_proposals,
+            "applied_proposals": proposal_stats.applied_proposals,
+        });
+        (observations, stats_json)
     }
 
-    /// List evolution proposals.
+    /// List all evolution proposals (any status).
     pub async fn ontology_evolution_proposals(
         &self,
     ) -> Vec<crate::ontology_evolution::OntologyProposal> {
-        // TODO: Requires OntologyEvolutionEngine stored on GraphEngine
-        Vec::new()
+        let evolution = self.ontology_evolution.read().await;
+        evolution.proposals().to_vec()
     }
 
-    /// Approve and apply a proposal.
-    pub async fn approve_and_apply_ontology_proposal(&self, _id: u64) -> Result<usize, String> {
-        Err("Evolution engine not yet wired to GraphEngine".into())
+    /// Approve and apply a proposal. Returns the number of ontology
+    /// properties registered.
+    ///
+    /// Idempotent on retry: a proposal that was already approved but whose
+    /// previous apply failed (e.g. disk write error) can be re-driven by
+    /// calling this again. Pending → Approved → Applied is the happy path;
+    /// Approved → Applied is the retry path.
+    pub async fn approve_and_apply_ontology_proposal(&self, id: u64) -> Result<usize, String> {
+        let mut evolution = self.ontology_evolution.write().await;
+        let current = evolution
+            .get_proposal(id)
+            .map(|p| p.status.clone())
+            .ok_or_else(|| format!("Proposal {} not found", id))?;
+        match current {
+            crate::ontology_evolution::ProposalStatus::Pending => {
+                // Transition Pending → Approved before apply.
+                evolution.approve_proposal(id);
+            },
+            crate::ontology_evolution::ProposalStatus::Approved => {
+                // Retry path: previous apply failed but proposal is already
+                // approved. Skip the transition and proceed to apply.
+            },
+            other => {
+                return Err(format!("Proposal {} is {:?}, cannot apply", id, other));
+            },
+        }
+        evolution
+            .apply_proposal(id, &self.ontology)
+            .map_err(|e| e.to_string())
     }
 
-    /// Reject a proposal.
-    pub async fn reject_ontology_proposal(&self, _id: u64) -> bool {
-        false
+    /// Reject a proposal. Returns true if the proposal was found and
+    /// transitioned to Rejected.
+    pub async fn reject_ontology_proposal(&self, id: u64) -> bool {
+        let mut evolution = self.ontology_evolution.write().await;
+        evolution.reject_proposal(id)
     }
 
-    /// Evolution engine statistics.
+    /// Evolution-side proposal counts. For predicate-stat counts (which
+    /// come from a fresh graph scan), see `list_ontology_observations`.
     pub async fn ontology_evolution_stats(&self) -> serde_json::Value {
+        let evolution = self.ontology_evolution.read().await;
+        let s = evolution.stats();
         serde_json::json!({
-            "total_observations": 0,
-            "pending_proposals": 0,
-            "status": "evolution engine not yet wired"
+            "pending_proposals": s.pending_proposals,
+            "approved_proposals": s.approved_proposals,
+            "rejected_proposals": s.rejected_proposals,
+            "applied_proposals": s.applied_proposals,
         })
     }
 }

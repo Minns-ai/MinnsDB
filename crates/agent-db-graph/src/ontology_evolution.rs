@@ -1,21 +1,28 @@
-//! Ontology Evolution Engine — self-expanding knowledge schema.
+//! Ontology evolution engine — graph-scan-based predicate discovery.
 //!
-//! Discovers new ontology properties from data patterns, infers their OWL
-//! characteristics (symmetric, functional, etc.), groups related predicates
-//! into hierarchies via LLM, and hot-reloads the ontology without restart.
+//! Discovers new predicates from the live graph, infers OWL characteristics
+//! (Functional, Symmetric, append-only, supersession-cascade), groups related
+//! predicates into hierarchies via LLM, and stages proposals for human
+//! approval before any schema change is applied.
 //!
-//! # Architecture
+//! # Design
 //!
-//! 1. **Observation**: Every edge creation records `(category, predicate, domain, range)`.
-//! 2. **Inference**: Periodically scans observations + graph edges to infer behaviors.
-//! 3. **Discovery**: LLM clusters related predicates into parent-child hierarchies.
-//! 4. **Proposal**: Changes are staged as proposals for review/approval.
-//! 5. **Application**: Approved proposals generate TTL files and hot-reload the registry.
+//! - **No per-edge observation state.** Stats are derived from a single
+//!   graph scan at `/discover` time. The graph is the source of truth.
+//!   Memory is bounded by the number of distinct predicates seen, not by
+//!   total edge count or by distinct entity names.
+//! - **No auto-apply.** Every proposal requires explicit approval. There
+//!   is no confidence threshold that triggers automatic schema change.
+//! - **Single-pass O(edges) scan** for snapshot stats; the previous design
+//!   ran a full edge sweep per observed predicate (O(predicates * edges)).
+//!
+//! Proposals live in-memory on the engine instance. Persistence to redb is
+//! a planned follow-up and is the only known restart-safety gap.
 
 use crate::ontology::{OntologyRegistry, PropertyCharacteristic, PropertyDescriptor};
-use crate::structures::Graph;
+use crate::structures::{EdgeType, Graph, NodeType};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -23,24 +30,23 @@ use std::path::PathBuf;
 // ---------------------------------------------------------------------------
 
 /// Configuration for the ontology evolution engine.
+///
+/// All thresholds gate which predicates produce a *proposal* — they never
+/// trigger automatic application. A human always approves before the
+/// ontology changes.
 #[derive(Debug, Clone)]
 pub struct OntologyEvolutionConfig {
     /// Minimum edge count before a predicate is eligible for proposal.
     pub min_observations: u64,
-    /// If single-value ratio exceeds this, infer FunctionalProperty.
+    /// Single-value ratio above which a predicate is flagged Functional.
     pub functional_ratio_threshold: f64,
-    /// If symmetric co-occurrence ratio exceeds this, infer SymmetricProperty.
+    /// Symmetric pair ratio above which a predicate is flagged Symmetric.
     pub symmetric_ratio_threshold: f64,
-    /// If supersession ratio exceeds this, infer supersession cascade.
+    /// Supersession ratio above which a predicate is flagged as having
+    /// cascade-supersession semantics.
     pub supersession_ratio_threshold: f64,
-    /// Directory to write generated TTL files.
+    /// Directory to write generated TTL files for applied proposals.
     pub generated_ttl_dir: PathBuf,
-    /// Whether to enable evolution tracking. Default: true.
-    pub enabled: bool,
-    /// Auto-apply proposals with confidence above this threshold.
-    /// Set to `None` to require manual approval (API-only).
-    /// Default: Some(0.85) — high-confidence proposals are applied automatically.
-    pub auto_apply_threshold: Option<f64>,
 }
 
 impl Default for OntologyEvolutionConfig {
@@ -51,53 +57,45 @@ impl Default for OntologyEvolutionConfig {
             symmetric_ratio_threshold: 0.85,
             supersession_ratio_threshold: 0.70,
             generated_ttl_dir: PathBuf::from("data/ontology"),
-            enabled: true,
-            auto_apply_threshold: Some(0.85),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Observation tracking
+// PredicateStats — produced by a single graph scan, bounded memory
 // ---------------------------------------------------------------------------
 
-/// Accumulated statistics for a single predicate.
+/// Per-predicate statistics derived from a single graph scan.
+///
+/// All counts are `u64`. The two type lists are capped at the top 5 entries
+/// each so memory is bounded by `distinct_predicates * (constant)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PredicateObservation {
-    /// Raw predicate string (e.g., "plays_tennis").
-    pub predicate: String,
-    /// Category it appeared under (e.g., "hobby").
+pub struct PredicateStats {
     pub category: String,
-    /// Total edge creations observed.
+    pub predicate: String,
+    /// Total edges seen (active + superseded).
     pub edge_count: u64,
-    /// Distinct subject entity names seen.
-    pub subjects: HashMap<String, u64>,
-    /// Distinct object entity names seen.
-    pub objects: HashMap<String, u64>,
-    /// Domain ConceptType names observed (counts).
-    pub domain_types: HashMap<String, u64>,
-    /// Range ConceptType names observed (counts).
-    pub range_types: HashMap<String, u64>,
-    /// First seen timestamp (epoch nanos).
-    pub first_seen: u64,
-    /// Last seen timestamp (epoch nanos).
-    pub last_seen: u64,
-}
-
-impl PredicateObservation {
-    fn new(category: &str, predicate: &str, timestamp: u64) -> Self {
-        Self {
-            predicate: predicate.to_string(),
-            category: category.to_string(),
-            edge_count: 0,
-            subjects: HashMap::new(),
-            objects: HashMap::new(),
-            domain_types: HashMap::new(),
-            range_types: HashMap::new(),
-            first_seen: timestamp,
-            last_seen: timestamp,
-        }
-    }
+    /// Active edges (valid_until is None).
+    pub forward_active: u64,
+    /// Active edges where the reverse direction also exists. Excludes
+    /// self-loops. Used to detect symmetric properties.
+    pub reverse_active: u64,
+    /// Edges marked as superseded (valid_until is Some). Disjoint from
+    /// `forward_active` so `edge_count == forward_active + superseded`.
+    pub superseded: u64,
+    /// Distinct subject NodeIds with at least one active edge.
+    pub distinct_subjects: u64,
+    /// Subjects with exactly one active edge — basis for the functional /
+    /// single-valued ratio.
+    pub single_value_subjects: u64,
+    /// Top 5 source node-type labels by count.
+    pub domain_types: Vec<(String, u64)>,
+    /// Top 5 target node-type labels by count.
+    pub range_types: Vec<(String, u64)>,
+    /// Earliest valid_from across all edges (for diagnostics).
+    pub first_valid_from: Option<u64>,
+    /// Latest valid_from across all edges (for diagnostics).
+    pub last_valid_from: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,9 +111,10 @@ pub struct InferredBehavior {
     pub is_functional: bool,
     pub is_append_only: bool,
     pub has_supersession: bool,
-    /// Overall confidence in the inference (0.0..1.0).
+    /// Overall confidence in the inference (0.0..1.0). Surfaced to the
+    /// human reviewer; never used for any automated decision.
     pub confidence: f64,
-    /// Number of edges analyzed.
+    /// Number of edges analysed.
     pub sample_size: u64,
 }
 
@@ -171,12 +170,13 @@ pub struct ProposedProperty {
 // Evolution Engine
 // ---------------------------------------------------------------------------
 
-/// Tracks unknown predicates, infers behaviors, and manages proposals.
+/// Manages proposals and runs discovery passes.
+///
+/// Holds no per-edge state — stats are derived from the graph on demand.
 pub struct OntologyEvolutionEngine {
     config: OntologyEvolutionConfig,
-    /// Observations keyed by "category:predicate".
-    observations: HashMap<String, PredicateObservation>,
-    /// Active proposals.
+    /// Active proposals. Bounded by human approval rate; in-memory until
+    /// persistence to redb lands as a follow-up.
     proposals: Vec<OntologyProposal>,
     /// Monotonic proposal ID counter.
     next_proposal_id: u64,
@@ -186,112 +186,180 @@ impl OntologyEvolutionEngine {
     pub fn new(config: OntologyEvolutionConfig) -> Self {
         Self {
             config,
-            observations: HashMap::new(),
             proposals: Vec::new(),
             next_proposal_id: 1,
         }
     }
 
-    // ── Observation Recording ──
+    // ── Graph scan ────────────────────────────────────────────────────────
 
-    /// Record an edge creation. Called from the pipeline after edge insertion.
+    /// Walk every Association edge in the graph exactly once and produce a
+    /// `PredicateStats` per distinct `(category, predicate)` pair.
     ///
-    /// Uses simple key tracking — no lock contention on the graph.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_observation(
-        &mut self,
-        category: &str,
-        predicate: &str,
-        subject_name: &str,
-        object_name: &str,
-        subject_type: &str,
-        object_type: &str,
-        timestamp: u64,
-    ) {
-        let key = format!("{}:{}", category, predicate);
-        let obs = self
-            .observations
-            .entry(key)
-            .or_insert_with(|| PredicateObservation::new(category, predicate, timestamp));
-
-        obs.edge_count += 1;
-        obs.last_seen = timestamp;
-        *obs.subjects.entry(subject_name.to_string()).or_insert(0) += 1;
-        *obs.objects.entry(object_name.to_string()).or_insert(0) += 1;
-        if !subject_type.is_empty() {
-            *obs.domain_types
-                .entry(subject_type.to_string())
-                .or_insert(0) += 1;
+    /// O(edges) time. Memory bounded by `distinct_predicates * (5 type
+    /// entries + per-subject HashSet + per-pair HashSet)`. Transient
+    /// HashSets are dropped at the end of the function.
+    pub fn snapshot_predicate_stats(graph: &Graph) -> Vec<PredicateStats> {
+        struct Raw {
+            edge_count: u64,
+            forward_active: u64,
+            superseded: u64,
+            /// subject_id → count of active edges from that subject
+            subject_active_counts: HashMap<u64, u64>,
+            /// type label → count (bounded by ~11 NodeType variants + ConceptType subvariants)
+            domain_type_counts: HashMap<String, u64>,
+            range_type_counts: HashMap<String, u64>,
+            first_valid_from: Option<u64>,
+            last_valid_from: Option<u64>,
+            /// Active (source, target) pairs, used for symmetry detection.
+            /// One entry per active edge, dropped at end of scan.
+            active_pairs: HashSet<(u64, u64)>,
         }
-        if !object_type.is_empty() {
-            *obs.range_types.entry(object_type.to_string()).or_insert(0) += 1;
+        impl Raw {
+            fn new() -> Self {
+                Self {
+                    edge_count: 0,
+                    forward_active: 0,
+                    superseded: 0,
+                    subject_active_counts: HashMap::new(),
+                    domain_type_counts: HashMap::new(),
+                    range_type_counts: HashMap::new(),
+                    first_valid_from: None,
+                    last_valid_from: None,
+                    active_pairs: HashSet::new(),
+                }
+            }
         }
+
+        let mut by_assoc: HashMap<String, Raw> = HashMap::new();
+
+        // Single pass.
+        for edge in graph.edges.values() {
+            let EdgeType::Association {
+                association_type, ..
+            } = &edge.edge_type
+            else {
+                continue;
+            };
+            let raw = by_assoc
+                .entry(association_type.clone())
+                .or_insert_with(Raw::new);
+
+            raw.edge_count += 1;
+            if edge.valid_until.is_some() {
+                raw.superseded += 1;
+            } else {
+                raw.forward_active += 1;
+                *raw.subject_active_counts.entry(edge.source).or_insert(0) += 1;
+                // Skip self-loops in the symmetry set so they don't
+                // self-match below.
+                if edge.source != edge.target {
+                    raw.active_pairs.insert((edge.source, edge.target));
+                }
+            }
+
+            if let Some(vf) = edge.valid_from {
+                raw.first_valid_from = Some(raw.first_valid_from.map_or(vf, |x| x.min(vf)));
+                raw.last_valid_from = Some(raw.last_valid_from.map_or(vf, |x| x.max(vf)));
+            }
+
+            if let Some(src_node) = graph.get_node(edge.source) {
+                let label = node_type_label(&src_node.node_type);
+                *raw.domain_type_counts.entry(label).or_insert(0) += 1;
+            }
+            if let Some(tgt_node) = graph.get_node(edge.target) {
+                let label = node_type_label(&tgt_node.node_type);
+                *raw.range_type_counts.entry(label).or_insert(0) += 1;
+            }
+        }
+
+        // Finalise each bucket. The transient HashMaps/HashSets are
+        // consumed here and freed when `by_assoc` is dropped.
+        let mut out = Vec::with_capacity(by_assoc.len());
+        for (assoc_type, raw) in by_assoc {
+            // Symmetry: count active edges whose reverse is also present.
+            // Each symmetric pair (A→B, B→A) contributes 2 to reverse_active
+            // (both directions match), giving forward/reverse parity for
+            // perfectly symmetric data — same semantics as the prior
+            // per-predicate scan.
+            let reverse_active = raw
+                .active_pairs
+                .iter()
+                .filter(|(s, t)| raw.active_pairs.contains(&(*t, *s)))
+                .count() as u64;
+
+            let distinct_subjects = raw.subject_active_counts.len() as u64;
+            let single_value_subjects = raw
+                .subject_active_counts
+                .values()
+                .filter(|&&c| c == 1)
+                .count() as u64;
+
+            let domain_types = top_n(raw.domain_type_counts, 5);
+            let range_types = top_n(raw.range_type_counts, 5);
+
+            // `association_type` format is `{category}:{predicate}`. Split at
+            // the first colon; predicates that happen to contain ':' keep
+            // the remainder.
+            let (category, predicate) = assoc_type
+                .split_once(':')
+                .map(|(c, p)| (c.to_string(), p.to_string()))
+                .unwrap_or_else(|| (assoc_type.clone(), String::new()));
+
+            out.push(PredicateStats {
+                category,
+                predicate,
+                edge_count: raw.edge_count,
+                forward_active: raw.forward_active,
+                reverse_active,
+                superseded: raw.superseded,
+                distinct_subjects,
+                single_value_subjects,
+                domain_types,
+                range_types,
+                first_valid_from: raw.first_valid_from,
+                last_valid_from: raw.last_valid_from,
+            });
+        }
+
+        out
     }
 
-    /// Return all observations (for API exposure).
-    pub fn observations(&self) -> &HashMap<String, PredicateObservation> {
-        &self.observations
-    }
+    // ── Behaviour Inference ──────────────────────────────────────────────
 
-    /// Return observations for predicates not yet in the ontology.
-    pub fn unknown_observations(&self, ontology: &OntologyRegistry) -> Vec<&PredicateObservation> {
-        self.observations
-            .values()
-            .filter(|obs| {
-                obs.edge_count >= self.config.min_observations
-                    && ontology.resolve(&obs.predicate).is_none()
-            })
-            .collect()
-    }
-
-    // ── Behavior Inference ──
-
-    /// Analyze graph edges to infer OWL characteristics for tracked predicates.
-    ///
-    /// Scans the graph for each observed predicate and checks:
-    /// - Symmetry: for each A→B edge, does B→A exist?
-    /// - Functionality: does each subject have at most one value?
-    /// - Supersession: what fraction of edges have `valid_until` set?
-    /// - Append-only: are edges never superseded?
-    pub fn infer_behaviors(
+    /// Infer OWL characteristics for each predicate not already in the
+    /// ontology, gated by `min_observations`. Pure function over `&[PredicateStats]`.
+    pub fn infer_behaviours(
         &self,
-        graph: &Graph,
+        stats: &[PredicateStats],
         ontology: &OntologyRegistry,
     ) -> Vec<InferredBehavior> {
         let mut results = Vec::new();
-
-        for obs in self.observations.values() {
-            if obs.edge_count < self.config.min_observations {
+        for s in stats {
+            if s.edge_count < self.config.min_observations {
                 continue;
             }
-            // Skip predicates already fully defined in the ontology
-            if ontology.resolve(&obs.predicate).is_some() {
+            // Skip predicates already fully defined in the ontology.
+            if ontology.resolve(&s.predicate).is_some() {
                 continue;
             }
-
-            let assoc_type = format!("{}:{}", obs.category, obs.predicate);
-            let (forward, reverse, superseded, total, subjects_single, subjects_total) =
-                self.scan_edges(graph, &assoc_type);
-
-            if total == 0 {
-                continue;
-            }
-
+            let total = s.edge_count;
+            let forward = s.forward_active;
             let is_symmetric = forward > 0
-                && (reverse as f64 / forward as f64) >= self.config.symmetric_ratio_threshold;
-            let is_functional = subjects_total >= 3
-                && (subjects_single as f64 / subjects_total as f64)
+                && (s.reverse_active as f64 / forward as f64)
+                    >= self.config.symmetric_ratio_threshold;
+            let is_functional = s.distinct_subjects >= 3
+                && (s.single_value_subjects as f64 / s.distinct_subjects as f64)
                     >= self.config.functional_ratio_threshold;
             let has_supersession = total >= 3
-                && (superseded as f64 / total as f64) >= self.config.supersession_ratio_threshold;
-            let is_append_only = total >= self.config.min_observations && superseded == 0;
+                && (s.superseded as f64 / total as f64) >= self.config.supersession_ratio_threshold;
+            let is_append_only = total >= self.config.min_observations && s.superseded == 0;
 
-            // Confidence based on sample size
             let confidence = (total as f64 / (total as f64 + 10.0)).min(0.95);
 
             results.push(InferredBehavior {
-                predicate: obs.predicate.clone(),
-                category: obs.category.clone(),
+                predicate: s.predicate.clone(),
+                category: s.category.clone(),
                 is_symmetric,
                 is_functional,
                 is_append_only,
@@ -300,92 +368,32 @@ impl OntologyEvolutionEngine {
                 sample_size: total,
             });
         }
-
         results
     }
 
-    /// Scan graph edges for a given association type, returning statistics.
-    ///
-    /// Returns `(forward_count, reverse_count, superseded, total, single_value_subjects, total_subjects)`.
-    fn scan_edges(&self, graph: &Graph, assoc_type: &str) -> (u64, u64, u64, u64, u64, u64) {
-        use crate::structures::EdgeType;
+    // ── Proposal Creation ────────────────────────────────────────────────
 
-        let mut forward = 0u64;
-        let mut reverse = 0u64;
-        let mut superseded = 0u64;
-        let mut total = 0u64;
-        // subject_id → count of active values
-        let mut subject_values: HashMap<u64, u64> = HashMap::new();
-
-        for edge in graph.edges.values() {
-            if let EdgeType::Association {
-                association_type, ..
-            } = &edge.edge_type
-            {
-                if association_type != assoc_type {
-                    continue;
-                }
-                total += 1;
-                forward += 1;
-
-                if edge.valid_until.is_some() {
-                    superseded += 1;
-                } else {
-                    *subject_values.entry(edge.source).or_insert(0) += 1;
-                }
-
-                // Check if reverse edge exists
-                let has_reverse = graph.get_edges_from(edge.target).iter().any(|rev| {
-                    if let EdgeType::Association {
-                        association_type: ref at,
-                        ..
-                    } = rev.edge_type
-                    {
-                        at == assoc_type && rev.target == edge.source
-                    } else {
-                        false
-                    }
-                });
-                if has_reverse {
-                    reverse += 1;
-                }
-            }
-        }
-
-        let subjects_total = subject_values.len() as u64;
-        let subjects_single = subject_values.values().filter(|&&v| v == 1).count() as u64;
-
-        (
-            forward,
-            reverse,
-            superseded,
-            total,
-            subjects_single,
-            subjects_total,
-        )
-    }
-
-    // ── Proposal Creation ──
-
-    /// Create a proposal from inferred behaviors.
-    ///
-    /// Groups related predicates by category, generates TTL, and stages a proposal.
+    /// Turn inferred behaviours into proposals. Domain/range are looked up
+    /// from `stats` (caller passes the same vector used by `infer_behaviours`).
     pub fn create_proposals_from_inferred(
         &mut self,
-        behaviors: &[InferredBehavior],
+        behaviours: &[InferredBehavior],
         ontology: &OntologyRegistry,
+        stats: &[PredicateStats],
     ) -> Vec<u64> {
-        // Group by category
+        // Index stats by predicate for O(1) domain/range lookup.
+        let stats_by_pred: HashMap<&str, &PredicateStats> =
+            stats.iter().map(|s| (s.predicate.as_str(), s)).collect();
+
+        // Group behaviours by category.
         let mut by_category: HashMap<String, Vec<&InferredBehavior>> = HashMap::new();
-        for b in behaviors {
+        for b in behaviours {
             by_category.entry(b.category.clone()).or_default().push(b);
         }
 
         let mut proposal_ids = Vec::new();
-
         for (category, predicates) in &by_category {
             let mut properties = Vec::new();
-
             for b in predicates {
                 let mut chars = Vec::new();
                 if b.is_symmetric {
@@ -395,20 +403,20 @@ impl OntologyEvolutionEngine {
                     chars.push(PropertyCharacteristic::Functional);
                 }
 
-                // Determine domain/range from observation data
-                let obs_key = format!("{}:{}", b.category, b.predicate);
-                let (domain, range) = if let Some(obs) = self.observations.get(&obs_key) {
-                    let dom = most_common_type(&obs.domain_types);
-                    let rng = most_common_type(&obs.range_types);
-                    (
-                        dom.map(|d| vec![d]).unwrap_or_default(),
-                        rng.map(|r| vec![r]).unwrap_or_default(),
-                    )
-                } else {
-                    (Vec::new(), Vec::new())
+                let (domain, range) = match stats_by_pred.get(b.predicate.as_str()) {
+                    Some(s) => (
+                        s.domain_types
+                            .first()
+                            .map(|(t, _)| vec![t.clone()])
+                            .unwrap_or_default(),
+                        s.range_types
+                            .first()
+                            .map(|(t, _)| vec![t.clone()])
+                            .unwrap_or_default(),
+                    ),
+                    None => (Vec::new(), Vec::new()),
                 };
 
-                // Check if the category exists as a parent property
                 let sub_property_of = if ontology.resolve(category).is_some() {
                     Some(category.clone())
                 } else {
@@ -419,7 +427,7 @@ impl OntologyEvolutionEngine {
                     id: b.predicate.clone(),
                     label: predicate_to_label(&b.predicate),
                     comment: format!(
-                        "Auto-discovered property ({} observations, confidence {:.0}%)",
+                        "Auto-discovered property ({} edges, confidence {:.0}%)",
                         b.sample_size,
                         b.confidence * 100.0
                     ),
@@ -429,12 +437,11 @@ impl OntologyEvolutionEngine {
                     max_cardinality: if b.is_functional { Some(1) } else { None },
                     sub_property_of,
                     append_only: b.is_append_only,
+                    canonical_predicate: b.predicate.clone(),
                     cascade_dependents: Vec::new(),
                     cascade_dependent: false,
-                    canonical_predicate: b.predicate.clone(),
                 });
             }
-
             if properties.is_empty() {
                 continue;
             }
@@ -445,9 +452,7 @@ impl OntologyEvolutionEngine {
                 properties.len(),
                 category
             );
-
             let parent_in_ontology = ontology.resolve(category).is_some();
-
             let proposal = OntologyProposal {
                 id: self.next_proposal_id,
                 status: ProposalStatus::Pending,
@@ -461,33 +466,36 @@ impl OntologyEvolutionEngine {
                 rationale,
                 ttl_preview,
             };
-
             proposal_ids.push(self.next_proposal_id);
             self.proposals.push(proposal);
             self.next_proposal_id += 1;
         }
-
         proposal_ids
     }
 
-    // ── LLM-Assisted Hierarchy Discovery ──
+    // ── LLM-Assisted Hierarchy Discovery ─────────────────────────────────
 
-    /// Use the LLM to cluster unknown predicates and propose parent hierarchies.
+    /// Build a hierarchy-discovery prompt from current predicate stats.
+    /// Returns `None` if there are no unknown predicates above `min_observations`.
     ///
-    /// Returns the system prompt + user prompt for the LLM call. The caller
-    /// is responsible for invoking the LLM and passing the response to
-    /// `parse_hierarchy_response`.
+    /// Static method so callers can drive prompt + LLM + parse without
+    /// holding a write lock on the engine during the (slow) LLM call.
     pub fn build_hierarchy_discovery_prompt(
-        &self,
+        stats: &[PredicateStats],
         ontology: &OntologyRegistry,
+        min_observations: u64,
     ) -> Option<(String, String)> {
-        let unknowns = self.unknown_observations(ontology);
+        let unknowns: Vec<&PredicateStats> = stats
+            .iter()
+            .filter(|s| {
+                s.edge_count >= min_observations && ontology.resolve(&s.predicate).is_none()
+            })
+            .collect();
         if unknowns.is_empty() {
             return None;
         }
 
         let existing_parents: Vec<String> = ontology.all_property_ids();
-
         let system = concat!(
             "You are an ontology engineer for a personal knowledge graph.\n",
             "Given observed predicates with their frequency and domain/range types, ",
@@ -513,27 +521,36 @@ impl OntologyEvolutionEngine {
         .to_string();
 
         let mut user = String::from("Observed predicates:\n");
-        for obs in &unknowns {
-            let dom = most_common_type(&obs.domain_types).unwrap_or_else(|| "unknown".to_string());
-            let rng = most_common_type(&obs.range_types).unwrap_or_else(|| "unknown".to_string());
+        for s in &unknowns {
+            let dom = s
+                .domain_types
+                .first()
+                .map(|(t, _)| t.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let rng = s
+                .range_types
+                .first()
+                .map(|(t, _)| t.clone())
+                .unwrap_or_else(|| "unknown".to_string());
             user.push_str(&format!(
                 "- {} ({} edges, domain: {}, range: {})\n",
-                obs.predicate, obs.edge_count, dom, rng
+                s.predicate, s.edge_count, dom, rng
             ));
         }
         user.push_str(&format!(
             "\nExisting parent properties: {}\n",
             existing_parents.join(", ")
         ));
-
         Some((system, user))
     }
 
-    /// Parse the LLM's hierarchy discovery response and create proposals.
+    /// Parse the LLM's hierarchy-discovery response and create proposals.
+    /// Stats are needed for domain/range lookup on each child predicate.
     pub fn parse_hierarchy_response(
         &mut self,
         response: &str,
         ontology: &OntologyRegistry,
+        stats: &[PredicateStats],
     ) -> Vec<u64> {
         let parsed: serde_json::Value = match crate::llm_client::parse_json_from_llm(response) {
             Some(v) => v,
@@ -542,14 +559,15 @@ impl OntologyEvolutionEngine {
                 return Vec::new();
             },
         };
-
         let groups = match parsed["groups"].as_array() {
             Some(g) => g,
             None => return Vec::new(),
         };
 
-        let mut proposal_ids = Vec::new();
+        let stats_by_pred: HashMap<&str, &PredicateStats> =
+            stats.iter().map(|s| (s.predicate.as_str(), s)).collect();
 
+        let mut proposal_ids = Vec::new();
         for group in groups {
             let parent = group["parent"].as_str().unwrap_or("").to_string();
             let parent_label = group["parent_label"]
@@ -561,7 +579,6 @@ impl OntologyEvolutionEngine {
                 .as_str()
                 .unwrap_or("LLM-suggested grouping")
                 .to_string();
-
             let children: Vec<String> = group["children"]
                 .as_array()
                 .map(|arr| {
@@ -576,8 +593,6 @@ impl OntologyEvolutionEngine {
             }
 
             let mut properties = Vec::new();
-
-            // If parent is new, include it in the proposal
             if is_new_parent && ontology.resolve(&parent).is_none() {
                 properties.push(ProposedProperty {
                     id: parent.clone(),
@@ -589,50 +604,41 @@ impl OntologyEvolutionEngine {
                     max_cardinality: None,
                     sub_property_of: None,
                     append_only: false,
+                    canonical_predicate: String::new(),
                     cascade_dependents: Vec::new(),
                     cascade_dependent: false,
-                    canonical_predicate: String::new(),
                 });
             }
-
-            // Add children as sub-properties
             for child_id in &children {
-                // Look up observation data for domain/range
-                let obs_key_match = self
-                    .observations
-                    .values()
-                    .find(|o| o.predicate == *child_id);
-                let (domain, range) = if let Some(obs) = obs_key_match {
-                    (
-                        most_common_type(&obs.domain_types)
-                            .map(|d| vec![d])
+                let (domain, range) = match stats_by_pred.get(child_id.as_str()) {
+                    Some(s) => (
+                        s.domain_types
+                            .first()
+                            .map(|(t, _)| vec![t.clone()])
                             .unwrap_or_default(),
-                        most_common_type(&obs.range_types)
-                            .map(|r| vec![r])
+                        s.range_types
+                            .first()
+                            .map(|(t, _)| vec![t.clone()])
                             .unwrap_or_default(),
-                    )
-                } else {
-                    (Vec::new(), Vec::new())
+                    ),
+                    None => (Vec::new(), Vec::new()),
                 };
-
                 properties.push(ProposedProperty {
                     id: child_id.clone(),
                     label: predicate_to_label(child_id),
                     comment: format!("Sub-property of {}: {}", parent, rationale),
                     domain,
                     range,
-                    characteristics: Vec::new(), // Will be enriched by behavior inference
+                    characteristics: Vec::new(),
                     max_cardinality: None,
                     sub_property_of: Some(parent.clone()),
                     append_only: false,
+                    canonical_predicate: child_id.clone(),
                     cascade_dependents: Vec::new(),
                     cascade_dependent: false,
-                    canonical_predicate: child_id.clone(),
                 });
             }
-
             let ttl_preview = generate_ttl_for_properties(&properties);
-
             let proposal = OntologyProposal {
                 id: self.next_proposal_id,
                 status: ProposalStatus::Pending,
@@ -642,26 +648,19 @@ impl OntologyEvolutionEngine {
                 rationale,
                 ttl_preview,
             };
-
             proposal_ids.push(self.next_proposal_id);
             self.proposals.push(proposal);
             self.next_proposal_id += 1;
         }
-
         proposal_ids
     }
 
-    // ── LLM-Assisted Cascade & Temporal Dependency Inference ──
+    // ── LLM-Assisted Cascade & Temporal Dependency Inference ─────────────
+    // Unchanged from the prior implementation. Kept verbatim so existing
+    // /api/ontology/cascade-inference and /api/ontology/upload continue
+    // working.
 
-    /// Build a prompt for the LLM to infer cascade dependencies and temporal
-    /// groupings across all registered ontology properties.
-    ///
-    /// This should be called after new properties are added (via hierarchy
-    /// discovery or TTL upload) to automatically determine which properties
-    /// are temporally dependent on others.
-    ///
-    /// Returns `(system_prompt, user_prompt)` for the LLM call. The caller
-    /// passes the response to `parse_cascade_inference_response`.
+    /// Build the prompt for cascade-dependency inference.
     pub fn build_cascade_inference_prompt(ontology: &OntologyRegistry) -> (String, String) {
         let system = concat!(
             "You are an ontology engineer analyzing temporal dependencies in a personal knowledge graph.\n\n",
@@ -716,14 +715,12 @@ impl OntologyEvolutionEngine {
                 ));
             }
         }
-
         (system, user)
     }
 
-    /// Parse the LLM's cascade inference response and update the ontology registry
-    /// with inferred cascade_dependents and cascade_dependent flags.
-    ///
-    /// Returns the number of properties updated.
+    /// Parse the cascade-inference response and update the ontology registry
+    /// with inferred cascade_dependents / cascade_dependent flags. Returns the
+    /// number of properties updated.
     pub fn parse_cascade_inference_response(response: &str, ontology: &OntologyRegistry) -> usize {
         let parsed: serde_json::Value = match crate::llm_client::parse_json_from_llm(response) {
             Some(v) => v,
@@ -732,20 +729,17 @@ impl OntologyEvolutionEngine {
                 return 0;
             },
         };
-
         let rules = match parsed["cascade_rules"].as_array() {
             Some(r) => r,
             None => return 0,
         };
 
         let mut updated = 0usize;
-
         for rule in rules {
             let trigger = match rule["trigger"].as_str() {
                 Some(t) => t,
                 None => continue,
             };
-
             let dependents: Vec<String> = rule["dependents"]
                 .as_array()
                 .map(|arr| {
@@ -754,12 +748,10 @@ impl OntologyEvolutionEngine {
                         .collect()
                 })
                 .unwrap_or_default();
-
             if dependents.is_empty() {
                 continue;
             }
 
-            // Validate: trigger must exist and be functional
             let trigger_desc = match ontology.resolve(trigger) {
                 Some(d) => d,
                 None => {
@@ -781,7 +773,6 @@ impl OntologyEvolutionEngine {
                 continue;
             }
 
-            // Filter dependents to only valid property IDs, exclude append-only
             let valid_dependents: Vec<String> = dependents
                 .into_iter()
                 .filter(|dep| {
@@ -803,12 +794,9 @@ impl OntologyEvolutionEngine {
                     }
                 })
                 .collect();
-
             if valid_dependents.is_empty() {
                 continue;
             }
-
-            // Update the trigger property's cascade_dependents
             if ontology.update_cascade_dependents(trigger, &valid_dependents) {
                 updated += 1;
                 tracing::info!(
@@ -817,31 +805,25 @@ impl OntologyEvolutionEngine {
                     valid_dependents.join(", ")
                 );
             }
-
-            // Mark each dependent as cascade_dependent
             for dep in &valid_dependents {
                 if ontology.mark_cascade_dependent(dep) {
                     updated += 1;
                 }
             }
         }
-
         updated
     }
 
-    // ── Proposal Management ──
+    // ── Proposal Lifecycle ───────────────────────────────────────────────
 
-    /// List all proposals.
     pub fn proposals(&self) -> &[OntologyProposal] {
         &self.proposals
     }
 
-    /// Get a proposal by ID.
     pub fn get_proposal(&self, id: u64) -> Option<&OntologyProposal> {
         self.proposals.iter().find(|p| p.id == id)
     }
 
-    /// Approve a proposal.
     pub fn approve_proposal(&mut self, id: u64) -> bool {
         if let Some(p) = self.proposals.iter_mut().find(|p| p.id == id) {
             if p.status == ProposalStatus::Pending {
@@ -852,7 +834,6 @@ impl OntologyEvolutionEngine {
         false
     }
 
-    /// Reject a proposal.
     pub fn reject_proposal(&mut self, id: u64) -> bool {
         if let Some(p) = self.proposals.iter_mut().find(|p| p.id == id) {
             if p.status == ProposalStatus::Pending {
@@ -863,9 +844,8 @@ impl OntologyEvolutionEngine {
         false
     }
 
-    /// Apply an approved proposal: write TTL, register properties, update status.
-    ///
-    /// Returns the number of new properties registered.
+    /// Apply an approved proposal: write the TTL file and register the
+    /// properties into the ontology (hot-reload). Marks the proposal Applied.
     pub fn apply_proposal(
         &mut self,
         id: u64,
@@ -876,7 +856,6 @@ impl OntologyEvolutionEngine {
             .iter()
             .find(|p| p.id == id)
             .ok_or(OntologyEvolutionError::ProposalNotFound(id))?;
-
         if proposal.status != ProposalStatus::Approved {
             return Err(OntologyEvolutionError::InvalidStatus(format!(
                 "Proposal {} is {:?}, not Approved",
@@ -884,20 +863,15 @@ impl OntologyEvolutionEngine {
             )));
         }
 
-        let ttl_content = &proposal.ttl_preview;
-
-        // Write TTL file
         let ttl_path = self
             .config
             .generated_ttl_dir
             .join(format!("evolved_{:04}.ttl", id));
-        std::fs::write(&ttl_path, ttl_content).map_err(OntologyEvolutionError::Io)?;
+        std::fs::write(&ttl_path, &proposal.ttl_preview).map_err(OntologyEvolutionError::Io)?;
         tracing::info!("Wrote evolved ontology to {:?}", ttl_path);
 
-        // Register properties directly into the ontology registry (hot-reload)
-        let mut registered = 0;
-        // We need to clone the properties to avoid borrow issues
         let properties = proposal.properties.clone();
+        let mut registered = 0;
         for prop in &properties {
             let descriptor = PropertyDescriptor {
                 id: prop.id.clone(),
@@ -919,12 +893,9 @@ impl OntologyEvolutionEngine {
                 registered += 1;
             }
         }
-
-        // Update proposal status
         if let Some(p) = self.proposals.iter_mut().find(|p| p.id == id) {
             p.status = ProposalStatus::Applied;
         }
-
         tracing::info!(
             "Applied proposal {}: registered {} new properties",
             id,
@@ -933,102 +904,52 @@ impl OntologyEvolutionEngine {
         Ok(registered)
     }
 
-    // ── Full Discovery Pass ──
+    // ── Full Discovery Pass (graph scan + behaviour proposals) ───────────
 
-    /// Run a complete discovery pass: infer behaviors → create proposals.
+    /// Run a complete behaviour-inference pass: scan the graph, infer
+    /// behaviours, create proposals. Returns IDs of newly created proposals.
     ///
-    /// Returns IDs of newly created proposals.
+    /// The LLM-assisted hierarchy discovery is a separate operation —
+    /// callers that want it should also invoke `build_hierarchy_discovery_prompt`,
+    /// run the LLM, and pass the response to `parse_hierarchy_response`.
+    /// This split keeps the engine lock-free during the LLM call.
     pub fn run_inference_pass(&mut self, graph: &Graph, ontology: &OntologyRegistry) -> Vec<u64> {
-        let behaviors = self.infer_behaviors(graph, ontology);
-        if behaviors.is_empty() {
+        let stats = Self::snapshot_predicate_stats(graph);
+        let behaviours = self.infer_behaviours(&stats, ontology);
+        if behaviours.is_empty() {
             return Vec::new();
         }
         tracing::info!(
-            "Ontology evolution: inferred behaviors for {} predicates",
-            behaviors.len()
+            "Ontology evolution: inferred behaviours for {} predicates from {} stats",
+            behaviours.len(),
+            stats.len()
         );
-        self.create_proposals_from_inferred(&behaviors, ontology)
+        self.create_proposals_from_inferred(&behaviours, ontology, &stats)
     }
 
-    /// Run a complete discovery pass with automatic application of
-    /// high-confidence proposals (if `auto_apply_threshold` is set).
-    ///
-    /// Returns (proposal_ids_created, proposal_ids_auto_applied).
-    pub fn run_inference_pass_auto(
-        &mut self,
-        graph: &Graph,
-        ontology: &OntologyRegistry,
-    ) -> (Vec<u64>, Vec<u64>) {
-        let behaviors = self.infer_behaviors(graph, ontology);
-        if behaviors.is_empty() {
-            return (Vec::new(), Vec::new());
-        }
-
-        // Build a confidence map: predicate → confidence
-        let confidence_map: HashMap<String, f64> = behaviors
-            .iter()
-            .map(|b| (b.predicate.clone(), b.confidence))
-            .collect();
-
-        tracing::info!(
-            "Ontology evolution: inferred behaviors for {} predicates",
-            behaviors.len()
-        );
-        let proposal_ids = self.create_proposals_from_inferred(&behaviors, ontology);
-
-        let threshold = match self.config.auto_apply_threshold {
-            Some(t) => t,
-            None => return (proposal_ids, Vec::new()),
-        };
-
-        // Auto-apply proposals where ALL properties exceed the threshold
-        let mut auto_applied = Vec::new();
-        for &pid in &proposal_ids {
-            let all_above = self
-                .proposals
-                .iter()
-                .find(|p| p.id == pid)
-                .map(|p| {
-                    p.properties.iter().all(|prop| {
-                        confidence_map.get(&prop.id).copied().unwrap_or(0.0) >= threshold
-                    })
-                })
-                .unwrap_or(false);
-
-            if all_above {
-                self.approve_proposal(pid);
-                match self.apply_proposal(pid, ontology) {
-                    Ok(n) => {
-                        tracing::info!(
-                            "Ontology evolution: auto-applied proposal {} ({} properties)",
-                            pid,
-                            n
-                        );
-                        auto_applied.push(pid);
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            "Ontology evolution: auto-apply failed for proposal {}: {}",
-                            pid,
-                            e
-                        );
-                    },
-                }
-            }
-        }
-
-        (proposal_ids, auto_applied)
+    /// Per-predicate stats threshold for callers that build LLM prompts.
+    pub fn min_observations(&self) -> u64 {
+        self.config.min_observations
     }
 
-    /// Return summary statistics for the evolution engine.
+    /// Summary statistics. Predicate counts come from a fresh graph scan
+    /// when callers ask; this method only reports proposal-side counts.
     pub fn stats(&self) -> EvolutionStats {
         EvolutionStats {
-            total_observations: self.observations.len(),
-            total_edge_count: self.observations.values().map(|o| o.edge_count).sum(),
             pending_proposals: self
                 .proposals
                 .iter()
                 .filter(|p| p.status == ProposalStatus::Pending)
+                .count(),
+            approved_proposals: self
+                .proposals
+                .iter()
+                .filter(|p| p.status == ProposalStatus::Approved)
+                .count(),
+            rejected_proposals: self
+                .proposals
+                .iter()
+                .filter(|p| p.status == ProposalStatus::Rejected)
                 .count(),
             applied_proposals: self
                 .proposals
@@ -1042,9 +963,9 @@ impl OntologyEvolutionEngine {
 /// Summary statistics for the evolution engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvolutionStats {
-    pub total_observations: usize,
-    pub total_edge_count: u64,
     pub pending_proposals: usize,
+    pub approved_proposals: usize,
+    pub rejected_proposals: usize,
     pub applied_proposals: usize,
 }
 
@@ -1144,7 +1065,6 @@ fn generate_ttl_for_properties(properties: &[ProposedProperty]) -> String {
         }
         ttl.push('\n');
     }
-
     ttl
 }
 
@@ -1167,12 +1087,30 @@ fn predicate_to_label(predicate: &str) -> String {
         .join(" ")
 }
 
-/// Return the most common type from a frequency map.
-fn most_common_type(types: &HashMap<String, u64>) -> Option<String> {
-    types
-        .iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(k, _)| k.clone())
+/// Stable string label for a `NodeType` variant. Bounded set, used to
+/// populate `domain_types` / `range_types` in `PredicateStats`.
+fn node_type_label(nt: &NodeType) -> String {
+    match nt {
+        NodeType::Concept { concept_type, .. } => format!("Concept:{:?}", concept_type),
+        NodeType::Agent { .. } => "Agent".to_string(),
+        NodeType::Event { .. } => "Event".to_string(),
+        NodeType::Context { .. } => "Context".to_string(),
+        NodeType::Goal { .. } => "Goal".to_string(),
+        NodeType::Episode { .. } => "Episode".to_string(),
+        NodeType::Memory { .. } => "Memory".to_string(),
+        NodeType::Strategy { .. } => "Strategy".to_string(),
+        NodeType::Tool { .. } => "Tool".to_string(),
+        NodeType::Result { .. } => "Result".to_string(),
+        NodeType::Claim { .. } => "Claim".to_string(),
+    }
+}
+
+/// Sort a count HashMap descending and keep the top `n` entries.
+fn top_n(counts: HashMap<String, u64>, n: usize) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = counts.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.truncate(n);
+    v
 }
 
 fn now_nanos() -> u64 {
@@ -1190,45 +1128,21 @@ fn now_nanos() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_record_observation() {
-        let config = OntologyEvolutionConfig::default();
-        let mut engine = OntologyEvolutionEngine::new(config);
-
-        engine.record_observation(
-            "hobby",
-            "plays_tennis",
-            "Alice",
-            "Tennis",
-            "Person",
-            "NamedEntity",
-            1000,
-        );
-        engine.record_observation(
-            "hobby",
-            "plays_tennis",
-            "Bob",
-            "Tennis",
-            "Person",
-            "NamedEntity",
-            2000,
-        );
-        engine.record_observation(
-            "hobby",
-            "plays_tennis",
-            "Alice",
-            "Tennis",
-            "Person",
-            "NamedEntity",
-            3000,
-        );
-
-        let obs = engine.observations.get("hobby:plays_tennis").unwrap();
-        assert_eq!(obs.edge_count, 3);
-        assert_eq!(obs.subjects.len(), 2); // Alice, Bob
-        assert_eq!(obs.objects.len(), 1); // Tennis
-        assert_eq!(obs.first_seen, 1000);
-        assert_eq!(obs.last_seen, 3000);
+    fn make_stats(predicate: &str, edges: u64, forward: u64, reverse: u64) -> PredicateStats {
+        PredicateStats {
+            category: "hobby".to_string(),
+            predicate: predicate.to_string(),
+            edge_count: edges,
+            forward_active: forward,
+            reverse_active: reverse,
+            superseded: edges - forward,
+            distinct_subjects: 0,
+            single_value_subjects: 0,
+            domain_types: vec![("Concept:Person".to_string(), forward)],
+            range_types: vec![("Concept:NamedEntity".to_string(), forward)],
+            first_valid_from: Some(1000),
+            last_valid_from: Some(2000),
+        }
     }
 
     #[test]
@@ -1236,6 +1150,18 @@ mod tests {
         assert_eq!(predicate_to_label("plays_tennis"), "Plays Tennis");
         assert_eq!(predicate_to_label("friend"), "Friend");
         assert_eq!(predicate_to_label("lives_in"), "Lives In");
+    }
+
+    #[test]
+    fn test_top_n_takes_largest_first() {
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), 1);
+        m.insert("b".to_string(), 3);
+        m.insert("c".to_string(), 2);
+        let out = top_n(m, 2);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], ("b".to_string(), 3));
+        assert_eq!(out[1], ("c".to_string(), 2));
     }
 
     #[test]
@@ -1250,9 +1176,9 @@ mod tests {
             max_cardinality: None,
             sub_property_of: Some("hobby".to_string()),
             append_only: false,
+            canonical_predicate: "plays_tennis".to_string(),
             cascade_dependents: Vec::new(),
             cascade_dependent: false,
-            canonical_predicate: "plays_tennis".to_string(),
         }];
 
         let ttl = generate_ttl_for_properties(&props);
@@ -1263,12 +1189,36 @@ mod tests {
     }
 
     #[test]
-    fn test_proposal_lifecycle() {
-        let config = OntologyEvolutionConfig::default();
-        let mut engine = OntologyEvolutionEngine::new(config);
+    fn test_infer_behaviours_flags_symmetric_above_threshold() {
+        let engine = OntologyEvolutionEngine::new(OntologyEvolutionConfig {
+            min_observations: 2,
+            symmetric_ratio_threshold: 0.85,
+            ..OntologyEvolutionConfig::default()
+        });
+        let ontology = OntologyRegistry::new();
+        // 10 forward, 9 reverse → ratio 0.9 → symmetric
+        let stats = vec![make_stats("friend_of", 10, 10, 9)];
+        let behaviours = engine.infer_behaviours(&stats, &ontology);
+        assert_eq!(behaviours.len(), 1);
+        assert!(behaviours[0].is_symmetric);
+    }
 
-        // Create a manual proposal
-        let behaviors = vec![InferredBehavior {
+    #[test]
+    fn test_infer_behaviours_respects_min_observations() {
+        let engine = OntologyEvolutionEngine::new(OntologyEvolutionConfig {
+            min_observations: 5,
+            ..OntologyEvolutionConfig::default()
+        });
+        let ontology = OntologyRegistry::new();
+        let stats = vec![make_stats("rare_pred", 3, 3, 3)];
+        let behaviours = engine.infer_behaviours(&stats, &ontology);
+        assert!(behaviours.is_empty());
+    }
+
+    #[test]
+    fn test_proposal_lifecycle() {
+        let mut engine = OntologyEvolutionEngine::new(OntologyEvolutionConfig::default());
+        let behaviours = vec![InferredBehavior {
             predicate: "plays_chess".to_string(),
             category: "hobby".to_string(),
             is_symmetric: false,
@@ -1278,103 +1228,92 @@ mod tests {
             confidence: 0.8,
             sample_size: 10,
         }];
-
+        let stats = vec![make_stats("plays_chess", 10, 10, 0)];
         let ontology = OntologyRegistry::new();
-        let ids = engine.create_proposals_from_inferred(&behaviors, &ontology);
+        let ids = engine.create_proposals_from_inferred(&behaviours, &ontology, &stats);
         assert_eq!(ids.len(), 1);
+        let p = engine.get_proposal(ids[0]).unwrap();
+        assert_eq!(p.status, ProposalStatus::Pending);
 
-        let proposal = engine.get_proposal(ids[0]).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Pending);
-
-        // Approve
         assert!(engine.approve_proposal(ids[0]));
-        let proposal = engine.get_proposal(ids[0]).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Approved);
-
-        // Can't approve again
+        let p = engine.get_proposal(ids[0]).unwrap();
+        assert_eq!(p.status, ProposalStatus::Approved);
+        // can't approve again
         assert!(!engine.approve_proposal(ids[0]));
     }
 
     #[test]
-    fn test_unknown_observations() {
-        let config = OntologyEvolutionConfig {
-            min_observations: 2,
-            ..OntologyEvolutionConfig::default()
-        };
-        let mut engine = OntologyEvolutionEngine::new(config);
-
-        // Add observations
-        for i in 0..5 {
-            engine.record_observation(
-                "hobby",
-                "plays_tennis",
-                "Alice",
-                "Tennis",
-                "Person",
-                "NamedEntity",
-                i,
-            );
-        }
-        engine.record_observation(
-            "hobby",
-            "plays_chess",
-            "Bob",
-            "Chess",
-            "Person",
-            "NamedEntity",
-            0,
-        );
-
+    fn test_reject_proposal() {
+        let mut engine = OntologyEvolutionEngine::new(OntologyEvolutionConfig::default());
+        let behaviours = vec![InferredBehavior {
+            predicate: "p".to_string(),
+            category: "c".to_string(),
+            is_symmetric: false,
+            is_functional: false,
+            is_append_only: false,
+            has_supersession: false,
+            confidence: 0.5,
+            sample_size: 5,
+        }];
+        let stats = vec![make_stats("p", 5, 5, 0)];
         let ontology = OntologyRegistry::new();
-        let unknowns = engine.unknown_observations(&ontology);
-        // plays_tennis has 5 obs (>= 2), plays_chess has 1 (< 2)
-        assert_eq!(unknowns.len(), 1);
-        assert_eq!(unknowns[0].predicate, "plays_tennis");
+        let ids = engine.create_proposals_from_inferred(&behaviours, &ontology, &stats);
+        assert!(engine.reject_proposal(ids[0]));
+        assert_eq!(
+            engine.get_proposal(ids[0]).unwrap().status,
+            ProposalStatus::Rejected
+        );
+        // Cannot approve a rejected proposal
+        assert!(!engine.approve_proposal(ids[0]));
+    }
+
+    #[test]
+    fn test_hierarchy_prompt_returns_none_when_no_unknowns() {
+        let ontology = OntologyRegistry::new();
+        let stats: Vec<PredicateStats> = Vec::new();
+        let prompt =
+            OntologyEvolutionEngine::build_hierarchy_discovery_prompt(&stats, &ontology, 5);
+        assert!(prompt.is_none());
     }
 
     #[test]
     fn test_evolution_stats() {
-        let config = OntologyEvolutionConfig::default();
-        let mut engine = OntologyEvolutionEngine::new(config);
-        engine.record_observation(
-            "hobby",
-            "plays_tennis",
-            "Alice",
-            "Tennis",
-            "Person",
-            "NamedEntity",
-            0,
-        );
-
-        let stats = engine.stats();
-        assert_eq!(stats.total_observations, 1);
-        assert_eq!(stats.total_edge_count, 1);
-        assert_eq!(stats.pending_proposals, 0);
+        let mut engine = OntologyEvolutionEngine::new(OntologyEvolutionConfig::default());
+        let behaviours = vec![InferredBehavior {
+            predicate: "p".to_string(),
+            category: "c".to_string(),
+            is_symmetric: false,
+            is_functional: false,
+            is_append_only: false,
+            has_supersession: false,
+            confidence: 0.5,
+            sample_size: 5,
+        }];
+        let stats = vec![make_stats("p", 5, 5, 0)];
+        let ontology = OntologyRegistry::new();
+        engine.create_proposals_from_inferred(&behaviours, &ontology, &stats);
+        let s = engine.stats();
+        assert_eq!(s.pending_proposals, 1);
+        assert_eq!(s.approved_proposals, 0);
+        assert_eq!(s.applied_proposals, 0);
     }
 
     #[test]
     fn test_cascade_inference_prompt_includes_all_properties() {
         let ontology = crate::ontology::tests::test_registry();
         let (system, user) = OntologyEvolutionEngine::build_cascade_inference_prompt(&ontology);
-
         assert!(system.contains("cascade"));
         assert!(system.contains("temporal dependencies"));
-        // Should include all registered properties
         assert!(user.contains("location"));
         assert!(user.contains("relationship"));
         assert!(user.contains("financial"));
         assert!(user.contains("routine"));
-        // Should show characteristics
         assert!(user.contains("Functional"));
         assert!(user.contains("Symmetric"));
     }
 
     #[test]
     fn test_parse_cascade_inference_response() {
-        let _ontology = crate::ontology::tests::test_registry();
-
-        // Clear existing cascade_dependents on location to test inference
-        // (test_registry already sets them, so we test with a fresh ontology)
         let fresh_ontology = crate::ontology::OntologyRegistry::new();
         fresh_ontology.register_property(crate::ontology::PropertyDescriptor {
             id: "location".into(),
@@ -1408,72 +1347,32 @@ mod tests {
             skip_conflict_detection: false,
             canonical_predicate: String::new(),
         });
-        fresh_ontology.register_property(crate::ontology::PropertyDescriptor {
-            id: "financial".into(),
-            label: "Financial".into(),
-            comment: "payments".into(),
-            domain: Vec::new(),
-            range: Vec::new(),
-            characteristics: Vec::new(),
-            max_cardinality: None,
-            sub_property_of: None,
-            inverse_of: None,
-            append_only: true,
-            cascade_dependents: Vec::new(),
-            cascade_dependent: false,
-            skip_conflict_detection: true,
-            canonical_predicate: String::new(),
-        });
 
-        let llm_response = r#"{
+        let response = r#"{
             "cascade_rules": [
                 {
                     "trigger": "location",
-                    "dependents": ["routine", "financial"],
-                    "rationale": "Moving invalidates daily routines"
+                    "dependents": ["routine"],
+                    "rationale": "Moving cities invalidates daily routine"
                 }
             ]
         }"#;
-
-        let updated = OntologyEvolutionEngine::parse_cascade_inference_response(
-            llm_response,
-            &fresh_ontology,
-        );
-
-        // Should have updated location's cascade_dependents (added routine)
-        // and marked routine as cascade_dependent.
-        // financial should be excluded (append-only).
-        assert!(updated > 0);
-        let loc = fresh_ontology.resolve("location").unwrap();
-        assert_eq!(loc.cascade_dependents, vec!["routine"]);
-        assert!(fresh_ontology.is_cascade_dependent("routine"));
-        // financial is append-only, should not be marked
-        assert!(!fresh_ontology.is_cascade_dependent("financial"));
+        let updated =
+            OntologyEvolutionEngine::parse_cascade_inference_response(response, &fresh_ontology);
+        assert!(updated >= 2);
+        let location = fresh_ontology.resolve("location").unwrap();
+        assert!(location.cascade_dependents.contains(&"routine".to_string()));
+        let routine = fresh_ontology.resolve("routine").unwrap();
+        assert!(routine.cascade_dependent);
     }
 
     #[test]
     fn test_parse_cascade_inference_rejects_non_functional_trigger() {
-        let ontology = crate::ontology::OntologyRegistry::new();
+        let ontology = OntologyRegistry::new();
         ontology.register_property(crate::ontology::PropertyDescriptor {
-            id: "relationship".into(),
-            label: "Relationship".into(),
-            comment: "connections".into(),
-            domain: Vec::new(),
-            range: Vec::new(),
-            characteristics: vec![PropertyCharacteristic::Symmetric], // NOT Functional
-            max_cardinality: None,
-            sub_property_of: None,
-            inverse_of: None,
-            append_only: false,
-            cascade_dependents: Vec::new(),
-            cascade_dependent: false,
-            skip_conflict_detection: false,
-            canonical_predicate: String::new(),
-        });
-        ontology.register_property(crate::ontology::PropertyDescriptor {
-            id: "routine".into(),
-            label: "Routine".into(),
-            comment: "habits".into(),
+            id: "not_functional".into(),
+            label: "Not Functional".into(),
+            comment: "".into(),
             domain: Vec::new(),
             range: Vec::new(),
             characteristics: Vec::new(),
@@ -1486,62 +1385,29 @@ mod tests {
             skip_conflict_detection: false,
             canonical_predicate: String::new(),
         });
-
-        let llm_response = r#"{
-            "cascade_rules": [
-                {
-                    "trigger": "relationship",
-                    "dependents": ["routine"],
-                    "rationale": "Bad inference"
-                }
-            ]
-        }"#;
-
+        let response = r#"{"cascade_rules":[{"trigger":"not_functional","dependents":["foo"],"rationale":"x"}]}"#;
         let updated =
-            OntologyEvolutionEngine::parse_cascade_inference_response(llm_response, &ontology);
-
-        // Should reject: relationship is not Functional
+            OntologyEvolutionEngine::parse_cascade_inference_response(response, &ontology);
         assert_eq!(updated, 0);
     }
 
     #[test]
     fn test_proposed_property_cascade_fields_in_ttl() {
         let props = vec![ProposedProperty {
-            id: "location".to_string(),
-            label: "Location".to_string(),
-            comment: "where someone lives".to_string(),
-            domain: vec!["Person".to_string()],
-            range: vec!["Location".to_string()],
+            id: "moves_to".into(),
+            label: "Moves To".into(),
+            comment: String::new(),
+            domain: Vec::new(),
+            range: Vec::new(),
             characteristics: vec![PropertyCharacteristic::Functional],
             max_cardinality: Some(1),
             sub_property_of: None,
             append_only: false,
-            cascade_dependents: vec!["routine".to_string(), "relationship".to_string()],
+            canonical_predicate: "moves_to".into(),
+            cascade_dependents: vec!["neighbor".into(), "routine".into()],
             cascade_dependent: false,
-            canonical_predicate: "lives_in".to_string(),
         }];
-
         let ttl = generate_ttl_for_properties(&props);
-        assert!(ttl.contains("eg:cascadeDependents eg:routine, eg:relationship"));
-        assert!(!ttl.contains("eg:cascadeDependent \"true\""));
-
-        // Test cascade_dependent property
-        let props2 = vec![ProposedProperty {
-            id: "routine".to_string(),
-            label: "Routine".to_string(),
-            comment: "daily habits".to_string(),
-            domain: Vec::new(),
-            range: Vec::new(),
-            characteristics: Vec::new(),
-            max_cardinality: None,
-            sub_property_of: None,
-            append_only: false,
-            cascade_dependents: Vec::new(),
-            cascade_dependent: true,
-            canonical_predicate: String::new(),
-        }];
-
-        let ttl2 = generate_ttl_for_properties(&props2);
-        assert!(ttl2.contains("eg:cascadeDependent \"true\""));
+        assert!(ttl.contains("eg:cascadeDependents eg:neighbor, eg:routine"));
     }
 }

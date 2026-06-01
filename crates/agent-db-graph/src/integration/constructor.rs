@@ -700,6 +700,15 @@ impl GraphEngine {
 
         let domain_registry = Arc::new(crate::domain_schema::DomainRegistry::new(ontology.clone()));
 
+        // Ontology evolution engine. Always on. No env flag, no auto-apply.
+        // Manual approval via /api/ontology/proposals/:id/approve is the
+        // safety control. Discovery is on-demand only via /api/ontology/discover.
+        let ontology_evolution = Arc::new(RwLock::new(
+            crate::ontology_evolution::OntologyEvolutionEngine::new(
+                crate::ontology_evolution::OntologyEvolutionConfig::default(),
+            ),
+        ));
+
         let engine = Self {
             inference,
             traversal,
@@ -738,6 +747,7 @@ impl GraphEngine {
             }),
             domain_registry: domain_registry.clone(),
             ontology: ontology.clone(),
+            ontology_evolution,
             embedding_client,
             // 10x/100x: Consolidation + Refinement — built BEFORE config is moved
             consolidation_engine: consolidation_engine_arc,
