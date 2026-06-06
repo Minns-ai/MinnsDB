@@ -18,6 +18,9 @@ pub struct ErrorResponse {
 pub enum ApiError {
     Internal(String),
     BadRequest(String),
+    /// 403 Forbidden — authenticated but not permitted (e.g. non-admin key
+    /// on an admin-only endpoint).
+    Forbidden(String),
     NotFound(String),
     NotImplemented(String),
     /// 503 Service Unavailable — returned when write lanes or read gate are exhausted.
@@ -37,6 +40,7 @@ impl std::fmt::Display for ApiError {
         let (kind, msg) = match self {
             ApiError::Internal(m) => ("internal", m),
             ApiError::BadRequest(m) => ("bad_request", m),
+            ApiError::Forbidden(m) => ("forbidden", m),
             ApiError::NotFound(m) => ("not_found", m),
             ApiError::NotImplemented(m) => ("not_implemented", m),
             ApiError::ServiceUnavailable(m) => ("service_unavailable", m),
@@ -65,6 +69,7 @@ impl IntoResponse for ApiError {
                 "Bad Request".to_string(),
                 Some(msg),
             ),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, "Forbidden".to_string(), Some(msg)),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "Not Found".to_string(), Some(msg)),
             ApiError::NotImplemented(msg) => (
                 StatusCode::NOT_IMPLEMENTED,

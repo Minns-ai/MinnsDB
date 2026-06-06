@@ -62,9 +62,34 @@ const MAX_MODULES: usize = 100;
 /// POST /api/modules — upload a WASM module
 pub async fn upload_module(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<UploadModuleRequest>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+
+    // Network egress with a wildcard domain is privileged: it enables SSRF to
+    // any host a module names. Only admins may grant it; other callers must
+    // pre-commit to specific domains (still subject to the internal-address
+    // denylist enforced at fetch time).
+    let wants_wildcard_net = req.permissions.iter().any(|p| {
+        let p = p.trim();
+        (p.starts_with("http:") || p.starts_with("net:")) && p.contains('*')
+    });
+    if wants_wildcard_net {
+        let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
+        let is_admin = super::auth::extract_auth(&state, auth_header)
+            .await
+            .map(|id| id.is_admin)
+            .unwrap_or(false);
+        if !is_admin {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "admin permission required to grant wildcard network access"
+                })),
+            );
+        }
+    }
     let wasm_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.wasm_base64) {
         Ok(b) => b,
         Err(e) => {

@@ -97,11 +97,30 @@ impl Drop for ChannelWriter {
 
 // ========== Export handler (streaming response) ==========
 
+/// Reject non-admin callers. Export streams the entire DB and import can wipe
+/// and replace it, so both require an admin key (like the key-management API).
+async fn require_admin(state: &AppState, headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
+    let identity = super::auth::extract_auth(state, auth_header)
+        .await
+        .map_err(|_| ApiError::Forbidden("authentication required".into()))?;
+    if !identity.has_permission(minns_auth::key::permissions::ADMIN) {
+        return Err(ApiError::Forbidden(
+            "admin permission required for export/import".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/admin/export
 ///
 /// Export all persisted state as a streaming binary v2 response.
 /// Content-Type: application/octet-stream
-pub async fn export_handler(State(state): State<AppState>) -> Result<Response, ApiError> {
+pub async fn export_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, ApiError> {
+    require_admin(&state, &headers).await?;
     let _export_permit = state
         .export_semaphore
         .try_acquire()
@@ -183,9 +202,11 @@ pub async fn export_handler(State(state): State<AppState>) -> Result<Response, A
 /// - "merge": upsert imported records into existing data
 pub async fn import_handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<ImportQuery>,
     body: Body,
 ) -> Result<Json<ImportResponse>, ApiError> {
+    require_admin(&state, &headers).await?;
     let mode = match query.mode.as_str() {
         "replace" => ImportMode::Replace,
         "merge" => ImportMode::Merge,

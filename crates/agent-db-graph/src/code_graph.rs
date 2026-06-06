@@ -430,8 +430,18 @@ pub fn build_code_embedding_text(node: &crate::structures::GraphNode) -> String 
         text.push_str(&format!(": {}", sig));
     }
     if let Some(doc) = doc {
-        // Truncate very long doc comments
-        let doc_trimmed = if doc.len() > 500 { &doc[..500] } else { doc };
+        // Truncate very long doc comments at a char boundary; slicing by raw
+        // byte offset panics when byte 500 lands inside a multi-byte char
+        // (accents, CJK, emoji in a doc comment).
+        let doc_trimmed = if doc.len() > 500 {
+            let mut end = 500;
+            while end > 0 && !doc.is_char_boundary(end) {
+                end -= 1;
+            }
+            &doc[..end]
+        } else {
+            doc
+        };
         text.push_str(&format!(". {}", doc_trimmed));
     }
     if !file.is_empty() {

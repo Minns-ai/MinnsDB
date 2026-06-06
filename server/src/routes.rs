@@ -18,8 +18,21 @@ use tower_http::cors::CorsLayer;
 fn build_cors_layer() -> CorsLayer {
     let origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
     if origins.is_empty() {
-        // Development default: permissive
-        CorsLayer::permissive()
+        let auth_enabled = std::env::var("MINNS_AUTH_ENABLED")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        if auth_enabled {
+            // Production (auth on) with no explicit allow-list: fail closed.
+            // Same-origin and non-browser clients still work; cross-origin
+            // browser requests are denied rather than silently allowed.
+            tracing::warn!(
+                "CORS_ALLOWED_ORIGINS is unset while auth is enabled; denying cross-origin requests. Set it to your app origin(s)."
+            );
+            CorsLayer::new()
+        } else {
+            // Local development convenience.
+            CorsLayer::permissive()
+        }
     } else {
         let allowed: Vec<_> = origins
             .split(',')

@@ -186,6 +186,10 @@ pub struct SearchRequest {
     /// Fusion strategy for hybrid search
     #[serde(default)]
     pub fusion_strategy: Option<agent_db_graph::indexing::FusionStrategy>,
+    /// Group scope. When set, results are restricted to this group_id; when
+    /// empty/omitted, search spans all groups (matching NLQ semantics).
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 // ============================================================================

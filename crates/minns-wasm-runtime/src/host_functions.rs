@@ -18,6 +18,43 @@ use crate::error::WasmError;
 use crate::permissions::PermissionSet;
 use crate::usage::ModuleUsageCounters;
 
+/// True if an IP literal is in a private/loopback/link-local/ULA/unspecified
+/// range that a sandboxed module must never reach (SSRF guard). Covers IPv4,
+/// IPv6, and IPv4-mapped IPv6. Link-local includes 169.254.0.0/16 (cloud
+/// metadata at 169.254.169.254).
+fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.octets()[0] == 0
+        },
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            let seg0 = v6.segments()[0];
+            if (seg0 & 0xfe00) == 0xfc00 {
+                return true; // ULA fc00::/7
+            }
+            if (seg0 & 0xffc0) == 0xfe80 {
+                return true; // link-local fe80::/10
+            }
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_unspecified();
+            }
+            false
+        },
+    }
+}
+
 /// MessagePack-serialisable query result.
 #[derive(Serialize)]
 struct QueryResultMsg {
@@ -570,20 +607,20 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
                         .and_then(|s| s.split(':').next()) // strip port
                         .unwrap_or("");
 
-                    // Block internal/private network addresses
-                    let blocked = [
-                        "localhost",
-                        "127.0.0.1",
-                        "0.0.0.0",
-                        "[::1]",
-                        "169.254.169.254",
-                        "metadata.google.internal",
-                    ];
-                    if blocked.contains(&domain)
-                        || domain.starts_with("10.")
-                        || domain.starts_with("172.16.")
-                        || domain.starts_with("192.168.")
-                    {
+                    // Block internal/private/metadata addresses. Hostnames are
+                    // matched against a denylist; anything that parses as an IP
+                    // literal (incl. IPv6 and IPv4-mapped) is checked against
+                    // private/loopback/link-local/ULA ranges. NOTE: this does
+                    // not resolve DNS names or decode non-standard IP encodings
+                    // (e.g. decimal), so wildcard network grants are admin-only
+                    // (enforced at module upload) to bound the residual risk.
+                    let host = domain.trim_start_matches('[').trim_end_matches(']');
+                    let blocked_host = ["localhost", "metadata.google.internal", "metadata.goog"];
+                    let ip_blocked = host
+                        .parse::<std::net::IpAddr>()
+                        .map(|ip| is_internal_ip(&ip))
+                        .unwrap_or(false);
+                    if blocked_host.contains(&host) || ip_blocked {
                         return Err(WasmError::PermissionDenied(format!(
                             "blocked internal network address: {}",
                             domain
@@ -591,6 +628,35 @@ pub fn register_host_functions(linker: &mut Linker<HostEnv>) -> Result<(), WasmE
                     }
 
                     caller.data().permissions.check_http_fetch(domain)?;
+
+                    // Resolve-then-validate (SSRF): reject if the host resolves
+                    // to any internal IP. This catches DNS names pointing at
+                    // internal/metadata addresses and non-standard IP encodings
+                    // (decimal/hex) that the literal denylist above cannot.
+                    {
+                        let host_owned = host.to_string();
+                        let port: u16 = if req.url.starts_with("https") {
+                            443
+                        } else {
+                            80
+                        };
+                        let resolves_internal = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                match tokio::net::lookup_host((host_owned.as_str(), port)).await {
+                                    Ok(addrs) => addrs.into_iter().any(|a| is_internal_ip(&a.ip())),
+                                    // Resolution failure: let the request itself
+                                    // surface the DNS error rather than block here.
+                                    Err(_) => false,
+                                }
+                            })
+                        });
+                        if resolves_internal {
+                            return Err(WasmError::PermissionDenied(format!(
+                                "host resolves to an internal address: {}",
+                                domain
+                            )));
+                        }
+                    }
 
                     let client = caller
                         .data()

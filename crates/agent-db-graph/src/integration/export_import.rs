@@ -24,7 +24,11 @@ impl GraphEngine {
                     agent_db_storage::CURRENT_DATA_VERSION,
                     &bytes,
                 );
-                let _ = backend.put_raw(table_names::TRANSITION_STATS, b"__model__", &wrapped);
+                backend
+                    .put_raw(table_names::TRANSITION_STATS, b"__model__", &wrapped)
+                    .map_err(|e| {
+                        GraphError::OperationError(format!("persist transition model: {e}"))
+                    })?;
             }
 
             let ed = self.episode_detector.read().await;
@@ -33,7 +37,11 @@ impl GraphEngine {
                     agent_db_storage::CURRENT_DATA_VERSION,
                     &bytes,
                 );
-                let _ = backend.put_raw(table_names::EPISODE_CATALOG, b"__detector__", &wrapped);
+                backend
+                    .put_raw(table_names::EPISODE_CATALOG, b"__detector__", &wrapped)
+                    .map_err(|e| {
+                        GraphError::OperationError(format!("persist episode detector: {e}"))
+                    })?;
             }
 
             let counter = self
@@ -44,11 +52,15 @@ impl GraphEngine {
                 agent_db_storage::CURRENT_DATA_VERSION,
                 &counter_bytes,
             );
-            let _ = backend.put_raw(
-                table_names::ID_ALLOCATOR,
-                b"consolidation_counter",
-                &wrapped,
-            );
+            backend
+                .put_raw(
+                    table_names::ID_ALLOCATOR,
+                    b"consolidation_counter",
+                    &wrapped,
+                )
+                .map_err(|e| {
+                    GraphError::OperationError(format!("persist consolidation counter: {e}"))
+                })?;
         }
 
         Ok(())

@@ -122,7 +122,7 @@ pub struct ClassDescriptor {
 
 /// Class hierarchy for rdfs:domain/range validation.
 pub struct ClassHierarchy {
-    classes: std::sync::RwLock<HashMap<String, ClassDescriptor>>,
+    classes: parking_lot::RwLock<HashMap<String, ClassDescriptor>>,
 }
 
 impl Default for ClassHierarchy {
@@ -134,12 +134,12 @@ impl Default for ClassHierarchy {
 impl ClassHierarchy {
     pub fn new() -> Self {
         Self {
-            classes: std::sync::RwLock::new(HashMap::new()),
+            classes: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
     pub fn register(&self, desc: ClassDescriptor) {
-        self.classes.write().unwrap().insert(desc.id.clone(), desc);
+        self.classes.write().insert(desc.id.clone(), desc);
     }
 
     /// Check if `child` is a subclass of `parent` (transitive BFS).
@@ -147,7 +147,7 @@ impl ClassHierarchy {
         if child == parent {
             return true;
         }
-        let classes = self.classes.read().unwrap();
+        let classes = self.classes.read();
         let mut queue = std::collections::VecDeque::new();
         let mut visited = std::collections::HashSet::new();
         queue.push_back(child.to_string());
@@ -250,11 +250,11 @@ pub enum ValidationResult {
 /// (`if category == "financial"`) now consult this registry.
 pub struct OntologyRegistry {
     /// Property descriptors keyed by ID
-    properties: std::sync::RwLock<HashMap<String, PropertyDescriptor>>,
+    properties: parking_lot::RwLock<HashMap<String, PropertyDescriptor>>,
     /// Class hierarchy
     class_hierarchy: ClassHierarchy,
     /// Reverse index: property ID → sub-properties (for query expansion)
-    sub_property_index: std::sync::RwLock<HashMap<String, Vec<String>>>,
+    sub_property_index: parking_lot::RwLock<HashMap<String, Vec<String>>>,
 }
 
 impl Default for OntologyRegistry {
@@ -266,9 +266,9 @@ impl Default for OntologyRegistry {
 impl OntologyRegistry {
     pub fn new() -> Self {
         Self {
-            properties: std::sync::RwLock::new(HashMap::new()),
+            properties: parking_lot::RwLock::new(HashMap::new()),
             class_hierarchy: ClassHierarchy::new(),
-            sub_property_index: std::sync::RwLock::new(HashMap::new()),
+            sub_property_index: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
@@ -376,7 +376,7 @@ impl OntologyRegistry {
     /// Returns the property itself if it has no parent.
     pub fn resolve_to_parent(&self, property_id: &str) -> String {
         let parent = {
-            let props = self.properties.read().unwrap();
+            let props = self.properties.read();
             props
                 .get(property_id)
                 .and_then(|p| p.sub_property_of.clone())
@@ -418,16 +418,17 @@ impl OntologyRegistry {
     /// E.g., "relationship" → ["relationship", "colleague", "friend", ...]
     pub fn expand_property(&self, property_id: &str) -> Vec<String> {
         let mut result = vec![property_id.to_string()];
-        if let Ok(index) = self.sub_property_index.read() {
-            if let Some(subs) = index.get(property_id) {
-                for sub in subs {
-                    // Recursively expand
-                    let sub_expanded = self.expand_property(sub);
-                    for s in sub_expanded {
-                        if !result.contains(&s) {
-                            result.push(s);
-                        }
-                    }
+        // Snapshot the direct sub-properties and drop the read guard BEFORE
+        // recursing: parking_lot's RwLock is not reentrant, so holding the
+        // guard across the recursive read would risk a deadlock.
+        let subs: Vec<String> = {
+            let index = self.sub_property_index.read();
+            index.get(property_id).cloned().unwrap_or_default()
+        };
+        for sub in subs {
+            for s in self.expand_property(&sub) {
+                if !result.contains(&s) {
+                    result.push(s);
                 }
             }
         }
@@ -493,8 +494,8 @@ impl OntologyRegistry {
     /// Only includes top-level properties. Sub-properties are listed inline
     /// so the LLM knows about them but uses the parent category.
     pub fn prompt_category_block(&self) -> String {
-        let props = self.properties.read().unwrap();
-        let sub_idx = self.sub_property_index.read().unwrap();
+        let props = self.properties.read();
+        let sub_idx = self.sub_property_index.read();
         let mut lines = Vec::new();
         for prop in props.values() {
             // Skip sub-properties — they're listed under their parent
@@ -551,7 +552,7 @@ impl OntologyRegistry {
     /// the LLM to commit to a real category surfaces uncertainty as a
     /// disagreement signal we can act on at write time.
     pub fn prompt_category_enum(&self) -> String {
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read();
         let mut cats: Vec<String> = props
             .values()
             .filter(|p| p.sub_property_of.is_none())
@@ -568,7 +569,7 @@ impl OntologyRegistry {
         let id = descriptor.id.clone();
         let sub_prop = descriptor.sub_property_of.clone();
 
-        let mut props = self.properties.write().unwrap();
+        let mut props = self.properties.write();
         if props.contains_key(&id) {
             return false;
         }
@@ -577,7 +578,7 @@ impl OntologyRegistry {
 
         // Update sub-property index
         if let Some(parent) = sub_prop {
-            let mut index = self.sub_property_index.write().unwrap();
+            let mut index = self.sub_property_index.write();
             index.entry(parent).or_default().push(id);
         }
         true
@@ -586,7 +587,7 @@ impl OntologyRegistry {
     /// Update the cascade_dependents list for a property. Merges with existing
     /// dependents (no duplicates). Returns true if any new dependents were added.
     pub fn update_cascade_dependents(&self, property_id: &str, dependents: &[String]) -> bool {
-        let mut props = self.properties.write().unwrap();
+        let mut props = self.properties.write();
         if let Some(prop) = props.get_mut(property_id) {
             let before = prop.cascade_dependents.len();
             for dep in dependents {
@@ -602,7 +603,7 @@ impl OntologyRegistry {
 
     /// Mark a property as cascade_dependent. Returns true if changed from false to true.
     pub fn mark_cascade_dependent(&self, property_id: &str) -> bool {
-        let mut props = self.properties.write().unwrap();
+        let mut props = self.properties.write();
         if let Some(prop) = props.get_mut(property_id) {
             if !prop.cascade_dependent {
                 prop.cascade_dependent = true;
@@ -614,13 +615,13 @@ impl OntologyRegistry {
 
     /// Resolve a property descriptor by ID.
     pub fn resolve(&self, property_id: &str) -> Option<PropertyDescriptor> {
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read();
         props.get(property_id).cloned()
     }
 
     /// Return all property IDs that have a given characteristic.
     pub fn properties_with_characteristic(&self, c: PropertyCharacteristic) -> Vec<String> {
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read();
         props
             .values()
             .filter(|p| p.has_characteristic(c))
@@ -630,14 +631,14 @@ impl OntologyRegistry {
 
     /// Return all registered property IDs.
     pub fn all_property_ids(&self) -> Vec<String> {
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read();
         props.keys().cloned().collect()
     }
 
     /// Build indices after loading (sub-property reverse index).
     fn build_indices(&self) {
-        let props = self.properties.read().unwrap();
-        let mut index = self.sub_property_index.write().unwrap();
+        let props = self.properties.read();
+        let mut index = self.sub_property_index.write();
         index.clear();
         for prop in props.values() {
             if let Some(ref parent) = prop.sub_property_of {
@@ -656,7 +657,7 @@ impl OntologyRegistry {
     /// `rdfs:comment`, `canonical_predicate`, and `rdfs:label` to find
     /// the best match. Returns `None` if no property matches.
     pub fn infer_category(&self, predicate: &str, statement: &str) -> Option<String> {
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read();
         let pred_lower = predicate.to_lowercase().replace('_', " ");
         let stmt_lower = statement.to_lowercase();
 
@@ -784,7 +785,7 @@ impl OntologyRegistry {
     /// properties with non-empty canonical predicates.
     /// Used by PredicateCanonicalizer to embed canonical predicates.
     pub fn single_valued_canonicals(&self) -> Vec<(String, String)> {
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read();
         props
             .values()
             .filter(|p| self.is_single_valued(&p.id) && !p.canonical_predicate.is_empty())
@@ -797,7 +798,7 @@ impl OntologyRegistry {
     /// to build one descriptive vector per category so an arbitrary
     /// raw-predicate+statement pair can be routed to the closest match.
     pub fn top_level_property_descriptors(&self) -> Vec<(String, String, String, String)> {
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read();
         props
             .values()
             .filter(|p| p.sub_property_of.is_none())
@@ -838,7 +839,7 @@ impl OntologyRegistry {
     pub fn learned_slots(&self) -> Vec<crate::domain_schema::LearnedSlot> {
         // In the ontology model, all properties are equal. We return
         // non-bootstrap properties as "learned" for backward compat.
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read();
         let bootstrap = [
             "location",
             "work",
