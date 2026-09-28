@@ -14,7 +14,7 @@ agent-db-events = { path = "../agent-db-events" }
 
 # NER - External service (rust-bert moved to separate microservice)
 # No heavy ML dependencies in main build
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 # Async runtime
 tokio = { version = "1.28", features = ["full"] }

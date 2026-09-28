@@ -118,7 +118,7 @@ pub struct HostEnv {
     /// Buffer pool for zero-copy data exchange.
     pub buffer_pool: crate::abi::BufferPool,
     /// WASI preview 1 context for modules that need std (fd_write, etc.)
-    pub wasi_p1: wasmtime_wasi::p1::WasiP1Ctx,
+    pub wasi_p1: wasmtime_wasi::preview1::WasiP1Ctx,
 }
 
 impl HostEnv {

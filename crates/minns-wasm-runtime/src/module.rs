@@ -103,8 +103,10 @@ impl ModuleInstance {
         compiled: &Module,
     ) -> Result<InstancePre<HostEnv>, WasmError> {
         let mut linker = Linker::new(runtime.engine());
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |env: &mut HostEnv| &mut env.wasi_p1)
-            .map_err(|e| WasmError::InstantiationError(format!("WASI link: {}", e)))?;
+        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |env: &mut HostEnv| {
+            &mut env.wasi_p1
+        })
+        .map_err(|e| WasmError::InstantiationError(format!("WASI link: {}", e)))?;
         host_functions::register_host_functions(&mut linker)?;
 
         linker

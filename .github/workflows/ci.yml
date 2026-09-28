@@ -109,7 +109,7 @@ jobs:
       uses: dtolnay/rust-toolchain@1.83.0
     
     - name: Install cargo-audit
-      run: cargo install cargo-audit
+      run: cargo install cargo-audit --locked
     
     - name: Run security audit
       run: cargo audit
