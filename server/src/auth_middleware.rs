@@ -34,11 +34,7 @@ pub async fn auth_layer(
 
     // Public allow-list — read-only surfaces with no sensitive data.
     let path = request.uri().path().trim_end_matches('/');
-    if path == "/api/health"
-        || path == "/metrics"
-        || path.is_empty()
-        || path == "/docs"
-    {
+    if path == "/api/health" || path == "/metrics" || path.is_empty() || path == "/docs" {
         return Ok(next.run(request).await);
     }
 
