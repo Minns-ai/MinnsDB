@@ -215,7 +215,7 @@ RETURN customers.name, orders.amount
 - In-memory indexes rebuilt from pages on startup
 - Column types: `String`, `Int64`, `Float64`, `Bool`, `Timestamp`, `Json`, `NodeRef`
 
-**REST API:** 11 endpoints — `POST /api/tables` (create), `GET /api/tables` (list), `GET /api/tables/:name/schema`, `DELETE /api/tables/:name` (drop), `POST /api/tables/:name/rows` (insert), `PUT /api/tables/:name/rows/:id` (update), `DELETE /api/tables/:name/rows/:id` (delete), `GET /api/tables/:name/rows` (scan with `?when=all`, `?as_of=`), `GET /api/tables/:name/by-node/:id` (NodeRef reverse lookup), `POST /api/tables/:name/compact`, `GET /api/tables/:name/stats`.
+**REST API:** 11 endpoints: `POST /api/tables` (create), `GET /api/tables` (list), `GET /api/tables/:name/schema`, `DELETE /api/tables/:name` (drop), `POST /api/tables/:name/rows` (insert), `PUT /api/tables/:name/rows/:id` (update), `DELETE /api/tables/:name/rows/:id` (delete), `GET /api/tables/:name/rows` (scan with `?when=all`, `?as_of=`), `GET /api/tables/:name/by-node/:id` (NodeRef reverse lookup), `POST /api/tables/:name/compact`, `GET /api/tables/:name/stats`.
 
 ### 3. WASM Agent Runtime
 
@@ -615,7 +615,7 @@ Full reference: [API_REFERENCE.md](API_REFERENCE.md)
 | Group | Key Endpoints |
 |-------|--------------|
 | **Auth** | `POST /api/keys` — create key (admin)<br>`GET /api/keys` — list keys<br>`DELETE /api/keys/:name` — delete key |
-| **Tables** | `POST /api/tables` — create table<br>`GET /api/tables` — list tables<br>`GET /api/tables/:name/schema` — schema<br>`DELETE /api/tables/:name` — drop<br>`POST/GET /api/tables/:name/rows` — insert/scan<br>`PUT/DELETE /api/tables/:name/rows/:id` — update/delete<br>`GET /api/tables/:name/stats` — stats<br>`POST /api/tables/:name/compact` — compaction |
+| **Tables** | `POST /api/tables`: create table<br>`GET /api/tables`: list tables<br>`GET /api/tables/:name/schema`: schema<br>`DELETE /api/tables/:name`: drop<br>`POST/GET /api/tables/:name/rows`: insert/scan<br>`PUT/DELETE /api/tables/:name/rows/:id`: update/delete<br>`GET /api/tables/:name/stats`: stats<br>`POST /api/tables/:name/compact`: compaction |
 | **MinnsQL** | `POST /api/query` — execute any MinnsQL (MATCH, FROM, CREATE TABLE, INSERT, etc.) |
 | **WASM Modules** | `POST /api/modules` — upload<br>`POST /api/modules/:name/call/:fn` — call function<br>`GET /api/modules/:name/usage` — usage stats<br>`POST /api/modules/:name/usage/reset` — billing reset<br>`POST/GET /api/modules/:name/schedules` — cron |
 | **Conversations** | `POST /api/conversations/ingest` — batch (requires LLM)<br>`POST /api/messages` — streaming with auto-compaction |
@@ -623,7 +623,7 @@ Full reference: [API_REFERENCE.md](API_REFERENCE.md)
 | **Subscriptions** | `POST /api/subscriptions` — create<br>`GET /api/subscriptions/:id/poll` — poll<br>`GET /api/subscriptions/ws` — WebSocket |
 | **Events** | `POST /api/events/simple` — simple event<br>`POST /api/events` — full event<br>`POST /api/events/state-change` — typed state change<br>`POST /api/events/transaction` — typed transaction |
 | **Graph & Analytics** | `GET /api/graph` — structure<br>`GET /api/communities` — Louvain/LP<br>`GET /api/centrality` — PageRank/betweenness<br>`GET /api/reachability` — temporal reachability |
-| **Admin** | `POST /api/admin/export` — binary export<br>`POST /api/admin/import` — import<br>`GET /api/health` — health check<br>`GET /metrics` — Prometheus metrics |
+| **Admin** | `POST /api/admin/export`: binary export<br>`POST /api/admin/import`: import<br>`GET /api/health`: health check<br>`GET /metrics`: Prometheus metrics |
 
 ---
 
