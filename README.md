@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/Minns-ai/MinnsDB/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Minns-ai/MinnsDB/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License: AGPL-3.0"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.83%2B-orange?style=flat-square&logo=rust" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.93-orange?style=flat-square&logo=rust" alt="Rust 1.93"></a>
   <a href="https://discord.gg/6a2cCRPwUR"><img src="https://img.shields.io/discord/1472727097368641720?style=flat-square&logo=discord&label=discord&color=5865F2" alt="Discord"></a>
 </p>
 
@@ -48,42 +48,58 @@ MinnsDB is a database purpose-built for AI agent workloads. It combines a tempor
 
 ## Quick start
 
+MinnsDB needs a [Qdrant](https://qdrant.tech/) vector store. The server connects to it over gRPC at `http://localhost:6334` by default (set `QDRANT_URL` to change this) and will not start if it cannot reach it.
+
 ### From source
+
+The toolchain is pinned to Rust 1.93 in `rust-toolchain.toml`, so rustup will install it on the first build.
 
 ```bash
 git clone https://github.com/Minns-ai/MinnsDB.git
 cd MinnsDB
-cargo build --release
+
+# Start Qdrant
+docker run -d -p 6334:6334 qdrant/qdrant:v1.13.0
+
 cargo run --release -p minnsdb-server
 ```
 
-### With Docker
+The server stores its data in `./data` relative to the directory you start it from, and reads the ontology files from `data/ontology`.
+
+### With Docker Compose
+
+`docker-compose.yml` builds the server image from this repository and starts it alongside Qdrant:
 
 ```bash
-docker pull ghcr.io/minns-ai/minnsdb:latest
-docker run -p 3000:3000 -v minns-data:/data ghcr.io/minns-ai/minnsdb:latest
+export LLM_API_KEY=sk-...   # optional, needed for conversation ingestion
+docker compose up --build
 ```
 
-On first boot, the server generates a root API key and prints it once:
+Inside the container the server writes its data to `/app/data`.
+
+### Authentication
+
+Authentication is off by default, which is convenient for local development. To require API keys, start the server with `MINNS_AUTH_ENABLED=true`.
+
+On first boot the server generates a root API key and logs it once:
 
 ```
 ========================================
   ROOT API KEY (save this — shown once):
   mndb_a1b2c3d4e5f6789...
 ========================================
-Listening on http://0.0.0.0:3000
 ```
 
-All requests require the API key:
+To use a key of your own instead, set `MINNS_ROOT_KEY` before the first boot. With authentication on, every request except `/`, `/docs`, `/api/health` and `/metrics` needs the key:
 
 ```bash
 export MINNS_KEY="mndb_a1b2c3d4e5f6789..."
 
-# Health check
-curl -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/health
+# Health check (no key needed)
+curl http://localhost:3000/api/health
 ```
 
-For development, disable auth with `MINNS_AUTH_DISABLED=true`.
+The examples below send the key on every request. If authentication is off, the header is ignored.
 
 ---
 
@@ -109,7 +125,8 @@ curl -X POST http://localhost:3000/api/query \
   -d '{"query": "FROM orders WHERE orders.status = \"pending\" RETURN orders.customer, orders.amount"}'
 # → {"columns": ["orders.customer", "orders.amount"], "rows": [["Alice", 99.99]], ...}
 
-# 4. Ingest a conversation into the graph
+# 4. Record an event in the graph
+#    (to extract facts from chat with an LLM, use POST /api/conversations/ingest)
 curl -X POST http://localhost:3000/api/events/simple \
   -H "Authorization: Bearer $MINNS_KEY" \
   -H 'Content-Type: application/json' \
@@ -133,19 +150,11 @@ curl -X POST http://localhost:3000/api/query \
 
 ## Benchmarks
 
-Evaluated on [StructMemEval](https://arxiv.org/abs/2602.11243), a benchmark designed to test structured memory in LLM agents across accounting (financial tracking), state tracking (entity state changes over time), tree-based (hierarchical relationship queries), and recommendation tasks.
+We are evaluating MinnsDB on [StructMemEval](https://arxiv.org/abs/2602.11243), a benchmark designed to test structured memory in LLM agents across accounting (financial tracking), state tracking (entity state changes over time), tree-based (hierarchical relationship queries), and recommendation tasks.
 
-| System | StructMemEval Score |
-|--------|:-------------------:|
-| **MinnsDB** | **70%** |
-| Next best | 27% |
+StructMemEval tests the capabilities that flat memory stores lack: tracking state changes over time, maintaining financial ledgers across conversations, resolving multi-hop relationship queries, and handling contradictions when facts are superseded. MinnsDB's temporal graph and bi-temporal storage are designed for these.
 
-StructMemEval tests the capabilities that flat memory stores lack: tracking state changes over time, maintaining financial ledgers across conversations, resolving multi-hop relationship queries, and handling contradictions when facts are superseded. MinnsDB's temporal graph and bi-temporal storage handle these natively.
-
-The benchmark is based on [StructMemEval](https://arxiv.org/abs/2602.11243). See the benchmark runner in the repository for reproduction details.
-
-```bash
-```
+The benchmark runner is not in this repository yet, so we do not publish scores here. We will add results once the runner is public and they can be reproduced.
 
 ---
 
@@ -206,7 +215,7 @@ RETURN customers.name, orders.amount
 - In-memory indexes rebuilt from pages on startup
 - Column types: `String`, `Int64`, `Float64`, `Bool`, `Timestamp`, `Json`, `NodeRef`
 
-**REST API:** 9 endpoints — `POST /api/tables` (create), `DELETE /api/tables/:name` (drop), `POST /api/tables/:name/rows` (insert), `PUT /api/tables/:name/rows/:id` (update), `DELETE /api/tables/:name/rows/:id` (delete), `GET /api/tables/:name/rows` (scan with `?when=all`, `?as_of=`), `GET /api/tables/:name/by-node/:id` (NodeRef reverse lookup), `POST /api/tables/:name/compact`, `GET /api/tables/:name/stats`.
+**REST API:** 11 endpoints — `POST /api/tables` (create), `GET /api/tables` (list), `GET /api/tables/:name/schema`, `DELETE /api/tables/:name` (drop), `POST /api/tables/:name/rows` (insert), `PUT /api/tables/:name/rows/:id` (update), `DELETE /api/tables/:name/rows/:id` (delete), `GET /api/tables/:name/rows` (scan with `?when=all`, `?as_of=`), `GET /api/tables/:name/by-node/:id` (NodeRef reverse lookup), `POST /api/tables/:name/compact`, `GET /api/tables/:name/stats`.
 
 ### 3. WASM Agent Runtime
 
@@ -281,7 +290,7 @@ Full language reference: [API_REFERENCE.md](API_REFERENCE.md#minnsql-language-re
 
 ### 5. Authentication
 
-API key-based authentication with group scoping and permissions.
+API key-based authentication with group scoping and permissions. It is off unless the server is started with `MINNS_AUTH_ENABLED=true`.
 
 ```bash
 # Create a scoped key (admin only)
@@ -302,8 +311,8 @@ curl -X DELETE -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/k
 - Stored as blake3 hashes — raw keys never persisted
 - Admin keys access all groups; scoped keys access one group
 - Permissions: `admin`, `read`, `write`, `query`, `tables`, `modules`, `ingest`, `subscribe`
-- Root key generated on first boot, printed once to console
-- `MINNS_AUTH_DISABLED=true` for development
+- Root key generated on first boot and printed once to the console, or taken from `MINNS_ROOT_KEY` if set; the root key cannot be deleted
+- Listing, creating and deleting keys needs an admin key
 
 ### 6. Reactive Subscriptions
 
@@ -415,13 +424,13 @@ Code events flow through the same event pipeline as conversations but with code-
 curl -X POST http://localhost:3000/api/events/code-review \
   -H "Authorization: Bearer $MINNS_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"review_id": "pr-42", "repository": "myapp", "action": "request_changes", "body": "Race condition in the connection pool", "file_path": "src/pool.rs", "line_range": [120, 135]}'
+  -d '{"agent_id": 1, "agent_type": "reviewer", "session_id": 1, "review_id": "pr-42", "repository": "myapp", "action": "request_changes", "body": "Race condition in the connection pool", "file_path": "src/pool.rs", "line_range": [120, 135]}'
 
 # Submit a code file snapshot
 curl -X POST http://localhost:3000/api/events/code-file \
   -H "Authorization: Bearer $MINNS_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"file_path": "src/pool.rs", "content": "...", "language": "rust", "repository": "myapp"}'
+  -d '{"agent_id": 1, "agent_type": "indexer", "session_id": 1, "file_path": "src/pool.rs", "content": "...", "language": "rust", "repository": "myapp"}'
 
 # Search code entities
 curl -X POST http://localhost:3000/api/code/search \
@@ -431,6 +440,8 @@ curl -X POST http://localhost:3000/api/code/search \
 ```
 
 Code reviews create `CodeReview` events with action mapping (approve, request_changes, comment). Code file snapshots create `CodeFile` events with language tagging. Both route through the standard event pipeline: event ordering, graph node creation, episode detection, and memory formation. The code search endpoint uses code-aware tokenization with camelCase/snake_case splitting for structural search.
+
+Tree-sitter AST parsing of code files is behind the `code` cargo feature: build the server with `cargo run --release -p minnsdb-server --features code`, or build the Docker image with `--build-arg SERVICE_PROFILE=code`. Without it, code files get a minimal summary.
 
 ### 9. Ontology Discovery
 
@@ -500,11 +511,11 @@ curl -X POST http://localhost:3000/api/ontology/proposals/1/approve \
 # View observations (transparency)
 curl -H "Authorization: Bearer $MINNS_KEY" http://localhost:3000/api/ontology/observations
 
-# Upload custom TTL
-curl -X POST http://localhost:3000/api/ontology/upload \
+# Upload custom TTL (sent as a JSON string in the "ttl" field)
+jq -Rs '{ttl: .}' my-ontology.ttl | curl -X POST http://localhost:3000/api/ontology/upload \
   -H "Authorization: Bearer $MINNS_KEY" \
-  -H 'Content-Type: text/turtle' \
-  -d '@data/ontology/custom.ttl'
+  -H 'Content-Type: application/json' \
+  -d @-
 ```
 
 The discovery pass runs three phases: behavior inference from edge statistics, hierarchy clustering via LLM (grouping related predicates under parent categories), and cascade dependency inference via LLM (determining which properties should invalidate dependents when they change). Proposals above the auto-apply confidence threshold (default: 0.85) are applied immediately. Others are held for manual review.
@@ -519,7 +530,7 @@ This means the ontology grows with your data. The first few conversations may us
 minnsdb/
 ├── crates/
 │   ├── agent-db-core/          # Core types: Timestamp, NodeId, RowId, GroupId
-│   ├── agent-db-events/        # Event struct, 8 EventType variants
+│   ├── agent-db-events/        # Event struct, 9 EventType variants
 │   ├── agent-db-storage/       # ReDB backend (30+ tables)
 │   ├── agent-db-graph/         # GraphEngine — orchestrator
 │   │                           #   Conversation compaction, NLQ pipeline
@@ -538,14 +549,18 @@ minnsdb/
 │   ├── minns-auth/             # API key authentication
 │   │                           #   Key generation, blake3 hashing, permissions
 │   │                           #   Group scoping, ReDB persistence
+│   ├── minns-vectors/          # Vector store client (Qdrant)
+│   ├── minns-cli/              # `minns` command-line client
+│   ├── minns-sdk/              # Rust SDK for writing WASM modules
+│   ├── minns-sdk-macros/       # Procedural macros for minns-sdk
 │   ├── agent-db-ast/           # Tree-sitter AST: Rust, Python, TS, JS, Go
 │   └── agent-db-ner/           # External NER service client
 ├── ml/
 │   ├── agent-db-world-model/   # Energy-based model critic [WIP]
 │   └── agent-db-planning/      # LLM planning pipeline [WIP]
 ├── server/                     # Axum HTTP server
-│   ├── src/handlers/           # 22 handler modules
-│   └── tests/end_to_end.rs     # Full E2E integration test
+│   ├── src/handlers/           # 26 handler modules
+│   └── tests/                  # Integration tests, including end_to_end.rs
 ├── data/ontology/              # OWL/RDFS Turtle files
 └── examples/                   # Rust examples
 ```
@@ -567,20 +582,25 @@ minnsdb/
 |----------|---------|-------------|
 | `SERVER_HOST` | `0.0.0.0` | Bind address |
 | `SERVER_PORT` | `3000` | Bind port |
-| `MINNS_AUTH_DISABLED` | `false` | Set `true` to disable API key auth (dev only) |
-| `RUST_LOG` | `info` | Log level |
-| `SERVICE_PROFILE` | `normal` | `normal` or `free` (controls cache sizes + limits) |
-| `LLM_API_KEY` | — | OpenAI-compatible key (required for conversation ingest + claims) |
+| `MINNS_AUTH_ENABLED` | `false` | Set `true` to require API keys |
+| `MINNS_ROOT_KEY` | none | Root key to install on first boot instead of generating one |
+| `QDRANT_URL` | `http://localhost:6334` | Qdrant gRPC endpoint (required at startup) |
+| `QDRANT_API_KEY` | none | Qdrant API key |
+| `QDRANT_COLLECTION_PREFIX` | none | Prefix for the Qdrant collection names |
+| `MINNS_ONTOLOGY_PATH` | `data/ontology` | Directory of OWL/RDFS Turtle files |
+| `SERVICE_PROFILE` | `normal` | `normal` or `free`. Sets cache sizes and limits (ReDB cache 256MB or 64MB, max graph size 1M or 50K nodes) |
+| `LLM_API_KEY` | none | OpenAI-compatible key (required for conversation ingest + claims) |
 | `LLM_MODEL` | `gpt-4o-mini` | LLM model for compaction |
-| `WRITE_LANE_COUNT` | `num_cpus/2` | Write lane concurrency (clamped 2-8) |
+| `WRITE_LANE_COUNT` | the larger of CPU count and 8 | Number of write lanes |
 | `WRITE_LANE_CAPACITY` | `128` | Per-lane queue depth |
-| `READ_GATE_PERMITS` | `num_cpus*2` | Concurrent read permits |
-| `REDB_CACHE_SIZE_MB` | `256` | ReDB page cache |
+| `READ_GATE_PERMITS` | the larger of CPU count x 8 and 32 | Concurrent read permits |
 | `NER_SERVICE_URL` | `http://localhost:8081/ner` | External NER service |
 | `ENABLE_WORLD_MODEL` | `false` | Enable energy-based world model [WIP] |
 | `ENABLE_LOUVAIN` | `true` | Background community detection |
 | `SUBSCRIPTION_INTERVAL_MS` | `50` | Subscription processing interval |
-| `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS origins |
+| `CORS_ALLOWED_ORIGINS` | none | Comma-separated CORS origins. If unset, CORS is permissive with auth off and denies cross-origin requests with auth on |
+
+The data directory is fixed at `./data` relative to the working directory.
 
 ---
 
@@ -588,14 +608,14 @@ minnsdb/
 
 **Base URL:** `http://localhost:3000`
 
-All requests require `Authorization: Bearer mndb_<key>` (unless `MINNS_AUTH_DISABLED=true`).
+With `MINNS_AUTH_ENABLED=true`, requests need `Authorization: Bearer mndb_<key>` (except `/`, `/docs`, `/api/health` and `/metrics`).
 
 Full reference: [API_REFERENCE.md](API_REFERENCE.md)
 
 | Group | Key Endpoints |
 |-------|--------------|
 | **Auth** | `POST /api/keys` — create key (admin)<br>`GET /api/keys` — list keys<br>`DELETE /api/keys/:name` — delete key |
-| **Tables** | `POST /api/tables` — create table<br>`DELETE /api/tables/:name` — drop<br>`POST/GET /api/tables/:name/rows` — insert/scan<br>`PUT/DELETE /api/tables/:name/rows/:id` — update/delete<br>`GET /api/tables/:name/stats` — stats<br>`POST /api/tables/:name/compact` — compaction |
+| **Tables** | `POST /api/tables` — create table<br>`GET /api/tables` — list tables<br>`GET /api/tables/:name/schema` — schema<br>`DELETE /api/tables/:name` — drop<br>`POST/GET /api/tables/:name/rows` — insert/scan<br>`PUT/DELETE /api/tables/:name/rows/:id` — update/delete<br>`GET /api/tables/:name/stats` — stats<br>`POST /api/tables/:name/compact` — compaction |
 | **MinnsQL** | `POST /api/query` — execute any MinnsQL (MATCH, FROM, CREATE TABLE, INSERT, etc.) |
 | **WASM Modules** | `POST /api/modules` — upload<br>`POST /api/modules/:name/call/:fn` — call function<br>`GET /api/modules/:name/usage` — usage stats<br>`POST /api/modules/:name/usage/reset` — billing reset<br>`POST/GET /api/modules/:name/schedules` — cron |
 | **Conversations** | `POST /api/conversations/ingest` — batch (requires LLM)<br>`POST /api/messages` — streaming with auto-compaction |
@@ -603,11 +623,13 @@ Full reference: [API_REFERENCE.md](API_REFERENCE.md)
 | **Subscriptions** | `POST /api/subscriptions` — create<br>`GET /api/subscriptions/:id/poll` — poll<br>`GET /api/subscriptions/ws` — WebSocket |
 | **Events** | `POST /api/events/simple` — simple event<br>`POST /api/events` — full event<br>`POST /api/events/state-change` — typed state change<br>`POST /api/events/transaction` — typed transaction |
 | **Graph & Analytics** | `GET /api/graph` — structure<br>`GET /api/communities` — Louvain/LP<br>`GET /api/centrality` — PageRank/betweenness<br>`GET /api/reachability` — temporal reachability |
-| **Admin** | `POST /api/admin/export` — binary export<br>`POST /api/admin/import` — import<br>`GET /api/health` — health check |
+| **Admin** | `POST /api/admin/export` — binary export<br>`POST /api/admin/import` — import<br>`GET /api/health` — health check<br>`GET /metrics` — Prometheus metrics |
 
 ---
 
 ## Development
+
+The tests open the Qdrant backend, so start Qdrant on `localhost:6334` first (see [Quick start](#quick-start)).
 
 ```bash
 cargo build                                              # Build all crates
