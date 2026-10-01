@@ -30,7 +30,7 @@ python3 -m http.server 8093
 
 `load.py` reads `MINNS_URL` (default `http://localhost:3000`) and, if authentication is on, `MINNS_KEY`. The page takes `?api=http://host:port` to point at another server and `?date=YYYY-MM-DD` to open on a date. It calls the API from the browser, so it needs CORS, which is permissive by default when authentication is off.
 
-With Docker Compose, set `QDRANT_API_KEY` to any value. If it is unset, Compose passes an empty key to Qdrant and the server exits on boot with "The request does not have valid authentication credentials".
+With Docker Compose, set `QDRANT_API_KEY` before `docker compose up`.
 
 ## The model
 
