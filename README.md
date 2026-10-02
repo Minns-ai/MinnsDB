@@ -44,6 +44,10 @@ MinnsDB is a database purpose-built for AI agent workloads. It combines a tempor
 
 **WASM agents** — upload sandboxed modules that read/write tables, query the graph, call external APIs, and trigger on events. Instruction-metered, memory-capped, permission-controlled.
 
+### Integrations
+
+- **LangGraph:** [langgraph-minnsdb](https://github.com/Minns-ai/langgraph-minnsdb) (`pip install langgraph-minnsdb`). A LangGraph store that keeps every version of each item, so an agent can read what it knew at any point in time, plus agent tools for graph memory: save what the user said, ask what's true now, or ask what was true on a date.
+
 ---
 
 ## Quick start
