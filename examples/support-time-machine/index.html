@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support Time Machine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0a0a; --panel: #111316; --line: #23262b; --ink: #eef0f3; --muted: #8a909a;
+  --blue: #3b82f6; --blue-d: #275ab1; --teal: #2dd4bf; --violet: #a855f7; --warn: #f59e0b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 Inter, system-ui, sans-serif; }
+body {
+  background-image: radial-gradient(#1c1f24 1px, transparent 1px);
+  background-size: 22px 22px;
+  min-height: 100vh;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 36px 24px 60px; }
+.eyebrow { font: 500 12px/1 "JetBrains Mono", monospace; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }
+h1 { font-weight: 600; font-size: clamp(30px, 5vw, 56px); letter-spacing: -1.5px; line-height: 1.05; margin: 14px 0 6px; }
+h1 .date {
+  background: linear-gradient(90deg, var(--teal), var(--blue), var(--violet));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.sub { color: var(--muted); max-width: 680px; margin: 0 0 24px; }
+
+.controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+input[type=range] { flex: 1 1 360px; accent-color: var(--blue); height: 28px; }
+input[type=date] {
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 10px; font: 500 14px "JetBrains Mono", monospace; color-scheme: dark;
+}
+button {
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 12px; font: 500 13px Inter, sans-serif; cursor: pointer;
+}
+button:hover { border-color: var(--blue); }
+button.play { background: var(--blue-d); border-color: var(--blue-d); min-width: 84px; }
+.presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 22px; }
+.presets button { font-size: 12px; padding: 6px 10px; color: var(--muted); }
+.presets button b { color: var(--ink); font-weight: 500; }
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin-bottom: 22px; }
+.card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.card-head .eyebrow::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); margin-right: 8px; vertical-align: 1px; }
+.stat { font: 400 12px "JetBrains Mono", monospace; color: var(--muted); }
+.stat b { color: var(--teal); font-weight: 500; }
+pre.q { margin: 0; font: 400 14px/1.6 "JetBrains Mono", monospace; white-space: pre-wrap; word-break: break-word; color: #c9d1dc; }
+.kw { color: #7aa7ff; } .str { color: var(--teal); } .fn { color: #d6a2ff; }
+
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 0 0 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.prod { background: rgba(17,19,22,.92); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-height: 64px; transition: opacity .2s; }
+.prod.empty { opacity: .35; }
+.prod h3 { margin: 0 0 7px; font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; }
+.prod h3 small { color: var(--muted); font-weight: 400; font: 400 11px "JetBrains Mono", monospace; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  font: 500 12px "JetBrains Mono", monospace; padding: 2px 7px; border-radius: 6px;
+  border: 1px solid #3a3f47; color: #b8bec8; position: relative; white-space: nowrap;
+  animation: pop .25s ease-out;
+}
+.chip.active { background: rgba(59,130,246,.18); border-color: rgba(59,130,246,.65); color: #dbe7ff; }
+.chip.lts::after { content: "LTS"; font-size: 9px; margin-left: 5px; color: var(--teal); }
+.chip.dying { border-color: rgba(245,158,11,.7); color: #fcd9a0; }
+@keyframes pop { from { transform: translateY(3px); opacity: 0; } to { transform: none; opacity: 1; } }
+.none { font-size: 12px; color: var(--muted); }
+.err { color: #fca5a5; font: 400 13px "JetBrains Mono", monospace; }
+footer { margin-top: 28px; color: var(--muted); font-size: 12px; }
+footer a { color: var(--muted); }
+@media (max-width: 600px) { .wrap { padding: 24px 16px 40px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">MinnsDB · temporal graph · live</div>
+  <h1>Supported on <span class="date" id="dateText">…</span></h1>
+  <p class="sub">Support windows for <span id="nProd">36</span> runtimes, databases and operating systems, loaded into MinnsDB as edges with <code>valid_from</code> and <code>valid_until</code>. Every frame is one MinnsQL query against a local server.</p>
+
+  <div class="controls">
+    <button class="play" id="play">▶ Play</button>
+    <input type="range" id="slider" min="0" max="1" step="1">
+    <input type="date" id="picker" min="2000-01-01" max="2031-12-31">
+  </div>
+  <div class="presets" id="presets"></div>
+
+  <div class="card">
+    <div class="card-head"><span class="eyebrow">MinnsQL</span><span class="stat" id="stat"></span></div>
+    <pre class="q" id="query"></pre>
+  </div>
+
+  <div class="legend">
+    <span><span class="chip active">3.12</span> active support</span>
+    <span><span class="chip">3.8</span> security fixes only</span>
+    <span><span class="chip dying">2.7</span> end of life within 90 days</span>
+    <span><span class="chip lts">18</span> long-term support</span>
+  </div>
+  <div class="grid" id="grid"></div>
+  <footer>Data: <a href="https://endoflife.date">endoflife.date</a> (MIT), fetched 2026-10-01. Server: <a href="https://github.com/Minns-ai/MinnsDB">MinnsDB</a>, default http://localhost:3000 (change with <code>?api=</code>).</footer>
+</div>
+<script>
+const API = new URLSearchParams(location.search).get("api") || "http://localhost:3000";
+const START = Date.UTC(2000, 0, 1), END = Date.UTC(2031, 11, 31), DAY = 864e5;
+const PRESETS = [
+  ["2008-12-03", "Python 3.0 ships"],
+  ["2019-12-31", "Python 2.7's last day"],
+  ["2021-12-31", "CentOS 8's last day"],
+  ["2023-09-10", "Node 16's last day"],
+  ["2026-10-01", "Today"],
+  ["2029-06-01", "2029"],
+];
+const $ = id => document.getElementById(id);
+const slider = $("slider"), picker = $("picker");
+slider.max = Math.round((END - START) / DAY);
+
+let products = [], firstSeen = new Map();         // [{name}] in display order
+let busy = false, pending = null, playing = null;
+
+const iso = t => new Date(t).toISOString().slice(0, 10);
+const fmt = d => new Date(d + "T00:00:00Z").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function queryFor(d) {
+  return `MATCH (p)-[r]->(v) WHEN "${d}"\nRETURN v.product, v.cycle, r.association_type, valid_until(r)`;
+}
+function highlight(q) {
+  return esc(q)
+    .replace(/\b(MATCH|WHEN|RETURN|ORDER BY|LIMIT)\b/g, '<span class="kw">$1</span>')
+    .replace(/(&quot;[^&]*&quot;)/g, '<span class="str">$1</span>')
+    .replace(/\b(valid_until)\(/g, '<span class="fn">$1</span>(');
+}
+
+async function run(q) {
+  const r = await fetch(API + "/api/query", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q }) });
+  if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 200));
+  return r.json();
+}
+
+async function loadProducts() {
+  const res = await run(`MATCH (p)-[r:supports]->(v) WHEN ALL RETURN v.product, min(valid_from(r)) AS first`);
+  firstSeen = new Map(res.rows.map(r => [r[0], r[1] / 1e6]));
+  products = res.rows.map(r => r[0]).sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
+  $("nProd").textContent = products.length;
+}
+
+function render(d, res, ms) {
+  const soon = Date.parse(d) + 90 * DAY;
+  const by = new Map(products.map(p => [p, new Map()]));
+  for (const [p, cycle, kind, until] of res.rows) {
+    if (!by.has(p)) by.set(p, new Map());
+    const m = by.get(p);
+    const e = m.get(cycle) || { cycle, kinds: new Set(), until: null };
+    e.kinds.add(kind);
+    if (kind === "supports") e.until = until;
+    m.set(cycle, e);
+  }
+  const cyc = c => c.split(/[.\-]/).map(x => isNaN(+x) ? x : +x);
+  const cmp = (a, b) => { const A = cyc(a), B = cyc(b); for (let i = 0; i < Math.max(A.length, B.length); i++) { if (A[i] === B[i]) continue; if (A[i] === undefined) return 1; if (B[i] === undefined) return -1; return A[i] > B[i] ? -1 : 1; } return 0; };
+  $("grid").innerHTML = [...by].map(([p, m]) => {
+    const rel = [...m.values()].sort((a, b) => cmp(a.cycle, b.cycle));
+    const chips = rel.map(e => {
+      const cls = ["chip"];
+      if (e.kinds.has("active_support")) cls.push("active");
+      if (e.kinds.has("lts")) cls.push("lts");
+      if (e.until && e.until / 1e6 < soon) cls.push("dying");
+      const t = e.until ? "until " + iso(e.until / 1e6) : "";
+      return `<span class="${cls.join(" ")}" title="${esc(t)}">${esc(e.cycle)}</span>`;
+    }).join("");
+    return `<div class="prod${rel.length ? "" : " empty"}"><h3>${esc(p)}<small>${rel.length || "–"}</small></h3><div class="chips">${chips || (Date.parse(d) < firstSeen.get(p) ? `<span class="none">no data before ${new Date(firstSeen.get(p)).getUTCFullYear()}</span>` : `<span class="none">nothing supported</span>`)}</div></div>`;
+  }).join("");
+  const edges = res.rows.length;
+  $("stat").innerHTML = `<b>${edges}</b> edges · <b>${ms.toFixed(0)}</b> ms`;
+}
+
+async function show(d) {
+  $("dateText").textContent = fmt(d);
+  picker.value = d;
+  slider.value = Math.round((Date.parse(d) - START) / DAY);
+  const q = queryFor(d);
+  $("query").innerHTML = highlight(q);
+  if (busy) { pending = d; return; }
+  busy = true;
+  try {
+    const t0 = performance.now();
+    const res = await run(q);
+    render(d, res, performance.now() - t0);
+  } catch (e) {
+    $("grid").innerHTML = `<p class="err">Could not reach MinnsDB at ${esc(API)}: ${esc(e.message)}</p>`;
+  }
+  busy = false;
+  if (pending) { const n = pending; pending = null; show(n); }
+}
+
+slider.addEventListener("input", () => show(iso(START + slider.value * DAY)));
+picker.addEventListener("change", () => picker.value && show(picker.value));
+$("presets").innerHTML = PRESETS.map(([d, l]) => `<button data-d="${d}"><b>${fmt(d)}</b> · ${l}</button>`).join("");
+$("presets").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { stop(); show(b.dataset.d); } });
+
+function stop() { clearInterval(playing); playing = null; $("play").textContent = "▶ Play"; }
+$("play").addEventListener("click", () => {
+  if (playing) return stop();
+  $("play").textContent = "❚❚ Pause";
+  let t = Math.min(START + slider.value * DAY, END - 30 * DAY);
+  playing = setInterval(() => { t += 30 * DAY; if (t >= END) return stop(); show(iso(t)); }, 160);
+});
+
+window.minnsShow = show; // for scripted recording
+loadProducts().then(() => show(new URLSearchParams(location.search).get("date") || "2026-10-01"))
+  .catch(e => { $("grid").innerHTML = `<p class="err">Could not reach MinnsDB at ${esc(API)}: ${esc(e.message)}</p>`; });
+</script>
+</body>
+</html>
