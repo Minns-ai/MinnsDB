@@ -567,6 +567,7 @@ minnsdb/
 │   └── tests/                  # Integration tests, including end_to_end.rs
 ├── data/ontology/              # OWL/RDFS Turtle files
 └── examples/                   # Rust examples
+    └── support-time-machine/   # Temporal graph demo: endoflife.date + WHEN (Python, HTML)
 ```
 
 **Key internals:**
